@@ -3860,6 +3860,7 @@
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
         const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
+        const workspaceFilter = body.querySelector("[data-action='toggle-board-workspace']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -3894,6 +3895,11 @@
           forYouFilter.classList.toggle("active", state.audienceFilter === "for_you");
           forYouFilter.textContent =
             state.forYouUnread > 0 ? `For you (${state.forYouUnread})` : "For you";
+        }
+        if (workspaceFilter) {
+          const workspaceActive = state.audienceFilter === "workspace";
+          workspaceFilter.setAttribute("aria-pressed", workspaceActive ? "true" : "false");
+          workspaceFilter.classList.toggle("active", workspaceActive);
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -6239,6 +6245,7 @@
                 </div>
                 <div class="workspace-toolbar-actions">
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
+                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Workspace</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -6274,6 +6281,20 @@
               if (state.audienceFilter === "for_you") {
                 state.forYouUnread = 0;
               }
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          // SPEC-2359 FR-101: toggle the Workspace audience filter. The
+          // entry visibility itself is driven by `state.audienceFilter ===
+          // "workspace"` plus `state.currentWorkspaceId` via
+          // `visibleBoardEntries`; the projection wires up the workspace
+          // id separately so unassigned agents see only broadcast.
+          body
+            .querySelector("[data-action='toggle-board-workspace']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter =
+                state.audienceFilter === "workspace" ? "all" : "workspace";
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);

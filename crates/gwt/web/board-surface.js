@@ -79,12 +79,27 @@ export function mentionsForBoardSubmit(state) {
   return mention ? [mention] : [];
 }
 
+// SPEC-2359 FR-093/098/103: mirror Rust `entry_visible_for_workspace`.
+// An entry is in-scope for Workspace W when its `audience` is empty
+// (broadcast) or contains W. Unassigned (`null`/`undefined`
+// workspaceId) only sees broadcast entries.
+export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
+  const audience = Array.isArray(entry?.audience) ? entry.audience : [];
+  if (audience.length === 0) return true;
+  if (!currentWorkspaceId) return false;
+  return audience.includes(currentWorkspaceId);
+}
+
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
-  if (state?.audienceFilter !== "for_you") {
-    return entries;
+  if (state?.audienceFilter === "for_you") {
+    return entries.filter((entry) => boardEntryMentionsSelf(entry, selfKeys));
   }
-  return entries.filter((entry) => boardEntryMentionsSelf(entry, selfKeys));
+  if (state?.audienceFilter === "workspace") {
+    const workspaceId = state?.currentWorkspaceId || null;
+    return entries.filter((entry) => entryVisibleForWorkspace(entry, workspaceId));
+  }
+  return entries;
 }
 
 export function applyBoardMentionNotificationFocus(state, entryId) {
