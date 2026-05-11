@@ -458,18 +458,28 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     Ok(())
 }
 
-/// Prepend `dir` to `env_vars["PATH"]` unless it is empty or already present.
+/// Prepend `dir` to the PATH-style entry in `env_vars` unless it is empty or
+/// already present.
 ///
-/// Returns `true` if PATH was updated, `false` for a no-op (empty `dir`, dir
-/// already on PATH, or `join_paths` failure). PATH parsing uses
-/// [`std::env::split_paths`] / [`std::env::join_paths`] so the `:` / `;`
-/// separator difference between Unix and Windows is handled automatically.
+/// Returns `true` if the entry was updated, `false` for a no-op (empty `dir`,
+/// dir already on PATH, or `join_paths` failure). Key lookup is
+/// case-insensitive: Windows processes may expose the variable as `Path` or
+/// `path`, and a case-sensitive read would produce a duplicate `PATH` key
+/// alongside the original, corrupting command lookup once the child process
+/// inherits both. PATH parsing uses [`std::env::split_paths`] /
+/// [`std::env::join_paths`] so the `:` / `;` separator difference between
+/// Unix and Windows is handled automatically.
 pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -> bool {
     if dir.as_os_str().is_empty() {
         return false;
     }
+    let existing_key = env_vars
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .cloned();
+    let key = existing_key.unwrap_or_else(|| "PATH".to_string());
     let existing_path = env_vars
-        .get("PATH")
+        .get(&key)
         .map(String::as_str)
         .unwrap_or_default()
         .to_string();
@@ -486,7 +496,7 @@ pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -
     let Ok(joined) = std::env::join_paths(&entries) else {
         return false;
     };
-    env_vars.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+    env_vars.insert(key, joined.to_string_lossy().into_owned());
     true
 }
 
@@ -2070,6 +2080,74 @@ mod tests {
             entries.first().map(|p| p.as_path()),
             Some(Path::new("/usr/local/bin")),
             "Docker dir not on PATH must be prepended; got entries: {entries:?}",
+        );
+    }
+
+    #[test]
+    fn prepend_dir_to_path_preserves_windows_style_path_key() {
+        // CodeRabbit P1 regression follow-up: Windows processes may expose
+        // the path variable as "Path" (case-insensitive at OS level).
+        // prepend_dir_to_path must update the existing key in place rather
+        // than creating a duplicate "PATH" entry alongside "Path", otherwise
+        // the spawned child process inherits both and command lookup is
+        // corrupted. Test values use the platform-native PATH separator so
+        // split_paths / join_paths round-trip on the host test runner.
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let mut env_vars =
+            HashMap::from([("Path".to_string(), existing.to_string_lossy().into_owned())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(updated, "PATH must be updated for Windows-style key");
+        assert!(
+            !env_vars.contains_key("PATH"),
+            "no duplicate uppercase PATH key may be created when Path exists: {env_vars:?}",
+        );
+        let path = env_vars.get("Path").expect("Path key must be preserved");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin")),
+            "prepended dir must lead the Path value; got {path}",
+        );
+        assert!(entries.iter().any(|p| p == Path::new("/usr/bin")));
+        assert!(entries.iter().any(|p| p == Path::new("/bin")));
+    }
+
+    #[test]
+    fn prepend_dir_to_path_preserves_lowercase_path_key() {
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let mut env_vars =
+            HashMap::from([("path".to_string(), existing.to_string_lossy().into_owned())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(updated);
+        assert!(
+            !env_vars.contains_key("PATH"),
+            "no duplicate uppercase PATH key may be created when lowercase path exists: {env_vars:?}",
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("path").expect("path key")).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin")),
+        );
+    }
+
+    #[test]
+    fn prepend_dir_to_path_dedups_case_insensitive_existing_dir() {
+        let existing = std::env::join_paths([Path::new("/opt/gwt/bin"), Path::new("/usr/bin")])
+            .expect("join_paths existing entries");
+        let original_value = existing.to_string_lossy().into_owned();
+        let mut env_vars = HashMap::from([("Path".to_string(), original_value.clone())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(
+            !updated,
+            "existing entry must be a no-op regardless of key case"
+        );
+        assert!(!env_vars.contains_key("PATH"));
+        assert_eq!(
+            env_vars.get("Path").map(String::as_str),
+            Some(original_value.as_str())
         );
     }
 
