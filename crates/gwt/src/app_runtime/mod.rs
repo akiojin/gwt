@@ -1994,6 +1994,11 @@ impl AppRuntime {
                     mentions,
                 },
             ),
+            FrontendEvent::OpenBoardOriginAgent {
+                id,
+                origin_session_id,
+                bounds,
+            } => self.open_board_origin_agent_events(&client_id, &id, &origin_session_id, bounds),
             FrontendEvent::SelectProfile { id, profile_name } => {
                 self.select_profile_events(&client_id, &id, &profile_name)
             }
@@ -9538,6 +9543,164 @@ exit 0
                 && id == &window_id
                 && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
                 && *has_more_before
+        ));
+    }
+
+    #[test]
+    fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let board_raw_id = tab
+            .workspace
+            .add_window(WindowPreset::Board, canvas_bounds())
+            .id;
+        let agent_raw_id = tab
+            .workspace
+            .add_window(WindowPreset::Agent, canvas_bounds())
+            .id;
+        let board_window_id = combined_window_id("tab-1", &board_raw_id);
+        let agent_window_id = combined_window_id("tab-1", &agent_raw_id);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.active_agent_sessions.insert(
+            agent_window_id.clone(),
+            ActiveAgentSession {
+                window_id: agent_window_id.clone(),
+                session_id: "session-origin".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/board-origin".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenBoardOriginAgent {
+                id: board_window_id,
+                origin_session_id: "session-origin".to_string(),
+                bounds: Some(canvas_bounds()),
+            },
+        );
+
+        let workspace = runtime.tab("tab-1").expect("tab").workspace.persisted();
+        let focused = workspace
+            .windows
+            .iter()
+            .max_by_key(|window| window.z_index)
+            .expect("focused window");
+        assert_eq!(focused.id, agent_raw_id);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                event: BackendEvent::WorkspaceState { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn board_origin_agent_resume_config_uses_exact_saved_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/board-origin", gwt_agent::AgentId::Codex);
+        session.id = "session-origin".to_string();
+        session.agent_session_id = Some("codex-resume-123".to_string());
+        session.model = Some("gpt-5.4".to_string());
+        session.reasoning_level = Some("high".to_string());
+        session.tool_version = Some("latest".to_string());
+        session.skip_permissions = true;
+        session.codex_fast_mode = true;
+        session.save(&runtime.sessions_dir).expect("save session");
+
+        let config = runtime
+            .board_origin_agent_resume_config("session-origin")
+            .expect("resume config");
+
+        assert_eq!(config.branch.as_deref(), Some("work/board-origin"));
+        assert_eq!(config.working_dir.as_deref(), Some(repo.as_path()));
+        assert_eq!(
+            config.resume_session_id.as_deref(),
+            Some("codex-resume-123")
+        );
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+        assert!(config.skip_permissions);
+        assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn board_origin_agent_resume_config_supports_builtin_agent_descriptors() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        for agent_id in [gwt_agent::AgentId::OpenClaw, gwt_agent::AgentId::Hermes] {
+            let session_id = format!("session-{}", agent_id.command());
+            let resume_id = format!("resume-{}", agent_id.command());
+            let mut session = gwt_agent::Session::new(
+                &repo,
+                format!("work/{}", agent_id.command()),
+                agent_id.clone(),
+            );
+            session.id = session_id.clone();
+            session.agent_session_id = Some(resume_id.clone());
+            session.save(&runtime.sessions_dir).expect("save session");
+
+            let config = runtime
+                .board_origin_agent_resume_config(&session_id)
+                .expect("resume config");
+
+            assert_eq!(config.agent_id, agent_id);
+            assert_eq!(
+                config.resume_session_id.as_deref(),
+                Some(resume_id.as_str())
+            );
+            assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        }
+    }
+
+    #[test]
+    fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo,
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let board_window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenBoardOriginAgent {
+                id: board_window_id.clone(),
+                origin_session_id: "missing-session".to_string(),
+                bounds: Some(canvas_bounds()),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardError { id, message },
+            }] if client_id == "client-1"
+                && id == &board_window_id
+                && message.contains("missing-session")
         ));
     }
 

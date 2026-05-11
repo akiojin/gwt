@@ -214,6 +214,11 @@ pub enum FrontendEvent {
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
     },
+    OpenBoardOriginAgent {
+        id: String,
+        origin_session_id: String,
+        bounds: Option<WindowGeometry>,
+    },
     SelectProfile {
         id: String,
         profile_name: String,
@@ -1266,6 +1271,33 @@ mod tests {
         assert_eq!(value["entries"][0]["mentions"][0]["target_kind"], "user");
         assert_eq!(value["entries"][0]["mentions"][0]["target"], "akiojin");
         assert_eq!(value["entries"][0]["mentions"][0]["label"], "Akio");
+    }
+
+    #[test]
+    fn open_board_origin_agent_deserializes_frontend_event_contract() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_board_origin_agent",
+            "id": "tab-1::board-1",
+            "origin_session_id": "session-origin",
+            "bounds": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1200.0,
+                "height": 800.0
+            }
+        }))
+        .expect("deserialize open board origin agent event");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::OpenBoardOriginAgent {
+                id,
+                origin_session_id,
+                bounds,
+            } if id == "tab-1::board-1"
+                && origin_session_id == "session-origin"
+                && bounds.as_ref().is_some_and(|bounds| bounds.width == 1200.0)
+        ));
     }
 
     #[test]

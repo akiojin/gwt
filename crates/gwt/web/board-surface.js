@@ -64,6 +64,31 @@ export function normalizedBoardWorkspaceAudience(entry) {
   return normalized;
 }
 
+export function boardEntryOriginSessionId(entry) {
+  const authorKind = String(entry?.author_kind || "").toLowerCase();
+  const sessionId = String(entry?.origin_session_id || "").trim();
+  return authorKind === "agent" ? sessionId : "";
+}
+
+export function boardEntryOriginLabel(entry) {
+  const sessionId = boardEntryOriginSessionId(entry);
+  if (!sessionId) return "";
+  const agent = String(entry?.origin_agent_id || entry?.author || "").trim();
+  const branch = String(entry?.origin_branch || "").trim();
+  const shortSession = sessionId.slice(0, 8);
+  const parts = [agent, branch, shortSession].filter(Boolean);
+  return parts.length > 0 ? `From ${parts.join(" · ")}` : "";
+}
+
+export function boardEntryOriginActionLabel(entry, activeAgents = []) {
+  const sessionId = boardEntryOriginSessionId(entry);
+  if (!sessionId) return "";
+  const live = (activeAgents || []).some(
+    (agent) => String(agent?.session_id || "").trim() === sessionId && agent?.window_id,
+  );
+  return live ? "Focus Agent" : "Resume Agent";
+}
+
 export function boardEntryPreview(entry) {
   const body = String(entry?.body || "").replace(/\s+/g, " ").trim();
   if (!body) return "Empty entry";

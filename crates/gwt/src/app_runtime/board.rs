@@ -17,6 +17,7 @@
 
 use std::path::Path;
 
+use gwt_agent::{AgentId, AgentLaunchBuilder, LaunchConfig, SessionMode};
 use gwt_core::{
     coordination::{self, BoardEntryKind, BoardMention},
     workspace_projection,
@@ -24,7 +25,7 @@ use gwt_core::{
 
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
-use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset};
+use super::{AppRuntime, BackendEvent, OutboundEvent, WindowGeometry, WindowPreset};
 
 pub(super) fn gui_default_board_scope_for_project(
     project_root: &Path,
@@ -208,6 +209,139 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn open_board_origin_agent_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        origin_session_id: &str,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
+        let (tab_id, board_geometry) = match self.board_surface_context(id) {
+            Ok(context) => context,
+            Err(message) => return board_error(client_id, id, message),
+        };
+        let origin_session_id = origin_session_id.trim();
+        if origin_session_id.is_empty() {
+            return board_error(client_id, id, "Board origin session is unavailable");
+        }
+
+        let live_window_id = self
+            .active_agent_sessions
+            .iter()
+            .find(|(_, session)| session.session_id == origin_session_id)
+            .map(|(window_id, _)| window_id.clone());
+        if let Some(window_id) = live_window_id {
+            let mut events = self.restore_window_events(&window_id);
+            events.extend(self.focus_window_events(&window_id, bounds));
+            return if events.is_empty() {
+                board_error(
+                    client_id,
+                    id,
+                    format!("Board origin Agent window not found for {origin_session_id}"),
+                )
+            } else {
+                events
+            };
+        }
+
+        let config = match self.board_origin_agent_resume_config(origin_session_id) {
+            Ok(config) => config,
+            Err(message) => return board_error(client_id, id, message),
+        };
+        match self.spawn_agent_window(&tab_id, config, bounds.unwrap_or(board_geometry), None) {
+            Ok(events) => events,
+            Err(message) => board_error(client_id, id, message),
+        }
+    }
+
+    pub(crate) fn board_origin_agent_resume_config(
+        &self,
+        origin_session_id: &str,
+    ) -> Result<LaunchConfig, String> {
+        let origin_session_id = origin_session_id.trim();
+        if origin_session_id.is_empty() {
+            return Err("Board origin session is unavailable".to_string());
+        }
+        let session_path = self.sessions_dir.join(format!("{origin_session_id}.toml"));
+        let session = gwt_agent::Session::load_and_migrate(&session_path).map_err(|error| {
+            format!("Board origin session {origin_session_id} could not be loaded: {error}")
+        })?;
+        let resume_session_id = session
+            .agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!("Board origin session {origin_session_id} has no agent session id")
+            })?;
+
+        let mut builder = AgentLaunchBuilder::new(session.agent_id.clone())
+            .working_dir(session.worktree_path.clone())
+            .branch(session.branch.clone())
+            .session_mode(SessionMode::Resume)
+            .resume_session_id(resume_session_id.to_string())
+            .runtime_target(session.runtime_target)
+            .docker_lifecycle_intent(session.docker_lifecycle_intent);
+
+        if let Some(custom_agent) = self
+            .launch_wizard_cache
+            .agent_options()
+            .into_iter()
+            .find(|option| agent_option_matches_session(option, &session.agent_id))
+            .and_then(|option| option.custom_agent)
+        {
+            builder = builder.custom_agent(custom_agent);
+        }
+        if let Some(model) = non_empty(session.model.as_deref()) {
+            builder = builder.model(model.to_string());
+        }
+        if let Some(tool_version) = non_empty(session.tool_version.as_deref()) {
+            builder = builder.version(tool_version.to_string());
+        }
+        if let Some(reasoning_level) = non_empty(session.reasoning_level.as_deref()) {
+            builder = builder.reasoning_level(reasoning_level.to_string());
+        }
+        if session.skip_permissions {
+            builder = builder.skip_permissions(true);
+        }
+        if session.codex_fast_mode {
+            builder = builder.fast_mode(true);
+        }
+        if let Some(docker_service) = non_empty(session.docker_service.as_deref()) {
+            builder = builder.docker_service(docker_service.to_string());
+        }
+        if let Some(linked_issue_number) = session.linked_issue_number {
+            builder = builder.linked_issue_number(linked_issue_number);
+        }
+        if let Some(windows_shell) = session.windows_shell {
+            builder = builder.windows_shell(windows_shell);
+        }
+
+        let mut config = builder.build();
+        if !session.display_name.trim().is_empty() {
+            config.display_name = session.display_name;
+        }
+        Ok(config)
+    }
+
+    fn board_surface_context(&self, id: &str) -> Result<(String, WindowGeometry), String> {
+        let address = self
+            .window_lookup
+            .get(id)
+            .ok_or_else(|| "Window not found".to_string())?;
+        let tab = self
+            .tab(&address.tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
+        let window = tab
+            .workspace
+            .window(&address.raw_id)
+            .ok_or_else(|| "Window not found".to_string())?;
+        if window.preset != WindowPreset::Board {
+            return Err("Window is not a Board surface".to_string());
+        }
+        Ok((address.tab_id.clone(), window.geometry.clone()))
+    }
+
     pub(crate) fn record_workspace_board_milestone_event(
         &mut self,
         tab_id: &str,
@@ -308,6 +442,35 @@ impl AppRuntime {
             Some(entry.body.clone()),
         )
     }
+}
+
+fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![OutboundEvent::reply(
+        client_id,
+        BackendEvent::BoardError {
+            id: id.to_string(),
+            message: message.into(),
+        },
+    )]
+}
+
+fn agent_option_matches_session(option: &gwt::AgentOption, agent_id: &AgentId) -> bool {
+    let command_matches = option.id == agent_id.command();
+    match agent_id {
+        AgentId::Custom(id) => {
+            command_matches
+                || option
+                    .custom_agent
+                    .as_ref()
+                    .map(|agent| agent.id == *id)
+                    .unwrap_or(false)
+        }
+        _ => command_matches,
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// Best-effort fan-out of a Board projection change to other gwt

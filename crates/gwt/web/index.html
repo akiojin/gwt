@@ -1672,6 +1672,20 @@
         background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
       }
 
+      .board-origin-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 18px;
+        padding: 2px 6px;
+        border: 1px solid color-mix(in oklab, var(--color-state-warning) 52%, var(--color-border));
+        border-radius: var(--radius-sm);
+        background: color-mix(in oklab, var(--color-state-warning) 12%, var(--color-surface));
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-2xs);
+        letter-spacing: var(--tracking-mono);
+      }
+
       .board-reply-quote {
         width: 100%;
         border: 1px solid var(--color-border);
@@ -1702,10 +1716,13 @@
 
       .board-message-actions {
         display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
         justify-content: flex-end;
       }
 
-      .board-reply-button {
+      .board-reply-button,
+      .board-origin-button {
         min-height: 26px;
         padding: 4px 8px;
         border: 1px solid var(--color-border);
@@ -1717,7 +1734,14 @@
         cursor: pointer;
       }
 
-      .board-reply-button:hover {
+      .board-origin-button {
+        border-color: color-mix(in oklab, var(--color-state-warning) 48%, var(--color-border));
+        color: var(--color-text);
+        background: color-mix(in oklab, var(--color-state-warning) 10%, var(--color-surface));
+      }
+
+      .board-reply-button:hover,
+      .board-origin-button:hover {
         color: var(--color-text);
         border-color: var(--color-focus-ring);
       }

@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
   applyBoardMentionNotificationFocus,
+  boardEntryOriginActionLabel,
+  boardEntryOriginLabel,
+  boardEntryOriginSessionId,
   boardEntryAudienceLabels,
   boardEntryMentionsSelf,
   entryVisibleForWorkspace,
@@ -48,6 +51,13 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
   assert.match(appSource, /all:\s*state\.audienceFilter\s*===\s*"all"/);
+});
+
+test("Board surface exposes origin Agent focus and resume affordances", () => {
+  assert.match(appSource, /open_board_origin_agent/);
+  assert.match(appSource, /board-origin-badge/);
+  assert.match(appSource, /board-origin-button/);
+  assert.match(appSource, /visibleBounds\(\)/);
 });
 
 test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {
@@ -221,4 +231,29 @@ test("Board notification helper prepares focused state for click-through", () =>
   assert.equal(state.forYouUnread, 0);
   assert.equal(state.focusEntryId, "entry-target");
   assert.equal(state.pendingFocusScroll, true);
+});
+
+test("Board origin helpers label live focus versus exact resume actions", () => {
+  const entry = {
+    author_kind: "agent",
+    author: "Codex",
+    origin_agent_id: "Codex",
+    origin_branch: "work/20260511-0327",
+    origin_session_id: "12345678-90ab-cdef-1234-567890abcdef",
+  };
+  const liveAgents = [
+    {
+      session_id: "12345678-90ab-cdef-1234-567890abcdef",
+      window_id: "tab-1::agent-1",
+    },
+  ];
+
+  assert.equal(
+    boardEntryOriginSessionId(entry),
+    "12345678-90ab-cdef-1234-567890abcdef",
+  );
+  assert.match(boardEntryOriginLabel(entry), /^From Codex · work\/20260511-0327 · 12345678$/);
+  assert.equal(boardEntryOriginActionLabel(entry, liveAgents), "Focus Agent");
+  assert.equal(boardEntryOriginActionLabel(entry, []), "Resume Agent");
+  assert.equal(boardEntryOriginActionLabel({ author_kind: "user" }, liveAgents), "");
 });

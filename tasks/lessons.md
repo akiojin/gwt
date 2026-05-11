@@ -5245,3 +5245,26 @@ audience が欠落していた。
    module-local lock を作らず crate-wide `env_test_lock` に寄せる。
 2. 単独 test green で満足せず、env mutation を伴う修正後は default parallelism の
    `cargo test -p gwt-core -p gwt` を必ず 1 回通す。
+
+## 2026-05-11 — Built-in AgentId を consumer 側の個別表で持たない
+
+### 事象
+
+develop 取り込み後、Board origin focus の `agent_option_matches_session` が `AgentId::OpenClaw`
+と `AgentId::Hermes` を網羅しておらず、`cargo test -p gwt-core -p gwt` が compile error で
+停止した。
+
+### 原因
+
+`gwt-agent` は built-in agent descriptor (`command`, `display_name`, `color` など) を持っているが、
+Board 側で `AgentId` variant ごとの `option.id` 対応表を別途 match していた。新しい built-in
+agent が追加されたとき、descriptor は更新されても Board 側の表が同期されなかった。
+
+### 再発防止策
+
+1. built-in `AgentId` の表示名・command・色・cache key は `AgentId` / descriptor API を使い、
+   consumer 側に variant 別の重複表を作らない。
+2. custom agent だけは `custom_agent.id` の互換判定が必要なので、built-in と custom の差分だけを
+   consumer 側に残す。
+3. 新規 AgentId 追加後は、Agent 起動だけでなく Board / Workspace / UI projection の resume 経路も
+   focused test で通す。
