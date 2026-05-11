@@ -23,6 +23,7 @@ pub mod envelope;
 pub mod event_dispatcher;
 pub mod forward;
 mod identity;
+pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;
 pub mod skill_build_spec_stop_check;
@@ -47,6 +48,7 @@ pub(crate) use identity::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
     Event,
+    ProviderEvent,
     RuntimeState,
     CoordinationEvent,
     BoardReminder,
@@ -66,6 +68,7 @@ impl HookKind {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "event" => Some(Self::Event),
+            "provider-event" => Some(Self::ProviderEvent),
             "runtime-state" => Some(Self::RuntimeState),
             "coordination-event" => Some(Self::CoordinationEvent),
             "board-reminder" => Some(Self::BoardReminder),
@@ -232,7 +235,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, skill_build_spec_stop_check,
+        block_bash_policy, event_dispatcher, provider_event, skill_build_spec_stop_check,
         skill_discussion_stop_check, skill_plan_spec_stop_check, workflow_policy, HookKind,
         HookOutput,
     };
@@ -267,6 +270,34 @@ pub fn run_daemon_hook<E: CliEnv>(
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
             match event_dispatcher::handle_with_input(
                 event,
+                &stdin,
+                &cwd,
+                current_session.as_deref(),
+            ) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::ProviderEvent => {
+            let Some(provider) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook provider-event: missing <provider> argument"
+                );
+                return Ok(2);
+            };
+            let Some(native_event) = rest.get(1) else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook provider-event: missing <native-event> argument"
+                );
+                return Ok(2);
+            };
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            match provider_event::handle_with_input(
+                provider,
+                native_event,
                 &stdin,
                 &cwd,
                 current_session.as_deref(),
@@ -484,5 +515,39 @@ mod tests {
             !content.contains("/tmp/bunx-old"),
             "stale temporary hook binary path must be removed, got: {content}"
         );
+    }
+
+    #[test]
+    fn provider_event_normalizes_hermes_hook_payloads_to_canonical_events() {
+        let normalized = provider_event::normalize_provider_payload(
+            "hermes",
+            "pre_tool_call",
+            r#"{"tool_name":"terminal","tool_input":{"command":"git status"},"session_id":"h-1","cwd":"/repo"}"#,
+        )
+        .expect("normalize hermes pre_tool_call");
+
+        assert_eq!(normalized.event, "PreToolUse");
+        assert_eq!(normalized.payload["tool_name"], "terminal");
+        assert_eq!(normalized.payload["tool_input"]["command"], "git status");
+        assert_eq!(normalized.payload["session_id"], "h-1");
+        assert_eq!(normalized.payload["cwd"], "/repo");
+    }
+
+    #[test]
+    fn provider_event_maps_prompt_and_stop_boundaries() {
+        let cases = [
+            ("opencode", "message.updated", "UserPromptSubmit"),
+            ("opencode", "session.idle", "Stop"),
+            ("openclaw", "before_prompt_build", "UserPromptSubmit"),
+            ("openclaw", "session_end", "Stop"),
+            ("hermes", "pre_llm_call", "UserPromptSubmit"),
+            ("hermes", "on_session_end", "Stop"),
+        ];
+
+        for (provider, native, expected) in cases {
+            let normalized = provider_event::normalize_provider_payload(provider, native, "{}")
+                .unwrap_or_else(|err| panic!("{provider}:{native}: {err}"));
+            assert_eq!(normalized.event, expected, "{provider}:{native}");
+        }
     }
 }

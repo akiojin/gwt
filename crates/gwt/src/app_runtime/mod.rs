@@ -5972,8 +5972,7 @@ mod tests {
     }
 
     fn env_test_lock() -> &'static Mutex<()> {
-        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::env_test_lock()
     }
 
     fn fake_gh_test_lock() -> &'static Mutex<()> {

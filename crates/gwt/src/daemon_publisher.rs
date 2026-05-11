@@ -123,6 +123,9 @@ mod tests {
 
     #[test]
     fn publish_returns_error_when_no_daemon_registered() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Use a tempdir for the project root and a tempdir for $HOME so
         // the resolver looks for the endpoint inside an empty
         // `~/.gwt/projects/.../runtime/daemon/` tree and finds nothing.

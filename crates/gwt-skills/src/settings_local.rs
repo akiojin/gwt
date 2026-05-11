@@ -19,6 +19,7 @@ const LEGACY_GWT_HOOK_SCRIPT_SEGMENT: &str = "hooks/scripts/gwt-";
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook event ",
+    " hook provider-event ",
     " hook runtime-state ",
     " hook coordination-event ",
     " hook board-reminder ",
@@ -119,8 +120,9 @@ fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
     }
 }
 
-fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
+pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)?;
     let tmp_path = dir.join(format!(
         ".{}.tmp-{}",
         path.file_name()
@@ -142,6 +144,49 @@ fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
         fs::remove_file(path)?;
     }
     fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir)?;
+    let tmp_path = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("gwt-managed"),
+        std::process::id()
+    ));
+
+    {
+        let mut tmp = fs::File::create(&tmp_path)?;
+        tmp.write_all(content.as_bytes())?;
+        if !content.ends_with('\n') {
+            tmp.write_all(b"\n")?;
+        }
+        tmp.sync_all()?;
+    }
+
+    if cfg!(windows) && path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     Ok(())
 }
 
@@ -307,7 +352,7 @@ const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 /// - Linux: `/proc/self/exe` resolves to the real binary, which may
 ///   land inside bun's per-version cache. The generator is re-run on
 ///   every gwt startup so staleness self-heals on the next launch.
-fn gwt_hook_bin_path() -> String {
+pub(crate) fn gwt_hook_bin_path() -> String {
     if let Ok(v) = std::env::var(GWT_HOOK_BIN_ENV) {
         if !v.is_empty() {
             return v;
@@ -369,7 +414,7 @@ fn path_lookup(command: &str) -> Option<PathBuf> {
 
 /// POSIX shell single-quote quoting. An embedded single quote becomes
 /// `'\''` (close, literal, reopen).
-fn posix_shell_quote(s: &str) -> String {
+pub(crate) fn posix_shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -504,6 +549,10 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 mod tests {
     use std::process::Command;
 
+    use crate::provider_hooks::{
+        generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
+    };
+
     use super::*;
 
     fn commands_for_event<'a>(value: &'a Value, event: &str) -> Vec<&'a str> {
@@ -542,6 +591,86 @@ mod tests {
                 commands[0]
             );
         }
+    }
+
+    #[test]
+    fn generate_opencode_hooks_creates_project_plugin_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_opencode_hooks(dir.path()).unwrap();
+
+        let plugin_path = dir.path().join(".gwt/opencode/plugins/gwt-hooks.js");
+        assert!(plugin_path.exists());
+        let content = fs::read_to_string(plugin_path).unwrap();
+        assert!(content.contains("provider-event"));
+        assert!(content.contains("opencode"));
+        assert!(content.contains("tool.execute.before"));
+        assert!(content.contains("tool.execute.after"));
+        assert!(content.contains("session.created"));
+        assert!(content.contains("session.idle"));
+        assert!(content.contains("permissionDecisionReason"));
+        assert!(content.contains("throw new Error"));
+    }
+
+    #[test]
+    fn generate_hermes_hooks_creates_isolated_home_config_and_script() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_hermes_hooks(dir.path()).unwrap();
+
+        let config_path = dir.path().join(".gwt/hermes/config.yaml");
+        let script_path = dir.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh");
+        assert!(config_path.exists());
+        assert!(script_path.exists());
+        let config = fs::read_to_string(config_path).unwrap();
+        assert!(config.contains("hooks_auto_accept: true"));
+        assert!(config.contains("on_session_start"));
+        assert!(config.contains("pre_llm_call"));
+        assert!(config.contains("pre_tool_call"));
+        assert!(config.contains("post_tool_call"));
+        assert!(config.contains("on_session_end"));
+        assert!(config.contains("gwt-hook.sh' on_session_start"));
+        assert!(config.contains("gwt-hook.sh' pre_tool_call"));
+        let script = fs::read_to_string(&script_path).unwrap();
+        assert!(script.contains("provider-event"));
+        assert!(script.contains("hermes"));
+        assert!(!script.contains("pre_tool_call}\""));
+        assert!(!script.contains("sed -n"));
+        assert!(script.contains("exit 0"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(script_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "Hermes hook script must be executable");
+        }
+    }
+
+    #[test]
+    fn generate_openclaw_hooks_creates_isolated_config_and_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_openclaw_hooks(dir.path()).unwrap();
+
+        let config_path = dir.path().join(".gwt/openclaw/openclaw.json");
+        let plugin_path = dir
+            .path()
+            .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts");
+        assert!(config_path.exists());
+        assert!(plugin_path.exists());
+        let config = fs::read_to_string(config_path).unwrap();
+        assert!(config.contains("gwt-hook-bridge"));
+        let plugin = fs::read_to_string(plugin_path).unwrap();
+        assert!(plugin.contains("before_tool_call"));
+        assert!(plugin.contains("after_tool_call"));
+        assert!(plugin.contains("before_prompt_build"));
+        assert!(plugin.contains("session_start"));
+        assert!(plugin.contains("session_end"));
+        assert!(plugin.contains("provider-event"));
+        assert!(plugin.contains("openclaw"));
+        assert!(plugin.contains("blockReason"));
+        assert!(plugin.contains("prependContext"));
     }
 
     #[test]
