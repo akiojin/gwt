@@ -605,6 +605,10 @@ pub enum BackendEvent {
     ProjectOpenError {
         message: String,
     },
+    LaunchWizardOpenError {
+        title: String,
+        message: String,
+    },
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
@@ -1007,6 +1011,29 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn launch_wizard_open_error_serializes_modal_error_contract() {
+        let event = BackendEvent::LaunchWizardOpenError {
+            title: "Start Work".to_string(),
+            message: "Default base branch not found".to_string(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize launch wizard open error");
+
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("launch_wizard_open_error".to_string()))
+        );
+        assert_eq!(
+            value.get("title"),
+            Some(&Value::String("Start Work".to_string()))
+        );
+        assert_eq!(
+            value.get("message"),
+            Some(&Value::String("Default base branch not found".to_string()))
         );
     }
 

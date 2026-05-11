@@ -7311,6 +7311,60 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardOpenError { title, message })
+                if title == "Start Work" && !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_failure_surfaces_launch_wizard_open_error() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: "missing-window".to_string(),
+                branch_name: "main".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardOpenError { title, message })
+                if title == "Launch Agent" && message == "Window not found"
+        ));
+    }
+
+    #[test]
     fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

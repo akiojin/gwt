@@ -1975,11 +1975,11 @@ mod tests {
         )
         .expect("valid regex");
         let close_controls = regex::Regex::new(
-            r#"wizardCloseButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);\s*wizardCancelButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);"#,
+            r#"wizardCloseButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\);\s*wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\);"#,
         )
         .expect("valid regex");
         let submit_button = regex::Regex::new(
-            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
+            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*if\s*\(\s*launchWizardOpenError\s*\)\s*\{\s*return;\s*\}\s*(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
         )
         .expect("valid regex");
 
@@ -1998,22 +1998,28 @@ mod tests {
         );
         assert!(
             close_controls.is_match(html),
-            "expected both close controls to route cancel through sendWizardAction",
+            "expected both close controls to share the wizard close helper",
+        );
+        assert!(
+            html.contains("function closeLaunchWizardFromChrome()")
+                && html.contains("closeLaunchWizardLocal();")
+                && html.contains("frontendUnits.launchWizardSurface.sendAction({ kind: \"cancel\" });"),
+            "expected close helper to local-close error-only state and send cancel for normal wizard state",
         );
         assert!(
             submit_button.is_match(html),
-            "expected submit control to flush branch draft before dispatching submit",
+            "expected submit control to ignore error-only state and flush branch draft before dispatching submit",
         );
         let backdrop_cancel = regex::Regex::new(
-            r#"if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}"#,
+            r#"if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}"#,
         )
         .expect("valid regex");
         assert!(
             backdrop_cancel.is_match(html),
-            "expected backdrop dismissal to share the same wizard cancel transport",
+            "expected backdrop dismissal to share the same wizard close helper",
         );
         let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
         )
         .expect("valid regex");
         assert!(
@@ -2120,7 +2126,11 @@ mod tests {
         )
         .expect("valid regex");
         let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+        )
+        .expect("valid regex");
+        let wizard_open_error_event = regex::Regex::new(
+            r#"case\s*"launch_wizard_open_error":\s*launchWizard\s*=\s*null;[\s\S]*?launchWizardOpenError\s*=\s*\{[\s\S]*?frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -2143,6 +2153,10 @@ mod tests {
         assert!(
             wizard_event.is_match(html),
             "expected launch wizard state events to render through the wizard surface unit",
+        );
+        assert!(
+            wizard_open_error_event.is_match(html),
+            "expected launch wizard open errors to render through the wizard surface unit",
         );
     }
 

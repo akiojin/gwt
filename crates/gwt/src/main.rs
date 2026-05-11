@@ -2240,15 +2240,16 @@ mod tests {
         assert_eq!(wizard_missing.len(), 1);
         assert!(matches!(
             wizard_missing[0].event,
-            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window not found"
         ));
 
         let wizard_wrong = runtime.open_launch_wizard(&file_tree_id, "feature/demo", None);
         assert_eq!(wizard_wrong.len(), 1);
         assert!(matches!(
             wizard_wrong[0].event,
-            BackendEvent::BranchError { ref message, .. }
-                if message == "Window is not a branches list"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window is not a branches list"
         ));
 
         let issue_missing = runtime.open_issue_launch_wizard_events("client-1", "missing", 7);
