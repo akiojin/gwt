@@ -15,8 +15,8 @@ use gwt_core::{
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
     workspace_projection::{
-        save_workspace_projection, WorkspaceAgentSummary, WorkspaceProjection,
-        WorkspaceStatusCategory,
+        record_workspace_work_event, save_workspace_projection, WorkspaceAgentSummary,
+        WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
     },
 };
 use gwt_github::{
@@ -215,6 +215,36 @@ fn seed_workspace_agents(
         other_title,
     ));
     save_workspace_projection(repo_path, &projection).expect("save workspace projection");
+}
+
+fn seed_workspace_current_agent(repo_path: &Path, session_id: &str, title: &str, focus: &str) {
+    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    projection
+        .agents
+        .push(workspace_agent(session_id, focus, title));
+    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
+}
+
+fn seed_workspace_work_item(
+    repo_path: &Path,
+    work_item_id: &str,
+    kind: WorkspaceWorkEventKind,
+    title: &str,
+    session_id: &str,
+) {
+    let mut event = WorkspaceWorkEvent::new(kind, work_item_id, Utc::now());
+    event.title = Some(title.to_string());
+    event.intent = Some("Implement Workspace WorkItem lifecycle history".to_string());
+    event.summary =
+        Some("Workspace WorkItem history should be joined instead of duplicated.".to_string());
+    event.status_category = Some(match kind {
+        WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
+        _ => WorkspaceStatusCategory::Active,
+    });
+    event.agent_session_id = Some(session_id.to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    record_workspace_work_event(repo_path, event).expect("record workspace work item");
 }
 
 fn seed_issue_linkage(repo_path: &Path, branch: &str, issue_number: u64) {
@@ -679,5 +709,89 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
         };
         assert!(detail.contains("active Board claim"), "{detail}");
         assert!(detail.contains("session-other"), "{detail}");
+    });
+}
+
+#[test]
+fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        seed_workspace_current_agent(
+            &repo_path,
+            &session_id,
+            "Workspace WorkItem history",
+            "Implement Workspace WorkItem lifecycle history",
+        );
+        seed_workspace_work_item(
+            &repo_path,
+            "workitem-existing",
+            WorkspaceWorkEventKind::Start,
+            "Workspace WorkItem history duplicate prevention",
+            "session-other",
+        );
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt-core/src/workspace_projection.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
+            panic!("expected incomplete WorkItem conflict to block mutation");
+        };
+        assert!(detail.contains("incomplete Workspace WorkItem"), "{detail}");
+        assert!(detail.contains("session-other"), "{detail}");
+        assert!(detail.contains("gwtd board post"), "{detail}");
+    });
+}
+
+#[test]
+fn completed_work_item_history_does_not_block_new_related_work() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        seed_workspace_current_agent(
+            &repo_path,
+            &session_id,
+            "Workspace WorkItem history",
+            "Implement Workspace WorkItem lifecycle history follow-up",
+        );
+        seed_workspace_work_item(
+            &repo_path,
+            "workitem-completed",
+            WorkspaceWorkEventKind::Done,
+            "Workspace WorkItem history",
+            "session-other",
+        );
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt-core/src/workspace_projection.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "completed WorkItem history must be context only"
+        );
     });
 }

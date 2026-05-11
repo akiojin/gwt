@@ -438,6 +438,58 @@ pub struct WorkspaceJournalEntryView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceWorkAgentView {
+    pub session_id: String,
+    pub agent_id: Option<String>,
+    pub display_name: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecutionContainerView {
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceWorkEventView {
+    pub id: String,
+    pub work_item_id: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub status_category: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub board_entry_id: Option<String>,
+    pub related_work_item_id: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceWorkItemView {
+    pub id: String,
+    pub title: String,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub status_category: String,
+    pub owner: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub agents: Vec<WorkspaceWorkAgentView>,
+    pub execution_containers: Vec<WorkspaceExecutionContainerView>,
+    pub board_refs: Vec<String>,
+    pub related_work_item_ids: Vec<String>,
+    pub events: Vec<WorkspaceWorkEventView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkCleanupCandidateView {
     pub branch: String,
     pub worktree_path: Option<String>,
@@ -465,6 +517,7 @@ pub struct ActiveWorkProjectionView {
     pub pr_created_at: Option<String>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
+    pub work_items: Vec<WorkspaceWorkItemView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
@@ -915,6 +968,7 @@ mod tests {
                     agent_current_focus: Some("Run launch tests".to_string()),
                     agent_title_summary: Some("Launch tests".to_string()),
                 }],
+                work_items: Vec::new(),
                 cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
                     branch: "work/20260504-1200".to_string(),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),

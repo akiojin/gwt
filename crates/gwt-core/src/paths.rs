@@ -82,6 +82,16 @@ pub fn gwt_workspace_journal_path(repo_hash: &RepoHash) -> PathBuf {
     gwt_project_dir(repo_hash).join("workspace/journal.jsonl")
 }
 
+/// Return the Workspace WorkItem hot projection path for a repository hash.
+pub fn gwt_workspace_work_items_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("workspace/work_items.json")
+}
+
+/// Return the Workspace WorkItem event log path for a repository hash.
+pub fn gwt_workspace_work_events_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("workspace/work_events.jsonl")
+}
+
 /// Return the Workspace current projection path for a repository path.
 pub fn gwt_workspace_projection_path_for_repo_path(repo_path: &Path) -> PathBuf {
     let repo_hash = project_scope_hash(repo_path);
@@ -92,6 +102,18 @@ pub fn gwt_workspace_projection_path_for_repo_path(repo_path: &Path) -> PathBuf 
 pub fn gwt_workspace_journal_path_for_repo_path(repo_path: &Path) -> PathBuf {
     let repo_hash = project_scope_hash(repo_path);
     gwt_workspace_journal_path(&repo_hash)
+}
+
+/// Return the Workspace WorkItem hot projection path for a repository path.
+pub fn gwt_workspace_work_items_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_workspace_work_items_path(&repo_hash)
+}
+
+/// Return the Workspace WorkItem event log path for a repository path.
+pub fn gwt_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_workspace_work_events_path(&repo_hash)
 }
 
 /// Return the repo-scoped notes root (`~/.gwt/notes/`).

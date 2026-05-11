@@ -23,8 +23,8 @@ use gwt_core::{
     coordination::{load_snapshot, BoardEntry, BoardEntryKind, BoardMentionTargetKind},
     paths::{gwt_cache_dir, gwt_sessions_dir},
     workspace_projection::{
-        load_workspace_projection, WorkspaceAgentSummary, WorkspaceProjection,
-        WorkspaceStatusCategory,
+        load_or_synthesize_workspace_work_items, load_workspace_projection, WorkspaceAgentSummary,
+        WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkItem,
     },
 };
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
@@ -306,6 +306,11 @@ fn workspace_coordination_conflicts(
             current_session_id,
         ));
     }
+    conflicts.extend(workspace_work_item_conflicts(
+        worktree_root,
+        current_intent,
+        current_session_id,
+    )?);
     conflicts.extend(board_claim_conflicts(
         worktree_root,
         current_intent,
@@ -347,6 +352,43 @@ fn workspace_agent_conflicts(
             })
         })
         .collect()
+}
+
+fn workspace_work_item_conflicts(
+    worktree_root: &Path,
+    current_intent: &str,
+    current_session_id: Option<&str>,
+) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
+    let projection = load_or_synthesize_workspace_work_items(worktree_root)?;
+    Ok(projection
+        .work_items
+        .iter()
+        .filter(|item| item.is_incomplete())
+        .filter(|item| {
+            current_session_id.is_none_or(|session_id| {
+                !item
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+            })
+        })
+        .filter_map(|item| {
+            let text = workspace_work_item_text(item);
+            is_similar_work(current_intent, &text).then(|| {
+                let first_agent = item.agents.first();
+                let first_container = item.execution_containers.first();
+                WorkspaceCoordinationConflict {
+                    source_label: "incomplete Workspace WorkItem",
+                    title: item.title.clone(),
+                    session_id: first_agent.map(|agent| agent.session_id.clone()),
+                    branch: first_container.and_then(|container| container.branch.clone()),
+                    agent_id: first_agent.and_then(|agent| agent.agent_id.clone()),
+                    related_owners: item.owner.iter().cloned().collect(),
+                    related_topics: vec![item.id.clone()],
+                }
+            })
+        })
+        .collect())
 }
 
 fn board_claim_conflicts(
@@ -433,6 +475,39 @@ fn workspace_agent_text(agent: &WorkspaceAgentSummary) -> String {
     push_optional(&mut parts, agent.branch.as_deref());
     parts.push(agent.agent_id.as_str());
     parts.push(agent.display_name.as_str());
+    parts.join("\n")
+}
+
+fn workspace_work_item_text(item: &WorkspaceWorkItem) -> String {
+    let mut parts = Vec::new();
+    parts.push(item.title.as_str());
+    push_optional(&mut parts, item.intent.as_deref());
+    push_optional(&mut parts, item.summary.as_deref());
+    push_optional(&mut parts, item.owner.as_deref());
+    parts.extend(item.board_refs.iter().map(String::as_str));
+    for agent in &item.agents {
+        parts.push(agent.session_id.as_str());
+        push_optional(&mut parts, agent.agent_id.as_deref());
+        push_optional(&mut parts, agent.display_name.as_deref());
+    }
+    for container in &item.execution_containers {
+        push_optional(&mut parts, container.branch.as_deref());
+        push_optional(
+            &mut parts,
+            container
+                .worktree_path
+                .as_ref()
+                .and_then(|path| path.to_str()),
+        );
+        push_optional(&mut parts, container.pr_url.as_deref());
+        push_optional(&mut parts, container.pr_state.as_deref());
+    }
+    for event in &item.events {
+        push_optional(&mut parts, event.title.as_deref());
+        push_optional(&mut parts, event.intent.as_deref());
+        push_optional(&mut parts, event.summary.as_deref());
+        push_optional(&mut parts, event.next_action.as_deref());
+    }
     parts.join("\n")
 }
 

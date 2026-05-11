@@ -215,6 +215,17 @@ impl AppRuntime {
             );
             return None;
         }
+        let work_event =
+            workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
+        if let Err(error) =
+            workspace_projection::record_workspace_work_event(project_root, work_event)
+        {
+            tracing::warn!(
+                error = %error,
+                project_root = %project_root.display(),
+                "failed to record workspace WorkItem event for board milestone"
+            );
+        }
 
         if self.active_tab_id.as_deref() != Some(tab_id) {
             return None;
