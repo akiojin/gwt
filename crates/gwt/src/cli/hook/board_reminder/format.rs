@@ -251,7 +251,7 @@ mod tests {
             vec![],
         )
         .with_origin_session_id("sess-other")
-        .with_audience(vec!["ws-1".into()]);
+        .with_audience(vec!["ws-1"]);
         let scoped_other = BoardEntry::new(
             AuthorKind::Agent,
             "Agent",
@@ -263,7 +263,7 @@ mod tests {
             vec![],
         )
         .with_origin_session_id("sess-other")
-        .with_audience(vec!["ws-2".into()]);
+        .with_audience(vec!["ws-2"]);
 
         let entries = vec![broadcast, scoped_match, scoped_other];
         let filtered = filter_and_cap_latest(entries, "sess-self", 20, Some("ws-1"));
@@ -298,7 +298,7 @@ mod tests {
             vec![],
         )
         .with_origin_session_id("sess-other")
-        .with_audience(vec!["ws-1".into()]);
+        .with_audience(vec!["ws-1"]);
 
         let entries = vec![broadcast, scoped];
         let filtered = filter_and_cap_latest(entries, "sess-self", 20, None);
