@@ -15,6 +15,9 @@
         applyBoardMentionNotificationFocus,
         boardEntryAudienceLabels,
         boardEntryMentionsSelf,
+        boardEntryOriginActionLabel,
+        boardEntryOriginLabel,
+        boardEntryOriginSessionId,
         boardEntryPreview,
         findBoardEntry,
         mentionsForBoardSubmit,
@@ -3040,6 +3043,29 @@
         });
       }
 
+      function boardOriginActiveAgents() {
+        const assigned = Array.isArray(activeWorkProjection?.agents)
+          ? activeWorkProjection.agents
+          : [];
+        const unassigned = Array.isArray(activeWorkProjection?.unassigned_agents)
+          ? activeWorkProjection.unassigned_agents
+          : [];
+        return assigned.concat(unassigned);
+      }
+
+      function openBoardOriginAgent(windowId, entry) {
+        const originSessionId = boardEntryOriginSessionId(entry);
+        if (!originSessionId) {
+          return;
+        }
+        send({
+          kind: "open_board_origin_agent",
+          id: windowId,
+          origin_session_id: originSessionId,
+          bounds: visibleBounds(),
+        });
+      }
+
       function logMatchesQuery(entry, query) {
         if (!query) {
           return true;
@@ -4004,6 +4030,10 @@
             }
             meta.appendChild(badge);
           }
+          const originLabel = boardEntryOriginLabel(entry);
+          if (originLabel) {
+            meta.appendChild(createNode("span", "board-origin-badge", originLabel));
+          }
           card.appendChild(meta);
           if (entry.parent_id) {
             const parent = findBoardEntry(state, entry.parent_id);
@@ -4029,6 +4059,16 @@
             input?.focus();
           });
           messageActions.appendChild(replyButton);
+          const originActionLabel = boardEntryOriginActionLabel(
+            entry,
+            boardOriginActiveAgents(),
+          );
+          if (originActionLabel) {
+            const originButton = createNode("button", "board-origin-button", originActionLabel);
+            originButton.type = "button";
+            originButton.addEventListener("click", () => openBoardOriginAgent(windowId, entry));
+            messageActions.appendChild(originButton);
+          }
           card.appendChild(messageActions);
           timeline.appendChild(card);
         }
