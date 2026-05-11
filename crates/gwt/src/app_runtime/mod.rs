@@ -1943,7 +1943,7 @@ impl AppRuntime {
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
-            FrontendEvent::OpenStartWork => self.open_start_work(),
+            FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(source, journal_id)
             }
@@ -1951,11 +1951,11 @@ impl AppRuntime {
                 id,
                 branch_name,
                 linked_issue_number,
-            } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
+            } => self.open_launch_wizard(&client_id, &id, &branch_name, linked_issue_number),
             FrontendEvent::OpenActiveWorkLaunchWizard {
                 branch_name,
                 linked_issue_number,
-            } => self.open_active_work_launch_wizard(&branch_name, linked_issue_number),
+            } => self.open_active_work_launch_wizard(&client_id, &branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action(action, bounds)
             }
@@ -7521,6 +7521,10 @@ exit 0
 
         assert!(runtime.launch_wizard.is_none());
         assert!(matches!(
+            events.first().map(|event| &event.target),
+            Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+        ));
+        assert!(matches!(
             events.first().map(|event| &event.event),
             Some(BackendEvent::LaunchWizardOpenError { title, message })
                 if title == "Start Work" && !message.is_empty()
@@ -7549,6 +7553,10 @@ exit 0
         );
 
         assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            events.first().map(|event| &event.target),
+            Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+        ));
         assert!(matches!(
             events.first().map(|event| &event.event),
             Some(BackendEvent::LaunchWizardOpenError { title, message })
