@@ -10,6 +10,8 @@ pub enum AgentId {
     Codex,
     Gemini,
     OpenCode,
+    OpenClaw,
+    Hermes,
     Copilot,
     Custom(String),
 }
@@ -22,6 +24,8 @@ impl AgentId {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
+            Self::OpenClaw => "openclaw",
+            Self::Hermes => "hermes",
             Self::Copilot => "gh",
             Self::Custom(name) => name,
         }
@@ -34,6 +38,8 @@ impl AgentId {
             Self::Codex => "Codex",
             Self::Gemini => "Gemini CLI",
             Self::OpenCode => "OpenCode",
+            Self::OpenClaw => "OpenClaw",
+            Self::Hermes => "Hermes Agent",
             Self::Copilot => "GitHub Copilot",
             Self::Custom(name) => name,
         }
@@ -46,6 +52,8 @@ impl AgentId {
             Self::Codex => Some("@openai/codex"),
             Self::Gemini => Some("@anthropic-ai/gemini-cli"),
             Self::OpenCode => None,
+            Self::OpenClaw => None,
+            Self::Hermes => None,
             Self::Copilot => None,
             Self::Custom(_) => None,
         }
@@ -58,6 +66,8 @@ impl AgentId {
             Self::Codex => AgentColor::Cyan,
             Self::Gemini => AgentColor::Magenta,
             Self::OpenCode => AgentColor::Green,
+            Self::OpenClaw => AgentColor::Blue,
+            Self::Hermes => AgentColor::Magenta,
             Self::Copilot => AgentColor::Blue,
             Self::Custom(_) => AgentColor::Gray,
         }
@@ -90,6 +100,8 @@ pub fn resolve_agent_id(raw: &str) -> Option<AgentId> {
         "codex" => Some(AgentId::Codex),
         "gemini" | "gemini cli" | "gemini-cli" => Some(AgentId::Gemini),
         "opencode" | "open-code" => Some(AgentId::OpenCode),
+        "openclaw" | "open-claw" => Some(AgentId::OpenClaw),
+        "hermes" | "hermes agent" | "hermes-agent" => Some(AgentId::Hermes),
         "gh" | "copilot" | "github copilot" | "github-copilot" => Some(AgentId::Copilot),
         _ => Some(AgentId::Custom(trimmed.to_string())),
     }
@@ -209,6 +221,8 @@ mod tests {
         assert_eq!(AgentId::Codex.command(), "codex");
         assert_eq!(AgentId::Gemini.command(), "gemini");
         assert_eq!(AgentId::OpenCode.command(), "opencode");
+        assert_eq!(AgentId::OpenClaw.command(), "openclaw");
+        assert_eq!(AgentId::Hermes.command(), "hermes");
         assert_eq!(AgentId::Copilot.command(), "gh");
         assert_eq!(AgentId::Custom("aider".into()).command(), "aider");
     }
@@ -216,6 +230,9 @@ mod tests {
     #[test]
     fn agent_id_display_name_returns_expected() {
         assert_eq!(AgentId::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(AgentId::OpenCode.display_name(), "OpenCode");
+        assert_eq!(AgentId::OpenClaw.display_name(), "OpenClaw");
+        assert_eq!(AgentId::Hermes.display_name(), "Hermes Agent");
         assert_eq!(AgentId::Copilot.display_name(), "GitHub Copilot");
         assert_eq!(AgentId::Custom("aider".into()).display_name(), "aider");
     }
@@ -227,6 +244,8 @@ mod tests {
             Some("@anthropic-ai/claude-code")
         );
         assert_eq!(AgentId::OpenCode.package_name(), None);
+        assert_eq!(AgentId::OpenClaw.package_name(), None);
+        assert_eq!(AgentId::Hermes.package_name(), None);
         assert_eq!(AgentId::Custom("x".into()).package_name(), None);
     }
 
@@ -235,6 +254,9 @@ mod tests {
         assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Yellow);
         assert_eq!(AgentId::Codex.default_color(), AgentColor::Cyan);
         assert_eq!(AgentId::Gemini.default_color(), AgentColor::Magenta);
+        assert_eq!(AgentId::OpenCode.default_color(), AgentColor::Green);
+        assert_eq!(AgentId::OpenClaw.default_color(), AgentColor::Blue);
+        assert_eq!(AgentId::Hermes.default_color(), AgentColor::Magenta);
         assert_eq!(
             AgentId::Custom("x".into()).default_color(),
             AgentColor::Gray
@@ -295,6 +317,12 @@ mod tests {
         assert_eq!(resolve_agent_id("opencode"), Some(AgentId::OpenCode));
         assert_eq!(resolve_agent_id("OpenCode"), Some(AgentId::OpenCode));
         assert_eq!(resolve_agent_id("open-code"), Some(AgentId::OpenCode));
+        assert_eq!(resolve_agent_id("openclaw"), Some(AgentId::OpenClaw));
+        assert_eq!(resolve_agent_id("OpenClaw"), Some(AgentId::OpenClaw));
+        assert_eq!(resolve_agent_id("open-claw"), Some(AgentId::OpenClaw));
+        assert_eq!(resolve_agent_id("hermes"), Some(AgentId::Hermes));
+        assert_eq!(resolve_agent_id("Hermes Agent"), Some(AgentId::Hermes));
+        assert_eq!(resolve_agent_id("hermes-agent"), Some(AgentId::Hermes));
         assert_eq!(resolve_agent_id("gh"), Some(AgentId::Copilot));
         assert_eq!(resolve_agent_id("copilot"), Some(AgentId::Copilot));
         assert_eq!(resolve_agent_id("GitHub Copilot"), Some(AgentId::Copilot));
@@ -331,6 +359,8 @@ mod tests {
             "codex-wrapper",
             "gemini-helper",
             "opencode-mentor",
+            "openclaw-mentor",
+            "hermes-helper",
             "copilot-mentor",
             "github-copilot-wrapper",
         ];
@@ -351,6 +381,8 @@ mod tests {
             ("codex", AgentColor::Cyan),
             ("gemini", AgentColor::Magenta),
             ("opencode", AgentColor::Green),
+            ("openclaw", AgentColor::Blue),
+            ("hermes", AgentColor::Magenta),
             ("gh", AgentColor::Blue),
             ("my-custom", AgentColor::Gray),
         ];
@@ -367,6 +399,11 @@ mod tests {
         let ids = vec![
             AgentId::ClaudeCode,
             AgentId::Codex,
+            AgentId::Gemini,
+            AgentId::OpenCode,
+            AgentId::OpenClaw,
+            AgentId::Hermes,
+            AgentId::Copilot,
             AgentId::Custom("test".into()),
         ];
         for id in ids {

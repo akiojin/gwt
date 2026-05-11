@@ -9,7 +9,8 @@ use crate::cli::gwtd_resolver::{
 };
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
+    distribute_to_worktree, generate_codex_hooks, generate_hermes_hooks, generate_openclaw_hooks,
+    generate_opencode_hooks, generate_settings_local, update_git_exclude,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
@@ -27,6 +28,21 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
     })?;
     generate_codex_hooks(worktree).map_err(|error| {
         io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+    })?;
+    generate_opencode_hooks(worktree).map_err(|error| {
+        io::Error::other(format!(
+            "failed to regenerate OpenCode hook settings: {error}"
+        ))
+    })?;
+    generate_openclaw_hooks(worktree).map_err(|error| {
+        io::Error::other(format!(
+            "failed to regenerate OpenClaw hook settings: {error}"
+        ))
+    })?;
+    generate_hermes_hooks(worktree).map_err(|error| {
+        io::Error::other(format!(
+            "failed to regenerate Hermes hook settings: {error}"
+        ))
     })?;
     Ok(())
 }

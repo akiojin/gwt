@@ -222,6 +222,8 @@ impl VersionCache {
             AgentId::Codex => "codex".to_string(),
             AgentId::Gemini => "gemini".to_string(),
             AgentId::OpenCode => "opencode".to_string(),
+            AgentId::OpenClaw => "openclaw".to_string(),
+            AgentId::Hermes => "hermes".to_string(),
             AgentId::Copilot => "copilot".to_string(),
             AgentId::Custom(name) => format!("custom-{name}"),
         }
@@ -393,6 +395,11 @@ mod tests {
     fn agent_key_mapping() {
         assert_eq!(VersionCache::agent_key(&AgentId::ClaudeCode), "claude-code");
         assert_eq!(VersionCache::agent_key(&AgentId::Codex), "codex");
+        assert_eq!(VersionCache::agent_key(&AgentId::Gemini), "gemini");
+        assert_eq!(VersionCache::agent_key(&AgentId::OpenCode), "opencode");
+        assert_eq!(VersionCache::agent_key(&AgentId::OpenClaw), "openclaw");
+        assert_eq!(VersionCache::agent_key(&AgentId::Hermes), "hermes");
+        assert_eq!(VersionCache::agent_key(&AgentId::Copilot), "copilot");
         assert_eq!(
             VersionCache::agent_key(&AgentId::Custom("aider".into())),
             "custom-aider"

@@ -24,6 +24,9 @@ const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
     ".gwt/discussion.md",
+    ".gwt/opencode/",
+    ".gwt/openclaw/",
+    ".gwt/hermes/",
     "docker-compose.override.yml",
 ];
 
@@ -160,6 +163,9 @@ mod tests {
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
         assert!(result.contains(".gwt/discussion.md"));
+        assert!(result.contains(".gwt/opencode/"));
+        assert!(result.contains(".gwt/openclaw/"));
+        assert!(result.contains(".gwt/hermes/"));
         assert!(result.contains("docker-compose.override.yml"));
         assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));

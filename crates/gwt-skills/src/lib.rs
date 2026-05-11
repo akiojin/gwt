@@ -15,7 +15,10 @@ pub use hooks::{
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use settings_local::{generate_codex_hooks, generate_settings_local};
+pub use settings_local::{
+    generate_codex_hooks, generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
+    generate_settings_local,
+};
 
 #[cfg(test)]
 mod tests {

@@ -51,6 +51,18 @@ fn builtin_probes() -> Vec<AgentProbe> {
             prefix_args: &[],
         },
         AgentProbe {
+            id: AgentId::OpenClaw,
+            command: "openclaw",
+            version_flag: "--version",
+            prefix_args: &[],
+        },
+        AgentProbe {
+            id: AgentId::Hermes,
+            command: "hermes",
+            version_flag: "--version",
+            prefix_args: &[],
+        },
+        AgentProbe {
             id: AgentId::Copilot,
             command: "gh",
             version_flag: "--version",
@@ -84,6 +96,8 @@ impl AgentDetector {
             "codex" => AgentId::Codex,
             "gemini" => AgentId::Gemini,
             "opencode" => AgentId::OpenCode,
+            "openclaw" => AgentId::OpenClaw,
+            "hermes" => AgentId::Hermes,
             "gh" => AgentId::Copilot,
             other => AgentId::Custom(other.to_string()),
         };
@@ -159,12 +173,14 @@ mod tests {
     #[test]
     fn builtin_probes_cover_all_variants() {
         let probes = builtin_probes();
-        assert_eq!(probes.len(), 5);
+        assert_eq!(probes.len(), 7);
         let ids: Vec<_> = probes.iter().map(|p| &p.id).collect();
         assert!(ids.contains(&&AgentId::ClaudeCode));
         assert!(ids.contains(&&AgentId::Codex));
         assert!(ids.contains(&&AgentId::Gemini));
         assert!(ids.contains(&&AgentId::OpenCode));
+        assert!(ids.contains(&&AgentId::OpenClaw));
+        assert!(ids.contains(&&AgentId::Hermes));
         assert!(ids.contains(&&AgentId::Copilot));
     }
 

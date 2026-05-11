@@ -3103,6 +3103,9 @@ fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
         "claude" => gwt_agent::AgentId::ClaudeCode,
         "codex" => gwt_agent::AgentId::Codex,
         "gemini" => gwt_agent::AgentId::Gemini,
+        "opencode" => gwt_agent::AgentId::OpenCode,
+        "openclaw" => gwt_agent::AgentId::OpenClaw,
+        "hermes" => gwt_agent::AgentId::Hermes,
         "gh" => gwt_agent::AgentId::Copilot,
         other => gwt_agent::AgentId::Custom(other.to_string()),
     }
@@ -3160,10 +3163,13 @@ pub fn build_builtin_agent_options(
     detected_agents: Vec<gwt_agent::DetectedAgent>,
     cache: &gwt_agent::VersionCache,
 ) -> Vec<AgentOption> {
-    const BUILTIN: [gwt_agent::AgentId; 4] = [
+    const BUILTIN: [gwt_agent::AgentId; 7] = [
         gwt_agent::AgentId::ClaudeCode,
         gwt_agent::AgentId::Codex,
         gwt_agent::AgentId::Gemini,
+        gwt_agent::AgentId::OpenCode,
+        gwt_agent::AgentId::OpenClaw,
+        gwt_agent::AgentId::Hermes,
         gwt_agent::AgentId::Copilot,
     ];
 
@@ -3258,6 +3264,14 @@ mod tests {
             agent_option_color("opencode"),
             Some(gwt_agent::AgentColor::Green)
         );
+        assert_eq!(
+            agent_option_color("openclaw"),
+            Some(gwt_agent::AgentColor::Blue)
+        );
+        assert_eq!(
+            agent_option_color("hermes"),
+            Some(gwt_agent::AgentColor::Magenta)
+        );
         assert_eq!(agent_option_color("gh"), Some(gwt_agent::AgentColor::Blue));
         assert_eq!(
             agent_option_color("my-custom"),
@@ -3313,6 +3327,20 @@ mod tests {
             options[missing].available,
             "configured custom agents must stay selectable; runtime preparation validates execution"
         );
+    }
+
+    #[test]
+    fn build_builtin_agent_options_includes_hook_parity_agents() {
+        let options = build_builtin_agent_options(Vec::new(), &gwt_agent::VersionCache::new());
+        let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec!["claude", "codex", "gemini", "opencode", "openclaw", "hermes", "gh"]
+        );
+        assert!(options.iter().any(|option| option.name == "OpenCode"));
+        assert!(options.iter().any(|option| option.name == "OpenClaw"));
+        assert!(options.iter().any(|option| option.name == "Hermes Agent"));
     }
 
     fn branch(name: &str) -> BranchListEntry {
@@ -5025,8 +5053,14 @@ mod tests {
         assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
+        assert!(!agent_has_npm_package("opencode"));
+        assert!(!agent_has_npm_package("openclaw"));
+        assert!(!agent_has_npm_package("hermes"));
         assert!(!agent_has_npm_package("custom"));
         assert_eq!(agent_id_from_key("gh"), gwt_agent::AgentId::Copilot);
+        assert_eq!(agent_id_from_key("opencode"), gwt_agent::AgentId::OpenCode);
+        assert_eq!(agent_id_from_key("openclaw"), gwt_agent::AgentId::OpenClaw);
+        assert_eq!(agent_id_from_key("hermes"), gwt_agent::AgentId::Hermes);
         assert_eq!(
             agent_id_from_key("custom"),
             gwt_agent::AgentId::Custom("custom".to_string())
