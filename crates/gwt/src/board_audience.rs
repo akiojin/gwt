@@ -26,6 +26,19 @@ fn workspace_id_for_agent(
         .or_else(|| non_empty_string(&projection.id))
 }
 
+fn active_workspace_id(projection: &WorkspaceProjection) -> Option<String> {
+    non_empty_string(&projection.id)
+}
+
+fn gui_workspace_id(projection: &WorkspaceProjection) -> Option<String> {
+    projection.assigned_agents().next()?;
+    active_workspace_id(projection).or_else(|| {
+        projection
+            .assigned_agents()
+            .find_map(|agent| workspace_id_for_agent(projection, agent))
+    })
+}
+
 fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
     let value = value.into();
     if value.trim().is_empty() || values.iter().any(|item| item == &value) {
@@ -102,10 +115,7 @@ pub fn gui_default_board_scope(repo_path: &Path) -> gwt_core::Result<BoardAudien
     let Some(projection) = load_workspace_projection(repo_path)? else {
         return Ok(BoardAudienceScope::All);
     };
-    if let Some(workspace_id) = projection
-        .assigned_agents()
-        .find_map(|agent| workspace_id_for_agent(&projection, agent))
-    {
+    if let Some(workspace_id) = gui_workspace_id(&projection) {
         return Ok(BoardAudienceScope::Workspace(workspace_id));
     }
     if projection.unassigned_agents().next().is_some() {
@@ -143,10 +153,7 @@ pub fn post_audience_for_gui(
     let projection = load_workspace_projection(repo_path)?;
     let mut audience = Vec::new();
     if let Some(projection) = projection.as_ref() {
-        if let Some(workspace_id) = projection
-            .assigned_agents()
-            .find_map(|agent| workspace_id_for_agent(projection, agent))
-        {
+        if let Some(workspace_id) = gui_workspace_id(projection) {
             push_unique(&mut audience, workspace_id);
         }
     }
