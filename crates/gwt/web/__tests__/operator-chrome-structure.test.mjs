@@ -1176,6 +1176,19 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
+test("Branches toolbar exposes explicit Launch Agent action for selected branch", () => {
+  assert.match(
+    appSource,
+    /data-action="open-branch-launch"/,
+    "expected Branches toolbar to include an explicit Launch Agent action",
+  );
+  assert.match(
+    appSource,
+    /selectedBranchName[\s\S]{0,300}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,300}?selectedBranchName/,
+    "expected Branches toolbar Launch Agent action to send selectedBranchName",
+  );
+});
+
 test("Keyboard-navigable rows have :focus-visible outlines", () => {
   // After PRs #2464/#2465 made file-tree-row and branch-row keyboard-
   // navigable, the rows could receive focus but had no visible outline
@@ -1192,6 +1205,29 @@ test("Keyboard-navigable rows have :focus-visible outlines", () => {
       `expected ${selector} to be in the unified focus-visible group`,
     );
   }
+});
+
+test("Launch wizard open errors render in wizard modal and close locally", () => {
+  assert.match(
+    appSource,
+    /let\s+launchWizardOpenError\s*=\s*null/,
+    "expected frontend to track launch wizard open errors separately from project_open_error",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenError\s*=/,
+    "expected launch_wizard_open_error events to populate wizard error state",
+  );
+  assert.match(
+    appSource,
+    /function\s+closeLaunchWizardLocal\(\)[\s\S]{0,300}?launchWizardOpenError\s*=\s*null/,
+    "expected a local close path for error-only wizard state",
+  );
+  assert.match(
+    appSource,
+    /wizardModal\.classList\.contains\("open"\)[\s\S]{0,500}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendAction\(\{\s*kind:\s*"cancel"/,
+    "expected Esc/backdrop/close to locally dismiss error-only wizard state before sending backend cancel",
+  );
 });
 
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {

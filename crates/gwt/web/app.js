@@ -205,12 +205,14 @@
           owner: "launch-wizard-surface",
           state: Object.freeze([
             "launchWizard",
+            "launchWizardOpenError",
             "wizardWasOpen",
             "wizardBranchDraft",
             "wizardBranchBackendValue",
           ]),
           mutatedBy: Object.freeze([
             "openIssueLaunchWizard",
+            "closeLaunchWizardLocal",
             "sendWizardAction",
             "renderLaunchWizard",
             "flushWizardBranchDraft",
@@ -261,6 +263,7 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       let viewportRasterTimer = null;
       let launchWizard = null;
+      let launchWizardOpenError = null;
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
@@ -4304,8 +4307,22 @@
       let wizardFocusReturn = null;
       let wizardFocusTrapRelease = null;
 
+      function closeLaunchWizardLocal() {
+        launchWizard = null;
+        launchWizardOpenError = null;
+        renderLaunchWizard();
+      }
+
+      function closeLaunchWizardFromChrome() {
+        if (launchWizardOpenError) {
+          closeLaunchWizardLocal();
+          return;
+        }
+        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+      }
+
       function renderLaunchWizard() {
-        if (!launchWizard) {
+        if (!launchWizard && !launchWizardOpenError) {
           const wasOpenBeforeClose = wizardModal.classList.contains("open");
           wizardModal.classList.remove("open");
           // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
@@ -4333,13 +4350,17 @@
           if (wizardTitle) wizardTitle.textContent = "Launch Agent";
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
+          wizardSubmitButton.hidden = false;
+          wizardCancelButton.textContent = "Cancel";
           syncWizardDraftState();
           return;
         }
 
         syncWizardDraftState();
         closeModal();
-        const isStartWorkMode = launchWizard.show_branch_controls === false;
+        const isStartWorkMode =
+          launchWizard?.show_branch_controls === false ||
+          launchWizardOpenError?.title === "Start Work";
         wizardModal.classList.toggle("is-drawer", isStartWorkMode);
         wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         const wasOpenWizard = wizardModal.classList.contains("open");
@@ -4361,6 +4382,28 @@
           // keyboard users can't escape into background content.
           wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
         }
+
+        if (launchWizardOpenError) {
+          if (wizardTitle) {
+            wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
+          }
+          wizardMeta.textContent =
+            launchWizardOpenError.title === "Start Work"
+              ? "Workspace launch"
+              : "Launch Agent";
+          wizardSubmitButton.hidden = true;
+          wizardSubmitButton.disabled = true;
+          wizardCancelButton.textContent = "Close";
+          wizardError.hidden = false;
+          wizardError.textContent =
+            launchWizardOpenError.message || "Unable to open Launch Wizard";
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          return;
+        }
+
+        wizardSubmitButton.hidden = false;
+        wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Workspace launch"
@@ -5136,6 +5179,7 @@
         syncBranchSelectionState(state);
         const list = element.querySelector(".branch-list");
         const notice = element.querySelector(".branch-notice");
+        const launchButton = element.querySelector("[data-action='open-branch-launch']");
         const cleanupButton = element.querySelector("[data-action='open-branch-cleanup']");
         if (!list) {
           return;
@@ -5143,6 +5187,9 @@
 
         for (const button of element.querySelectorAll("[data-branch-filter]")) {
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
+        }
+        if (launchButton) {
+          launchButton.disabled = !state.selectedBranchName;
         }
         if (cleanupButton) {
           const selectedCount = selectedBranchCleanupEntries(windowId).length;
@@ -6063,6 +6110,7 @@
                   </div>
                 </div>
                 <div class="branch-toolbar-actions workspace-toolbar-actions">
+                  <button class="wizard-button primary branch-launch-trigger" type="button" data-action="open-branch-launch" disabled>Launch Agent</button>
                   <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
@@ -6099,6 +6147,22 @@
               frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
+          body
+            .querySelector("[data-action='open-branch-launch']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+                windowData.id,
+              );
+              if (!state.selectedBranchName) {
+                return;
+              }
+              send({
+                kind: "open_launch_wizard",
+                id: windowData.id,
+                branch_name: state.selectedBranchName,
+              });
+            });
           body
             .querySelector("[data-action='open-branch-cleanup']")
             .addEventListener("click", (event) => {
@@ -7789,8 +7853,17 @@
               frontendUnits.projectWorkspaceShell.activeProjectTab(),
             );
             break;
+          case "launch_wizard_open_error":
+            launchWizard = null;
+            launchWizardOpenError = {
+              title: event.title || "Launch Agent",
+              message: event.message || "Unable to open Launch Wizard",
+            };
+            frontendUnits.launchWizardSurface.render();
+            break;
           case "launch_wizard_state":
             launchWizard = event.wizard;
+            launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
             break;
           case "runtime_hook_event":
@@ -8212,19 +8285,18 @@
           closeModal();
         }
       });
-      wizardCloseButton.addEventListener("click", () => {
-        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
-      });
-      wizardCancelButton.addEventListener("click", () => {
-        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
-      });
+      wizardCloseButton.addEventListener("click", closeLaunchWizardFromChrome);
+      wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardSubmitButton.addEventListener("click", () => {
+        if (launchWizardOpenError) {
+          return;
+        }
         frontendUnits.launchWizardSurface.flushBranchDraft();
         frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
       });
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
-          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          closeLaunchWizardFromChrome();
         }
       });
       branchCleanupModal.addEventListener("click", (event) => {
@@ -8268,7 +8340,11 @@
         if (wizardModal.classList.contains("open")) {
           // Wizard cancel is the explicit cancellation path; map Esc to
           // the same action so the modal isn't a keyboard trap.
-          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          if (launchWizardOpenError) {
+            closeLaunchWizardLocal();
+          } else {
+            frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          }
           event.preventDefault();
           return;
         }

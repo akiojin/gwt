@@ -2017,7 +2017,7 @@ impl AppRuntime {
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
-            FrontendEvent::OpenStartWork => self.open_start_work(),
+            FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(source, journal_id)
             }
@@ -2025,11 +2025,11 @@ impl AppRuntime {
                 id,
                 branch_name,
                 linked_issue_number,
-            } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
+            } => self.open_launch_wizard(&client_id, &id, &branch_name, linked_issue_number),
             FrontendEvent::OpenActiveWorkLaunchWizard {
                 branch_name,
                 linked_issue_number,
-            } => self.open_active_work_launch_wizard(&branch_name, linked_issue_number),
+            } => self.open_active_work_launch_wizard(&client_id, &branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action(action, bounds)
             }
@@ -7586,6 +7586,68 @@ exit 0
             refs_after_cancel.stdout.is_empty(),
             "cancelling Start Work must not create branch refs"
         );
+    }
+
+    #[test]
+    fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            events.first().map(|event| &event.target),
+            Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardOpenError { title, message })
+                if title == "Start Work" && !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_failure_surfaces_launch_wizard_open_error() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: "missing-window".to_string(),
+                branch_name: "main".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            events.first().map(|event| &event.target),
+            Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardOpenError { title, message })
+                if title == "Launch Agent" && message == "Window not found"
+        ));
     }
 
     #[test]

@@ -2236,19 +2236,22 @@ mod tests {
                 if message == "Window is not a branches list"
         ));
 
-        let wizard_missing = runtime.open_launch_wizard("missing", "feature/demo", None);
+        let wizard_missing =
+            runtime.open_launch_wizard("client-1", "missing", "feature/demo", None);
         assert_eq!(wizard_missing.len(), 1);
         assert!(matches!(
             wizard_missing[0].event,
-            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window not found"
         ));
 
-        let wizard_wrong = runtime.open_launch_wizard(&file_tree_id, "feature/demo", None);
+        let wizard_wrong =
+            runtime.open_launch_wizard("client-1", &file_tree_id, "feature/demo", None);
         assert_eq!(wizard_wrong.len(), 1);
         assert!(matches!(
             wizard_wrong[0].event,
-            BackendEvent::BranchError { ref message, .. }
-                if message == "Window is not a branches list"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window is not a branches list"
         ));
 
         let issue_missing = runtime.open_issue_launch_wizard_events("client-1", "missing", 7);
@@ -2533,7 +2536,8 @@ mod tests {
             })
         });
 
-        let wizard_events = runtime.open_launch_wizard(&branches_id, "feature/demo", Some(42));
+        let wizard_events =
+            runtime.open_launch_wizard("client-1", &branches_id, "feature/demo", Some(42));
         assert_eq!(wizard_events.len(), 1);
         assert!(matches!(
             wizard_events[0].event,

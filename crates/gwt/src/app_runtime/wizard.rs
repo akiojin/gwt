@@ -38,6 +38,28 @@ fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKi
     }
 }
 
+fn launch_wizard_open_error(
+    client_id: &str,
+    title: &str,
+    message: impl Into<String>,
+) -> OutboundEvent {
+    OutboundEvent::reply(
+        client_id.to_string(),
+        BackendEvent::LaunchWizardOpenError {
+            title: title.to_string(),
+            message: message.into(),
+        },
+    )
+}
+
+fn launch_agent_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(client_id, "Launch Agent", message)]
+}
+
+fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(client_id, "Start Work", message)]
+}
+
 use super::{
     branch_worktree_path, build_shell_process_launch, combined_window_id,
     detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
@@ -75,34 +97,23 @@ impl AppRuntime {
 
     pub(crate) fn open_launch_wizard(
         &mut self,
+        client_id: &str,
         id: &str,
         branch_name: &str,
         linked_issue_number: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Window not found");
         };
         let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Project tab not found".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Project tab not found");
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Window not found");
         };
 
         if window.preset != WindowPreset::Branches {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Window is not a branches list");
         }
 
         let project_root = tab.project_root.clone();
@@ -115,10 +126,7 @@ impl AppRuntime {
             None,
         ) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: error,
-            })],
+            Err(error) => launch_agent_open_error(client_id, error),
         }
     }
 
@@ -190,23 +198,18 @@ impl AppRuntime {
 
     pub(crate) fn open_active_work_launch_wizard(
         &mut self,
+        client_id: &str,
         branch_name: &str,
         linked_issue_number: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Open a project before adding an agent".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Open a project before adding an agent");
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Project tab not found".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Add Agent requires a Git project".to_string(),
-            })];
+            return launch_agent_open_error(client_id, "Add Agent requires a Git project");
         }
 
         let project_root = tab.project_root.clone();
@@ -218,35 +221,25 @@ impl AppRuntime {
             None,
         ) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: error,
-            })],
+            Err(error) => launch_agent_open_error(client_id, error),
         }
     }
 
-    pub(crate) fn open_start_work(&mut self) -> Vec<OutboundEvent> {
+    pub(crate) fn open_start_work(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Open a project before starting work".to_string(),
-            })];
+            return start_work_open_error(client_id, "Open a project before starting work");
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Project tab not found".to_string(),
-            })];
+            return start_work_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: "Start Work requires a Git project".to_string(),
-            })];
+            return start_work_open_error(client_id, "Start Work requires a Git project");
         }
 
         let project_root = tab.project_root.clone();
         match self.open_start_work_for_project(&tab_id, &project_root) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: error,
-            })],
+            Err(error) => start_work_open_error(client_id, error),
         }
     }
 
