@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.27.0] - 2026-05-11
+
+### Bug Fixes
+
+- Prepend GWT_BIN_PATH dir under existing case-insensitive PATH key
+- Scope managed assets by agent provider
+- **workspace:** Materialize actionable unassigned agents
+
+### Features
+
+- Prepend GWT_BIN_PATH dir to agent PATH
+- Restore launch agent preferences per agent
+
+### Miscellaneous Tasks
+
+- Apply cargo fmt to prepend_dir_to_path test additions
+- Merge origin develop
+
 ## [9.26.0] - 2026-05-11
 
 ### Bug Fixes
