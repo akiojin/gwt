@@ -20,7 +20,10 @@ use gwt_agent::{
     types::WorkflowBypass,
 };
 use gwt_core::{
-    coordination::{load_snapshot, BoardEntry, BoardEntryKind, BoardMentionTargetKind},
+    coordination::{
+        board_entry_visible_for_scope, load_snapshot, BoardEntry, BoardEntryKind,
+        BoardMentionTargetKind,
+    },
     paths::{gwt_cache_dir, gwt_sessions_dir},
     workspace_projection::{
         load_or_synthesize_workspace_work_items, load_workspace_projection, WorkspaceAgentSummary,
@@ -31,6 +34,7 @@ use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
 use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use crate::board_audience::current_session_board_scope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -199,15 +203,18 @@ fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, Hoo
         worktree_root
     };
     let Some(projection) = load_workspace_projection(projection_root)? else {
-        return Ok(true);
+        return Ok(false);
     };
     let Some(agent) = projection
         .agents
         .iter()
         .find(|agent| agent.session_id == session.id)
     else {
-        return Ok(true);
+        return Ok(false);
     };
+    if agent.is_unassigned() {
+        return Ok(false);
+    }
     Ok(agent
         .title_summary
         .as_deref()
@@ -329,6 +336,7 @@ fn workspace_agent_conflicts(
         .iter()
         .filter(|agent| {
             current_session_id != Some(agent.session_id.as_str())
+                && agent.is_assigned()
                 && matches!(
                     agent.status_category,
                     WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
@@ -378,7 +386,7 @@ fn workspace_work_item_conflicts(
                 let first_agent = item.agents.first();
                 let first_container = item.execution_containers.first();
                 WorkspaceCoordinationConflict {
-                    source_label: "incomplete Workspace WorkItem",
+                    source_label: "incomplete Workspace",
                     title: item.title.clone(),
                     session_id: first_agent.map(|agent| agent.session_id.clone()),
                     branch: first_container.and_then(|container| container.branch.clone()),
@@ -397,6 +405,7 @@ fn board_claim_conflicts(
     current_session_id: Option<&str>,
 ) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
     let snapshot = load_snapshot(worktree_root)?;
+    let audience_scope = current_session_board_scope(worktree_root, current_session_id)?;
     Ok(snapshot
         .board
         .entries
@@ -406,6 +415,7 @@ fn board_claim_conflicts(
             entry.kind == BoardEntryKind::Claim
                 && board_claim_is_active(entry)
                 && current_session_id != entry.origin_session_id.as_deref()
+                && board_entry_visible_for_scope(entry, &audience_scope)
         })
         .filter_map(|entry| {
             let text = board_entry_text(entry);
@@ -546,10 +556,12 @@ fn has_matching_split_claim(
         return Ok(false);
     };
     let snapshot = load_snapshot(worktree_root)?;
+    let audience_scope = current_session_board_scope(worktree_root, Some(current_session_id))?;
     Ok(snapshot.board.entries.iter().rev().any(|entry| {
         entry.kind == BoardEntryKind::Claim
             && entry.origin_session_id.as_deref() == Some(current_session_id)
             && board_claim_is_active(entry)
+            && board_entry_visible_for_scope(entry, &audience_scope)
             && board_entry_has_boundary(entry)
             && board_entry_targets_conflict(entry, conflict)
             && split_claim_matches_current_work(entry, current_intent)
@@ -607,6 +619,7 @@ fn board_entry_targets_conflict(
                 BoardMentionTargetKind::Branch => format!("branch:{}", mention.target),
                 BoardMentionTargetKind::Agent => format!("agent:{}", mention.target),
                 BoardMentionTargetKind::User => format!("user:{}", mention.target),
+                BoardMentionTargetKind::Workspace => format!("workspace:{}", mention.target),
             })
             .any(|typed_key| keys.iter().any(|key| key == &typed_key))
 }

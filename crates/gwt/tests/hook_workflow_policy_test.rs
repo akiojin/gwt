@@ -15,8 +15,9 @@ use gwt_core::{
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
     workspace_projection::{
-        record_workspace_work_event, save_workspace_projection, WorkspaceAgentSummary,
-        WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
+        record_workspace_work_event, save_workspace_projection, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkEvent,
+        WorkspaceWorkEventKind,
     },
 };
 use gwt_github::{
@@ -189,6 +190,28 @@ fn workspace_agent(
         last_board_entry_id: None,
         last_board_entry_kind: None,
         coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("workspace-existing".to_string()),
+        updated_at: Utc::now(),
+    }
+}
+
+fn unassigned_workspace_agent(session_id: &str) -> WorkspaceAgentSummary {
+    WorkspaceAgentSummary {
+        session_id: session_id.to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: None,
+        branch: Some("work/unassigned".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
         updated_at: Utc::now(),
     }
 }
@@ -713,6 +736,126 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
 }
 
 #[test]
+fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
+    // SPEC-2359 FR-099 / SC-031: a claim audienced only to a different
+    // Workspace must not gate the current Agent. With Codex's
+    // affiliation field landed, the current Agent is assigned to
+    // `workspace-existing` (per workspace_agent helper); the claim
+    // audienced to `ws-other-only` does not intersect, so the gate
+    // must stay silent.
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection.agents.push(workspace_agent(
+            &session_id,
+            "Implement Workspace audience scoped gate",
+            "Workspace audience scoped gate",
+        ));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Other Codex",
+            BoardEntryKind::Claim,
+            "Implement Workspace audience scoped gate for active agents.",
+            None,
+            None,
+            vec!["workspace-audience".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id("session-other")
+        .with_audience(vec!["ws-other-only".to_string()]);
+        post_entry(&repo_path, entry).expect("post audienced claim");
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        match decision {
+            HookOutput::PreToolUsePermission { detail, .. } => {
+                panic!(
+                    "audience-only claim must not block the current Agent when audience does not intersect: {detail}"
+                );
+            }
+            HookOutput::Silent => {}
+            other => panic!("expected silent allow, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn unassigned_agent_without_title_summary_is_not_title_blocked() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/unassigned", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection
+            .agents
+            .push(unassigned_workspace_agent(&session_id));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt/src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision =
+            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "Unassigned Agents must not be blocked as missing title-summary"
+        );
+    });
+}
+
+#[test]
+fn assigned_agent_without_title_summary_remains_title_blocked() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/assigned", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut agent = workspace_agent(&session_id, "Implement assigned work", "");
+        agent.title_summary = None;
+        projection.agents.push(agent);
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt/src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision =
+            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::PreToolUsePermission { .. }),
+            "Assigned Agents still need a title-summary before implementation"
+        );
+    });
+}
+
+#[test]
 fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
@@ -751,7 +894,7 @@ fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
         let HookOutput::PreToolUsePermission { detail, .. } = decision else {
             panic!("expected incomplete WorkItem conflict to block mutation");
         };
-        assert!(detail.contains("incomplete Workspace WorkItem"), "{detail}");
+        assert!(detail.contains("incomplete Workspace"), "{detail}");
         assert!(detail.contains("session-other"), "{detail}");
         assert!(detail.contains("gwtd board post"), "{detail}");
     });

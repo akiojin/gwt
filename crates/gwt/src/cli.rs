@@ -41,6 +41,7 @@ mod workspace;
 
 use std::io::{self};
 
+pub use board::{BoardCommand, BoardPostCommand};
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
@@ -189,6 +190,25 @@ pub enum WorkspaceCommand {
         current_focus: Option<String>,
         title_summary: Option<String>,
     },
+    /// `gwtd workspace candidates --agent-session <id>` — list join candidates.
+    Candidates { agent_session: String },
+    /// `gwtd workspace join --agent-session <id> --workspace <id>`.
+    Join {
+        agent_session: String,
+        workspace_id: String,
+        current_focus: Option<String>,
+        title_summary: Option<String>,
+    },
+    /// `gwtd workspace create --agent-session <id> --title-summary <name> ...`.
+    Create {
+        agent_session: String,
+        title_summary: String,
+        current_focus: Option<String>,
+        spec: Option<u64>,
+        issue: Option<u64>,
+        split_from: Option<String>,
+        boundary: Option<String>,
+    },
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
@@ -296,30 +316,6 @@ pub enum ActionsCommand {
     JobLogs { job_id: u64 },
 }
 
-/// SPEC-1942 family enum for `gwtd board ...`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BoardCommand {
-    /// `gwtd board show [--json]`.
-    Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
-    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
-    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
-    Post(Box<BoardPostCommand>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoardPostCommand {
-    pub kind: String,
-    pub body: Option<String>,
-    pub file: Option<String>,
-    pub title_summary: Option<String>,
-    pub parent: Option<String>,
-    pub topics: Vec<String>,
-    pub owners: Vec<String>,
-    pub targets: Vec<String>,
-    pub mentions: Vec<String>,
-}
-
 /// SPEC-1942 family enum for `gwtd index ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexCommand {
@@ -418,7 +414,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),

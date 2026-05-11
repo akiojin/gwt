@@ -30,11 +30,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::coordination::{
-    has_recent_post_by, load_entries_since, load_reminders_state, write_reminders_state,
+    has_recent_post_by, load_entries_since_for_scope, load_reminders_state, write_reminders_state,
     BoardEntryKind,
 };
 
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
+use crate::board_audience::current_session_board_scope;
 
 pub use plan::{plan_reminder, ReminderInputs, ReminderPlan};
 
@@ -107,15 +108,18 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
     let Some(projection) =
         gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?
     else {
-        return Ok(true);
+        return Ok(false);
     };
     let Some(agent) = projection
         .agents
         .iter()
         .find(|agent| agent.session_id == session.id)
     else {
-        return Ok(true);
+        return Ok(false);
     };
+    if agent.is_unassigned() {
+        return Ok(false);
+    }
     Ok(agent
         .title_summary
         .as_deref()
@@ -155,17 +159,24 @@ pub fn compute_plan(
     };
 
     let reminders = load_reminders_state(&session.worktree_path, &session.id)?;
+    let audience_scope = current_session_board_scope(&session.worktree_path, Some(&session.id))?;
+    let self_workspace_id = match &audience_scope {
+        gwt_core::coordination::BoardAudienceScope::Workspace(workspace_id) => {
+            Some(workspace_id.clone())
+        }
+        _ => None,
+    };
 
     let recent_entries = match intent_event {
         IntentBoundaryEvent::SessionStart => {
             let threshold = now - session_start_window();
-            load_entries_since(&session.worktree_path, threshold)?
+            load_entries_since_for_scope(&session.worktree_path, threshold, &audience_scope)?
         }
         IntentBoundaryEvent::UserPromptSubmit => {
             let since = reminders
                 .last_injected_at
                 .unwrap_or(now - session_start_window());
-            load_entries_since(&session.worktree_path, since)?
+            load_entries_since_for_scope(&session.worktree_path, since, &audience_scope)?
         }
         IntentBoundaryEvent::Stop => Vec::new(),
     };
@@ -190,6 +201,7 @@ pub fn compute_plan(
         reminders,
         has_recent_own_status,
         language: language.clone(),
+        self_workspace_id,
     });
 
     plan.output = append_title_summary_required_context(
@@ -213,9 +225,16 @@ fn resolve_narrative_language() -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::cli::test_support::ScopedEnvVar;
     use chrono::TimeZone;
     use gwt_agent::AgentId;
-    use gwt_core::coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind};
+    use gwt_core::{
+        coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+        workspace_projection::{
+            save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+            WorkspaceProjection, WorkspaceStatusCategory,
+        },
+    };
 
     use super::*;
 
@@ -223,6 +242,37 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    fn workspace_agent(
+        session_id: &str,
+        workspace_id: Option<&str>,
+        affiliation_status: WorkspaceAgentAffiliationStatus,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Board audience".to_string()),
+            title_summary: Some("Board audience".to_string()),
+            worktree_path: None,
+            branch: Some("work/board-audience".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status,
+            workspace_id: workspace_id.map(str::to_string),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn save_projection(repo: &Path, agents: Vec<WorkspaceAgentSummary>) {
+        let mut projection = WorkspaceProjection::default_for_project(repo);
+        projection.id = "workspace-current".to_string();
+        projection.agents = agents;
+        save_workspace_projection(repo, &projection).expect("save workspace projection");
     }
 
     fn entry(
@@ -304,8 +354,8 @@ mod tests {
         let session = make_session(&repo, "work/title", "Codex");
 
         assert!(
-            agent_title_summary_missing(&session).expect("missing title check"),
-            "new sessions without a saved title_summary must require an update"
+            !agent_title_summary_missing(&session).expect("missing title check"),
+            "sessions without a Workspace projection are Unassigned and must not require a title update"
         );
 
         let mut projection =
@@ -325,6 +375,9 @@ mod tests {
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -473,6 +526,117 @@ mod tests {
         assert!(!text.contains("old post before last inject"));
         assert!(text.contains("brand new post"));
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
+    }
+
+    #[test]
+    fn compute_plan_session_start_filters_entries_to_current_workspace_audience() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", dir.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", dir.path());
+        let session = make_session(dir.path(), "feature/me", "Codex");
+        save_projection(
+            dir.path(),
+            vec![workspace_agent(
+                &session.id,
+                Some("workspace-current"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        let now = Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap();
+        let broadcast = entry(
+            "Other",
+            BoardEntryKind::Status,
+            "broadcast update",
+            "work/other",
+            "session-other",
+            now - chrono::Duration::minutes(5),
+        );
+        let current = entry(
+            "Other",
+            BoardEntryKind::Status,
+            "current workspace update",
+            "work/other",
+            "session-other",
+            now - chrono::Duration::minutes(4),
+        )
+        .with_audience(vec!["workspace-current"]);
+        let other = entry(
+            "Other",
+            BoardEntryKind::Status,
+            "other workspace update",
+            "work/other",
+            "session-other",
+            now - chrono::Duration::minutes(3),
+        )
+        .with_audience(vec!["workspace-other"]);
+        post_entry(dir.path(), broadcast).unwrap();
+        post_entry(dir.path(), current).unwrap();
+        post_entry(dir.path(), other).unwrap();
+
+        let plan = compute_plan("SessionStart", &session, now)
+            .unwrap()
+            .unwrap();
+        let text = additional_context(&plan.output);
+
+        assert!(text.contains("broadcast update"), "{text}");
+        assert!(text.contains("current workspace update"), "{text}");
+        assert!(!text.contains("other workspace update"), "{text}");
+    }
+
+    #[test]
+    fn compute_plan_unassigned_agent_only_reads_broadcast_board_entries() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", dir.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", dir.path());
+        let session = make_session(dir.path(), "feature/me", "Codex");
+        save_projection(
+            dir.path(),
+            vec![workspace_agent(
+                &session.id,
+                None,
+                WorkspaceAgentAffiliationStatus::Unassigned,
+            )],
+        );
+        let now = Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap();
+        post_entry(
+            dir.path(),
+            entry(
+                "Other",
+                BoardEntryKind::Status,
+                "broadcast update",
+                "work/other",
+                "session-other",
+                now - chrono::Duration::minutes(5),
+            ),
+        )
+        .unwrap();
+        post_entry(
+            dir.path(),
+            entry(
+                "Other",
+                BoardEntryKind::Status,
+                "workspace-only update",
+                "work/other",
+                "session-other",
+                now - chrono::Duration::minutes(4),
+            )
+            .with_audience(vec!["workspace-current"]),
+        )
+        .unwrap();
+
+        let plan = compute_plan("SessionStart", &session, now)
+            .unwrap()
+            .unwrap();
+        let text = additional_context(&plan.output);
+
+        assert!(text.contains("broadcast update"), "{text}");
+        assert!(!text.contains("workspace-only update"), "{text}");
     }
 
     #[test]

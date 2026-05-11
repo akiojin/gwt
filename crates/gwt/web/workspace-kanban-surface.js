@@ -73,20 +73,30 @@ export function createWorkspaceKanbanSurface({
     const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
     const branch = projection.branch || "";
     const worktreePath = projection.worktree_path || "";
-    const workItems = Array.isArray(projection.work_items)
-      ? projection.work_items
-      : [];
-    if (workItems.length > 0) {
-      return workItems.map((item) => {
+    const workspaces = Array.isArray(projection.workspaces)
+      ? projection.workspaces
+      : Array.isArray(projection.work_items)
+        ? projection.work_items
+        : [];
+    if (workspaces.length > 0) {
+      return workspaces.map((item) => {
+        const workspaceId = item.id || `workspace-${item.title || "workspace"}`;
+        const workspaceTitle = item.title || item.intent || "Workspace";
+        const workspaceEvents = Array.isArray(item.events) ? item.events : [];
+        const normalizedEvents = workspaceEvents.map((event) => ({
+          ...event,
+          workspace_id: event.workspace_id || event.work_item_id || workspaceId,
+          related_workspace_id: event.related_workspace_id || event.related_work_item_id || "",
+        }));
         const containers = Array.isArray(item.execution_containers)
           ? item.execution_containers
           : [];
         const container = containers[0] || {};
         return {
-          id: item.id || `workitem-${item.title || "workspace"}`,
-          kind: "work_item",
-          label: "WorkItem",
-          title: item.title || item.intent || "Workspace WorkItem",
+          id: workspaceId,
+          kind: "workspace",
+          label: "Workspace",
+          title: workspaceTitle,
           intent: item.intent || "",
           status_category: item.status_category || "idle",
           status_text: item.summary || item.intent || "",
@@ -105,7 +115,7 @@ export function createWorkspaceKanbanSurface({
           updated_at: item.updated_at || "",
           resume_source: "current",
           journal_id: null,
-          events: Array.isArray(item.events) ? item.events : [],
+          events: normalizedEvents,
           column: workspaceColumnForCurrentStatus(item.status_category),
         };
       });
@@ -174,6 +184,70 @@ export function createWorkspaceKanbanSurface({
     }
 
     return cards;
+  }
+
+  function unassignedAgentsFromProjection(projection) {
+    const unassigned = Array.isArray(projection?.unassigned_agents)
+      ? projection.unassigned_agents
+      : [];
+    return unassigned
+      .filter((agent) => String(agent?.affiliation_status || "unassigned") === "unassigned")
+      .map((agent) => ({
+        session_id: agent.session_id || "",
+        display_name: agent.display_name || agent.agent_id || "Agent",
+        agent_id: agent.agent_id || "",
+        branch: agent.branch || "",
+        worktree_path: agent.worktree_path || "",
+        current_focus: agent.current_focus || agent.title_summary || "",
+      }));
+  }
+
+  function renderUnassignedAgents(container, projection) {
+    if (!container) return;
+    container.innerHTML = "";
+    const agents = unassignedAgentsFromProjection(projection);
+    if (agents.length === 0) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    const header = createNode("div", "workspace-unassigned-header");
+    header.appendChild(createNode("div", "workspace-unassigned-title", "Unassigned"));
+    header.appendChild(
+      createNode(
+        "div",
+        "workspace-unassigned-count",
+        agents.length === 1 ? "1 Agent" : `${agents.length} Agents`,
+      ),
+    );
+    container.appendChild(header);
+    const list = createNode("div", "workspace-unassigned-list");
+    for (const agent of agents) {
+      const row = createNode("article", "workspace-unassigned-agent");
+      row.dataset.sessionId = agent.session_id;
+      row.appendChild(createNode("div", "workspace-unassigned-agent-name", agent.display_name));
+      row.appendChild(
+        createNode("div", "workspace-unassigned-agent-state", "No Workspace selected"),
+      );
+      const meta = createNode("div", "kanban-card-meta");
+      appendMeta(meta, agent.branch);
+      appendMeta(meta, agent.current_focus);
+      if (meta.childElementCount > 0) {
+        row.appendChild(meta);
+      }
+      const actions = createNode("div", "workspace-card-actions");
+      const findButton = createNode("button", "wizard-button", "Find Workspace");
+      findButton.type = "button";
+      findButton.disabled = true;
+      const createButton = createNode("button", "wizard-button", "Create Workspace");
+      createButton.type = "button";
+      createButton.disabled = true;
+      actions.appendChild(findButton);
+      actions.appendChild(createButton);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+    container.appendChild(list);
   }
 
   function resumeWorkspaceCard(card) {
@@ -380,11 +454,14 @@ export function createWorkspaceKanbanSurface({
     if (!element) return;
     const state = ensureWorkspaceKanbanState(windowId);
     const board = element.querySelector(".workspace-kanban-board");
+    const unassigned = element.querySelector("[data-role='unassigned-agents']");
     const detailPane = element.querySelector(".workspace-kanban-detail-pane");
     const status = element.querySelector(".workspace-kanban-status");
     if (!board || !detailPane || !status) return;
 
-    const cards = workspaceCardsFromProjection(getActiveWorkProjection());
+    const projection = getActiveWorkProjection();
+    const cards = workspaceCardsFromProjection(projection);
+    renderUnassignedAgents(unassigned, projection);
     if (!state.selectedId || !cards.some((card) => card.id === state.selectedId)) {
       state.selectedId = cards[0]?.id || null;
     }
@@ -440,6 +517,7 @@ export function createWorkspaceKanbanSurface({
         <div class="knowledge-status workspace-kanban-status"></div>
         <div class="knowledge-split workspace-split kanban-shell">
           <div class="knowledge-list-pane kanban-list-pane">
+            <section class="workspace-unassigned" data-role="unassigned-agents" hidden></section>
             <div class="kanban-board workspace-kanban-board" role="list" aria-label="Workspace Kanban Board">
               <div class="kanban-column workspace-kanban-column" data-workspace-column="active" aria-label="Active Workspace column">
                 <div class="kanban-column-header">

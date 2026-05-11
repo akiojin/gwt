@@ -148,19 +148,55 @@ test("Workspace Kanban labels the non-current history column as Inactive", () =>
   );
 });
 
-test("Workspace Kanban renders WorkItem cards with lifecycle timeline detail", () => {
+test("Workspace Kanban renders Unassigned agents outside Workspace status columns", () => {
+  const fixture = createFixture();
+  const projection = {
+    id: "project-workspace",
+    title: "Project workspace",
+    status_category: "idle",
+    status_text: "No active Workspace selected",
+    journal_entries: [],
+    workspaces: [],
+    unassigned_agents: [
+      {
+        session_id: "session-unassigned",
+        display_name: "Codex",
+        status_category: "active",
+        affiliation_status: "unassigned",
+        branch: "work/20260511-0100",
+      },
+    ],
+  };
+
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const unassigned = fixture.body.querySelector("[data-role='unassigned-agents']");
+  assert.ok(unassigned, "Unassigned section should be rendered");
+  assert.match(unassigned.textContent, /Unassigned/);
+  assert.match(unassigned.textContent, /No Workspace selected/);
+  assert.match(unassigned.textContent, /Codex/);
+  assert.equal(cardTexts(column(fixture.body, "active")).length, 0);
+  assert.equal(cardTexts(column(fixture.body, "inactive")).length, 1);
+  assert.doesNotMatch(fixture.body.textContent, /WorkItem/);
+});
+
+test("Workspace Kanban renders Workspace history cards with lifecycle timeline detail", () => {
   const fixture = createFixture();
   const projection = {
     id: "current-workspace",
     title: "Legacy current Workspace",
     status_category: "idle",
     status_text: "Idle",
-    work_items: [
+    workspaces: [
       {
-        id: "workitem-history",
-        title: "Workspace WorkItem history",
-        intent: "Group duplicate Workspace work under one WorkItem",
-        summary: "One WorkItem owns the history.",
+        id: "workspace-history",
+        title: "Workspace history",
+        intent: "Group duplicate work under one Workspace",
+        summary: "One Workspace owns the history.",
         status_category: "active",
         owner: "SPEC-2359",
         agents: [
@@ -184,7 +220,7 @@ test("Workspace Kanban renders WorkItem cards with lifecycle timeline detail", (
           {
             id: "evt-start",
             kind: "start",
-            title: "Start WorkItem",
+            title: "Start Workspace",
             summary: "Started lifecycle implementation.",
             updated_at: "2026-05-11T01:00:00Z",
             agent_session_id: "session-other",
@@ -217,8 +253,9 @@ test("Workspace Kanban renders WorkItem cards with lifecycle timeline detail", (
   });
 
   const cardText = cardTexts(column(fixture.body, "active")).join("\n");
-  assert.match(cardText, /WorkItem/);
-  assert.match(cardText, /Workspace WorkItem history/);
+  assert.match(cardText, /Workspace/);
+  assert.match(cardText, /Workspace history/);
+  assert.doesNotMatch(cardText, /WorkItem/);
   assert.doesNotMatch(cardText, /Legacy duplicate card/);
 
   const detailText = fixture.body

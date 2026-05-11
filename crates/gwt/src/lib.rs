@@ -1,3 +1,4 @@
+pub mod board_audience;
 pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
@@ -99,7 +100,8 @@ pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
     FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, WorkspaceExecutionContainerView, WorkspaceJournalEntryView,
+    RecentProjectView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
+    WorkspaceHistoryEventView, WorkspaceHistoryView, WorkspaceJournalEntryView,
     WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
     WorkspaceWorkItemView,
 };
