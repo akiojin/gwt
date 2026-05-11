@@ -318,15 +318,16 @@ pub enum ActionsCommand {
 /// SPEC-1942 family enum for `gwtd board ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `gwtd board show [--json]`.
-    Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
-    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
-    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
+    /// `gwtd board show [--json] [--workspace <id>] [--all]` (SPEC-2359 FR-100).
+    Show {
+        json: bool,
+        workspace: Option<String>,
+        all: bool,
+    },
     Post(Box<BoardPostCommand>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoardPostCommand {
     pub kind: String,
     pub body: Option<String>,
@@ -337,6 +338,7 @@ pub struct BoardPostCommand {
     pub owners: Vec<String>,
     pub targets: Vec<String>,
     pub mentions: Vec<String>,
+    pub broadcast: bool,
 }
 
 /// SPEC-1942 family enum for `gwtd index ...`.
