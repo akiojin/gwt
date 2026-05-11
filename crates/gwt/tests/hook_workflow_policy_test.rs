@@ -713,6 +713,62 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
 }
 
 #[test]
+fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
+    // SPEC-2359 FR-099 / SC-031: a claim audienced only to a different
+    // Workspace must not gate the current Agent. Until the affiliation
+    // field lands, the current Agent is treated as Unassigned and only
+    // broadcast claims should reach the gate.
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection.agents.push(workspace_agent(
+            &session_id,
+            "Implement Workspace audience scoped gate",
+            "Workspace audience scoped gate",
+        ));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Other Codex",
+            BoardEntryKind::Claim,
+            "Implement Workspace audience scoped gate for active agents.",
+            None,
+            None,
+            vec!["workspace-audience".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id("session-other")
+        .with_audience(vec!["ws-other-only".to_string()]);
+        post_entry(&repo_path, entry).expect("post audienced claim");
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        match decision {
+            HookOutput::PreToolUsePermission { detail, .. } => {
+                panic!(
+                    "audience-only claim must not block the current Agent until affiliation lands: {detail}"
+                );
+            }
+            HookOutput::Silent => {}
+            other => panic!("expected silent allow, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);

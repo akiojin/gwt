@@ -192,6 +192,21 @@ pub fn normalize_board_mentions(values: &[BoardMention]) -> Vec<BoardMention> {
     normalized
 }
 
+/// SPEC-2359 FR-098/099/100: shared audience predicate for reminder
+/// injection, workflow-policy duplicate-work coordination gate, CLI Board
+/// view, and GUI Board pane. An entry is visible from Workspace `W` when
+/// its `audience` is empty (broadcast) or contains `W`. An Unassigned
+/// Agent (`current_workspace_id = None`) only sees broadcast entries.
+pub fn entry_visible_for_workspace(entry: &BoardEntry, current_workspace_id: Option<&str>) -> bool {
+    if entry.audience.is_empty() {
+        return true;
+    }
+    match current_workspace_id {
+        Some(id) => entry.audience.iter().any(|workspace| workspace == id),
+        None => false,
+    }
+}
+
 pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
     entry
         .target_owners
@@ -232,6 +247,8 @@ pub struct BoardEntry {
     pub target_owners: Vec<String>,
     #[serde(default)]
     pub mentions: Vec<BoardMention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audience: Vec<String>,
 }
 
 impl BoardEntry {
@@ -276,6 +293,19 @@ impl BoardEntry {
         self
     }
 
+    pub fn with_audience(mut self, values: Vec<String>) -> Self {
+        self.audience = normalize_audience(values);
+        self
+    }
+
+    pub fn with_audience_workspace(mut self, value: impl Into<String>) -> Self {
+        let trimmed = value.into().trim().to_string();
+        if !trimmed.is_empty() && !self.audience.iter().any(|existing| existing == &trimmed) {
+            self.audience.push(trimmed);
+        }
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -306,8 +336,24 @@ impl BoardEntry {
             origin_agent_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
+            audience: Vec::new(),
         }
     }
+}
+
+pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in values {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if out.iter().any(|existing| existing == &trimmed) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1489,6 +1535,143 @@ mod tests {
         assert_eq!(normalized[0].label.as_deref(), Some("Akio"));
         assert_eq!(normalized[1].typed_key(), "agent:codex");
         assert_eq!(normalized[1].label, None);
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_broadcast_audience_is_visible_from_anywhere() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        assert!(entry_visible_for_workspace(&entry, Some("ws-1")));
+        assert!(entry_visible_for_workspace(&entry, None));
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_matches_only_listed_audience() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "scoped",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1".into(), "ws-2".into()]);
+
+        assert!(entry_visible_for_workspace(&entry, Some("ws-1")));
+        assert!(entry_visible_for_workspace(&entry, Some("ws-2")));
+        assert!(!entry_visible_for_workspace(&entry, Some("ws-3")));
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_unassigned_excludes_non_broadcast() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "scoped to ws-1",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1".into()]);
+
+        assert!(!entry_visible_for_workspace(&entry, None));
+    }
+
+    #[test]
+    fn board_entry_audience_default_empty_and_legacy_compatible() {
+        let legacy = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry without audience",
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
+
+        assert!(entry.audience.is_empty());
+    }
+
+    #[test]
+    fn board_entry_round_trips_audience_workspace_ids() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "audienced status",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1".into(), "ws-2".into()]);
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(encoded["audience"][0], "ws-1");
+        assert_eq!(encoded["audience"][1], "ws-2");
+
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.audience,
+            vec!["ws-1".to_string(), "ws-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_entry_empty_audience_is_skipped_during_serialization() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+
+        assert!(
+            !encoded.as_object().unwrap().contains_key("audience"),
+            "empty audience must be omitted to round-trip as absent (FR-093): {encoded}"
+        );
+    }
+
+    #[test]
+    fn board_entry_with_audience_workspace_appends_dedup_and_trims() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "fan-out target",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience_workspace("  ws-a  ")
+        .with_audience_workspace("ws-a")
+        .with_audience_workspace("ws-b")
+        .with_audience_workspace("   ");
+
+        assert_eq!(entry.audience, vec!["ws-a".to_string(), "ws-b".to_string()]);
     }
 
     #[test]

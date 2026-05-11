@@ -311,12 +311,24 @@ fn workspace_coordination_conflicts(
         current_intent,
         current_session_id,
     )?);
+    let current_workspace_id = resolve_current_workspace_audience();
     conflicts.extend(board_claim_conflicts(
         worktree_root,
         current_intent,
         current_session_id,
+        current_workspace_id.as_deref(),
     )?);
     Ok(conflicts)
+}
+
+/// SPEC-2359 FR-099: resolve the current Agent's assigned Workspace id for
+/// the duplicate-work coordination gate. Returns `None` until the Agent
+/// affiliation field (SPEC-2359 FR-088, US-25) lands, mirroring the
+/// reminder-injection resolver. With `None`, only broadcast (audience
+/// absent) claims gate the current Agent, matching reminder visibility
+/// for Unassigned Agents.
+fn resolve_current_workspace_audience() -> Option<String> {
+    None
 }
 
 fn workspace_agent_conflicts(
@@ -395,6 +407,7 @@ fn board_claim_conflicts(
     worktree_root: &Path,
     current_intent: &str,
     current_session_id: Option<&str>,
+    current_workspace_id: Option<&str>,
 ) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
     let snapshot = load_snapshot(worktree_root)?;
     Ok(snapshot
@@ -406,6 +419,7 @@ fn board_claim_conflicts(
             entry.kind == BoardEntryKind::Claim
                 && board_claim_is_active(entry)
                 && current_session_id != entry.origin_session_id.as_deref()
+                && gwt_core::coordination::entry_visible_for_workspace(entry, current_workspace_id)
         })
         .filter_map(|entry| {
             let text = board_entry_text(entry);

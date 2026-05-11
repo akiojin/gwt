@@ -299,15 +299,27 @@ pub enum ActionsCommand {
 /// SPEC-1942 family enum for `gwtd board ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `gwtd board show [--json]`.
-    Show { json: bool },
+    /// `gwtd board show [--json] [--workspace <id>] [--all]`.
+    ///
+    /// SPEC-2359 FR-100: `workspace` scopes the view to entries whose
+    /// `audience` contains the given Workspace id or is broadcast.
+    /// `all` opts out of audience scoping and shows the full timeline.
+    /// Without either flag, the default future behavior is "current
+    /// Workspace + broadcast" once the current Agent's affiliation can
+    /// be resolved (FR-088); until then the default falls back to the
+    /// full timeline so legacy callers are unaffected.
+    Show {
+        json: bool,
+        workspace: Option<String>,
+        all: bool,
+    },
     /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
     /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
     /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
     Post(Box<BoardPostCommand>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoardPostCommand {
     pub kind: String,
     pub body: Option<String>,
@@ -318,6 +330,7 @@ pub struct BoardPostCommand {
     pub owners: Vec<String>,
     pub targets: Vec<String>,
     pub mentions: Vec<String>,
+    pub broadcast: bool,
 }
 
 /// SPEC-1942 family enum for `gwtd index ...`.

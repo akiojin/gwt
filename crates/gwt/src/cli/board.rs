@@ -16,13 +16,26 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     match it.next().map(String::as_str) {
         Some("show") => {
             let mut json = false;
-            for arg in it {
+            let mut workspace: Option<String> = None;
+            let mut all = false;
+            while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
+                    "--all" => all = true,
+                    "--workspace" => {
+                        let Some(value) = it.next() else {
+                            return Err(CliParseError::MissingFlag("--workspace"));
+                        };
+                        workspace = Some(value.clone());
+                    }
                     other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
                 }
             }
-            Ok(BoardCommand::Show { json })
+            Ok(BoardCommand::Show {
+                json,
+                workspace,
+                all,
+            })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -36,8 +49,28 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
-        BoardCommand::Show { json } => {
-            let snapshot = load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?;
+        BoardCommand::Show {
+            json,
+            workspace,
+            all,
+        } => {
+            let mut snapshot =
+                load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?;
+            // SPEC-2359 FR-100: scope to current Workspace audience + broadcast
+            // unless `--all` is set. `--workspace <id>` overrides the default
+            // workspace resolution. Without affiliation resolution yet
+            // (FR-088), the default is the full timeline so legacy callers
+            // are unaffected.
+            if !all {
+                if let Some(workspace_id) = workspace.as_deref() {
+                    snapshot.board.entries.retain(|entry| {
+                        gwt_core::coordination::entry_visible_for_workspace(
+                            entry,
+                            Some(workspace_id),
+                        )
+                    });
+                }
+            }
             if json {
                 let rendered = serde_json::to_string_pretty(&snapshot)
                     .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
@@ -59,6 +92,7 @@ pub(super) fn run<E: CliEnv>(
                 owners,
                 targets,
                 mentions,
+                broadcast,
             } = *command;
             let body = match (body, file) {
                 (Some(body), None) => body,
@@ -107,10 +141,22 @@ pub(super) fn run<E: CliEnv>(
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
             }
-            let mentions = parse_mentions(&mentions).map_err(gwt_error_to_spec_ops_error)?;
+            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let mentions =
+                parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?;
             if !mentions.is_empty() {
                 entry = entry.with_mentions(mentions);
             }
+            // SPEC-2359 FR-093/094/095/096: Workspace audience comes from
+            // explicit `--mention workspace:<id>` flags. `--broadcast`
+            // suppresses any auto-attach (FR-094/097 will fan-out the
+            // current Agent's and mention targets' workspaces once the
+            // Agent affiliation field lands; until then, audience is
+            // only the explicit workspace mentions).
+            if !workspace_audience.is_empty() {
+                entry = entry.with_audience(workspace_audience);
+            }
+            let _ = broadcast;
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
             publish_board_change(env.repo_path(), snapshot.board.entries.len());
@@ -171,6 +217,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut owners = Vec::new();
     let mut targets = Vec::new();
     let mut mentions = Vec::new();
+    let mut broadcast = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -238,6 +285,9 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                 }
                 mentions.push(args[i].clone());
             }
+            "--broadcast" => {
+                broadcast = true;
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -256,6 +306,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         owners,
         targets,
         mentions,
+        broadcast,
     })))
 }
 
@@ -265,6 +316,26 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
         mentions.push(value.parse::<BoardMention>()?);
     }
     Ok(normalize_board_mentions(&mentions))
+}
+
+/// SPEC-2359 FR-096: `--mention workspace:<id>` routes to BoardEntry.audience,
+/// not to BoardMention. Split the raw mention args into (workspace_audience,
+/// other_mention_args) so the rest of the post path can parse other mentions
+/// as `BoardMention` as before.
+fn split_workspace_mentions(values: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut workspaces: Vec<String> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    for value in values {
+        if let Some(rest) = value.trim().strip_prefix("workspace:") {
+            let id = rest.trim();
+            if !id.is_empty() && !workspaces.iter().any(|existing| existing == id) {
+                workspaces.push(id.to_string());
+            }
+        } else {
+            others.push(value.clone());
+        }
+    }
+    (workspaces, others)
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
@@ -352,7 +423,120 @@ mod tests {
     #[test]
     fn board_family_parse_show_json() {
         let cmd = parse(&[s("show"), s("--json")]).unwrap();
-        assert_eq!(cmd, BoardCommand::Show { json: true });
+        assert_eq!(
+            cmd,
+            BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: false
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_parse_show_collects_workspace_and_all_flags() {
+        let cmd = parse(&[
+            s("show"),
+            s("--json"),
+            s("--workspace"),
+            s("ws-1"),
+            s("--all"),
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: true,
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_run_show_workspace_filter_keeps_broadcast_and_matching_audience() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        for (body, audience) in [
+            ("broadcast post", Vec::<String>::new()),
+            ("scoped to ws-1", vec!["ws-1".into()]),
+            ("scoped to ws-2", vec!["ws-2".into()]),
+        ] {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Status,
+                body,
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if !audience.is_empty() {
+                entry = entry.with_audience(audience);
+            }
+            gwt_core::coordination::post_entry(tmp.path(), entry).unwrap();
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("broadcast post"), "{out}");
+        assert!(out.contains("scoped to ws-1"), "{out}");
+        assert!(!out.contains("scoped to ws-2"), "{out}");
+    }
+
+    #[test]
+    fn board_family_run_show_all_flag_shows_full_timeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        for (body, audience) in [
+            ("broadcast", Vec::<String>::new()),
+            ("scoped to ws-1", vec!["ws-1".into()]),
+            ("scoped to ws-2", vec!["ws-2".into()]),
+        ] {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Status,
+                body,
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if !audience.is_empty() {
+                entry = entry.with_audience(audience);
+            }
+            gwt_core::coordination::post_entry(tmp.path(), entry).unwrap();
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: true,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("broadcast"), "{out}");
+        assert!(out.contains("scoped to ws-1"), "{out}");
+        assert!(out.contains("scoped to ws-2"), "{out}");
     }
 
     #[test]
@@ -379,6 +563,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -409,6 +594,7 @@ mod tests {
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/foo".into()],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -440,6 +626,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+                broadcast: false,
             }))
         );
     }
@@ -471,6 +658,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -512,6 +700,7 @@ mod tests {
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/x".into()],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -544,6 +733,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -560,6 +750,123 @@ mod tests {
         assert_eq!(
             snapshot.board.entries[0].mentions[1].typed_key(),
             "agent:codex"
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_routes_workspace_mention_into_audience_and_broadcast_flag() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("scoped to two workspaces"),
+            s("--mention"),
+            s("workspace:ws-1"),
+            s("--mention"),
+            s("agent:codex"),
+            s("--mention"),
+            s("workspace:ws-2"),
+            s("--broadcast"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("scoped to two workspaces".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:ws-1".into(),
+                    "agent:codex".into(),
+                    "workspace:ws-2".into(),
+                ],
+                broadcast: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_persists_audience_from_workspace_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("audienced status".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:ws-1".into(),
+                    "agent:codex".into(),
+                    "workspace:ws-2".into(),
+                ],
+                broadcast: false,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+
+        assert_eq!(
+            entry.audience,
+            vec!["ws-1".to_string(), "ws-2".to_string()],
+            "workspace mentions must land on BoardEntry.audience"
+        );
+        assert_eq!(
+            entry.mentions.len(),
+            1,
+            "workspace mentions must not be stored as regular BoardMentions"
+        );
+        assert_eq!(entry.mentions[0].typed_key(), "agent:codex");
+    }
+
+    #[test]
+    fn board_family_run_post_broadcast_flag_keeps_audience_empty_without_explicit_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("broadcast post".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: true,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert!(
+            entry.audience.is_empty(),
+            "broadcast flag must keep audience empty even when current workspace exists"
         );
     }
 
@@ -590,6 +897,7 @@ mod tests {
                 owners: vec!["2359".into()],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -646,6 +954,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -691,6 +1000,7 @@ mod tests {
                 owners: vec!["1974".into()],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -725,7 +1035,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -754,7 +1073,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("- [request] user ("));
@@ -783,7 +1111,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("== Chat =="));
@@ -814,7 +1151,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(
