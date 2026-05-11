@@ -195,36 +195,16 @@ pub fn normalize_board_mentions(values: &[BoardMention]) -> Vec<BoardMention> {
     normalized
 }
 
-pub fn normalize_board_audience(values: Option<Vec<String>>) -> Option<Vec<String>> {
-    let mut normalized = Vec::new();
-    for value in values.unwrap_or_default() {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if normalized.iter().any(|item| item == value) {
-            continue;
-        }
-        normalized.push(value.to_string());
-    }
-    (!normalized.is_empty()).then_some(normalized)
-}
-
-fn board_audience_is_absent(value: &Option<Vec<String>>) -> bool {
-    value
-        .as_ref()
-        .map(|items| items.iter().all(|item| item.trim().is_empty()))
-        .unwrap_or(true)
-}
-
-fn deserialize_board_audience<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Vec<String>>, D::Error>
+fn deserialize_board_audience<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    let value = Vec::<String>::deserialize(deserializer)?;
     Ok(normalize_board_audience(value))
+}
+
+pub fn normalize_board_audience(values: Vec<String>) -> Vec<String> {
+    normalize_audience(values)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,15 +215,11 @@ pub enum BoardAudienceScope {
 }
 
 pub fn board_entry_visible_for_scope(entry: &BoardEntry, scope: &BoardAudienceScope) -> bool {
-    let Some(audience) = normalize_board_audience(entry.audience.clone()) else {
-        return true;
-    };
     match scope {
         BoardAudienceScope::All => true,
-        BoardAudienceScope::Broadcast => false,
+        BoardAudienceScope::Broadcast => entry.audience.is_empty(),
         BoardAudienceScope::Workspace(workspace_id) => {
-            let workspace_id = workspace_id.trim();
-            !workspace_id.is_empty() && audience.iter().any(|item| item == workspace_id)
+            entry_visible_for_workspace(entry, Some(workspace_id.as_str()))
         }
     }
 }
@@ -256,6 +232,24 @@ pub fn filter_board_entries_for_scope(
         .into_iter()
         .filter(|entry| board_entry_visible_for_scope(entry, scope))
         .collect()
+}
+
+/// SPEC-2359 FR-098/099/100: shared audience predicate for reminder
+/// injection, workflow-policy duplicate-work coordination gate, CLI Board
+/// view, and GUI Board pane. An entry is visible from Workspace `W` when
+/// its `audience` is empty (broadcast) or contains `W`. An Unassigned
+/// Agent (`current_workspace_id = None`) only sees broadcast entries.
+pub fn entry_visible_for_workspace(entry: &BoardEntry, current_workspace_id: Option<&str>) -> bool {
+    if entry.audience.is_empty() {
+        return true;
+    }
+    let Some(id) = current_workspace_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+    entry.audience.iter().any(|workspace| workspace == id)
 }
 
 pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
@@ -301,9 +295,9 @@ pub struct BoardEntry {
     #[serde(
         default,
         deserialize_with = "deserialize_board_audience",
-        skip_serializing_if = "board_audience_is_absent"
+        skip_serializing_if = "Vec::is_empty"
     )]
-    pub audience: Option<Vec<String>>,
+    pub audience: Vec<String>,
 }
 
 impl BoardEntry {
@@ -348,14 +342,22 @@ impl BoardEntry {
         self
     }
 
-    pub fn with_audience(mut self, values: Vec<impl Into<String>>) -> Self {
+    pub fn with_audience<S: Into<String>>(mut self, values: Vec<S>) -> Self {
         self.audience =
-            normalize_board_audience(Some(values.into_iter().map(Into::into).collect::<Vec<_>>()));
+            normalize_board_audience(values.into_iter().map(Into::into).collect::<Vec<_>>());
         self
     }
 
     pub fn normalize_audience(&mut self) {
-        self.audience = normalize_board_audience(self.audience.take());
+        self.audience = normalize_board_audience(std::mem::take(&mut self.audience));
+    }
+
+    pub fn with_audience_workspace(mut self, value: impl Into<String>) -> Self {
+        let trimmed = value.into().trim().to_string();
+        if !trimmed.is_empty() && !self.audience.iter().any(|existing| existing == &trimmed) {
+            self.audience.push(trimmed);
+        }
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -388,9 +390,24 @@ impl BoardEntry {
             origin_agent_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
-            audience: None,
+            audience: Vec::new(),
         }
     }
+}
+
+pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in values {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if out.iter().any(|existing| existing == &trimmed) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1609,7 +1626,7 @@ mod tests {
         });
 
         let legacy_entry: BoardEntry = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy_entry.audience, None);
+        assert!(legacy_entry.audience.is_empty());
         assert!(board_entry_visible_for_scope(
             &legacy_entry,
             &BoardAudienceScope::Workspace("workspace-a".to_string())
@@ -1638,7 +1655,7 @@ mod tests {
         let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
         assert_eq!(
             decoded.audience,
-            Some(vec!["workspace-a".to_string(), "workspace-b".to_string()])
+            vec!["workspace-a".to_string(), "workspace-b".to_string()]
         );
         assert!(board_entry_visible_for_scope(
             &decoded,
@@ -1672,7 +1689,7 @@ mod tests {
         });
 
         let entry: BoardEntry = serde_json::from_value(empty_audience).unwrap();
-        assert_eq!(entry.audience, None);
+        assert!(entry.audience.is_empty());
 
         let mut explicit_empty = BoardEntry::new(
             AuthorKind::Agent,
@@ -1684,7 +1701,7 @@ mod tests {
             vec![],
             vec![],
         );
-        explicit_empty.audience = Some(Vec::new());
+        explicit_empty.audience = Vec::new();
         let encoded = serde_json::to_value(&explicit_empty).unwrap();
         assert!(encoded.get("audience").is_none());
     }
@@ -1733,10 +1750,10 @@ mod tests {
         assert_eq!(snapshot.board.entries.len(), 3);
         assert_eq!(
             snapshot.board.entries[0].audience,
-            Some(vec!["workspace-a".to_string()])
+            vec!["workspace-a".to_string()]
         );
-        assert_eq!(snapshot.board.entries[1].audience, None);
-        assert_eq!(snapshot.board.entries[2].audience, None);
+        assert!(snapshot.board.entries[1].audience.is_empty());
+        assert!(snapshot.board.entries[2].audience.is_empty());
 
         let scoped_snapshot = load_snapshot_for_scope(
             dir.path(),
@@ -1821,6 +1838,143 @@ mod tests {
         assert_eq!(normalized[0].label.as_deref(), Some("Akio"));
         assert_eq!(normalized[1].typed_key(), "agent:codex");
         assert_eq!(normalized[1].label, None);
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_broadcast_audience_is_visible_from_anywhere() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        assert!(entry_visible_for_workspace(&entry, Some("ws-1")));
+        assert!(entry_visible_for_workspace(&entry, None));
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_matches_only_listed_audience() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "scoped",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1", "ws-2"]);
+
+        assert!(entry_visible_for_workspace(&entry, Some("ws-1")));
+        assert!(entry_visible_for_workspace(&entry, Some("ws-2")));
+        assert!(!entry_visible_for_workspace(&entry, Some("ws-3")));
+    }
+
+    #[test]
+    fn entry_visible_for_workspace_unassigned_excludes_non_broadcast() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "scoped to ws-1",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1"]);
+
+        assert!(!entry_visible_for_workspace(&entry, None));
+    }
+
+    #[test]
+    fn board_entry_audience_default_empty_and_legacy_compatible() {
+        let legacy = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry without audience",
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
+
+        assert!(entry.audience.is_empty());
+    }
+
+    #[test]
+    fn board_entry_round_trips_audience_workspace_ids() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "audienced status",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["ws-1", "ws-2"]);
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(encoded["audience"][0], "ws-1");
+        assert_eq!(encoded["audience"][1], "ws-2");
+
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.audience,
+            vec!["ws-1".to_string(), "ws-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_entry_empty_audience_is_skipped_during_serialization() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+
+        assert!(
+            !encoded.as_object().unwrap().contains_key("audience"),
+            "empty audience must be omitted to round-trip as absent (FR-093): {encoded}"
+        );
+    }
+
+    #[test]
+    fn board_entry_with_audience_workspace_appends_dedup_and_trims() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "fan-out target",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience_workspace("  ws-a  ")
+        .with_audience_workspace("ws-a")
+        .with_audience_workspace("ws-b")
+        .with_audience_workspace("   ");
+
+        assert_eq!(entry.audience, vec!["ws-a".to_string(), "ws-b".to_string()]);
     }
 
     #[test]

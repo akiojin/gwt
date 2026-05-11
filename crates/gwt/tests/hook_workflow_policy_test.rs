@@ -736,7 +736,13 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
 }
 
 #[test]
-fn allows_mutation_when_active_board_claim_is_scoped_to_other_workspace() {
+fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
+    // SPEC-2359 FR-099 / SC-031: a claim audienced only to a different
+    // Workspace must not gate the current Agent. With Codex's
+    // affiliation field landed, the current Agent is assigned to
+    // `workspace-existing` (per workspace_agent helper); the claim
+    // audienced to `ws-other-only` does not intersect, so the gate
+    // must stay silent.
     with_temp_home(|home| {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
@@ -744,8 +750,8 @@ fn allows_mutation_when_active_board_claim_is_scoped_to_other_workspace() {
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         projection.agents.push(workspace_agent(
             &session_id,
-            "Implement Workspace semantic coordination gate",
-            "Workspace semantic coordination gate",
+            "Implement Workspace audience scoped gate",
+            "Workspace audience scoped gate",
         ));
         save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
 
@@ -753,15 +759,15 @@ fn allows_mutation_when_active_board_claim_is_scoped_to_other_workspace() {
             AuthorKind::Agent,
             "Other Codex",
             BoardEntryKind::Claim,
-            "Implement Workspace semantic coordination duplicate guard for active agents.",
+            "Implement Workspace audience scoped gate for active agents.",
             None,
             None,
-            vec!["workspace-semantic-coordination".to_string()],
+            vec!["workspace-audience".to_string()],
             vec!["2359".to_string()],
         )
         .with_origin_session_id("session-other")
-        .with_audience(vec!["workspace-other"]);
-        post_entry(&repo_path, entry).expect("post other-workspace claim");
+        .with_audience(vec!["ws-other-only".to_string()]);
+        post_entry(&repo_path, entry).expect("post audienced claim");
 
         let event = event(
             "Write",
@@ -775,10 +781,15 @@ fn allows_mutation_when_active_board_claim_is_scoped_to_other_workspace() {
         )
         .expect("workflow evaluation succeeds");
 
-        assert!(
-            matches!(decision, HookOutput::Silent),
-            "other-Workspace Board claims must not block this Workspace"
-        );
+        match decision {
+            HookOutput::PreToolUsePermission { detail, .. } => {
+                panic!(
+                    "audience-only claim must not block the current Agent when audience does not intersect: {detail}"
+                );
+            }
+            HookOutput::Silent => {}
+            other => panic!("expected silent allow, got {other:?}"),
+        }
     });
 }
 

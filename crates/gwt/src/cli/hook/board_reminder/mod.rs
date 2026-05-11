@@ -160,6 +160,12 @@ pub fn compute_plan(
 
     let reminders = load_reminders_state(&session.worktree_path, &session.id)?;
     let audience_scope = current_session_board_scope(&session.worktree_path, Some(&session.id))?;
+    let self_workspace_id = match &audience_scope {
+        gwt_core::coordination::BoardAudienceScope::Workspace(workspace_id) => {
+            Some(workspace_id.clone())
+        }
+        _ => None,
+    };
 
     let recent_entries = match intent_event {
         IntentBoundaryEvent::SessionStart => {
@@ -195,6 +201,7 @@ pub fn compute_plan(
         reminders,
         has_recent_own_status,
         language: language.clone(),
+        self_workspace_id,
     });
 
     plan.output = append_title_summary_required_context(

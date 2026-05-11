@@ -132,7 +132,8 @@ pub fn post_audience_for_session(
         push_workspace_for_session(&mut audience, projection, session_id);
     }
     collect_mention_audience(&mut audience, projection.as_ref(), mentions);
-    Ok(normalize_board_audience(Some(audience)))
+    let audience = normalize_board_audience(audience);
+    Ok((!audience.is_empty()).then_some(audience))
 }
 
 pub fn post_audience_for_gui(
@@ -150,7 +151,8 @@ pub fn post_audience_for_gui(
         }
     }
     collect_mention_audience(&mut audience, projection.as_ref(), mentions);
-    Ok(normalize_board_audience(Some(audience)))
+    let audience = normalize_board_audience(audience);
+    Ok((!audience.is_empty()).then_some(audience))
 }
 
 fn collect_mention_audience(

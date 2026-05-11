@@ -3,15 +3,17 @@ use std::io;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
-        load_snapshot, load_snapshot_for_scope, normalize_board_mentions, post_entry, AuthorKind,
-        BoardAudienceScope, BoardEntry, BoardMention,
+        load_snapshot, load_snapshot_for_scope, normalize_board_audience, normalize_board_mentions,
+        post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardMention,
     },
     paths::gwt_sessions_dir,
 };
 use gwt_github::SpecOpsError;
 
 use crate::{
-    board_audience::{current_session_board_scope, post_audience_for_session},
+    board_audience::{
+        current_session_board_scope, gui_default_board_scope, post_audience_for_session,
+    },
     cli::{CliEnv, CliParseError},
 };
 
@@ -30,7 +32,7 @@ pub enum BoardCommand {
     Post(Box<BoardPostCommand>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoardPostCommand {
     pub kind: String,
     pub body: Option<String>,
@@ -49,24 +51,20 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     match it.next().map(String::as_str) {
         Some("show") => {
             let mut json = false;
-            let mut workspace = None;
+            let mut workspace: Option<String> = None;
             let mut all = false;
-            let args = it.collect::<Vec<_>>();
-            let mut i = 0;
-            while i < args.len() {
-                match args[i].as_str() {
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
                     "--json" => json = true,
-                    "--workspace" => {
-                        i += 1;
-                        if i >= args.len() {
-                            return Err(CliParseError::MissingFlag("--workspace"));
-                        }
-                        workspace = Some(args[i].clone());
-                    }
                     "--all" => all = true,
+                    "--workspace" => {
+                        let Some(value) = it.next() else {
+                            return Err(CliParseError::MissingFlag("--workspace"));
+                        };
+                        workspace = Some(value.clone());
+                    }
                     other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
                 }
-                i += 1;
             }
             Ok(BoardCommand::Show {
                 json,
@@ -97,11 +95,16 @@ pub(super) fn run<E: CliEnv>(
             } else if let Some(workspace_id) = workspace {
                 BoardAudienceScope::Workspace(workspace_id)
             } else {
-                current_session_board_scope(
+                let session_scope = current_session_board_scope(
                     env.repo_path(),
                     current_session.as_ref().map(|session| session.id.as_str()),
                 )
-                .map_err(gwt_error_to_spec_ops_error)?
+                .map_err(gwt_error_to_spec_ops_error)?;
+                if current_session.is_none() && matches!(session_scope, BoardAudienceScope::All) {
+                    gui_default_board_scope(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?
+                } else {
+                    session_scope
+                }
             };
             let snapshot = if matches!(scope, BoardAudienceScope::All) {
                 load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?
@@ -179,18 +182,31 @@ pub(super) fn run<E: CliEnv>(
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
             }
-            let mentions = parse_mentions(&mentions).map_err(gwt_error_to_spec_ops_error)?;
+            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let mentions =
+                parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?;
             if !mentions.is_empty() {
                 entry = entry.with_mentions(mentions);
             }
-            let audience = post_audience_for_session(
-                env.repo_path(),
-                current_session.as_ref().map(|session| session.id.as_str()),
-                &entry.mentions,
-                broadcast,
-            )
-            .map_err(gwt_error_to_spec_ops_error)?;
-            if let Some(audience) = audience {
+            let mut audience = Vec::new();
+            if !broadcast {
+                if let BoardAudienceScope::Workspace(workspace_id) = current_session_board_scope(
+                    env.repo_path(),
+                    current_session.as_ref().map(|session| session.id.as_str()),
+                )
+                .map_err(gwt_error_to_spec_ops_error)?
+                {
+                    audience.push(workspace_id);
+                }
+                audience.extend(workspace_audience);
+                audience.extend(
+                    post_audience_for_session(env.repo_path(), None, &entry.mentions, false)
+                        .map_err(gwt_error_to_spec_ops_error)?
+                        .unwrap_or_default(),
+                );
+            }
+            let audience = normalize_board_audience(audience);
+            if !audience.is_empty() {
                 entry = entry.with_audience(audience);
             }
             let snapshot =
@@ -354,6 +370,26 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
     Ok(normalize_board_mentions(&mentions))
 }
 
+/// SPEC-2359 FR-096: `--mention workspace:<id>` routes to BoardEntry.audience,
+/// not to BoardMention. Split the raw mention args into (workspace_audience,
+/// other_mention_args) so the rest of the post path can parse other mentions
+/// as `BoardMention` as before.
+fn split_workspace_mentions(values: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut workspaces: Vec<String> = Vec::new();
+    let mut others: Vec<String> = Vec::new();
+    for value in values {
+        if let Some(rest) = value.trim().strip_prefix("workspace:") {
+            let id = rest.trim();
+            if !id.is_empty() && !workspaces.iter().any(|existing| existing == id) {
+                workspaces.push(id.to_string());
+            }
+        } else {
+            others.push(value.clone());
+        }
+    }
+    (workspaces, others)
+}
+
 fn current_session_from_env() -> io::Result<Option<Session>> {
     let Some(session_id) = std::env::var_os(GWT_SESSION_ID_ENV) else {
         return Ok(None);
@@ -434,7 +470,7 @@ mod tests {
         },
     };
 
-    use crate::cli::test_support::{fake_gh_test_lock, ScopedEnvVar};
+    use crate::cli::test_support::ScopedEnvVar;
 
     use super::*;
 
@@ -485,6 +521,112 @@ mod tests {
                 all: false,
             }
         );
+    }
+
+    #[test]
+    fn board_family_parse_show_collects_workspace_and_all_flags() {
+        let cmd = parse(&[
+            s("show"),
+            s("--json"),
+            s("--workspace"),
+            s("ws-1"),
+            s("--all"),
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: true,
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_run_show_workspace_filter_keeps_broadcast_and_matching_audience() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        for (body, audience) in [
+            ("broadcast post", Vec::<String>::new()),
+            ("scoped to ws-1", vec!["ws-1".into()]),
+            ("scoped to ws-2", vec!["ws-2".into()]),
+        ] {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Status,
+                body,
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if !audience.is_empty() {
+                entry = entry.with_audience(audience);
+            }
+            gwt_core::coordination::post_entry(tmp.path(), entry).unwrap();
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("broadcast post"), "{out}");
+        assert!(out.contains("scoped to ws-1"), "{out}");
+        assert!(!out.contains("scoped to ws-2"), "{out}");
+    }
+
+    #[test]
+    fn board_family_run_show_all_flag_shows_full_timeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        for (body, audience) in [
+            ("broadcast", Vec::<String>::new()),
+            ("scoped to ws-1", vec!["ws-1".into()]),
+            ("scoped to ws-2", vec!["ws-2".into()]),
+        ] {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                gwt_core::coordination::BoardEntryKind::Status,
+                body,
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if !audience.is_empty() {
+                entry = entry.with_audience(audience);
+            }
+            gwt_core::coordination::post_entry(tmp.path(), entry).unwrap();
+        }
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: Some("ws-1".into()),
+                all: true,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("broadcast"), "{out}");
+        assert!(out.contains("scoped to ws-1"), "{out}");
+        assert!(out.contains("scoped to ws-2"), "{out}");
     }
 
     #[test]
@@ -761,6 +903,123 @@ mod tests {
     }
 
     #[test]
+    fn board_family_parse_post_routes_workspace_mention_into_audience_and_broadcast_flag() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("scoped to two workspaces"),
+            s("--mention"),
+            s("workspace:ws-1"),
+            s("--mention"),
+            s("agent:codex"),
+            s("--mention"),
+            s("workspace:ws-2"),
+            s("--broadcast"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("scoped to two workspaces".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:ws-1".into(),
+                    "agent:codex".into(),
+                    "workspace:ws-2".into(),
+                ],
+                broadcast: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_persists_audience_from_workspace_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("audienced status".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:ws-1".into(),
+                    "agent:codex".into(),
+                    "workspace:ws-2".into(),
+                ],
+                broadcast: false,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+
+        assert_eq!(
+            entry.audience,
+            vec!["ws-1".to_string(), "ws-2".to_string()],
+            "workspace mentions must land on BoardEntry.audience"
+        );
+        assert_eq!(
+            entry.mentions.len(),
+            1,
+            "workspace mentions must not be stored as regular BoardMentions"
+        );
+        assert_eq!(entry.mentions[0].typed_key(), "agent:codex");
+    }
+
+    #[test]
+    fn board_family_run_post_broadcast_flag_keeps_audience_empty_without_explicit_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("broadcast post".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: true,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert!(
+            entry.audience.is_empty(),
+            "broadcast flag must keep audience empty even when current workspace exists"
+        );
+    }
+
+    #[test]
     fn board_family_run_post_attaches_current_session_origin_metadata() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -857,7 +1116,7 @@ mod tests {
         let snapshot = load_snapshot(&repo).unwrap();
         assert_eq!(
             snapshot.board.entries[0].audience,
-            Some(vec!["workspace-current".to_string()])
+            vec!["workspace-current".to_string()]
         );
     }
 
@@ -931,8 +1190,8 @@ mod tests {
         .unwrap();
 
         let snapshot = load_snapshot(&repo).unwrap();
-        assert_eq!(snapshot.board.entries[0].audience, None);
-        assert_eq!(snapshot.board.entries[1].audience, None);
+        assert!(snapshot.board.entries[0].audience.is_empty());
+        assert!(snapshot.board.entries[1].audience.is_empty());
     }
 
     #[test]
@@ -1010,11 +1269,11 @@ mod tests {
         let snapshot = load_snapshot(&repo).unwrap();
         assert_eq!(
             snapshot.board.entries[0].audience,
-            Some(vec![
+            vec![
                 "workspace-current".to_string(),
                 "workspace-explicit".to_string(),
                 "workspace-target".to_string(),
-            ])
+            ]
         );
     }
 
@@ -1032,7 +1291,7 @@ mod tests {
     // 誤認させる impersonation 経路を塞ぐ。
     #[test]
     fn board_family_run_post_uses_synthetic_agent_identity_when_session_env_missing() {
-        let _env_lock = fake_gh_test_lock()
+        let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);

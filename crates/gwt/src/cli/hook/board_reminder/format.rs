@@ -19,8 +19,10 @@ pub(super) fn filter_and_cap_latest(
     mut entries: Vec<BoardEntry>,
     self_session_id: &str,
     cap: usize,
+    self_workspace_id: Option<&str>,
 ) -> Vec<BoardEntry> {
     entries.retain(|entry| entry.origin_session_id.as_deref() != Some(self_session_id));
+    entries.retain(|entry| coordination::entry_visible_for_workspace(entry, self_workspace_id));
     if entries.len() > cap {
         let start = entries.len() - cap;
         entries.drain(..start);
@@ -220,9 +222,89 @@ mod tests {
         )
         .with_origin_session_id("sess-other");
 
-        let filtered = filter_and_cap_latest(vec![self_entry, other_entry], "sess-self", 20);
+        let filtered = filter_and_cap_latest(vec![self_entry, other_entry], "sess-self", 20, None);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].author, "Other");
+    }
+
+    #[test]
+    fn filter_and_cap_latest_keeps_only_audience_matching_or_broadcast_entries() {
+        let broadcast = BoardEntry::new(
+            AuthorKind::Agent,
+            "Agent",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-other");
+        let scoped_match = BoardEntry::new(
+            AuthorKind::Agent,
+            "Agent",
+            BoardEntryKind::Status,
+            "scoped to ws-1",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-other")
+        .with_audience(vec!["ws-1"]);
+        let scoped_other = BoardEntry::new(
+            AuthorKind::Agent,
+            "Agent",
+            BoardEntryKind::Status,
+            "scoped to ws-2",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-other")
+        .with_audience(vec!["ws-2"]);
+
+        let entries = vec![broadcast, scoped_match, scoped_other];
+        let filtered = filter_and_cap_latest(entries, "sess-self", 20, Some("ws-1"));
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|e| e.body == "broadcast"));
+        assert!(filtered.iter().any(|e| e.body == "scoped to ws-1"));
+        assert!(filtered.iter().all(|e| e.body != "scoped to ws-2"));
+    }
+
+    #[test]
+    fn filter_and_cap_latest_unassigned_keeps_only_broadcast_entries() {
+        let broadcast = BoardEntry::new(
+            AuthorKind::Agent,
+            "Agent",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-other");
+        let scoped = BoardEntry::new(
+            AuthorKind::Agent,
+            "Agent",
+            BoardEntryKind::Status,
+            "scoped to ws-1",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-other")
+        .with_audience(vec!["ws-1"]);
+
+        let entries = vec![broadcast, scoped];
+        let filtered = filter_and_cap_latest(entries, "sess-self", 20, None);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].body, "broadcast");
     }
 
     #[test]

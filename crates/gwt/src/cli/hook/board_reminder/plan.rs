@@ -47,6 +47,12 @@ pub struct ReminderInputs {
     /// because they target the user, not the agent.
     /// SPEC-1933 FR-010.
     pub language: String,
+    /// SPEC-2359 FR-098: workspace audience scoping. `None` means the
+    /// current Agent is Unassigned (or affiliation has not yet been
+    /// resolved), in which case only broadcast-audience entries are
+    /// surfaced. `Some(id)` shows entries audienced to `id` plus
+    /// broadcast.
+    pub self_workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +77,7 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
         inputs.recent_entries,
         &inputs.self_session_id,
         SESSION_START_CAP,
+        inputs.self_workspace_id.as_deref(),
     );
     let mut text = session_start_text_with_language(&entries, &inputs.self_match_keys, language);
     text.push_str(&format_language_directive(&inputs.language));
@@ -91,6 +98,7 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
         inputs.recent_entries,
         &inputs.self_session_id,
         USER_PROMPT_DIFF_CAP,
+        inputs.self_workspace_id.as_deref(),
     );
 
     let reminder = user_prompt_reminder(language, inputs.has_recent_own_status);
@@ -219,6 +227,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("phase"));
@@ -237,6 +246,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = system_message(&plan.output);
         assert!(text.contains("Stop"));
@@ -257,6 +267,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
 
@@ -286,6 +297,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
 
@@ -315,6 +327,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
 
@@ -336,6 +349,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let user_prompt = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
@@ -347,6 +361,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: true,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let stop = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
@@ -358,6 +373,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
 
         for text in [
@@ -387,6 +403,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: true,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("coordination"));
@@ -417,6 +434,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -453,6 +471,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -488,6 +507,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -513,6 +533,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: true,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         assert!(additional_context(&plan.output).contains("posted to the Board recently"));
     }
@@ -548,6 +569,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("investigating broken test"));
@@ -569,6 +591,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("Board Post Reminder"));
@@ -587,6 +610,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(
@@ -608,6 +632,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(
@@ -629,6 +654,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
 
@@ -652,6 +678,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: true,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
 
@@ -673,6 +700,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("Use language: ja"));
@@ -690,6 +718,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: true,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("最近 Board に投稿済み"));
@@ -708,6 +737,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "ja".to_string(),
+            self_workspace_id: None,
         });
         let text = system_message(&plan.output);
         assert!(
@@ -728,6 +758,7 @@ mod tests {
             reminders: RemindersState::default(),
             has_recent_own_status: false,
             language: "zh".to_string(),
+            self_workspace_id: None,
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("Use language: en"));
@@ -751,6 +782,7 @@ mod tests {
             reminders,
             has_recent_own_status: false,
             language: "en".to_string(),
+            self_workspace_id: None,
         });
         assert_eq!(plan.next_reminders.last_injected_at, Some(before));
     }
