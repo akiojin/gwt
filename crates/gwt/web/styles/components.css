@@ -2316,6 +2316,65 @@ kbd.op-kbd {
   grid-template-columns: repeat(3, minmax(240px, 1fr));
 }
 
+.workspace-unassigned {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) var(--space-3) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.workspace-unassigned[hidden] {
+  display: none;
+}
+
+.workspace-unassigned-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.workspace-unassigned-title {
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 600;
+}
+
+.workspace-unassigned-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.workspace-unassigned-agent {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+}
+
+.workspace-unassigned-agent-name {
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.workspace-unassigned-agent-state {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
 .kanban-column {
   display: flex;
   flex-direction: column;

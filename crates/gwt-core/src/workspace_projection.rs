@@ -27,6 +27,17 @@ pub enum WorkspaceStatusCategory {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAgentAffiliationStatus {
+    Unassigned,
+    Assigned,
+}
+
+fn default_workspace_agent_affiliation_status() -> WorkspaceAgentAffiliationStatus {
+    WorkspaceAgentAffiliationStatus::Assigned
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDetails {
     pub branch: Option<String>,
@@ -86,7 +97,21 @@ pub struct WorkspaceAgentSummary {
     pub last_board_entry_kind: Option<BoardEntryKind>,
     #[serde(default)]
     pub coordination_scope: Option<String>,
+    #[serde(default = "default_workspace_agent_affiliation_status")]
+    pub affiliation_status: WorkspaceAgentAffiliationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl WorkspaceAgentSummary {
+    pub fn is_unassigned(&self) -> bool {
+        self.affiliation_status == WorkspaceAgentAffiliationStatus::Unassigned
+    }
+
+    pub fn is_assigned(&self) -> bool {
+        self.affiliation_status == WorkspaceAgentAffiliationStatus::Assigned
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,51 +150,81 @@ impl WorkspaceProjection {
     }
 
     pub fn effective_status_category(&self) -> WorkspaceStatusCategory {
-        if self
-            .agents
-            .iter()
-            .any(|agent| agent.status_category == WorkspaceStatusCategory::Blocked)
-        {
+        if self.agents.iter().any(|agent| {
+            agent.is_assigned() && agent.status_category == WorkspaceStatusCategory::Blocked
+        }) {
             return WorkspaceStatusCategory::Blocked;
         }
-        if self
-            .agents
-            .iter()
-            .any(|agent| agent.status_category == WorkspaceStatusCategory::Active)
-        {
+        if self.agents.iter().any(|agent| {
+            agent.is_assigned() && agent.status_category == WorkspaceStatusCategory::Active
+        }) {
             return WorkspaceStatusCategory::Active;
         }
         self.status_category
+    }
+
+    pub fn unassigned_agents(&self) -> impl Iterator<Item = &WorkspaceAgentSummary> {
+        self.agents.iter().filter(|agent| agent.is_unassigned())
+    }
+
+    pub fn assigned_agents(&self) -> impl Iterator<Item = &WorkspaceAgentSummary> {
+        self.agents.iter().filter(|agent| agent.is_assigned())
+    }
+
+    pub fn register_unassigned_agent(&mut self, mut agent: WorkspaceAgentSummary) {
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+        agent.workspace_id = None;
+        if let Some(existing) = self
+            .agents
+            .iter_mut()
+            .find(|existing| existing.session_id == agent.session_id)
+        {
+            *existing = agent;
+        } else {
+            self.agents.push(agent);
+        }
     }
 
     pub fn record_board_milestone(&mut self, entry: &BoardEntry) {
         if !self.board_refs.iter().any(|id| id == &entry.id) {
             self.board_refs.push(entry.id.clone());
         }
-        if let Some(owner) = entry.related_owners.first() {
-            self.owner = Some(owner.clone());
-        }
+        let origin_agent_is_unassigned = entry
+            .origin_session_id
+            .as_deref()
+            .and_then(|session_id| {
+                self.agents
+                    .iter()
+                    .find(|agent| agent.session_id == session_id)
+            })
+            .is_some_and(WorkspaceAgentSummary::is_unassigned);
 
-        match entry.kind {
-            BoardEntryKind::Blocked => {
-                self.status_category = WorkspaceStatusCategory::Blocked;
-                self.status_text = entry.body.clone();
-                self.next_action = Some("Resolve blocker".to_string());
+        if !origin_agent_is_unassigned {
+            if let Some(owner) = entry.related_owners.first() {
+                self.owner = Some(owner.clone());
             }
-            BoardEntryKind::Next => {
-                self.next_action = Some(entry.body.clone());
-                if self.status_category == WorkspaceStatusCategory::Unknown {
-                    self.status_category = WorkspaceStatusCategory::Active;
+
+            match entry.kind {
+                BoardEntryKind::Blocked => {
+                    self.status_category = WorkspaceStatusCategory::Blocked;
+                    self.status_text = entry.body.clone();
+                    self.next_action = Some("Resolve blocker".to_string());
                 }
+                BoardEntryKind::Next => {
+                    self.next_action = Some(entry.body.clone());
+                    if self.status_category == WorkspaceStatusCategory::Unknown {
+                        self.status_category = WorkspaceStatusCategory::Active;
+                    }
+                }
+                BoardEntryKind::Status
+                | BoardEntryKind::Claim
+                | BoardEntryKind::Handoff
+                | BoardEntryKind::Decision => {
+                    self.status_category = WorkspaceStatusCategory::Active;
+                    self.status_text = entry.body.clone();
+                }
+                BoardEntryKind::Request | BoardEntryKind::Impact | BoardEntryKind::Question => {}
             }
-            BoardEntryKind::Status
-            | BoardEntryKind::Claim
-            | BoardEntryKind::Handoff
-            | BoardEntryKind::Decision => {
-                self.status_category = WorkspaceStatusCategory::Active;
-                self.status_text = entry.body.clone();
-            }
-            BoardEntryKind::Request | BoardEntryKind::Impact | BoardEntryKind::Question => {}
         }
 
         if let Some(session_id) = entry.origin_session_id.as_deref() {
@@ -315,10 +370,11 @@ impl WorkspaceProjection {
         if removed {
             self.updated_at = updated_at;
             if !self.agents.iter().any(|agent| {
-                matches!(
-                    agent.status_category,
-                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
-                )
+                agent.is_assigned()
+                    && matches!(
+                        agent.status_category,
+                        WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
+                    )
             }) {
                 self.status_category = WorkspaceStatusCategory::Idle;
                 self.status_text = "No active work".to_string();
@@ -946,6 +1002,15 @@ fn synthesize_workspace_work_item_from_legacy(
     if projection.is_none() && journal_entries.is_empty() {
         return None;
     }
+    if let Some(projection) = projection {
+        let has_workspace_identity = projection.assigned_agents().next().is_some()
+            || projection.git_details.is_some()
+            || !projection.board_refs.is_empty()
+            || projection.status_category != WorkspaceStatusCategory::Unknown;
+        if journal_entries.is_empty() && !has_workspace_identity {
+            return None;
+        }
+    }
     let first_entry = journal_entries.first();
     let last_entry = journal_entries.last();
     let id = projection
@@ -1000,13 +1065,16 @@ fn synthesize_workspace_work_item_from_legacy(
         events: Vec::new(),
     };
     if let Some(projection) = projection {
-        item.agents
-            .extend(projection.agents.iter().map(|agent| WorkspaceWorkAgentRef {
-                session_id: agent.session_id.clone(),
-                agent_id: Some(agent.agent_id.clone()),
-                display_name: Some(agent.display_name.clone()),
-                updated_at: agent.updated_at,
-            }));
+        item.agents.extend(
+            projection
+                .assigned_agents()
+                .map(|agent| WorkspaceWorkAgentRef {
+                    session_id: agent.session_id.clone(),
+                    agent_id: Some(agent.agent_id.clone()),
+                    display_name: Some(agent.display_name.clone()),
+                    updated_at: agent.updated_at,
+                }),
+        );
         if let Some(details) = projection.git_details.as_ref() {
             item.execution_containers
                 .push(WorkspaceExecutionContainerRef {
@@ -1295,6 +1363,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
 
@@ -1346,6 +1416,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
 
@@ -1517,6 +1589,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
         let mut blocked = BoardEntry::new(
@@ -1577,6 +1651,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
         let mut entry_value = serde_json::to_value(
@@ -1629,6 +1705,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
         let mut blocked = BoardEntry::new(
@@ -1690,6 +1768,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: Utc::now(),
         });
         let mut handoff = BoardEntry::new(
@@ -1958,6 +2038,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at,
         });
 
@@ -1997,6 +2079,61 @@ mod tests {
     }
 
     #[test]
+    fn legacy_workspace_agent_affiliation_defaults_to_assigned() {
+        let payload = serde_json::json!({
+            "session_id": "session-legacy",
+            "window_id": "tab-1:agent-1",
+            "agent_id": "codex",
+            "display_name": "Codex",
+            "status_category": "active",
+            "current_focus": "Implement existing Workspace behavior",
+            "title_summary": "Existing Workspace behavior",
+            "worktree_path": null,
+            "branch": "work/legacy",
+            "last_board_entry_id": null,
+            "updated_at": "2026-05-11T00:00:00Z"
+        });
+
+        let agent: WorkspaceAgentSummary =
+            serde_json::from_value(payload).expect("legacy agent summary");
+
+        assert_eq!(
+            agent.affiliation_status,
+            WorkspaceAgentAffiliationStatus::Assigned
+        );
+        assert_eq!(agent.workspace_id.as_deref(), None);
+    }
+
+    #[test]
+    fn unassigned_agent_is_not_effective_active_workspace_status() {
+        let mut projection = WorkspaceProjection::default_for_project("/tmp/repo");
+        projection.register_unassigned_agent(WorkspaceAgentSummary {
+            session_id: "session-unassigned".to_string(),
+            window_id: Some("tab-1:agent-1".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: Some("work/20260511-0100".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+            workspace_id: None,
+            updated_at: Utc::now(),
+        });
+
+        assert_eq!(projection.unassigned_agents().count(), 1);
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Unknown,
+            "Unassigned Agents must not make a Workspace active"
+        );
+    }
+
+    #[test]
     fn stopped_agent_is_removed_from_current_projection_without_losing_summary() {
         let now = Utc::now();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
@@ -2017,6 +2154,8 @@ mod tests {
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: now,
         });
 

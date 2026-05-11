@@ -189,6 +189,25 @@ pub enum WorkspaceCommand {
         current_focus: Option<String>,
         title_summary: Option<String>,
     },
+    /// `gwtd workspace candidates --agent-session <id>` — list join candidates.
+    Candidates { agent_session: String },
+    /// `gwtd workspace join --agent-session <id> --workspace <id>`.
+    Join {
+        agent_session: String,
+        workspace_id: String,
+        current_focus: Option<String>,
+        title_summary: Option<String>,
+    },
+    /// `gwtd workspace create --agent-session <id> --title-summary <name> ...`.
+    Create {
+        agent_session: String,
+        title_summary: String,
+        current_focus: Option<String>,
+        spec: Option<u64>,
+        issue: Option<u64>,
+        split_from: Option<String>,
+        boundary: Option<String>,
+    },
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
@@ -299,23 +318,12 @@ pub enum ActionsCommand {
 /// SPEC-1942 family enum for `gwtd board ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `gwtd board show [--json] [--workspace <id>] [--all]`.
-    ///
-    /// SPEC-2359 FR-100: `workspace` scopes the view to entries whose
-    /// `audience` contains the given Workspace id or is broadcast.
-    /// `all` opts out of audience scoping and shows the full timeline.
-    /// Without either flag, the default future behavior is "current
-    /// Workspace + broadcast" once the current Agent's affiliation can
-    /// be resolved (FR-088); until then the default falls back to the
-    /// full timeline so legacy callers are unaffected.
+    /// `gwtd board show [--json] [--workspace <id>] [--all]` (SPEC-2359 FR-100).
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
     },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
-    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
-    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
     Post(Box<BoardPostCommand>),
 }
 
@@ -431,7 +439,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),

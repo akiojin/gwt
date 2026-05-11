@@ -199,15 +199,18 @@ fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, Hoo
         worktree_root
     };
     let Some(projection) = load_workspace_projection(projection_root)? else {
-        return Ok(true);
+        return Ok(false);
     };
     let Some(agent) = projection
         .agents
         .iter()
         .find(|agent| agent.session_id == session.id)
     else {
-        return Ok(true);
+        return Ok(false);
     };
+    if agent.is_unassigned() {
+        return Ok(false);
+    }
     Ok(agent
         .title_summary
         .as_deref()
@@ -341,6 +344,7 @@ fn workspace_agent_conflicts(
         .iter()
         .filter(|agent| {
             current_session_id != Some(agent.session_id.as_str())
+                && agent.is_assigned()
                 && matches!(
                     agent.status_category,
                     WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
@@ -390,7 +394,7 @@ fn workspace_work_item_conflicts(
                 let first_agent = item.agents.first();
                 let first_container = item.execution_containers.first();
                 WorkspaceCoordinationConflict {
-                    source_label: "incomplete Workspace WorkItem",
+                    source_label: "incomplete Workspace",
                     title: item.title.clone(),
                     session_id: first_agent.map(|agent| agent.session_id.clone()),
                     branch: first_container.and_then(|container| container.branch.clone()),
