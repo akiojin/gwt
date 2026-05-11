@@ -72,6 +72,7 @@ fn cli_command_family_split_round_trip_parses() {
     assert_eq!(command.body.as_deref(), Some("x"));
     assert_eq!(command.file, None);
     assert_eq!(command.title_summary, None);
+    assert!(!command.broadcast);
 
     // gwtd index status / rebuild
     let cmd = parse_index_args(&[s("status")]).expect("parse index status");

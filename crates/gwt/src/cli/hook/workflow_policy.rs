@@ -20,7 +20,10 @@ use gwt_agent::{
     types::WorkflowBypass,
 };
 use gwt_core::{
-    coordination::{load_snapshot, BoardEntry, BoardEntryKind, BoardMentionTargetKind},
+    coordination::{
+        board_entry_visible_for_scope, load_snapshot, BoardEntry, BoardEntryKind,
+        BoardMentionTargetKind,
+    },
     paths::{gwt_cache_dir, gwt_sessions_dir},
     workspace_projection::{
         load_or_synthesize_workspace_work_items, load_workspace_projection, WorkspaceAgentSummary,
@@ -31,6 +34,7 @@ use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
 use super::{block_bash_policy, HookError, HookEvent, HookOutput};
+use crate::board_audience::current_session_board_scope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -314,23 +318,12 @@ fn workspace_coordination_conflicts(
         current_intent,
         current_session_id,
     )?);
-    let current_workspace_id = current_session_id
-        .and_then(|session_id| resolve_current_workspace_audience(worktree_root, session_id));
     conflicts.extend(board_claim_conflicts(
         worktree_root,
         current_intent,
         current_session_id,
-        current_workspace_id.as_deref(),
     )?);
     Ok(conflicts)
-}
-
-/// SPEC-2359 FR-099: resolve the current Agent's assigned Workspace id for
-/// the duplicate-work coordination gate. Returns `None` for Unassigned
-/// agents (broadcast-only gating) and `Some(id)` for assigned agents,
-/// mirroring the reminder-injection resolver.
-fn resolve_current_workspace_audience(worktree_root: &Path, session_id: &str) -> Option<String> {
-    gwt_core::workspace_projection::resolve_workspace_id_for_session(worktree_root, session_id)
 }
 
 fn workspace_agent_conflicts(
@@ -410,9 +403,9 @@ fn board_claim_conflicts(
     worktree_root: &Path,
     current_intent: &str,
     current_session_id: Option<&str>,
-    current_workspace_id: Option<&str>,
 ) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
     let snapshot = load_snapshot(worktree_root)?;
+    let audience_scope = current_session_board_scope(worktree_root, current_session_id)?;
     Ok(snapshot
         .board
         .entries
@@ -422,7 +415,7 @@ fn board_claim_conflicts(
             entry.kind == BoardEntryKind::Claim
                 && board_claim_is_active(entry)
                 && current_session_id != entry.origin_session_id.as_deref()
-                && gwt_core::coordination::entry_visible_for_workspace(entry, current_workspace_id)
+                && board_entry_visible_for_scope(entry, &audience_scope)
         })
         .filter_map(|entry| {
             let text = board_entry_text(entry);
@@ -563,10 +556,12 @@ fn has_matching_split_claim(
         return Ok(false);
     };
     let snapshot = load_snapshot(worktree_root)?;
+    let audience_scope = current_session_board_scope(worktree_root, Some(current_session_id))?;
     Ok(snapshot.board.entries.iter().rev().any(|entry| {
         entry.kind == BoardEntryKind::Claim
             && entry.origin_session_id.as_deref() == Some(current_session_id)
             && board_claim_is_active(entry)
+            && board_entry_visible_for_scope(entry, &audience_scope)
             && board_entry_has_boundary(entry)
             && board_entry_targets_conflict(entry, conflict)
             && split_claim_matches_current_work(entry, current_intent)
@@ -624,6 +619,7 @@ fn board_entry_targets_conflict(
                 BoardMentionTargetKind::Branch => format!("branch:{}", mention.target),
                 BoardMentionTargetKind::Agent => format!("agent:{}", mention.target),
                 BoardMentionTargetKind::User => format!("user:{}", mention.target),
+                BoardMentionTargetKind::Workspace => format!("workspace:{}", mention.target),
             })
             .any(|typed_key| keys.iter().any(|key| key == &typed_key))
 }

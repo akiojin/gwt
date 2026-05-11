@@ -975,6 +975,11 @@
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
+        const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
+        if (nextWorkspaceId !== currentProjectWorkspaceId) {
+          currentProjectWorkspaceId = nextWorkspaceId;
+          refreshBoardCurrentWorkspaceId();
+        }
         renderWindowList();
         renderActiveWorkOverview();
       }
@@ -2713,12 +2718,39 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
-            audienceFilter: "all",
+            audienceFilter: "workspace",
+            currentWorkspaceId: "",
             forYouUnread: 0,
             lastNotifiedMentionEntryId: null,
+            currentWorkspaceId: currentProjectWorkspaceId,
           });
         }
         return boardStateMap.get(windowId);
+      }
+
+      // SPEC-2359 FR-098/101: track the project's "primary" assigned
+      // workspace id for the Board Workspace filter. Picks the first
+      // assigned agent's workspace_id from the workspace state event.
+      // When no agent in the project is assigned (all Unassigned), the
+      // filter degrades to broadcast-only via FR-103. Multi-workspace
+      // selection UX is a follow-up.
+      let currentProjectWorkspaceId = null;
+      function deriveCurrentProjectWorkspaceId(workspaceState) {
+        const agents = workspaceState?.workspace?.agents
+          || workspaceState?.agents
+          || [];
+        const assigned = agents.find(
+          (agent) =>
+            String(agent?.affiliation_status || "").toLowerCase() === "assigned"
+            && typeof agent?.workspace_id === "string"
+            && agent.workspace_id.length > 0,
+        );
+        return assigned ? assigned.workspace_id : null;
+      }
+      function refreshBoardCurrentWorkspaceId() {
+        for (const state of boardStateMap.values()) {
+          state.currentWorkspaceId = currentProjectWorkspaceId;
+        }
       }
 
       function normalizeLogSeverity(severity) {
@@ -2782,6 +2814,7 @@
         send({
           kind: "load_board",
           id: windowId,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -2801,6 +2834,7 @@
           id: windowId,
           before_entry_id: beforeEntryId,
           limit: 50,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -3885,6 +3919,7 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const allFilter = body.querySelector("[data-action='toggle-board-all']");
         const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         const workspaceFilter = body.querySelector("[data-action='toggle-board-workspace']");
         if (!status || !timeline || !composer) {
@@ -3894,6 +3929,10 @@
           state.focusEntryId = pendingBoardEntryFocusId;
           state.pendingFocusScroll = true;
         }
+        state.currentWorkspaceId =
+          activeWorkProjection && (activeWorkProjection.agents || []).length > 0
+            ? activeWorkProjection.id || ""
+            : "";
 
         const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
@@ -3912,6 +3951,13 @@
           status.classList.add("error");
         } else if (state.loading) {
           status.classList.add("info");
+        }
+        if (allFilter) {
+          allFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "all" ? "true" : "false",
+          );
+          allFilter.classList.toggle("active", state.audienceFilter === "all");
         }
         if (forYouFilter) {
           forYouFilter.setAttribute(
@@ -3981,6 +4027,8 @@
               "board-empty workspace-empty-state",
               state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
+                : state.audienceFilter === "workspace"
+                  ? "No posts in this Workspace."
                 : "No coordination entries yet.",
             ),
           );
@@ -6284,6 +6332,7 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Workspace</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
@@ -6317,10 +6366,21 @@
             .addEventListener("click", (event) => {
               event.stopPropagation();
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
-              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              state.audienceFilter =
+                state.audienceFilter === "for_you" ? "workspace" : "for_you";
               if (state.audienceFilter === "for_you") {
                 state.forYouUnread = 0;
               }
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-all']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "all" ? "workspace" : "all";
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           // SPEC-2359 FR-101: toggle the Workspace audience filter. The
@@ -6335,6 +6395,8 @@
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
               state.audienceFilter =
                 state.audienceFilter === "workspace" ? "all" : "workspace";
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
