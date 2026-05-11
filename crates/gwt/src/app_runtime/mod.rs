@@ -1693,6 +1693,7 @@ pub struct AppRuntime {
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
     pub(crate) window_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
+    pub(crate) board_all_view_windows: HashSet<String>,
     pub(crate) session_state_path: PathBuf,
     pub(crate) log_dir: PathBuf,
     pub(crate) proxy: AppEventProxy,
@@ -1772,6 +1773,7 @@ impl AppRuntime {
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            board_all_view_windows: HashSet::new(),
             session_state_path,
             log_dir,
             proxy: AppEventProxy::new(proxy),
@@ -2980,7 +2982,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn load_board_events(
-        &self,
+        &mut self,
         client_id: &str,
         id: &str,
         all: bool,
@@ -3021,11 +3023,17 @@ impl AppRuntime {
                 },
             )];
         }
+        let project_root = tab.project_root.clone();
+        if all {
+            self.board_all_view_windows.insert(id.to_string());
+        } else {
+            self.board_all_view_windows.remove(id);
+        }
 
         let scope = if all {
             gwt_core::coordination::BoardAudienceScope::All
         } else {
-            match board::gui_default_board_scope_for_project(&tab.project_root) {
+            match board::gui_default_board_scope_for_project(&project_root) {
                 Ok(scope) => scope,
                 Err(error) => {
                     return vec![OutboundEvent::reply(
@@ -3039,9 +3047,9 @@ impl AppRuntime {
             }
         };
         let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_snapshot(&tab.project_root)
+            gwt_core::coordination::load_snapshot(&project_root)
         } else {
-            gwt_core::coordination::load_snapshot_for_scope(&tab.project_root, &scope)
+            gwt_core::coordination::load_snapshot_for_scope(&project_root, &scope)
         };
         match snapshot_result {
             Ok(snapshot) => vec![OutboundEvent::reply(
@@ -3063,7 +3071,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn load_board_history_events(
-        &self,
+        &mut self,
         client_id: &str,
         id: &str,
         before_entry_id: Option<&str>,
@@ -3106,11 +3114,17 @@ impl AppRuntime {
                 },
             )];
         }
+        let project_root = tab.project_root.clone();
+        if all {
+            self.board_all_view_windows.insert(id.to_string());
+        } else {
+            self.board_all_view_windows.remove(id);
+        }
 
         let scope = if all {
             gwt_core::coordination::BoardAudienceScope::All
         } else {
-            match board::gui_default_board_scope_for_project(&tab.project_root) {
+            match board::gui_default_board_scope_for_project(&project_root) {
                 Ok(scope) => scope,
                 Err(error) => {
                     return vec![OutboundEvent::reply(
@@ -3124,10 +3138,10 @@ impl AppRuntime {
             }
         };
         let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_entries_before(&tab.project_root, before_entry_id, limit)
+            gwt_core::coordination::load_entries_before(&project_root, before_entry_id, limit)
         } else {
             gwt_core::coordination::load_entries_before_for_scope(
-                &tab.project_root,
+                &project_root,
                 before_entry_id,
                 limit,
                 &scope,
@@ -3226,8 +3240,13 @@ impl AppRuntime {
                 if window.preset != WindowPreset::Board {
                     continue;
                 }
-                let scope = board::gui_default_board_scope_for_project(&tab.project_root)
-                    .unwrap_or(gwt_core::coordination::BoardAudienceScope::All);
+                let window_id = combined_window_id(&tab.id, &window.id);
+                let scope = if self.board_all_view_windows.contains(&window_id) {
+                    gwt_core::coordination::BoardAudienceScope::All
+                } else {
+                    board::gui_default_board_scope_for_project(&tab.project_root)
+                        .unwrap_or(gwt_core::coordination::BoardAudienceScope::All)
+                };
                 let board = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
                     snapshot.board.clone()
                 } else {
@@ -3236,7 +3255,7 @@ impl AppRuntime {
                         .unwrap_or_else(|_| snapshot.board.clone())
                 };
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
-                    id: combined_window_id(&tab.id, &window.id),
+                    id: window_id,
                     entries: board.entries,
                     has_more_before: board.has_more_before,
                 }));
@@ -5260,6 +5279,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_hook_states.remove(window_id);
+        self.board_all_view_windows.remove(window_id);
     }
 
     fn tracked_window_exists(&self, window_id: &str) -> bool {
@@ -5795,8 +5815,8 @@ mod tests {
     use gwt_config::{Profile, Settings};
     use gwt_core::{
         coordination::{
-            load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention,
-            BoardMentionTargetKind,
+            load_snapshot, post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind,
+            BoardMention, BoardMentionTargetKind,
         },
         logging::{current_log_file, LogEvent, LogLevel},
         paths::gwt_cache_dir,
@@ -6278,6 +6298,30 @@ exit 0
         save_workspace_launch_projection(repo, session, Some("develop"), None, Some(&context), true)
     }
 
+    fn workspace_agent_summary_for_test(
+        session_id: &str,
+        workspace_id: Option<&str>,
+    ) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
+        gwt_core::workspace_projection::WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            current_focus: Some("Board audience follow-up".to_string()),
+            title_summary: Some("Board audience follow-up".to_string()),
+            worktree_path: None,
+            branch: Some("work/test".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: workspace_id.map(str::to_string),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
     #[test]
     fn image_paste_prepare_uses_host_absolute_path_reference() {
         let temp = tempdir().expect("tempdir");
@@ -6511,6 +6555,7 @@ exit 0
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
             proxy,
@@ -11834,6 +11879,152 @@ exit 0
                 .dynamic_title
                 .as_deref(),
             Some("Board milestone focus")
+        );
+    }
+
+    #[test]
+    fn app_runtime_gui_board_scope_uses_active_workspace_id_not_first_agent_workspace() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.id = "workspace-active".to_string();
+        projection.agents.push(workspace_agent_summary_for_test(
+            "session-other",
+            Some("workspace-other"),
+        ));
+        projection
+            .agents
+            .push(workspace_agent_summary_for_test("session-active", None));
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let scope = super::board::gui_default_board_scope_for_project(&repo)
+            .expect("resolve GUI board scope");
+        let post_audience =
+            gwt::board_audience::post_audience_for_gui(&repo, &[]).expect("resolve post audience");
+
+        assert_eq!(
+            scope,
+            BoardAudienceScope::Workspace("workspace-active".to_string())
+        );
+        assert_eq!(post_audience, Some(vec!["workspace-active".to_string()]));
+    }
+
+    #[test]
+    fn app_runtime_board_projection_change_preserves_all_view_for_live_updates() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.id = "workspace-a".to_string();
+        projection
+            .agents
+            .push(workspace_agent_summary_for_test("session-a", None));
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Workspace A update",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-a"]),
+        )
+        .expect("seed workspace A update");
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Workspace B update",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-b"]),
+        )
+        .expect("seed workspace B update");
+
+        let mut tab_workspace = empty_workspace_state();
+        tab_workspace.windows.push(sample_window(
+            "board-all",
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        ));
+        tab_workspace.windows.push(sample_window(
+            "board-workspace",
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        ));
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let all_window_id = combined_window_id("tab-1", "board-all");
+        let workspace_window_id = combined_window_id("tab-1", "board-workspace");
+        let _ = runtime.load_board_events("client-1", &all_window_id, true);
+        let _ = runtime.load_board_events("client-1", &workspace_window_id, false);
+
+        let events = runtime.handle_board_projection_changed_events(&repo);
+
+        let all_entries = events
+            .iter()
+            .find_map(|event| match event {
+                OutboundEvent {
+                    event: BackendEvent::BoardEntries { id, entries, .. },
+                    ..
+                } if id == &all_window_id => Some(entries),
+                _ => None,
+            })
+            .expect("all view board entries");
+        let workspace_entries = events
+            .iter()
+            .find_map(|event| match event {
+                OutboundEvent {
+                    event: BackendEvent::BoardEntries { id, entries, .. },
+                    ..
+                } if id == &workspace_window_id => Some(entries),
+                _ => None,
+            })
+            .expect("workspace view board entries");
+
+        assert!(
+            all_entries
+                .iter()
+                .any(|entry| entry.body == "Workspace B update"),
+            "All view live update must include other Workspace entries"
+        );
+        assert!(
+            !workspace_entries
+                .iter()
+                .any(|entry| entry.body == "Workspace B update"),
+            "Workspace view live update must stay scoped"
         );
     }
 
