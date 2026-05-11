@@ -11,7 +11,31 @@ use include_dir::Dir;
 
 use crate::assets::{CLAUDE_COMMANDS, CLAUDE_SKILLS};
 
-const TRACKED_ROOTS: &[&str] = &[".claude/skills", ".claude/commands", ".codex/skills"];
+const TRACKED_ROOTS: &[&str] = &[
+    ".claude/skills",
+    ".claude/commands",
+    ".codex/skills",
+    ".gwt/hermes/skills",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ManagedAssetTarget {
+    ClaudeCode,
+    Codex,
+    OpenCode,
+    OpenClaw,
+    Hermes,
+}
+
+impl ManagedAssetTarget {
+    pub const ALL: [Self; 5] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::OpenCode,
+        Self::OpenClaw,
+        Self::Hermes,
+    ];
+}
 
 /// Result of a distribution operation.
 #[derive(Debug, Default)]
@@ -30,46 +54,69 @@ enum RootEntryKind {
     Files,
 }
 
-/// Write all bundled skill, command, and hook files to the target worktree.
+/// Write bundled skill and command files to the target worktree.
 ///
-/// Distribution targets:
+/// Full distribution targets:
 /// - `.claude/skills/gwt-*/`
 /// - `.claude/commands/gwt-*.md`
 /// - `.codex/skills/gwt-*/`  (same skill content)
+/// - `.gwt/hermes/skills/gwt-*/`  (gwt skill content only)
 ///
-/// Claude and Codex hook execution are now driven only by generated config
-/// (`.claude/settings.local.json` and `.codex/hooks.json`).
+/// Provider hook execution is driven by generated config owned by the
+/// caller (`.claude/settings.local.json`, `.codex/hooks.json`, and
+/// `.gwt/<provider>/...` provider homes).
 /// Retired `hooks/scripts/gwt-*` files are pruned as stale managed
 /// assets instead of being redistributed.
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
+    distribute_to_worktree_for_targets(worktree, &ManagedAssetTarget::ALL)
+}
+
+pub fn distribute_to_worktree_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
+    let targets = normalize_targets(targets);
 
-    prune_managed_asset_roots(worktree, &tracked_paths, &mut report)?;
+    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut report)?;
 
-    // Claude Code targets
-    write_dir_assets(
-        &CLAUDE_SKILLS,
-        worktree,
-        &worktree.join(".claude/skills"),
-        &tracked_paths,
-        &mut report,
-    )?;
-    write_dir_assets(
-        &CLAUDE_COMMANDS,
-        worktree,
-        &worktree.join(".claude/commands"),
-        &tracked_paths,
-        &mut report,
-    )?;
-    // Codex targets
-    write_dir_assets(
-        &CLAUDE_SKILLS,
-        worktree,
-        &worktree.join(".codex/skills"),
-        &tracked_paths,
-        &mut report,
-    )?;
+    if targets.contains(&ManagedAssetTarget::ClaudeCode) {
+        write_dir_assets(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".claude/skills"),
+            &tracked_paths,
+            &mut report,
+        )?;
+        write_dir_assets(
+            &CLAUDE_COMMANDS,
+            worktree,
+            &worktree.join(".claude/commands"),
+            &tracked_paths,
+            &mut report,
+        )?;
+    }
+
+    if targets.contains(&ManagedAssetTarget::Codex) {
+        write_dir_assets(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".codex/skills"),
+            &tracked_paths,
+            &mut report,
+        )?;
+    }
+
+    if targets.contains(&ManagedAssetTarget::Hermes) {
+        write_gwt_skill_dir_assets(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".gwt/hermes/skills"),
+            &tracked_paths,
+            &mut report,
+        )?;
+    }
 
     Ok(report)
 }
@@ -77,48 +124,84 @@ pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
 /// Remove stale gwt-managed asset paths from the target worktree without
 /// materializing the current bundle.
 pub fn prune_stale_gwt_assets(worktree: &Path) -> io::Result<usize> {
+    prune_stale_gwt_assets_for_targets(worktree, &ManagedAssetTarget::ALL)
+}
+
+pub fn prune_stale_gwt_assets_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<usize> {
     let mut report = DistributeReport::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
-    prune_managed_asset_roots(worktree, &tracked_paths, &mut report)?;
+    let targets = normalize_targets(targets);
+    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut report)?;
     Ok(report.paths_removed)
 }
 
-fn prune_managed_asset_roots(
+fn prune_managed_asset_roots_for_targets(
     worktree: &Path,
     tracked_paths: &HashSet<PathBuf>,
+    targets: &[ManagedAssetTarget],
     report: &mut DistributeReport,
 ) -> io::Result<()> {
-    // Claude Code targets
-    prune_dir_against_source(
-        &CLAUDE_SKILLS,
-        worktree,
-        &worktree.join(".claude/skills"),
-        Some(RootEntryKind::Directories),
-        tracked_paths,
-        report,
-    )?;
-    prune_dir_against_source(
-        &CLAUDE_COMMANDS,
-        worktree,
-        &worktree.join(".claude/commands"),
-        Some(RootEntryKind::Files),
-        tracked_paths,
-        report,
-    )?;
-    prune_retired_hook_scripts(&worktree.join(".claude/hooks/scripts"), report)?;
+    if targets.contains(&ManagedAssetTarget::ClaudeCode) {
+        prune_dir_against_source(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".claude/skills"),
+            Some(RootEntryKind::Directories),
+            false,
+            tracked_paths,
+            report,
+        )?;
+        prune_dir_against_source(
+            &CLAUDE_COMMANDS,
+            worktree,
+            &worktree.join(".claude/commands"),
+            Some(RootEntryKind::Files),
+            false,
+            tracked_paths,
+            report,
+        )?;
+        prune_retired_hook_scripts(&worktree.join(".claude/hooks/scripts"), report)?;
+    }
 
-    // Codex targets use the same skill bundle as Claude.
-    prune_dir_against_source(
-        &CLAUDE_SKILLS,
-        worktree,
-        &worktree.join(".codex/skills"),
-        Some(RootEntryKind::Directories),
-        tracked_paths,
-        report,
-    )?;
-    prune_retired_hook_scripts(&worktree.join(".codex/hooks/scripts"), report)?;
+    if targets.contains(&ManagedAssetTarget::Codex) {
+        prune_dir_against_source(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".codex/skills"),
+            Some(RootEntryKind::Directories),
+            false,
+            tracked_paths,
+            report,
+        )?;
+        prune_retired_hook_scripts(&worktree.join(".codex/hooks/scripts"), report)?;
+    }
+
+    if targets.contains(&ManagedAssetTarget::Hermes) {
+        prune_dir_against_source(
+            &CLAUDE_SKILLS,
+            worktree,
+            &worktree.join(".gwt/hermes/skills"),
+            Some(RootEntryKind::Directories),
+            true,
+            tracked_paths,
+            report,
+        )?;
+    }
 
     Ok(())
+}
+
+fn normalize_targets(targets: &[ManagedAssetTarget]) -> Vec<ManagedAssetTarget> {
+    let mut normalized = Vec::new();
+    for target in targets {
+        if !normalized.contains(target) {
+            normalized.push(*target);
+        }
+    }
+    normalized
 }
 
 fn prune_retired_hook_scripts(dest: &Path, report: &mut DistributeReport) -> io::Result<()> {
@@ -158,6 +241,27 @@ fn write_dir_assets(
     tracked_paths: &HashSet<PathBuf>,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, false, report)
+}
+
+fn write_gwt_skill_dir_assets(
+    source: &Dir<'_>,
+    worktree: &Path,
+    dest: &Path,
+    tracked_paths: &HashSet<PathBuf>,
+    report: &mut DistributeReport,
+) -> io::Result<()> {
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, true, report)
+}
+
+fn write_dir_assets_inner(
+    source: &Dir<'_>,
+    worktree: &Path,
+    dest: &Path,
+    tracked_paths: &HashSet<PathBuf>,
+    root_gwt_only: bool,
+    report: &mut DistributeReport,
+) -> io::Result<()> {
     for file in source.files() {
         let target = dest.join(file.path().file_name().unwrap_or_default());
         // Preserve existing tracked files so we do not overwrite user-checked-in
@@ -178,6 +282,9 @@ fn write_dir_assets(
 
     for subdir in source.dirs() {
         let subdir_name = subdir.path().file_name().unwrap_or_default();
+        if root_gwt_only && !subdir_name.to_string_lossy().starts_with("gwt-") {
+            continue;
+        }
         write_dir_assets(
             subdir,
             worktree,
@@ -195,6 +302,7 @@ fn prune_dir_against_source(
     worktree: &Path,
     dest: &Path,
     root_kind: Option<RootEntryKind>,
+    root_gwt_only: bool,
     tracked_paths: &HashSet<PathBuf>,
     report: &mut DistributeReport,
 ) -> io::Result<()> {
@@ -210,6 +318,7 @@ fn prune_dir_against_source(
     let desired_dir_names: HashSet<String> = source
         .dirs()
         .filter_map(|dir| dir.path().file_name().and_then(|name| name.to_str()))
+        .filter(|name| !root_gwt_only || name.starts_with("gwt-"))
         .map(str::to_string)
         .collect();
 
@@ -247,11 +356,15 @@ fn prune_dir_against_source(
 
     for subdir in source.dirs() {
         let subdir_name = subdir.path().file_name().unwrap_or_default();
+        if root_gwt_only && !subdir_name.to_string_lossy().starts_with("gwt-") {
+            continue;
+        }
         prune_dir_against_source(
             subdir,
             worktree,
             &dest.join(subdir_name),
             None,
+            false,
             tracked_paths,
             report,
         )?;
@@ -343,6 +456,71 @@ mod tests {
         distribute_to_worktree(dir.path()).unwrap();
         let skill_md = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
         assert!(skill_md.exists(), "expected {}", skill_md.display());
+    }
+
+    #[test]
+    fn distribute_for_targets_only_materializes_requested_agent_assets() {
+        let dir = tempfile::tempdir().unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::Codex]).unwrap();
+
+        assert!(dir
+            .path()
+            .join(".codex/skills/gwt-manage-pr/SKILL.md")
+            .exists());
+        assert!(
+            !dir.path()
+                .join(".claude/skills/gwt-manage-pr/SKILL.md")
+                .exists(),
+            "Codex launch must not materialize Claude Code skills"
+        );
+        assert!(
+            !dir.path()
+                .join(".gwt/hermes/skills/gwt-manage-pr/SKILL.md")
+                .exists(),
+            "Codex launch must not materialize Hermes skills"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_materializes_hermes_skills_under_hermes_home() {
+        let dir = tempfile::tempdir().unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::Hermes]).unwrap();
+
+        let skill_md = dir
+            .path()
+            .join(".gwt/hermes/skills/gwt-build-spec/SKILL.md");
+        assert!(skill_md.exists(), "expected {}", skill_md.display());
+        assert!(
+            !dir.path()
+                .join(".claude/skills/gwt-build-spec/SKILL.md")
+                .exists(),
+            "Hermes launch must not materialize Claude Code skills"
+        );
+        assert!(
+            !dir.path()
+                .join(".codex/skills/gwt-build-spec/SKILL.md")
+                .exists(),
+            "Hermes launch must not materialize Codex skills"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_preserves_non_gwt_hermes_skill_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_asset = dir
+            .path()
+            .join(".gwt/hermes/skills/tui-design/user-note.md");
+        fs::create_dir_all(user_asset.parent().unwrap()).unwrap();
+        fs::write(&user_asset, "user owned").unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::Hermes]).unwrap();
+
+        assert!(
+            user_asset.exists(),
+            "Hermes distribution must not prune non-gwt skill content"
+        );
     }
 
     #[test]

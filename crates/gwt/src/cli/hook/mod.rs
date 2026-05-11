@@ -225,7 +225,7 @@ pub(crate) fn refresh_managed_assets_for_hook_front_door(
     if gwt_git::Repository::discover(project_root).is_err() {
         return Ok(());
     }
-    crate::managed_assets::refresh_managed_gwt_assets_for_worktree(project_root)
+    crate::managed_assets::refresh_existing_managed_gwt_assets_for_worktree(project_root)
         .map_err(|err| err.to_string())
 }
 

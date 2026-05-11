@@ -3,7 +3,11 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use gwt::refresh_managed_gwt_assets_for_worktree;
+use gwt::{
+    refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    refresh_managed_gwt_assets_for_worktree,
+};
+use gwt_agent::AgentId;
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -76,6 +80,105 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     assert!(exclude.contains(".claude/skills/gwt-*"));
     assert!(exclude.contains(".claude/commands/gwt-*"));
     assert!(exclude.contains(".codex/skills/gwt-*"));
+}
+
+#[test]
+fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Codex)
+        .expect("refresh Codex assets");
+
+    assert!(dir
+        .path()
+        .join(".codex/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(dir.path().join(".codex/hooks.json").exists());
+    assert!(!dir
+        .path()
+        .join(".claude/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(!dir.path().join(".claude/settings.local.json").exists());
+    assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+
+    let exclude =
+        std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
+    assert!(exclude.contains(".codex/skills/gwt-*"));
+    assert!(!exclude.contains(".claude/skills/gwt-*"));
+    assert!(!exclude.contains(".gwt/hermes/"));
+}
+
+#[test]
+fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Hermes)
+        .expect("refresh Hermes assets");
+
+    assert!(dir.path().join(".gwt/hermes/config.yaml").exists());
+    assert!(dir
+        .path()
+        .join(".gwt/hermes/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(!dir
+        .path()
+        .join(".claude/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(!dir
+        .path()
+        .join(".codex/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(!dir.path().join(".codex/hooks.json").exists());
+
+    let exclude =
+        std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
+    assert!(exclude.contains(".gwt/hermes/"));
+    assert!(!exclude.contains(".claude/skills/gwt-*"));
+    assert!(!exclude.contains(".codex/skills/gwt-*"));
+}
+
+#[test]
+fn refresh_existing_managed_assets_refreshes_only_present_provider_surfaces() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    std::fs::create_dir_all(dir.path().join(".codex/skills")).expect("create codex marker");
+
+    refresh_existing_managed_gwt_assets_for_worktree(dir.path())
+        .expect("refresh existing managed assets");
+
+    assert!(dir
+        .path()
+        .join(".codex/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(dir.path().join(".codex/hooks.json").exists());
+    assert!(!dir
+        .path()
+        .join(".claude/skills/gwt-build-spec/SKILL.md")
+        .exists());
+    assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+
+    let exclude =
+        std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
+    assert!(exclude.contains(".codex/skills/gwt-*"));
+    assert!(!exclude.contains(".claude/skills/gwt-*"));
+    assert!(!exclude.contains(".gwt/hermes/"));
 }
 
 #[test]

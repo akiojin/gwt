@@ -825,6 +825,69 @@ fn unassigned_agent_without_title_summary_is_not_title_blocked() {
 }
 
 #[test]
+fn actionable_unassigned_agent_is_blocked_from_mutation_until_workspace_ensure() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/unassigned", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut agent = unassigned_workspace_agent(&session_id);
+        agent.title_summary = Some("Workspace materialization".to_string());
+        agent.current_focus = Some("Ensure actionable intent enters a Workspace".to_string());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt/src/cli/workspace.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision =
+            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
+            panic!("expected actionable Unassigned mutation to be blocked");
+        };
+        assert!(detail.contains("Unassigned"), "{detail}");
+        assert!(detail.contains("gwtd workspace ensure"), "{detail}");
+    });
+}
+
+#[test]
+fn actionable_unassigned_agent_can_run_workspace_ensure_command() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/unassigned", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut agent = unassigned_workspace_agent(&session_id);
+        agent.title_summary = Some("Workspace materialization".to_string());
+        agent.current_focus = Some("Ensure actionable intent enters a Workspace".to_string());
+        projection.agents.push(agent);
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let event = event(
+            "Bash",
+            json!({
+                "command": "gwtd workspace ensure --agent-session \"$GWT_SESSION_ID\" --title-summary 'Workspace materialization' --current-focus 'Ensure actionable intent enters a Workspace' --spec 2359"
+            }),
+        );
+
+        let decision =
+            workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "Workspace ensure must remain allowed so the Agent can repair affiliation"
+        );
+    });
+}
+
+#[test]
 fn assigned_agent_without_title_summary_remains_title_blocked() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);

@@ -7,28 +7,12 @@ use std::{
 
 use gwt_core::process::hidden_command;
 
+use crate::distribute::ManagedAssetTarget;
+
 const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
-
-/// Patterns to exclude gwt-managed assets from git tracking.
-///
-/// `.gwt/discussion.md` is the gwt-discussion skill's working artifact, which
-/// is always created under the active worktree. gwt owns its exclusion via
-/// this managed block rather than `.gitignore`, because a project-level
-/// `.gitignore` cannot assume every worktree using a gwt skill has the same
-/// repo-wide rule (some consumers run gwt without committing to the
-/// repository's `.gitignore`).
-const GWT_EXCLUDE_PATTERNS: &[&str] = &[
-    ".claude/skills/gwt-*",
-    ".claude/commands/gwt-*",
-    ".claude/settings.local.json",
-    ".codex/skills/gwt-*",
-    ".gwt/discussion.md",
-    ".gwt/opencode/",
-    ".gwt/openclaw/",
-    ".gwt/hermes/",
-    "docker-compose.override.yml",
-];
+const LEGACY_BEGIN_MARKER: &str = "# BEGIN gwt managed local assets";
+const LEGACY_END_MARKER: &str = "# END gwt managed local assets";
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
 ///
@@ -36,6 +20,22 @@ const GWT_EXCLUDE_PATTERNS: &[&str] = &[
 /// `# gwt-managed-begin` / `# gwt-managed-end` markers and replaced on
 /// each call.
 pub fn update_git_exclude(worktree: &Path) -> io::Result<()> {
+    write_git_exclude(worktree, replace_managed_block)
+}
+
+pub fn update_git_exclude_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<()> {
+    write_git_exclude(worktree, |existing| {
+        replace_managed_block_for_targets(existing, targets)
+    })
+}
+
+fn write_git_exclude(
+    worktree: &Path,
+    replace: impl FnOnce(&str) -> io::Result<String>,
+) -> io::Result<()> {
     let exclude_path = resolve_git_exclude_path(worktree)?;
 
     // Create parent directory if needed
@@ -49,7 +49,7 @@ pub fn update_git_exclude(worktree: &Path) -> io::Result<()> {
         String::new()
     };
 
-    let updated = replace_managed_block(&existing)?;
+    let updated = replace(&existing)?;
     fs::write(&exclude_path, updated)?;
 
     Ok(())
@@ -88,8 +88,26 @@ fn resolve_git_exclude_path(worktree: &Path) -> io::Result<PathBuf> {
 }
 
 fn replace_managed_block(content: &str) -> io::Result<String> {
+    let mut patterns = exclude_patterns_for_targets(&ManagedAssetTarget::ALL);
+    push_unique(&mut patterns, "docker-compose.override.yml");
+    replace_managed_block_with_patterns(content, &patterns)
+}
+
+fn replace_managed_block_for_targets(
+    content: &str,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<String> {
+    let patterns = exclude_patterns_for_targets(targets);
+    replace_managed_block_with_patterns(content, &patterns)
+}
+
+fn replace_managed_block_with_patterns(
+    content: &str,
+    patterns: &[&'static str],
+) -> io::Result<String> {
     let mut result = String::new();
     let mut in_managed_block = false;
+    let mut in_legacy_managed_block = false;
 
     for line in content.lines() {
         if line.trim() == BEGIN_MARKER {
@@ -101,6 +119,15 @@ fn replace_managed_block(content: &str) -> io::Result<String> {
             in_managed_block = true;
             continue;
         }
+        if line.trim() == LEGACY_BEGIN_MARKER {
+            if in_legacy_managed_block {
+                return Err(malformed_marker_error(
+                    "nested begin marker in legacy gwt-managed exclude block",
+                ));
+            }
+            in_legacy_managed_block = true;
+            continue;
+        }
         if line.trim() == END_MARKER {
             if !in_managed_block {
                 return Err(malformed_marker_error(
@@ -110,7 +137,16 @@ fn replace_managed_block(content: &str) -> io::Result<String> {
             in_managed_block = false;
             continue;
         }
-        if !in_managed_block {
+        if line.trim() == LEGACY_END_MARKER {
+            if !in_legacy_managed_block {
+                return Err(malformed_marker_error(
+                    "legacy end marker without matching begin marker in gwt-managed exclude block",
+                ));
+            }
+            in_legacy_managed_block = false;
+            continue;
+        }
+        if !in_managed_block && !in_legacy_managed_block {
             result.push_str(line);
             result.push('\n');
         }
@@ -119,6 +155,11 @@ fn replace_managed_block(content: &str) -> io::Result<String> {
     if in_managed_block {
         return Err(malformed_marker_error(
             "unterminated gwt-managed exclude block",
+        ));
+    }
+    if in_legacy_managed_block {
+        return Err(malformed_marker_error(
+            "unterminated legacy gwt-managed exclude block",
         ));
     }
 
@@ -130,18 +171,58 @@ fn replace_managed_block(content: &str) -> io::Result<String> {
         format!("{trimmed}\n")
     };
 
-    // Append managed block
-    final_content.push('\n');
-    final_content.push_str(BEGIN_MARKER);
-    final_content.push('\n');
-    for pattern in GWT_EXCLUDE_PATTERNS {
-        final_content.push_str(pattern);
+    if !patterns.is_empty() {
+        // Append managed block
+        final_content.push('\n');
+        final_content.push_str(BEGIN_MARKER);
+        final_content.push('\n');
+        for pattern in patterns {
+            final_content.push_str(pattern);
+            final_content.push('\n');
+        }
+        final_content.push_str(END_MARKER);
         final_content.push('\n');
     }
-    final_content.push_str(END_MARKER);
-    final_content.push('\n');
 
     Ok(final_content)
+}
+
+fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static str> {
+    let mut patterns = Vec::new();
+    if !targets.is_empty() {
+        push_unique(&mut patterns, ".gwt/discussion.md");
+    }
+    for target in ManagedAssetTarget::ALL {
+        if !targets.contains(&target) {
+            continue;
+        }
+        match target {
+            ManagedAssetTarget::ClaudeCode => {
+                push_unique(&mut patterns, ".claude/skills/gwt-*");
+                push_unique(&mut patterns, ".claude/commands/gwt-*");
+                push_unique(&mut patterns, ".claude/settings.local.json");
+            }
+            ManagedAssetTarget::Codex => {
+                push_unique(&mut patterns, ".codex/skills/gwt-*");
+            }
+            ManagedAssetTarget::OpenCode => {
+                push_unique(&mut patterns, ".gwt/opencode/");
+            }
+            ManagedAssetTarget::OpenClaw => {
+                push_unique(&mut patterns, ".gwt/openclaw/");
+            }
+            ManagedAssetTarget::Hermes => {
+                push_unique(&mut patterns, ".gwt/hermes/");
+            }
+        }
+    }
+    patterns
+}
+
+fn push_unique(patterns: &mut Vec<&'static str>, pattern: &'static str) {
+    if !patterns.contains(&pattern) {
+        patterns.push(pattern);
+    }
 }
 
 fn malformed_marker_error(detail: &str) -> io::Error {
@@ -170,6 +251,40 @@ mod tests {
         assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));
         assert!(!result.contains(".agents/skills/gwt-*"));
+    }
+
+    #[test]
+    fn adds_only_requested_provider_patterns() {
+        let result = replace_managed_block_for_targets("", &[ManagedAssetTarget::Hermes]).unwrap();
+
+        assert!(result.contains(BEGIN_MARKER));
+        assert!(result.contains(".gwt/hermes/"));
+        assert!(result.contains(".gwt/discussion.md"));
+        assert!(!result.contains(".claude/skills/gwt-*"));
+        assert!(!result.contains(".codex/skills/gwt-*"));
+        assert!(!result.contains(".gwt/opencode/"));
+        assert!(!result.contains(".gwt/openclaw/"));
+    }
+
+    #[test]
+    fn replaces_legacy_broad_managed_block_with_scoped_patterns() {
+        let existing = "\
+user-entry
+# BEGIN gwt managed local assets
+/.gwt/
+/.codex/skills/gwt-*/
+/.claude/skills/gwt-*/
+# END gwt managed local assets
+";
+
+        let result =
+            replace_managed_block_for_targets(existing, &[ManagedAssetTarget::Codex]).unwrap();
+
+        assert!(result.contains("user-entry"));
+        assert!(result.contains(".codex/skills/gwt-*"));
+        assert!(!result.contains("/.gwt/"));
+        assert!(!result.contains(".claude/skills/gwt-*"));
+        assert!(!result.contains("# BEGIN gwt managed local assets"));
     }
 
     #[test]

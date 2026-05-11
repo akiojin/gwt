@@ -70,11 +70,14 @@ pub use launch_wizard::{
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
-    LaunchWizardPreviousProfile, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
-    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
-    QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardQuickStartView,
+    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
+    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
 };
-pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
+pub use managed_assets::{
+    refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    refresh_managed_gwt_assets_for_worktree,
+};
 #[cfg(target_os = "macos")]
 pub use native_app::MacosNativeMenu;
 pub use native_app::{

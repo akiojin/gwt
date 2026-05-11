@@ -407,8 +407,8 @@ impl LaunchWizardMemoryCache {
         )
     }
 
-    fn previous_profile(&self, repo_path: &Path) -> Option<gwt::LaunchWizardPreviousProfile> {
-        gwt::launch_wizard::previous_launch_profile_from_sessions(repo_path, &self.sessions)
+    fn previous_profiles(&self) -> gwt::LaunchWizardPreviousProfiles {
+        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
     }
 
     fn record_session(&mut self, session: gwt_agent::Session) {
@@ -4669,7 +4669,7 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-            refresh_managed_gwt_assets_for_worktree(&worktree_path)
+            refresh_managed_gwt_assets_for_agent(&worktree_path, &config.agent_id)
                 .map_err(|error| error.to_string())?;
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
@@ -10670,6 +10670,82 @@ exit 0
         assert_eq!(projected_event.active_agents, 0);
         assert_eq!(projected_event.status_category, "idle");
         assert_eq!(projected_event.next_action, None);
+    }
+
+    #[test]
+    fn app_runtime_board_milestone_from_unassigned_origin_does_not_create_workspace_history() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo.clone(),
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "session-unassigned".to_string(),
+                window_id: None,
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Investigate Workspace materialization".to_string()),
+                title_summary: Some("Workspace materialization".to_string()),
+                worktree_path: None,
+                branch: Some("work/unassigned".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
+                workspace_id: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "Unassigned claim without materialization must not pollute current Workspace history.",
+            None,
+            None,
+            vec!["workspace-materialization".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_title_summary("Workspace materialization")
+        .with_origin_session_id("session-unassigned");
+
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &entry);
+
+        let saved = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-unassigned")
+            .expect("agent");
+        assert_eq!(
+            agent.affiliation_status,
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned
+        );
+        assert!(
+            gwt_core::workspace_projection::load_workspace_work_items(&repo)
+                .expect("load workspace history")
+                .is_none(),
+            "Unassigned origin Board entries must not append to unrelated Workspace history"
+        );
     }
 
     #[test]

@@ -372,16 +372,18 @@ impl AppRuntime {
             );
             return None;
         }
-        let work_event =
-            workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
-        if let Err(error) =
-            workspace_projection::record_workspace_work_event(project_root, work_event)
-        {
-            tracing::warn!(
-                error = %error,
-                project_root = %project_root.display(),
-                "failed to record workspace WorkItem event for board milestone"
-            );
+        if board_entry_origin_can_record_workspace_work_event(&projection, entry) {
+            let work_event =
+                workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
+            if let Err(error) =
+                workspace_projection::record_workspace_work_event(project_root, work_event)
+            {
+                tracing::warn!(
+                    error = %error,
+                    project_root = %project_root.display(),
+                    "failed to record workspace WorkItem event for board milestone"
+                );
+            }
         }
 
         if self.active_tab_id.as_deref() != Some(tab_id) {
@@ -442,6 +444,20 @@ impl AppRuntime {
             Some(entry.body.clone()),
         )
     }
+}
+
+fn board_entry_origin_can_record_workspace_work_event(
+    projection: &workspace_projection::WorkspaceProjection,
+    entry: &coordination::BoardEntry,
+) -> bool {
+    let Some(session_id) = entry.origin_session_id.as_deref() else {
+        return true;
+    };
+    projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session_id)
+        .is_some_and(|agent| agent.is_assigned())
 }
 
 fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
