@@ -407,8 +407,8 @@ impl LaunchWizardMemoryCache {
         )
     }
 
-    fn previous_profile(&self, repo_path: &Path) -> Option<gwt::LaunchWizardPreviousProfile> {
-        gwt::launch_wizard::previous_launch_profile_from_sessions(repo_path, &self.sessions)
+    fn previous_profiles(&self) -> gwt::LaunchWizardPreviousProfiles {
+        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
     }
 
     fn record_session(&mut self, session: gwt_agent::Session) {

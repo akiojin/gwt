@@ -450,7 +450,54 @@ pub fn install_launch_gwt_bin_env_with_lookup(
                 .or_insert(gwt_bin);
         }
     }
+    if let Some(resolved) = env_vars.get(GWT_BIN_PATH_ENV).cloned() {
+        if let Some(parent) = Path::new(&resolved).parent() {
+            prepend_dir_to_path(env_vars, parent);
+        }
+    }
     Ok(())
+}
+
+/// Prepend `dir` to the PATH-style entry in `env_vars` unless it is empty or
+/// already present.
+///
+/// Returns `true` if the entry was updated, `false` for a no-op (empty `dir`,
+/// dir already on PATH, or `join_paths` failure). Key lookup is
+/// case-insensitive: Windows processes may expose the variable as `Path` or
+/// `path`, and a case-sensitive read would produce a duplicate `PATH` key
+/// alongside the original, corrupting command lookup once the child process
+/// inherits both. PATH parsing uses [`std::env::split_paths`] /
+/// [`std::env::join_paths`] so the `:` / `;` separator difference between
+/// Unix and Windows is handled automatically.
+pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -> bool {
+    if dir.as_os_str().is_empty() {
+        return false;
+    }
+    let existing_key = env_vars
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .cloned();
+    let key = existing_key.unwrap_or_else(|| "PATH".to_string());
+    let existing_path = env_vars
+        .get(&key)
+        .map(String::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(&existing_path).collect()
+    };
+    let dir_buf = dir.to_path_buf();
+    if entries.iter().any(|entry| entry == &dir_buf) {
+        return false;
+    }
+    entries.insert(0, dir_buf);
+    let Ok(joined) = std::env::join_paths(&entries) else {
+        return false;
+    };
+    env_vars.insert(key, joined.to_string_lossy().into_owned());
+    true
 }
 
 pub fn resolve_public_gwt_bin_with_lookup(
@@ -1886,5 +1933,305 @@ mod tests {
     fn preflight_env_test_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
+    // install_launch_gwt_bin_env_with_lookup must prepend the GWT_BIN_PATH
+    // parent directory to env_vars["PATH"] so agent subshells can resolve
+    // gwtd / gwt directly without the ${GWT_BIN_PATH:-gwtd} indirection.
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        assert_eq!(
+            env_vars.get(GWT_BIN_PATH_ENV).map(String::as_str),
+            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+        );
+        let path = env_vars.get("PATH").expect("PATH should be set");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/Applications/GWT.app/Contents/MacOS")),
+            "GWT_BIN_PATH parent dir must be prepended; got {path}",
+        );
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            "/Applications/GWT.app/Contents/MacOS:/usr/bin".to_string(),
+        )]);
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/Applications/GWT.app/Contents/MacOS"),
+                PathBuf::from("/usr/bin"),
+            ],
+            "PATH must not contain duplicate GWT_BIN_PATH parent dir",
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        // Lookup returns a bare filename (Path::parent => Some(""))
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("gwtd")),
+        )
+        .expect("install");
+
+        assert_eq!(
+            env_vars.get(GWT_BIN_PATH_ENV).map(String::as_str),
+            Some("gwtd"),
+        );
+        assert_eq!(
+            env_vars.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin"),
+            "empty GWT_BIN_PATH parent must be a no-op",
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_creates_path_when_absent() {
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        let path = env_vars.get("PATH").expect("PATH should be created");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries,
+            vec![PathBuf::from("/Applications/GWT.app/Contents/MacOS")],
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_docker_dedups_when_dir_already_on_path() {
+        let mut env_vars =
+            HashMap::from([("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())]);
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Docker,
+            Path::new("/never/used/in/docker"),
+            |_command| None,
+        )
+        .expect("install");
+
+        assert_eq!(
+            env_vars.get(GWT_BIN_PATH_ENV).map(String::as_str),
+            Some("/usr/local/bin/gwtd"),
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries,
+            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"),],
+            "Docker dir already on PATH must dedup",
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_docker_prepends_when_dir_missing_from_path() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Docker,
+            Path::new("/never/used/in/docker"),
+            |_command| None,
+        )
+        .expect("install");
+
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/usr/local/bin")),
+            "Docker dir not on PATH must be prepended; got entries: {entries:?}",
+        );
+    }
+
+    #[test]
+    fn prepend_dir_to_path_preserves_windows_style_path_key() {
+        // CodeRabbit P1 regression follow-up: Windows processes may expose
+        // the path variable as "Path" (case-insensitive at OS level).
+        // prepend_dir_to_path must update the existing key in place rather
+        // than creating a duplicate "PATH" entry alongside "Path", otherwise
+        // the spawned child process inherits both and command lookup is
+        // corrupted. Test values use the platform-native PATH separator so
+        // split_paths / join_paths round-trip on the host test runner.
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let mut env_vars =
+            HashMap::from([("Path".to_string(), existing.to_string_lossy().into_owned())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(updated, "PATH must be updated for Windows-style key");
+        assert!(
+            !env_vars.contains_key("PATH"),
+            "no duplicate uppercase PATH key may be created when Path exists: {env_vars:?}",
+        );
+        let path = env_vars.get("Path").expect("Path key must be preserved");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin")),
+            "prepended dir must lead the Path value; got {path}",
+        );
+        assert!(entries.iter().any(|p| p == Path::new("/usr/bin")));
+        assert!(entries.iter().any(|p| p == Path::new("/bin")));
+    }
+
+    #[test]
+    fn prepend_dir_to_path_preserves_lowercase_path_key() {
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let mut env_vars =
+            HashMap::from([("path".to_string(), existing.to_string_lossy().into_owned())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(updated);
+        assert!(
+            !env_vars.contains_key("PATH"),
+            "no duplicate uppercase PATH key may be created when lowercase path exists: {env_vars:?}",
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("path").expect("path key")).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin")),
+        );
+    }
+
+    #[test]
+    fn prepend_dir_to_path_dedups_case_insensitive_existing_dir() {
+        let existing = std::env::join_paths([Path::new("/opt/gwt/bin"), Path::new("/usr/bin")])
+            .expect("join_paths existing entries");
+        let original_value = existing.to_string_lossy().into_owned();
+        let mut env_vars = HashMap::from([("Path".to_string(), original_value.clone())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(
+            !updated,
+            "existing entry must be a no-op regardless of key case"
+        );
+        assert!(!env_vars.contains_key("PATH"));
+        assert_eq!(
+            env_vars.get("Path").map(String::as_str),
+            Some(original_value.as_str())
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_preserves_existing_path_order() {
+        let mut env_vars =
+            HashMap::from([("PATH".to_string(), "/profile/bin:/usr/bin:/bin".to_string())]);
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/Applications/GWT.app/Contents/MacOS"),
+                PathBuf::from("/profile/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ],
+            "existing PATH order must be preserved after prepend",
+        );
+    }
+
+    #[test]
+    fn prepare_agent_launch_host_prepends_gwtd_dir_to_path() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join(".gwt").join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut config = sample_versioned_launch_config(&worktree);
+        config
+            .env_vars
+            .insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+
+        let mut probe_host_runner =
+            |_command: &str,
+             _args: Vec<String>,
+             _env: &HashMap<String, String>,
+             _remove_env: &[String],
+             _cwd: Option<PathBuf>| true;
+        let lookup_gwt_bin = |_command: &str| Some(PathBuf::from("/opt/gwt/bin/gwtd"));
+
+        let prepared = prepare_agent_launch_with(
+            &worktree,
+            &sessions_dir,
+            config,
+            None,
+            |_path| Ok(()),
+            PrepareLaunchDeps {
+                current_exe: Path::new("/opt/gwt/bin/gwt"),
+                probe_host_runner: &mut probe_host_runner,
+                lookup_gwt_bin: &lookup_gwt_bin,
+            },
+        )
+        .expect("prepare launch");
+
+        assert_eq!(
+            prepared
+                .process_launch
+                .env
+                .get(GWT_BIN_PATH_ENV)
+                .map(String::as_str),
+            Some("/opt/gwt/bin/gwtd"),
+        );
+        let path = prepared
+            .process_launch
+            .env
+            .get("PATH")
+            .expect("PATH should be set after install_launch_gwt_bin_env_with_lookup");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin")),
+            "agent process PATH must start with GWT_BIN_PATH parent dir; got {path}",
+        );
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
     }
 }
