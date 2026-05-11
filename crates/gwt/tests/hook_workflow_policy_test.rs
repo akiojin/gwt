@@ -9,6 +9,9 @@ use chrono::Utc;
 use gwt::cli::hook::{workflow_policy, HookEvent, HookOutput};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{
+    coordination::{
+        post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+    },
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
     workspace_projection::{
@@ -160,21 +163,57 @@ fn save_session(repo_path: &Path, branch: &str, linked_issue_number: Option<u64>
 
 fn seed_workspace_agent_title(repo_path: &Path, session_id: &str) {
     let mut projection = WorkspaceProjection::default_for_project(repo_path);
-    projection.agents.push(WorkspaceAgentSummary {
+    projection.agents.push(workspace_agent(
+        session_id,
+        "Testing workflow policy",
+        "Workflow policy test",
+    ));
+    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
+}
+
+fn workspace_agent(
+    session_id: &str,
+    current_focus: &str,
+    title_summary: &str,
+) -> WorkspaceAgentSummary {
+    WorkspaceAgentSummary {
         session_id: session_id.to_string(),
         window_id: None,
         agent_id: "codex".to_string(),
         display_name: "Codex".to_string(),
         status_category: WorkspaceStatusCategory::Active,
-        current_focus: Some("Testing workflow policy".to_string()),
-        title_summary: Some("Workflow policy test".to_string()),
-        worktree_path: Some(repo_path.to_path_buf()),
+        current_focus: Some(current_focus.to_string()),
+        title_summary: Some(title_summary.to_string()),
+        worktree_path: None,
         branch: Some("feature/workflow".to_string()),
         last_board_entry_id: None,
         last_board_entry_kind: None,
         coordination_scope: None,
         updated_at: Utc::now(),
-    });
+    }
+}
+
+fn seed_workspace_agents(
+    repo_path: &Path,
+    current_session_id: &str,
+    current_title: &str,
+    other_session_id: &str,
+    other_title: &str,
+) {
+    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    projection.title = "Workspace semantic coordination".to_string();
+    projection.status_category = WorkspaceStatusCategory::Active;
+    projection.summary = Some("Coordinate same-work detection across agents".to_string());
+    projection.agents.push(workspace_agent(
+        current_session_id,
+        "Implement Workspace semantic coordination gate",
+        current_title,
+    ));
+    projection.agents.push(workspace_agent(
+        other_session_id,
+        "Implement duplicate Workspace semantic coordination protection",
+        other_title,
+    ));
     save_workspace_projection(repo_path, &projection).expect("save workspace projection");
 }
 
@@ -499,5 +538,146 @@ fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
             matches!(decision, HookOutput::Silent),
             "plain issue owner from linkage store should allow implementation"
         );
+    });
+}
+
+#[test]
+fn blocks_mutation_when_another_active_workspace_matches_current_title() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        seed_workspace_agents(
+            &repo_path,
+            &session_id,
+            "Workspace semantic coordination gate",
+            "session-other",
+            "Workspace semantic coordination duplicate guard",
+        );
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
+            panic!("expected active Workspace conflict to block mutation");
+        };
+        assert!(detail.contains("similar active Workspace"), "{detail}");
+        assert!(detail.contains("session-other"), "{detail}");
+        assert!(detail.contains("gwtd board post"), "{detail}");
+        assert!(detail.contains("Boundary:"), "{detail}");
+    });
+}
+
+#[test]
+fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        seed_workspace_agents(
+            &repo_path,
+            &session_id,
+            "Workspace semantic coordination gate",
+            "session-other",
+            "Workspace semantic coordination duplicate guard",
+        );
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "Split accepted for same Workspace work.\n\nBoundary: current session owns workflow-policy tests and policy gate only.",
+            None,
+            None,
+            vec!["workspace-semantic-coordination".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id(session_id.clone())
+        .with_mention(BoardMention::new(
+            BoardMentionTargetKind::Session,
+            "session-other",
+        ));
+        post_entry(&repo_path, entry).expect("post split claim");
+
+        let event = event(
+            "Edit",
+            json!({
+                "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "Boundary-targeted split claim should allow disjoint implementation"
+        );
+    });
+}
+
+#[test]
+fn blocks_mutation_when_active_board_claim_matches_current_title() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection.agents.push(workspace_agent(
+            &session_id,
+            "Implement Workspace semantic coordination gate",
+            "Workspace semantic coordination gate",
+        ));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Other Codex",
+            BoardEntryKind::Claim,
+            "Implement Workspace semantic coordination duplicate guard for active agents.",
+            None,
+            None,
+            vec!["workspace-semantic-coordination".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id("session-other");
+        post_entry(&repo_path, entry).expect("post active claim");
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
+            panic!("expected active Board claim conflict to block mutation");
+        };
+        assert!(detail.contains("active Board claim"), "{detail}");
+        assert!(detail.contains("session-other"), "{detail}");
     });
 }
