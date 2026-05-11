@@ -50,6 +50,7 @@ pub struct WorkflowContext {
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
+    pub workspace_materialization_missing: bool,
 }
 
 impl WorkflowContext {
@@ -60,6 +61,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
+            workspace_materialization_missing: false,
         }
     }
 
@@ -70,6 +72,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
+            workspace_materialization_missing: false,
         }
     }
 
@@ -80,6 +83,7 @@ impl WorkflowContext {
             has_tasks,
             bypass: None,
             title_summary_missing: false,
+            workspace_materialization_missing: false,
         }
     }
 
@@ -90,11 +94,17 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: Some(bypass),
             title_summary_missing: false,
+            workspace_materialization_missing: false,
         }
     }
 
     pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
         self.title_summary_missing = missing;
+        self
+    }
+
+    pub fn with_workspace_materialization_missing(mut self, missing: bool) -> Self {
+        self.workspace_materialization_missing = missing;
         self
     }
 }
@@ -119,12 +129,20 @@ pub fn evaluate_with_context(
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
     }
+    let materialization =
+        evaluate_workspace_materialization_guard(event, context.workspace_materialization_missing)?;
+    if materialization != HookOutput::Silent {
+        return Ok(materialization);
+    }
     evaluate_workspace_coordination_guard(event, worktree_root)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     let context = resolve_workflow_context(worktree_root)
-        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?);
+        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?)
+        .with_workspace_materialization_missing(current_agent_workspace_materialization_missing(
+            worktree_root,
+        )?);
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -223,6 +241,34 @@ fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, Hoo
         .is_none())
 }
 
+fn current_agent_workspace_materialization_missing(
+    worktree_root: &Path,
+) -> Result<bool, HookError> {
+    let Some(session) = load_session_from_env() else {
+        return Ok(false);
+    };
+    let projection_root = if session.worktree_path.exists() {
+        session.worktree_path.as_path()
+    } else {
+        worktree_root
+    };
+    let Some(projection) = load_workspace_projection(projection_root)? else {
+        return Ok(false);
+    };
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session.id)
+    else {
+        return Ok(false);
+    };
+    if !agent.is_unassigned() {
+        return Ok(false);
+    }
+    Ok(option_has_nonempty_text(agent.title_summary.as_deref())
+        || option_has_nonempty_text(agent.current_focus.as_deref()))
+}
+
 fn evaluate_title_summary_guard(
     event: &HookEvent,
     title_summary_missing: bool,
@@ -244,6 +290,33 @@ Required command shape:\n\
 Good example: --title-summary 'Agent title improvement'\n\
 Bad example: --title-summary 'Agent title improvement complete'\n\n\
 Use the configured narrative language for the title-summary. Keep progress, completion, blocker state, and long detail in --current-focus, --summary, or Board --body.",
+        ));
+    }
+
+    Ok(HookOutput::Silent)
+}
+
+fn evaluate_workspace_materialization_guard(
+    event: &HookEvent,
+    workspace_materialization_missing: bool,
+) -> Result<HookOutput, HookError> {
+    if !workspace_materialization_missing {
+        return Ok(HookOutput::Silent);
+    }
+
+    if is_workspace_materialization_event(event) || is_read_only_exploration_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+
+    if is_title_sensitive_tool(event) {
+        return Ok(HookOutput::pre_tool_use_permission(
+            "Unassigned Agent has actionable Workspace intent",
+            "This Agent already has a title-summary or current focus, but it is still Unassigned. \
+Materialize the work into a Workspace before implementation or verification so title sync, Board audience, and Workspace history stay attached to the same work.\n\n\
+Required command shape:\n\
+  gwtd workspace ensure --agent-session \"$GWT_SESSION_ID\" --title-summary '<short work title>' --current-focus '<current work focus>' [--spec <number>|--issue <number>] [--topic <topic>]\n\n\
+Use `gwtd workspace candidates --agent-session \"$GWT_SESSION_ID\"` first only when you need to inspect choices manually. \
+Use `gwtd board post --kind claim --title-summary '<short work title>' ...` when the intent should be materialized as a Board milestone.",
         ));
     }
 
@@ -537,6 +610,10 @@ fn push_optional<'a>(parts: &mut Vec<&'a str>, value: Option<&'a str>) {
     }
 }
 
+fn option_has_nonempty_text(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
 fn board_claim_is_active(entry: &BoardEntry) -> bool {
     !entry.state.as_deref().is_some_and(|state| {
         matches!(
@@ -705,10 +782,45 @@ fn is_workspace_coordination_command(command: &str) -> bool {
             matches!(
                 tokens.as_slice(),
                 [_, "board", "post" | "show", ..]
-                    | [_, "workspace", "update", ..]
+                    | [
+                        _,
+                        "workspace",
+                        "update" | "ensure" | "create" | "join" | "candidates",
+                        ..
+                    ]
                     | [_, "build", "start" | "phase" | "complete" | "abort", ..]
             )
         })
+}
+
+fn is_workspace_materialization_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    let Some(command) = event.command() else {
+        return false;
+    };
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| is_workspace_materialization_segment(segment))
+}
+
+fn is_workspace_materialization_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return false;
+    };
+    if command_name != "gwtd" {
+        return false;
+    }
+    match tokens.as_slice() {
+        [_, "workspace", "ensure" | "create" | "join" | "candidates", ..] => true,
+        [_, "board", "show", ..] => true,
+        [_, "board", "post", rest @ ..] => rest.contains(&"--title-summary"),
+        _ => false,
+    }
 }
 
 fn is_similar_work(left: &str, right: &str) -> bool {
@@ -825,6 +937,9 @@ fn is_title_summary_update_segment(segment: &str) -> bool {
     }
     match tokens.as_slice() {
         [_, "workspace", "update", rest @ ..] => {
+            rest.contains(&"--agent-session") && rest.contains(&"--title-summary")
+        }
+        [_, "workspace", "ensure", rest @ ..] => {
             rest.contains(&"--agent-session") && rest.contains(&"--title-summary")
         }
         [_, "board", "post", rest @ ..] => rest.contains(&"--title-summary"),

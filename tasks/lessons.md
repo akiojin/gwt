@@ -1,5 +1,36 @@
 # Lessons Learned
 
+## 2026-05-11 — Actionable Unassigned Agents must materialize before mutation
+
+### 事象
+
+Unassigned Agent が `title-summary` 付きの Board milestone や実装作業を
+行っても、Agent window title が更新されず、Workspace Overview では多くの
+Agent が Unassigned のまま残った。さらに Workspace Overview の Unassigned
+領域と detail pane に明示的な scroll containment がなく、表示内容が見切れた。
+
+### 原因
+
+`title-summary` guard は「Assigned Agent の title 欠落」を防いでいたが、
+「作業名や current focus を持つ Unassigned Agent は、まず Workspace に
+materialize しなければならない」という前提を workflow-policy / Board post
+経路で強制していなかった。Board milestone から Workspace history を更新する
+経路も origin Agent の affiliation を確認しておらず、Unassigned 起点の
+milestone が所属修復なしに履歴だけを更新できた。
+
+### 再発防止策
+
+1. Agent title / Board milestone / Workspace history のいずれかを変更する
+   修正では、Unassigned Agent の materialization 経路 (`workspace ensure` /
+   join / create) を必ずテストする。
+2. Board post で milestone kind (`claim` / `status` / `blocked` / `handoff` /
+   `decision` / `next`) を扱う場合、audience 計算より前に Workspace
+   affiliation が確定していることを確認する。意図的な broadcast は例外として
+   明示的に opt-out させる。
+3. Workspace Overview の固定領域を変更する場合は、`min-height: 0` と
+   bounded `overflow` の contract test を追加し、Unassigned / columns /
+   detail pane のどれも到達不能にならないことを確認する。
+
 ## 2026-05-10 — SPEC section edits must preserve section markers and avoid concurrent writes
 
 ### 事象
