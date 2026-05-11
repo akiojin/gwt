@@ -7,6 +7,7 @@ import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
   boardEntryMentionsSelf,
+  entryVisibleForWorkspace,
   mentionForReplyParent,
   mentionsForBoardSubmit,
   visibleBoardEntries,
@@ -47,6 +48,12 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
   assert.match(appSource, /all:\s*state\.audienceFilter\s*===\s*"all"/);
+});
+
+test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {
+  assert.match(appSource, /board-workspace-filter/);
+  assert.match(appSource, /toggle-board-workspace/);
+  assert.match(appSource, /state\.audienceFilter\s*===\s*"workspace"/);
 });
 
 test("Board message body preserves multiline plaintext", () => {
@@ -133,6 +140,64 @@ test("Board workspace audience filter shows current workspace plus broadcast by 
     visibleBoardEntries(state).map((entry) => entry.id),
     ["broadcast", "workspace-a", "workspace-b", "empty"],
   );
+});
+
+test("entryVisibleForWorkspace treats absent or empty audience as broadcast (FR-093/103)", () => {
+  const broadcastA = { id: "a", audience: [] };
+  const broadcastB = { id: "b" };
+  const scopedAB = { id: "ab", audience: ["ws-1", "ws-2"] };
+  const scopedOther = { id: "other", audience: ["ws-2"] };
+
+  assert.equal(entryVisibleForWorkspace(broadcastA, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(broadcastB, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(broadcastA, null), true);
+  assert.equal(entryVisibleForWorkspace(scopedAB, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(scopedAB, "ws-3"), false);
+  assert.equal(entryVisibleForWorkspace(scopedOther, "ws-1"), false);
+  assert.equal(entryVisibleForWorkspace(scopedAB, null), false);
+});
+
+test("visibleBoardEntries 'workspace' filter scopes by current workspace audience plus broadcast (FR-098)", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scopedSelf = { id: "scoped-self", audience: ["ws-1"], mentions: [] };
+  const scopedOther = { id: "scoped-other", audience: ["ws-2"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scopedSelf, scopedOther],
+    audienceFilter: "workspace",
+    currentWorkspaceId: "ws-1",
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast", "scoped-self"]);
+});
+
+test("visibleBoardEntries 'workspace' filter for unassigned agent shows only broadcast", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scoped = { id: "scoped", audience: ["ws-1"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scoped],
+    audienceFilter: "workspace",
+    currentWorkspaceId: null,
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast"]);
+});
+
+test("visibleBoardEntries 'all' filter still bypasses workspace scoping", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scopedOther = { id: "scoped-other", audience: ["ws-2"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scopedOther],
+    audienceFilter: "all",
+    currentWorkspaceId: "ws-1",
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast", "scoped-other"]);
 });
 
 test("Board notification helper prepares focused state for click-through", () => {

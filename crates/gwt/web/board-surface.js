@@ -64,13 +64,6 @@ export function normalizedBoardWorkspaceAudience(entry) {
   return normalized;
 }
 
-export function boardEntryVisibleForWorkspace(entry, workspaceId) {
-  const audience = normalizedBoardWorkspaceAudience(entry);
-  if (audience.length === 0) return true;
-  const current = String(workspaceId || "").trim();
-  return Boolean(current) && audience.includes(current);
-}
-
 export function boardEntryPreview(entry) {
   const body = String(entry?.body || "").replace(/\s+/g, " ").trim();
   if (!body) return "Empty entry";
@@ -102,15 +95,27 @@ export function mentionsForBoardSubmit(state) {
   return mention ? [mention] : [];
 }
 
+// SPEC-2359 FR-093/098/103: mirror Rust `entry_visible_for_workspace`.
+// Broadcast entries are visible everywhere; scoped entries require the
+// current Workspace id, so unassigned agents see broadcast only.
+export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
+  const audience = normalizedBoardWorkspaceAudience(entry);
+  if (audience.length === 0) return true;
+  const workspaceId = String(currentWorkspaceId || "").trim();
+  return Boolean(workspaceId) && audience.includes(workspaceId);
+}
+
+export function boardEntryVisibleForWorkspace(entry, workspaceId) {
+  return entryVisibleForWorkspace(entry, workspaceId);
+}
+
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
   if (state?.audienceFilter === "all") {
     return entries;
   }
   if (state?.audienceFilter === "workspace") {
-    return entries.filter((entry) =>
-      boardEntryVisibleForWorkspace(entry, state?.currentWorkspaceId),
-    );
+    return entries.filter((entry) => entryVisibleForWorkspace(entry, state?.currentWorkspaceId));
   }
   return entries.filter((entry) => boardEntryMentionsSelf(entry, selfKeys));
 }
