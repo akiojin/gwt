@@ -42,6 +42,12 @@ mod runtime_support;
 mod update_front_door;
 
 #[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{

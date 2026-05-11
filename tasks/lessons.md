@@ -5223,3 +5223,25 @@ Board request `2b256bfc-...` で報告していた。
    broadcast event で reach するかを表形式で残す (SPEC 7.2 の `Inventory: write path vs
    surface` 表)。Inventory を見ながら write path を設計すれば「すべての surface を
    touch しているか」を caller 側で必ず確認できる。
+
+## 2026-05-11 — Test-only HOME mutation は crate-wide lock に統一する
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` の並列実行で Board/Workspace 系テストが intermittent に失敗した。
+単独実行では通り、失敗時は `GWT_SESSION_ID` から保存済み session を読めず、current workspace
+audience が欠落していた。
+
+### 原因
+
+`app_runtime` test module と一部 helper test が `HOME` / `USERPROFILE` を module-local lock
+または lock なしで変更していた。CLI Board/Workspace tests は crate-wide `env_test_lock` を
+使っていたため、同じ process 内で別 test が HOME を差し替え、session path resolution が
+別 tempdir を参照した。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `GWT_SESSION_ID` など process-global env を触る test は、
+   module-local lock を作らず crate-wide `env_test_lock` に寄せる。
+2. 単独 test green で満足せず、env mutation を伴う修正後は default parallelism の
+   `cargo test -p gwt-core -p gwt` を必ず 1 回通す。
