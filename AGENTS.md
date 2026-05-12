@@ -21,7 +21,7 @@
 - **Investigation-First Discussion:** 実装中に以下のシグナルを検知した場合、実装を一時停止して調査と議論に入る:
   - generator やテンプレートを変更したが、生成される実ファイル（settings.local.json 等）を実際に確認していない
   - SPEC の acceptance scenario と実装の実際の挙動が一致しない
-  - 実装が tasks.md に記載されていないファイルに触れようとしている
+  - 実装が SPEC の `tasks` section / `tasks.md` artifact に記載されていないファイルに触れようとしている
   - テストが通ったが、手動で検証すると期待と異なる結果になる
   - migration / 互換性パスの条件分岐が新形式を網羅していない
   - 変更の下流影響（何が壊れるか）、上流前提（何が先に必要か）、同時変更境界（何を一緒に変えないと中間状態で壊れるか）を分析していない
@@ -44,7 +44,7 @@
 
 - デスクトップ GUI は WebView (wry + tao) + axum WebSocket サーバー
 - フロントエンド: HTML/JS/CSS (xterm.js でターミナル描画)
-- バックエンド: Rust (gwt-core + gwt)
+- バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
 
@@ -87,22 +87,23 @@
 - 検索クエリは対象機能のキーワードを 2〜3 パターン試す（日本語・英語両方）
 - `gwt-search --specs` で SPEC を、`gwt-search --issues` で Issue を絞り込める
 
-##### Step 2: 既存 SPEC が見つかった場合 → 既存 SPEC を更新する
+##### Step 2: 既存 SPEC が見つかった場合 → 既存 SPEC Issue を更新する
 
-- 該当 SPEC の `spec.md` に不足しているユーザーストーリー・機能要件・受け入れシナリオを追加する
-- `plan.md` に新しいフェーズや実装ステップを追加する
-- `tasks.md` に新しいタスクを追加する
-- `metadata.json` の status/phase を必要に応じて更新する（例: `done` → `in-progress` に戻す）
+- 該当 GitHub Issue (`gwt-spec` label) の `spec` section に不足しているユーザーストーリー・機能要件・受け入れシナリオを追加する
+- `plan` section に新しいフェーズや実装ステップを追加する
+- `tasks` section に新しいタスクを追加する
+- SPEC section の読み書きは `gwtd issue spec <n> --section <section>` と `gwtd issue spec <n> --edit <section> -f <file>` を正本経路にする
+- 同一 SPEC Issue の section 更新は逐次実行し、更新後に対象 section を読み直して parse 可能であることを確認する
 - 対象の SPEC が確定した後は SPEC 管理ワークフローに従って実装進行を管理する
 
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC ディレクトリ内の `spec.md` に最低限以下を含める:
+- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める:
   - ユーザーシナリオとテスト（受け入れシナリオ）
   - 機能要件（FR-\*）
   - 成功基準
-- `gwt-plan-spec` で `plan.md`、`tasks.md` も策定してから実装に入る
+- `gwt-plan-spec` で `plan` / `tasks` section も策定してから実装に入る
 - 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。
 - Git 環境の作成が必要な場合は、ユーザー操作に基づく gwt の Start Work / Launch materialization が担当する。
 
@@ -127,7 +128,7 @@
 - `fix:` タイプのバグ修正（原因調査 → 修正 → 再発防止確認の Plan/Execute/Verify で管理する）
 - `docs:` / `chore:` タイプの変更（ドキュメント修正、CI設定、依存更新など）
 - 1行程度の明白な typo 修正
-- CLAUDE.md / README.md の更新のみの変更
+- AGENTS.md / CLAUDE.md / README.md の更新のみの変更
 
 ### Plan / Execute / Verify（必須）
 
@@ -151,7 +152,7 @@
 
 ### 基本ルール
 
-- 指示を受けた場合、まず既存実装・関連ドキュメント（README/CLAUDE.md）を確認し、必要なら先に更新する。
+- 指示を受けた場合、まず既存実装・関連ドキュメント（AGENTS.md/CLAUDE.md/README.md）を確認し、必要なら先に更新する。
 - 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
 - 完了報告には、実行した検証コマンドと結果（成功/失敗、未実施項目）を必ず含める
 - 作業（タスク）は、最大限の並列化をして進める
@@ -159,7 +160,7 @@
 - 作業（タスク）は、忖度なしで進める
 - **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除・切り替えを行ってはならない。`git checkout -b`、`git switch -c`、`git branch -D`、`git worktree add/remove` は禁止。Worktree は起動ブランチで作業を完結する設計であり、必要な Git 環境作成は gwt の Start Work / Launch materialization が行う。**
 - 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
-- **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（ローカル SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / CLAUDE.md更新のみ
+- **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（GitHub Issue-backed SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / AGENTS.md / CLAUDE.md / README.md 更新のみ
 
 ### コミットメッセージポリシー
 
@@ -176,9 +177,9 @@
 ### ローカル検証/実行ルール（Rust）
 
 - このリポジトリのローカル検証・実行は Cargo を使用する
-- ビルド: `cargo build -p gwt`
-- 開発: `cargo run -p gwt`
-- テスト: `cargo test -p gwt-core -p gwt`
+- ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
+- 開発: `cargo run -p gwt --bin gwt`
+- テスト: `cargo test -p gwt-core -p gwt --all-features`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 
@@ -199,7 +200,9 @@ Board は Coordination ドメインの shared chat。`gwtd board post --kind <X>
 - **協調軸**: `claim`（担当宣言で衝突回避）、`next`（協調 next を broadcast）、`blocked`（ブロッカー可視化・unblock 要請）、`handoff`（具体的な引き継ぎ）
 - **その他**: `request`、`impact`、`question`
 
-`--target <session-id|branch|agent-id>` を複数指定すると、受信側 Agent の reminder injection で `[for-you]` ハイライトされる（FR-041）。指定なしは broadcast。`--owner` は SPEC/Issue 番号、`--topic` は分類タグ、`--parent` は thread reply。
+投稿前に audience を選ぶ。返答や合流を期待する場合は `--mention user:<id>` / `--mention agent:<id>` / `--mention session:<id>` / `--mention workspace:<id>` を優先し、返答不要の全体共有だけ `--broadcast` または mention なしにする。`--target <session-id|branch|agent-id>` は older agent 互換のために残すが、新しい投稿では typed `--mention ...` を優先する。`--owner` は SPEC/Issue 番号、`--topic` は分類タグ、`--parent` は thread reply。
+
+Board の claim や Workspace の類似 work は coordination signal であり、通常の mutation を止める global lock ではない。重複作業を避けたい場合は Board で boundary を明示し、Workspace に束ねる場合は `gwtd workspace candidates` / `join` / `create` / `ensure` の明示的な affiliation 操作で確認する。
 
 ツール単位の報告（"running gcc"等）は **post 禁止**。reasoning milestone (phase / choice / concern) または coordination boundary (claim / next / blocked / handoff / decision) でのみ post する。
 
@@ -241,16 +244,19 @@ Board は Coordination ドメインの shared chat。`gwtd board post --kind <X>
 ## 使用中の技術
 
 - Rust 2021 Edition (stable) + vt100, portable-pty, serde, tokio, axum, wry/tao, xterm.js (GUI terminal)
-- ローカルファイルと Git メタデータ（DB なし）
+- GitHub Issue cache、ローカルファイル、Git メタデータ、ChromaDB / multilingual-e5 semantic index
 
 ## プロジェクト構成
 
 ```text
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
-│   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
+│   ├── gwt/            # GUI フロントエンド + gwtd CLI (`gwtd issue spec ...`, WebView GUI)
+│   ├── gwt-core/       # コアライブラリ（coordination / workspace / index など）
+│   ├── gwt-agent/      # エージェント検出・起動・セッション管理
+│   ├── gwt-skills/     # 組込スキル / 管理対象アセット配布
 │   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
-│   └── gwt/            # GUI フロントエンド + gwtd CLI (`gwtd issue spec ...`, WebView GUI)
+│   └── ...             # AI / Git / Docker / terminal / config などのドメインクレート
 └── package.json        # 開発用スクリプト
 ```
 
@@ -275,7 +281,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | gwt-register-issue | `/gwt:gwt-register-issue` | Register new work from a bug report, enhancement idea, docs task, or rough request. Decides plain Issue vs SPEC after duplicate search. |
 | gwt-fix-issue | `/gwt:gwt-fix-issue` | Resolve an existing GitHub Issue by number or URL. Carries clear direct-fix work through implementation and routes to SPEC design only when needed. |
 | gwt-discussion | `/gwt:gwt-discussion` | Investigate ideas, spec gaps, and implementation concerns. Updates `spec` / `plan` when discussion stabilizes and returns an action bundle for the next step. |
-| gwt-plan-spec | `/gwt:gwt-plan-spec` | Generate or refresh `plan.md`, `tasks.md`, and related planning artifacts for a SPEC. |
+| gwt-plan-spec | `/gwt:gwt-plan-spec` | Generate or refresh `plan` / `tasks` and related planning artifacts for a SPEC. |
 | gwt-build-spec | `/gwt:gwt-build-spec` | Implement an approved SPEC or approved standalone task with TDD, verification, and PR handoff. |
 | gwt-manage-pr | `/gwt:gwt-manage-pr` | Create, inspect, update, or unblock a PR through one visible PR lifecycle entrypoint. |
 | gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-discussion. |
@@ -284,7 +290,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over SPECs, GitHub Issues, project source files, and docs using ChromaDB. Supports `--specs`, `--issues`, `--files` filters and resolves `gwtd` through the managed skill contract. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management through `gwtd pane`. Auto-detects mode: no args → list panes; pane ID → read output; stop/close + pane ID → stop pane. Use Board for agent-to-agent communication. |
 
 ### Recommended Workflow
