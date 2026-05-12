@@ -927,18 +927,21 @@ impl LaunchWizardState {
         } else {
             self.context.normalized_branch_name.clone()
         };
-        if self.has_docker_workflow() {
-            self.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
-            if self.docker_service.is_none() {
-                self.docker_service = self.preferred_docker_service().map(str::to_string);
-            }
-        } else {
-            self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
-            self.docker_service = None;
-        }
-        self.sync_selected_agent_options();
+        // SPEC-2014 FR-032..FR-035: hydration 経路でも初期化と同じ runtime resolver を使い、
+        // open_loading -> hydration の間に repo-local Host/Docker 選好が失われないようにする。
+        let refreshed_previous_profiles = previous_profiles.is_some();
         if let Some(previous_profiles) = previous_profiles {
             self.previous_profiles = previous_profiles;
+        }
+        let (resolved_target, resolved_service, resolved_lifecycle) =
+            resolve_initial_runtime_selection(&self.context, self.previous_profiles.repo_local());
+        self.runtime_target = resolved_target;
+        self.docker_service = resolved_service;
+        self.docker_lifecycle_intent = resolved_lifecycle;
+        self.sync_selected_agent_options();
+        // Agent preference の再適用は previous_profiles が refresh されたときのみ。
+        // 現 wizard 内で user が編集した draft (model / reasoning など) を上書きしない。
+        if refreshed_previous_profiles {
             self.apply_preferred_agent_profile();
         }
         self.sync_docker_lifecycle_default();
@@ -2722,15 +2725,19 @@ fn resolve_initial_runtime_selection(
     Option<String>,
     gwt_agent::DockerLifecycleIntent,
 ) {
-    let context_default_target = if context.docker_context.is_some() {
+    // SPEC-2014 FR-013: 既存正規化チェーン (suggested -> first -> Host fallback)。
+    // docker_context があっても services が空、または stale saved service で
+    // 全ての候補が消えた場合は Host に落とす。
+    let context_default_service = context.docker_context.as_ref().and_then(|ctx| {
+        ctx.suggested_service
+            .clone()
+            .or_else(|| ctx.services.first().cloned())
+    });
+    let context_default_target = if context_default_service.is_some() {
         gwt_agent::LaunchRuntimeTarget::Docker
     } else {
         gwt_agent::LaunchRuntimeTarget::Host
     };
-    let context_default_service = context
-        .docker_context
-        .as_ref()
-        .and_then(|ctx| ctx.suggested_service.clone());
     let context_default_lifecycle = default_docker_lifecycle_intent(context.docker_service_status);
 
     let Some(saved) = repo_local_previous else {
@@ -4364,6 +4371,83 @@ mod tests {
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert!(config.resume_session_id.is_none());
         assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn apply_hydration_preserves_repo_local_host_preference_when_docker_context_appears() {
+        // CodeRabbit PR #2661 B2: open_loading -> hydration の途中で apply_hydration が
+        // raw Docker context のみで runtime_target を上書きしないこと。
+        let initial_ctx = context(branch("feature/current"), "feature/current");
+        let mut state = LaunchWizardState::open_with_previous_profile(
+            initial_ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                windows_shell: None,
+            }),
+        );
+        assert_eq!(state.view().selected_runtime_target, "host");
+        state.apply_hydration(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: None,
+            quick_start_root: PathBuf::from("/tmp/quick_start_root"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["api".to_string()],
+                suggested_service: Some("api".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: None,
+        });
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(view.selected_docker_service.is_none());
+    }
+
+    #[test]
+    fn previous_profile_docker_service_falls_back_to_first_service_when_no_suggestion() {
+        // CodeRabbit PR #2661 B3: saved docker_service が stale で context に
+        // suggested_service が無い場合、services の最初の要素を採用する。
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["only".to_string()],
+            suggested_service: None,
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let state = LaunchWizardState::open_with_previous_profile(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("missing".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("only"));
     }
 
     #[test]
