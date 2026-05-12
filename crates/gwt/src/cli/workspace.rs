@@ -1350,6 +1350,66 @@ mod tests {
     }
 
     #[test]
+    fn workspace_create_allows_explicit_split_boundary_for_similar_workspace() {
+        let _guard = crate::env_test_lock().lock().unwrap();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push(unassigned_agent("session-1"));
+        save_workspace_projection(&repo, &projection).expect("save projection");
+        let mut event = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "workspace-existing",
+            Utc::now(),
+        );
+        event.title = Some("Workspace history".to_string());
+        event.intent = Some("Implement Workspace history with affiliation state".to_string());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event(&repo, event).expect("record workspace");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Create {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace history".to_string(),
+                current_focus: Some("Implement Workspace history affiliation".to_string()),
+                spec: None,
+                issue: Some(2359),
+                split_from: Some("workspace-existing".to_string()),
+                boundary: Some("new affiliation state tests only".to_string()),
+            },
+            &mut out,
+        )
+        .expect("explicit split boundary should create a new Workspace");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("workspace created: workspace-"), "{out}");
+        let saved = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert_ne!(saved.id, "workspace-existing");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("agent");
+        assert_eq!(agent.workspace_id.as_deref(), Some(saved.id.as_str()));
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        assert!(items
+            .work_items
+            .iter()
+            .any(|item| item.id == "workspace-existing"));
+        assert!(items.work_items.iter().any(|item| item.id == saved.id));
+    }
+
+    #[test]
     fn workspace_ensure_joins_similar_incomplete_workspace() {
         let _guard = crate::env_test_lock().lock().unwrap();
         let gwt_home = tempfile::tempdir().expect("gwt home");

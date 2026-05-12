@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-05-12 — Workspace coordination must not become a global tool lock
+
+### 事象
+
+`Similar active Workspace already exists` が Claude Code hooks で発生し、複数の
+gwt-* skill / agent が unrelated work でも実装・編集を継続できなくなった。
+特に stale な project-level Workspace title や active Board claim が、現在の
+Agent の実作業 intent として扱われ、広範囲の PreToolUse denial に波及した。
+
+### 原因
+
+Workspace / Board は duplicate work を避けるための coordination surface だが、
+workflow-policy が active Workspace / Board claim / incomplete work item の
+semantic similarity を tool 実行前の hard block として扱っていた。さらに
+Unassigned Agent の actionable title/focus を mutation 前に強制 materialize
+する設計により、Workspace 所属が任意状態ではなく実行前提になっていた。
+
+### 再発防止策
+
+1. duplicate prevention は `gwtd workspace candidates` / `join` / `create` /
+   `ensure` の explicit affiliation boundary で扱い、PreToolUse hook では
+   Board/Workspace similarity を理由に mutation を hard block しない。
+2. Unassigned は正常な affiliation state として扱う。Board post や通常 mutation
+   から暗黙に Workspace を create/join しない。
+3. coordination policy を変更する場合は、stale projection title、active Board
+   claim、incomplete work item、Unassigned actionable intent の各ケースを
+   hook tests で固定してから実装する。
+
 ## 2026-05-11 — Actionable Unassigned Agents must materialize before mutation
 
 ### 事象
