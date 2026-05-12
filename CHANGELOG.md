@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.28.0] - 2026-05-12
+
+### Bug Fixes
+
+- Limit workspace coordination to explicit affiliation
+- **gui:** Clamp and scroll terminal-overlay so agent window title stays operable
+- **launch-wizard:** Apply repo-local runtime resolver in hydration (#2661 review)
+
+### Features
+
+- **launch-wizard:** Persist Host/Docker runtime per repo (SPEC-2014)
+
+### Miscellaneous Tasks
+
+- Merge origin develop
+
 ## [9.27.0] - 2026-05-11
 
 ### Bug Fixes
