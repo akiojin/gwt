@@ -166,7 +166,9 @@ impl AppRuntime {
         let quick_start_entries = self
             .launch_wizard_cache
             .quick_start_entries(&quick_start_root, &normalized_branch_name);
-        let previous_profiles = self.launch_wizard_cache.previous_profiles();
+        let previous_profiles = self
+            .launch_wizard_cache
+            .previous_profiles(&quick_start_root);
         let agent_options = self.launch_wizard_cache.agent_options();
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
@@ -376,7 +378,9 @@ impl AppRuntime {
         let quick_start_entries = self
             .launch_wizard_cache
             .quick_start_entries(&quick_start_root, &work_branch);
-        let previous_profiles = self.launch_wizard_cache.previous_profiles();
+        let previous_profiles = self
+            .launch_wizard_cache
+            .previous_profiles(&quick_start_root);
         let agent_options = self.launch_wizard_cache.agent_options();
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);

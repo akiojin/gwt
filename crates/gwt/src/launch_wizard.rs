@@ -209,6 +209,11 @@ pub struct LaunchWizardPreviousProfile {
 pub struct LaunchWizardPreviousProfiles {
     default_agent_id: Option<String>,
     by_agent: HashMap<String, LaunchWizardPreviousProfile>,
+    /// SPEC-2014 FR-032/FR-035: repo-local 最新 successful session から得られる
+    /// runtime_target / docker_service / docker_lifecycle_intent の復元元。
+    /// agent 識別系 (by_agent) は cross-repo の global preference を表すのに対し、
+    /// repo_local は per-repo の runtime/Docker 永続化を担う。
+    repo_local: Option<LaunchWizardPreviousProfile>,
 }
 
 impl LaunchWizardPreviousProfiles {
@@ -217,11 +222,19 @@ impl LaunchWizardPreviousProfiles {
             return Self::default();
         };
         let default_agent_id = Some(profile.agent_id.clone());
-        let by_agent = HashMap::from([(profile.agent_id.clone(), profile)]);
+        let by_agent = HashMap::from([(profile.agent_id.clone(), profile.clone())]);
         Self {
             default_agent_id,
             by_agent,
+            repo_local: Some(profile),
         }
+    }
+
+    /// SPEC-2014 FR-032: repo-local previous profile を別途差し込む。
+    /// テスト・production 双方で agent map とは独立に runtime 復元元を構成できる。
+    pub fn with_repo_local(mut self, profile: Option<LaunchWizardPreviousProfile>) -> Self {
+        self.repo_local = profile;
+        self
     }
 
     fn preferred_agent_id(&self) -> Option<&str> {
@@ -230,6 +243,11 @@ impl LaunchWizardPreviousProfiles {
 
     fn profile_for(&self, agent_id: &str) -> Option<&LaunchWizardPreviousProfile> {
         self.by_agent.get(agent_id)
+    }
+
+    /// SPEC-2014 FR-032/FR-035: repo-local previous profile を返す。
+    fn repo_local(&self) -> Option<&LaunchWizardPreviousProfile> {
+        self.repo_local.as_ref()
     }
 }
 
@@ -343,7 +361,20 @@ pub fn previous_launch_profiles_from_sessions(
     LaunchWizardPreviousProfiles {
         default_agent_id,
         by_agent,
+        repo_local: None,
     }
+}
+
+/// SPEC-2014 FR-032/FR-035: per-agent global preference に加え、repo-local
+/// 最新 successful session profile を `repo_local` 経路として併せ持つ
+/// `LaunchWizardPreviousProfiles` を構築する。
+pub fn previous_launch_profiles_for_repo_from_sessions(
+    repo_path: &Path,
+    sessions: &[gwt_agent::Session],
+) -> LaunchWizardPreviousProfiles {
+    let mut profiles = previous_launch_profiles_from_sessions(sessions);
+    profiles.repo_local = previous_launch_profile_from_sessions(repo_path, sessions);
+    profiles
 }
 
 fn load_launch_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
@@ -641,17 +672,12 @@ impl LaunchWizardState {
         is_hydrating: bool,
     ) -> Self {
         Self::hydrate_live_window_ids(&context, &mut quick_start_entries);
-        let runtime_target = if context.docker_context.is_some() {
-            gwt_agent::LaunchRuntimeTarget::Docker
-        } else {
-            gwt_agent::LaunchRuntimeTarget::Host
-        };
-        let docker_service = context
-            .docker_context
-            .as_ref()
-            .and_then(|ctx| ctx.suggested_service.clone());
-        let docker_lifecycle_intent =
-            default_docker_lifecycle_intent(context.docker_service_status);
+        // SPEC-2014 FR-032..FR-035: 初期 runtime_target / docker_service / docker_lifecycle_intent は
+        // open Wizard draft (= 開いた直後はまだ無い) → repo-local previous session → context default
+        // の順で決定する。runtime/Docker の復元は agent map ではなく `repo_local` 経路に閉じ込め、
+        // global agent preference path (apply_previous_agent_preferences) は触れない。
+        let (runtime_target, docker_service, docker_lifecycle_intent) =
+            resolve_initial_runtime_selection(&context, previous_profiles.repo_local());
         let has_quick_start = !quick_start_entries.is_empty() || !context.live_sessions.is_empty();
         let step = if has_quick_start {
             LaunchWizardStep::QuickStart
@@ -2682,6 +2708,82 @@ fn default_docker_lifecycle_intent(
     }
 }
 
+/// SPEC-2014 FR-032..FR-035:
+/// Launch Wizard 初期 `runtime_target` / `docker_service` /
+/// `docker_lifecycle_intent` を、現在の Docker context と repo-local previous
+/// profile から決定する。優先順は
+/// `repo-local previous session` → `docker context default` で、open Wizard
+/// draft は wizard 起動直後には存在しないので呼び出し側で考慮する必要は無い。
+fn resolve_initial_runtime_selection(
+    context: &LaunchWizardContext,
+    repo_local_previous: Option<&LaunchWizardPreviousProfile>,
+) -> (
+    gwt_agent::LaunchRuntimeTarget,
+    Option<String>,
+    gwt_agent::DockerLifecycleIntent,
+) {
+    let context_default_target = if context.docker_context.is_some() {
+        gwt_agent::LaunchRuntimeTarget::Docker
+    } else {
+        gwt_agent::LaunchRuntimeTarget::Host
+    };
+    let context_default_service = context
+        .docker_context
+        .as_ref()
+        .and_then(|ctx| ctx.suggested_service.clone());
+    let context_default_lifecycle = default_docker_lifecycle_intent(context.docker_service_status);
+
+    let Some(saved) = repo_local_previous else {
+        return (
+            context_default_target,
+            context_default_service,
+            context_default_lifecycle,
+        );
+    };
+
+    match saved.runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            // FR-033: saved=Host は Docker context の有無に関わらず Host を維持し、
+            // service/lifecycle UI も表示しない。
+            (
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+                default_docker_lifecycle_intent(context.docker_service_status),
+            )
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => match context.docker_context.as_ref() {
+            // FR-034: saved=Docker かつ context 無し → Host に fallback。
+            None => (
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+                default_docker_lifecycle_intent(context.docker_service_status),
+            ),
+            // FR-034: saved service が現在の services にあれば session の値を採用。
+            // 無ければ既存 FR-013 の正規化 (suggested → first → 既定) を経由する。
+            Some(docker_context) => {
+                let saved_service_in_context = saved
+                    .docker_service
+                    .as_ref()
+                    .filter(|name| docker_context.services.iter().any(|svc| svc == *name))
+                    .cloned();
+                if let Some(service) = saved_service_in_context {
+                    (
+                        gwt_agent::LaunchRuntimeTarget::Docker,
+                        Some(service),
+                        saved.docker_lifecycle_intent,
+                    )
+                } else {
+                    (
+                        gwt_agent::LaunchRuntimeTarget::Docker,
+                        context_default_service,
+                        context_default_lifecycle,
+                    )
+                }
+            }
+        },
+    }
+}
+
 struct LaunchWizardFlow<'a> {
     state: &'a LaunchWizardState,
 }
@@ -4251,10 +4353,9 @@ mod tests {
         assert_eq!(view.selected_version, "0.110.0");
         assert_eq!(view.selected_execution_mode, "continue");
         assert_eq!(view.selected_runtime_target, "docker");
-        assert_eq!(view.selected_docker_service.as_deref(), Some("api"));
-        assert_eq!(view.selected_docker_lifecycle, "connect");
-        assert_ne!(view.selected_docker_service.as_deref(), Some("gwt"));
-        assert_ne!(view.selected_docker_lifecycle, "restart");
+        // SPEC-2014 FR-034: saved docker_service が現 context にあれば saved を採用する。
+        assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
+        assert_eq!(view.selected_docker_lifecycle, "restart");
         assert!(view.skip_permissions);
         assert!(view.codex_fast_mode);
 
@@ -4263,6 +4364,76 @@ mod tests {
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert!(config.resume_session_id.is_none());
         assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn previous_profile_runtime_target_restores_host_with_docker_context_available() {
+        // SPEC-2014 SC-018: saved=Host のとき、Docker context が検出されていても Host を初期値にする。
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "gwt".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let state = LaunchWizardState::open_with_previous_profile(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(!view.show_docker_service);
+        assert!(!view.show_docker_lifecycle);
+    }
+
+    #[test]
+    fn previous_profile_docker_service_and_lifecycle_restore_when_service_present_in_current_context(
+    ) {
+        // SPEC-2014 SC-019: saved=Docker + saved docker_service が現在 context にあれば、
+        // runtime_target / docker_service / docker_lifecycle_intent を session の値で復元する。
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let state = LaunchWizardState::open_with_previous_profile(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("worker".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("worker"));
+        assert_eq!(view.selected_docker_lifecycle, "restart");
     }
 
     #[test]
