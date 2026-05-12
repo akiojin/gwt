@@ -595,7 +595,7 @@ fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
 }
 
 #[test]
-fn blocks_mutation_when_another_active_workspace_matches_current_title() {
+fn similar_active_workspace_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
@@ -624,13 +624,10 @@ fn blocks_mutation_when_another_active_workspace_matches_current_title() {
         )
         .expect("workflow evaluation succeeds");
 
-        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
-            panic!("expected active Workspace conflict to block mutation");
-        };
-        assert!(detail.contains("similar active Workspace"), "{detail}");
-        assert!(detail.contains("session-other"), "{detail}");
-        assert!(detail.contains("gwtd board post"), "{detail}");
-        assert!(detail.contains("Boundary:"), "{detail}");
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "active Workspace similarity is coordination context; duplicate prevention belongs to explicit workspace affiliation"
+        );
     });
 }
 
@@ -689,7 +686,7 @@ fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
 }
 
 #[test]
-fn blocks_mutation_when_active_board_claim_matches_current_title() {
+fn active_board_claim_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
@@ -727,11 +724,57 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
         )
         .expect("workflow evaluation succeeds");
 
-        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
-            panic!("expected active Board claim conflict to block mutation");
-        };
-        assert!(detail.contains("active Board claim"), "{detail}");
-        assert!(detail.contains("session-other"), "{detail}");
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "active Board claims should coordinate duplicate risk without blocking unrelated tool execution"
+        );
+    });
+}
+
+#[test]
+fn unassigned_agent_does_not_inherit_projection_title_for_duplicate_gate() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/unassigned", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection.title = "Workspace affiliation fix".to_string();
+        projection.summary = Some("Stale project-level workspace title".to_string());
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection
+            .agents
+            .push(unassigned_workspace_agent(&session_id));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Other Codex",
+            BoardEntryKind::Claim,
+            "Workspace affiliation fix is in progress on another branch.",
+            None,
+            None,
+            vec!["workspace-materialization".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id("session-other");
+        post_entry(&repo_path, entry).expect("post stale active claim");
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "Unassigned Agents must not inherit stale projection-level title as duplicate-gate intent"
+        );
     });
 }
 
@@ -825,7 +868,7 @@ fn unassigned_agent_without_title_summary_is_not_title_blocked() {
 }
 
 #[test]
-fn actionable_unassigned_agent_is_blocked_from_mutation_until_workspace_ensure() {
+fn actionable_unassigned_agent_can_mutate_without_forced_workspace_affiliation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/unassigned", None);
@@ -849,11 +892,10 @@ fn actionable_unassigned_agent_is_blocked_from_mutation_until_workspace_ensure()
         let decision =
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
 
-        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
-            panic!("expected actionable Unassigned mutation to be blocked");
-        };
-        assert!(detail.contains("Unassigned"), "{detail}");
-        assert!(detail.contains("gwtd workspace ensure"), "{detail}");
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "Unassigned is a valid coordination state; affiliation is explicit and optional"
+        );
     });
 }
 
@@ -919,7 +961,7 @@ fn assigned_agent_without_title_summary_remains_title_blocked() {
 }
 
 #[test]
-fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
+fn incomplete_work_item_history_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
@@ -954,12 +996,10 @@ fn blocks_mutation_when_incomplete_work_item_matches_current_title() {
         )
         .expect("workflow evaluation succeeds");
 
-        let HookOutput::PreToolUsePermission { detail, .. } = decision else {
-            panic!("expected incomplete WorkItem conflict to block mutation");
-        };
-        assert!(detail.contains("incomplete Workspace"), "{detail}");
-        assert!(detail.contains("session-other"), "{detail}");
-        assert!(detail.contains("gwtd board post"), "{detail}");
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "incomplete Workspace history is context; explicit workspace join/create owns duplicate prevention"
+        );
     });
 }
 

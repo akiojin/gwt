@@ -9,32 +9,20 @@
 //! - allow transport operations such as `git push` and worktree-internal edits
 //!   without an owner gate
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::Read,
-    path::Path,
-};
+use std::{collections::HashMap, io::Read, path::Path};
 
 use gwt_agent::{
     session::{Session, GWT_SESSION_ID_ENV},
     types::WorkflowBypass,
 };
 use gwt_core::{
-    coordination::{
-        board_entry_visible_for_scope, load_snapshot, BoardEntry, BoardEntryKind,
-        BoardMentionTargetKind,
-    },
     paths::{gwt_cache_dir, gwt_sessions_dir},
-    workspace_projection::{
-        load_or_synthesize_workspace_work_items, load_workspace_projection, WorkspaceAgentSummary,
-        WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkItem,
-    },
+    workspace_projection::load_workspace_projection,
 };
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
 use super::{block_bash_policy, HookError, HookEvent, HookOutput};
-use crate::board_audience::current_session_board_scope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -50,7 +38,6 @@ pub struct WorkflowContext {
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
-    pub workspace_materialization_missing: bool,
 }
 
 impl WorkflowContext {
@@ -61,7 +48,6 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            workspace_materialization_missing: false,
         }
     }
 
@@ -72,7 +58,6 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            workspace_materialization_missing: false,
         }
     }
 
@@ -83,7 +68,6 @@ impl WorkflowContext {
             has_tasks,
             bypass: None,
             title_summary_missing: false,
-            workspace_materialization_missing: false,
         }
     }
 
@@ -94,17 +78,11 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: Some(bypass),
             title_summary_missing: false,
-            workspace_materialization_missing: false,
         }
     }
 
     pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
         self.title_summary_missing = missing;
-        self
-    }
-
-    pub fn with_workspace_materialization_missing(mut self, missing: bool) -> Self {
-        self.workspace_materialization_missing = missing;
         self
     }
 }
@@ -129,20 +107,12 @@ pub fn evaluate_with_context(
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
     }
-    let materialization =
-        evaluate_workspace_materialization_guard(event, context.workspace_materialization_missing)?;
-    if materialization != HookOutput::Silent {
-        return Ok(materialization);
-    }
-    evaluate_workspace_coordination_guard(event, worktree_root)
+    Ok(HookOutput::Silent)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     let context = resolve_workflow_context(worktree_root)
-        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?)
-        .with_workspace_materialization_missing(current_agent_workspace_materialization_missing(
-            worktree_root,
-        )?);
+        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?);
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -241,34 +211,6 @@ fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, Hoo
         .is_none())
 }
 
-fn current_agent_workspace_materialization_missing(
-    worktree_root: &Path,
-) -> Result<bool, HookError> {
-    let Some(session) = load_session_from_env() else {
-        return Ok(false);
-    };
-    let projection_root = if session.worktree_path.exists() {
-        session.worktree_path.as_path()
-    } else {
-        worktree_root
-    };
-    let Some(projection) = load_workspace_projection(projection_root)? else {
-        return Ok(false);
-    };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session.id)
-    else {
-        return Ok(false);
-    };
-    if !agent.is_unassigned() {
-        return Ok(false);
-    }
-    Ok(option_has_nonempty_text(agent.title_summary.as_deref())
-        || option_has_nonempty_text(agent.current_focus.as_deref()))
-}
-
 fn evaluate_title_summary_guard(
     event: &HookEvent,
     title_summary_missing: bool,
@@ -294,615 +236,6 @@ Use the configured narrative language for the title-summary. Keep progress, comp
     }
 
     Ok(HookOutput::Silent)
-}
-
-fn evaluate_workspace_materialization_guard(
-    event: &HookEvent,
-    workspace_materialization_missing: bool,
-) -> Result<HookOutput, HookError> {
-    if !workspace_materialization_missing {
-        return Ok(HookOutput::Silent);
-    }
-
-    if is_workspace_materialization_event(event) || is_read_only_exploration_event(event) {
-        return Ok(HookOutput::Silent);
-    }
-
-    if is_title_sensitive_tool(event) {
-        return Ok(HookOutput::pre_tool_use_permission(
-            "Unassigned Agent has actionable Workspace intent",
-            "This Agent already has a title-summary or current focus, but it is still Unassigned. \
-Materialize the work into a Workspace before implementation or verification so title sync, Board audience, and Workspace history stay attached to the same work.\n\n\
-Required command shape:\n\
-  gwtd workspace ensure --agent-session \"$GWT_SESSION_ID\" --title-summary '<short work title>' --current-focus '<current work focus>' [--spec <number>|--issue <number>] [--topic <topic>]\n\n\
-Use `gwtd workspace candidates --agent-session \"$GWT_SESSION_ID\"` first only when you need to inspect choices manually. \
-Use `gwtd board post --kind claim --title-summary '<short work title>' ...` when the intent should be materialized as a Board milestone.",
-        ));
-    }
-
-    Ok(HookOutput::Silent)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkspaceCoordinationConflict {
-    source_label: &'static str,
-    title: String,
-    session_id: Option<String>,
-    branch: Option<String>,
-    agent_id: Option<String>,
-    related_owners: Vec<String>,
-    related_topics: Vec<String>,
-}
-
-fn evaluate_workspace_coordination_guard(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<HookOutput, HookError> {
-    if !is_workspace_coordination_sensitive_event(event) {
-        return Ok(HookOutput::Silent);
-    }
-
-    let session = load_session_from_env();
-    let current_session_id = session.as_ref().map(|session| session.id.as_str());
-    let projection = load_workspace_projection(worktree_root)?;
-    let current_intent = workspace_current_intent(event, projection.as_ref(), current_session_id);
-    if current_intent.trim().is_empty() {
-        return Ok(HookOutput::Silent);
-    }
-
-    let conflicts = workspace_coordination_conflicts(
-        worktree_root,
-        projection.as_ref(),
-        &current_intent,
-        current_session_id,
-    )?;
-    let Some(conflict) = conflicts.into_iter().next() else {
-        return Ok(HookOutput::Silent);
-    };
-
-    if has_matching_split_claim(
-        worktree_root,
-        current_session_id,
-        &current_intent,
-        &conflict,
-    )? {
-        return Ok(HookOutput::Silent);
-    }
-
-    Ok(workspace_coordination_block_decision(&conflict))
-}
-
-fn workspace_coordination_conflicts(
-    worktree_root: &Path,
-    projection: Option<&WorkspaceProjection>,
-    current_intent: &str,
-    current_session_id: Option<&str>,
-) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
-    let mut conflicts = Vec::new();
-    if let Some(projection) = projection {
-        conflicts.extend(workspace_agent_conflicts(
-            projection,
-            current_intent,
-            current_session_id,
-        ));
-    }
-    conflicts.extend(workspace_work_item_conflicts(
-        worktree_root,
-        current_intent,
-        current_session_id,
-    )?);
-    conflicts.extend(board_claim_conflicts(
-        worktree_root,
-        current_intent,
-        current_session_id,
-    )?);
-    Ok(conflicts)
-}
-
-fn workspace_agent_conflicts(
-    projection: &WorkspaceProjection,
-    current_intent: &str,
-    current_session_id: Option<&str>,
-) -> Vec<WorkspaceCoordinationConflict> {
-    projection
-        .agents
-        .iter()
-        .filter(|agent| {
-            current_session_id != Some(agent.session_id.as_str())
-                && agent.is_assigned()
-                && matches!(
-                    agent.status_category,
-                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
-                )
-        })
-        .filter_map(|agent| {
-            let text = workspace_agent_text(agent);
-            is_similar_work(current_intent, &text).then(|| WorkspaceCoordinationConflict {
-                source_label: "similar active Workspace",
-                title: agent
-                    .title_summary
-                    .as_deref()
-                    .or(agent.current_focus.as_deref())
-                    .unwrap_or("active Workspace agent")
-                    .to_string(),
-                session_id: Some(agent.session_id.clone()),
-                branch: agent.branch.clone(),
-                agent_id: Some(agent.agent_id.clone()),
-                related_owners: Vec::new(),
-                related_topics: agent.coordination_scope.iter().cloned().collect(),
-            })
-        })
-        .collect()
-}
-
-fn workspace_work_item_conflicts(
-    worktree_root: &Path,
-    current_intent: &str,
-    current_session_id: Option<&str>,
-) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
-    let projection = load_or_synthesize_workspace_work_items(worktree_root)?;
-    Ok(projection
-        .work_items
-        .iter()
-        .filter(|item| item.is_incomplete())
-        .filter(|item| {
-            current_session_id.is_none_or(|session_id| {
-                !item
-                    .agents
-                    .iter()
-                    .any(|agent| agent.session_id == session_id)
-            })
-        })
-        .filter_map(|item| {
-            let text = workspace_work_item_text(item);
-            is_similar_work(current_intent, &text).then(|| {
-                let first_agent = item.agents.first();
-                let first_container = item.execution_containers.first();
-                WorkspaceCoordinationConflict {
-                    source_label: "incomplete Workspace",
-                    title: item.title.clone(),
-                    session_id: first_agent.map(|agent| agent.session_id.clone()),
-                    branch: first_container.and_then(|container| container.branch.clone()),
-                    agent_id: first_agent.and_then(|agent| agent.agent_id.clone()),
-                    related_owners: item.owner.iter().cloned().collect(),
-                    related_topics: vec![item.id.clone()],
-                }
-            })
-        })
-        .collect())
-}
-
-fn board_claim_conflicts(
-    worktree_root: &Path,
-    current_intent: &str,
-    current_session_id: Option<&str>,
-) -> Result<Vec<WorkspaceCoordinationConflict>, HookError> {
-    let snapshot = load_snapshot(worktree_root)?;
-    let audience_scope = current_session_board_scope(worktree_root, current_session_id)?;
-    Ok(snapshot
-        .board
-        .entries
-        .iter()
-        .rev()
-        .filter(|entry| {
-            entry.kind == BoardEntryKind::Claim
-                && board_claim_is_active(entry)
-                && current_session_id != entry.origin_session_id.as_deref()
-                && board_entry_visible_for_scope(entry, &audience_scope)
-        })
-        .filter_map(|entry| {
-            let text = board_entry_text(entry);
-            is_similar_work(current_intent, &text).then(|| WorkspaceCoordinationConflict {
-                source_label: "active Board claim",
-                title: entry
-                    .title_summary
-                    .as_deref()
-                    .or_else(|| entry.body.lines().find(|line| !line.trim().is_empty()))
-                    .unwrap_or("active Board claim")
-                    .trim()
-                    .to_string(),
-                session_id: entry.origin_session_id.clone(),
-                branch: entry.origin_branch.clone(),
-                agent_id: entry.origin_agent_id.clone(),
-                related_owners: entry.related_owners.clone(),
-                related_topics: entry.related_topics.clone(),
-            })
-        })
-        .collect())
-}
-
-fn workspace_current_intent(
-    event: &HookEvent,
-    projection: Option<&WorkspaceProjection>,
-    current_session_id: Option<&str>,
-) -> String {
-    let mut parts = Vec::new();
-    if let (Some(projection), Some(current_session_id)) = (projection, current_session_id) {
-        if let Some(agent) = projection
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == current_session_id)
-        {
-            push_optional(&mut parts, agent.title_summary.as_deref());
-            push_optional(&mut parts, agent.current_focus.as_deref());
-            push_optional(&mut parts, agent.coordination_scope.as_deref());
-        }
-    }
-    if parts.is_empty() {
-        if let Some(projection) = projection {
-            parts.push(projection.title.as_str());
-            push_optional(&mut parts, projection.summary.as_deref());
-            push_optional(&mut parts, projection.next_action.as_deref());
-            push_optional(&mut parts, projection.owner.as_deref());
-        }
-    }
-    if parts.is_empty() {
-        push_optional(&mut parts, event.command());
-        if let Some(tool_input) = event.tool_input.as_ref() {
-            push_optional(
-                &mut parts,
-                tool_input
-                    .get("file_path")
-                    .and_then(serde_json::Value::as_str),
-            );
-        }
-    }
-    parts.join("\n")
-}
-
-fn workspace_agent_text(agent: &WorkspaceAgentSummary) -> String {
-    let mut parts = Vec::new();
-    push_optional(&mut parts, agent.title_summary.as_deref());
-    push_optional(&mut parts, agent.current_focus.as_deref());
-    push_optional(&mut parts, agent.coordination_scope.as_deref());
-    push_optional(&mut parts, agent.branch.as_deref());
-    parts.push(agent.agent_id.as_str());
-    parts.push(agent.display_name.as_str());
-    parts.join("\n")
-}
-
-fn workspace_work_item_text(item: &WorkspaceWorkItem) -> String {
-    let mut parts = Vec::new();
-    parts.push(item.title.as_str());
-    push_optional(&mut parts, item.intent.as_deref());
-    push_optional(&mut parts, item.summary.as_deref());
-    push_optional(&mut parts, item.owner.as_deref());
-    parts.extend(item.board_refs.iter().map(String::as_str));
-    for agent in &item.agents {
-        parts.push(agent.session_id.as_str());
-        push_optional(&mut parts, agent.agent_id.as_deref());
-        push_optional(&mut parts, agent.display_name.as_deref());
-    }
-    for container in &item.execution_containers {
-        push_optional(&mut parts, container.branch.as_deref());
-        push_optional(
-            &mut parts,
-            container
-                .worktree_path
-                .as_ref()
-                .and_then(|path| path.to_str()),
-        );
-        push_optional(&mut parts, container.pr_url.as_deref());
-        push_optional(&mut parts, container.pr_state.as_deref());
-    }
-    for event in &item.events {
-        push_optional(&mut parts, event.title.as_deref());
-        push_optional(&mut parts, event.intent.as_deref());
-        push_optional(&mut parts, event.summary.as_deref());
-        push_optional(&mut parts, event.next_action.as_deref());
-    }
-    parts.join("\n")
-}
-
-fn board_entry_text(entry: &BoardEntry) -> String {
-    let mut parts = Vec::new();
-    push_optional(&mut parts, entry.title_summary.as_deref());
-    parts.push(entry.body.as_str());
-    parts.extend(entry.related_topics.iter().map(String::as_str));
-    parts.extend(entry.related_owners.iter().map(String::as_str));
-    parts.extend(entry.target_owners.iter().map(String::as_str));
-    parts.join("\n")
-}
-
-fn push_optional<'a>(parts: &mut Vec<&'a str>, value: Option<&'a str>) {
-    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-        parts.push(value);
-    }
-}
-
-fn option_has_nonempty_text(value: Option<&str>) -> bool {
-    value.map(str::trim).is_some_and(|value| !value.is_empty())
-}
-
-fn board_claim_is_active(entry: &BoardEntry) -> bool {
-    !entry.state.as_deref().is_some_and(|state| {
-        matches!(
-            state.trim().to_ascii_lowercase().as_str(),
-            "done" | "closed" | "resolved" | "cancelled" | "canceled" | "inactive"
-        )
-    })
-}
-
-fn has_matching_split_claim(
-    worktree_root: &Path,
-    current_session_id: Option<&str>,
-    current_intent: &str,
-    conflict: &WorkspaceCoordinationConflict,
-) -> Result<bool, HookError> {
-    let Some(current_session_id) = current_session_id else {
-        return Ok(false);
-    };
-    let snapshot = load_snapshot(worktree_root)?;
-    let audience_scope = current_session_board_scope(worktree_root, Some(current_session_id))?;
-    Ok(snapshot.board.entries.iter().rev().any(|entry| {
-        entry.kind == BoardEntryKind::Claim
-            && entry.origin_session_id.as_deref() == Some(current_session_id)
-            && board_claim_is_active(entry)
-            && board_entry_visible_for_scope(entry, &audience_scope)
-            && board_entry_has_boundary(entry)
-            && board_entry_targets_conflict(entry, conflict)
-            && split_claim_matches_current_work(entry, current_intent)
-    }))
-}
-
-fn split_claim_matches_current_work(entry: &BoardEntry, current_intent: &str) -> bool {
-    is_similar_work(current_intent, &board_entry_text(entry))
-        || entry
-            .title_summary
-            .as_deref()
-            .is_some_and(|title| is_similar_work(current_intent, title))
-        || entry
-            .related_topics
-            .iter()
-            .any(|topic| is_similar_work(current_intent, topic))
-}
-
-fn board_entry_has_boundary(entry: &BoardEntry) -> bool {
-    entry.body.lines().any(|line| {
-        line.trim_start()
-            .to_ascii_lowercase()
-            .starts_with("boundary:")
-    })
-}
-
-fn board_entry_targets_conflict(
-    entry: &BoardEntry,
-    conflict: &WorkspaceCoordinationConflict,
-) -> bool {
-    let mut keys = Vec::new();
-    if let Some(session_id) = conflict.session_id.as_deref() {
-        keys.push(session_id.to_string());
-        keys.push(format!("session:{session_id}"));
-    }
-    if let Some(branch) = conflict.branch.as_deref() {
-        keys.push(branch.to_string());
-        keys.push(format!("branch:{branch}"));
-    }
-    if let Some(agent_id) = conflict.agent_id.as_deref() {
-        keys.push(agent_id.to_string());
-        keys.push(format!("agent:{agent_id}"));
-    }
-    keys.extend(conflict.related_owners.iter().cloned());
-
-    entry
-        .target_owners
-        .iter()
-        .any(|target| keys.iter().any(|key| key == target))
-        || entry
-            .mentions
-            .iter()
-            .map(|mention| match mention.target_kind {
-                BoardMentionTargetKind::Session => format!("session:{}", mention.target),
-                BoardMentionTargetKind::Branch => format!("branch:{}", mention.target),
-                BoardMentionTargetKind::Agent => format!("agent:{}", mention.target),
-                BoardMentionTargetKind::User => format!("user:{}", mention.target),
-                BoardMentionTargetKind::Workspace => format!("workspace:{}", mention.target),
-            })
-            .any(|typed_key| keys.iter().any(|key| key == &typed_key))
-}
-
-fn workspace_coordination_block_decision(conflict: &WorkspaceCoordinationConflict) -> HookOutput {
-    let mut detail = format!(
-        "A {source} is already in progress and appears to cover the same work.\n\n\
-Conflict title: {title}\n",
-        source = conflict.source_label,
-        title = conflict.title
-    );
-    if let Some(session_id) = conflict.session_id.as_deref() {
-        detail.push_str(&format!("Session: {session_id}\n"));
-    }
-    if let Some(branch) = conflict.branch.as_deref() {
-        detail.push_str(&format!("Branch: {branch}\n"));
-    }
-    if !conflict.related_topics.is_empty() {
-        detail.push_str(&format!("Topics: {}\n", conflict.related_topics.join(", ")));
-    }
-    detail.push_str(
-        "\nDo not continue implementation/editing for duplicate work in a new Workspace. \
-Coordinate on the shared Board with the active agent first.\n\n\
-To coordinate or hand off:\n\
-  gwtd board post --kind request --target <session-or-branch> --body '<question or handoff request>'\n\n\
-To split intentionally, post a claim that targets/mentions the active agent and includes a Boundary line:\n\
-  gwtd board post --kind claim --target <session-or-branch> --topic <topic> --body 'Split accepted.\\n\\nBoundary: <owned files/modules and non-overlap>'",
-    );
-    HookOutput::pre_tool_use_permission("Similar active Workspace already exists", &detail)
-}
-
-fn is_workspace_coordination_sensitive_event(event: &HookEvent) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
-        Some("Bash") => event
-            .command()
-            .is_some_and(is_workspace_coordination_sensitive_bash),
-        _ => false,
-    }
-}
-
-fn is_workspace_coordination_sensitive_bash(command: &str) -> bool {
-    if is_workspace_coordination_command(command) {
-        return false;
-    }
-    if command.contains('>') || command.contains(" tee ") || command.contains("|tee ") {
-        return true;
-    }
-    let segments = super::segments::split_command_segments(command);
-    segments.iter().any(|segment| {
-        let tokens = segment_tokens(segment);
-        let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
-            return false;
-        };
-        match command_name.as_str() {
-            "cp" | "mkdir" | "mv" | "rm" | "rmdir" | "touch" => true,
-            "sed" => tokens
-                .iter()
-                .any(|token| *token == "--in-place" || token.starts_with("-i")),
-            "cargo" => tokens
-                .get(1)
-                .is_some_and(|subcommand| matches!(*subcommand, "fmt" | "fix")),
-            "git" => tokens
-                .get(1)
-                .is_some_and(|subcommand| matches!(*subcommand, "add" | "commit")),
-            _ => false,
-        }
-    })
-}
-
-fn is_workspace_coordination_command(command: &str) -> bool {
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments.iter().all(|segment| {
-            let tokens = segment_tokens(segment);
-            let Some(command_name) = tokens.first().map(|token| normalize_command_name(token))
-            else {
-                return false;
-            };
-            if command_name != "gwtd" {
-                return false;
-            }
-            matches!(
-                tokens.as_slice(),
-                [_, "board", "post" | "show", ..]
-                    | [
-                        _,
-                        "workspace",
-                        "update" | "ensure" | "create" | "join" | "candidates",
-                        ..
-                    ]
-                    | [_, "build", "start" | "phase" | "complete" | "abort", ..]
-            )
-        })
-}
-
-fn is_workspace_materialization_event(event: &HookEvent) -> bool {
-    if event.tool_name.as_deref() != Some("Bash") {
-        return false;
-    }
-    let Some(command) = event.command() else {
-        return false;
-    };
-    let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| is_workspace_materialization_segment(segment))
-}
-
-fn is_workspace_materialization_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
-        return false;
-    };
-    if command_name != "gwtd" {
-        return false;
-    }
-    match tokens.as_slice() {
-        [_, "workspace", "ensure" | "create" | "join" | "candidates", ..] => true,
-        [_, "board", "show", ..] => true,
-        [_, "board", "post", rest @ ..] => rest.contains(&"--title-summary"),
-        _ => false,
-    }
-}
-
-fn is_similar_work(left: &str, right: &str) -> bool {
-    let left_compact = compact_for_similarity(left);
-    let right_compact = compact_for_similarity(right);
-    if left_compact.len() >= 16
-        && right_compact.len() >= 16
-        && (left_compact.contains(&right_compact) || right_compact.contains(&left_compact))
-    {
-        return true;
-    }
-
-    let left_tokens = similarity_tokens(left);
-    let right_tokens = similarity_tokens(right);
-    if left_tokens.is_empty() || right_tokens.is_empty() {
-        return false;
-    }
-    let overlap = left_tokens.intersection(&right_tokens).count();
-    if overlap < 3 {
-        return false;
-    }
-    let left_coverage = overlap as f32 / left_tokens.len() as f32;
-    let right_coverage = overlap as f32 / right_tokens.len() as f32;
-    let dice = (2 * overlap) as f32 / (left_tokens.len() + right_tokens.len()) as f32;
-
-    (overlap >= 4 && left_coverage >= 0.45 && dice >= 0.35)
-        || (left_coverage >= 0.60 && right_coverage >= 0.45)
-}
-
-fn compact_for_similarity(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn similarity_tokens(value: &str) -> HashSet<String> {
-    let mut tokens = HashSet::new();
-    for raw in value
-        .split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        let lower = raw.to_ascii_lowercase();
-        if raw.is_ascii() {
-            if lower.len() >= 3 && !is_similarity_stopword(&lower) {
-                tokens.insert(lower);
-            }
-            continue;
-        }
-        let chars = raw.chars().collect::<Vec<_>>();
-        for size in [2, 3] {
-            if chars.len() >= size {
-                for window in chars.windows(size) {
-                    tokens.insert(window.iter().collect());
-                }
-            }
-        }
-    }
-    tokens
-}
-
-fn is_similarity_stopword(token: &str) -> bool {
-    matches!(
-        token,
-        "add"
-            | "and"
-            | "body"
-            | "for"
-            | "from"
-            | "gate"
-            | "new"
-            | "old"
-            | "only"
-            | "the"
-            | "this"
-            | "update"
-            | "with"
-            | "work"
-            | "works"
-    )
 }
 
 fn is_title_sensitive_tool(event: &HookEvent) -> bool {
