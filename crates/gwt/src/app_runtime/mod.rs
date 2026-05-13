@@ -1835,6 +1835,17 @@ impl AppRuntime {
         for tab in &self.tabs {
             let _ =
                 gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
+            // SPEC-2359 US-39 / FR-142..145: backfill Phase U-6 schema
+            // additions (`summary`, `created_at`, `creator`,
+            // `lifecycle_stage`) on legacy `workspace.json` files. Runs
+            // alongside the auto-done scan above with independent helpers
+            // and an independent `workspace.migration.json` marker, so the
+            // two migrations are exactly-once each and never duplicate work.
+            // Errors are silently dropped (`let _ = ...`) so a corrupt or
+            // unreadable Workspace cannot block daemon startup.
+            let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
+                &tab.project_root,
+            );
         }
 
         let windows = self

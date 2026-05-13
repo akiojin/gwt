@@ -458,9 +458,25 @@ pub(super) fn run<E: CliEnv>(
             projection.status_text = current_focus
                 .clone()
                 .unwrap_or_else(|| "Workspace created".to_string());
-            projection.summary = current_focus.clone();
+            // SPEC-2359 Phase U-6 (FR-134): when current_focus is omitted,
+            // fall back to title_summary so the Workspace Overview Summary
+            // section never renders empty for newly-created workspaces.
+            // Previously summary stayed None whenever the caller did not
+            // pass --current-focus, leaving the Detail pane stuck on the
+            // "No Workspace summary yet" placeholder.
+            projection.summary = current_focus
+                .clone()
+                .or_else(|| Some(title_summary.clone()));
             projection.owner = owner;
             projection.next_action = Some("Coordinate on Board before implementation".to_string());
+            // SPEC-2359 Phase U-6 (FR-131, FR-135): record creation metadata
+            // and initial lifecycle stage so the new Card preview / Detail
+            // pane has informative chips from Day-0 without waiting for
+            // retroactive migration.
+            projection.created_at = now;
+            projection.creator = Some(agent.display_name.clone());
+            projection.lifecycle_stage =
+                gwt_core::workspace_projection::WorkspaceLifecycleStage::Active;
             assign_agent_to_workspace(
                 &mut projection,
                 &agent_session,
@@ -1268,6 +1284,75 @@ mod tests {
         assert_eq!(items.work_items.len(), 1);
         assert_eq!(items.work_items[0].id, workspace_id);
         assert_eq!(items.work_items[0].title, "Workspace history");
+    }
+
+    /// SPEC-2359 Phase U-6 (FR-131, FR-134, FR-135, FR-136): a workspace
+    /// created without `--current-focus` must still have a non-empty
+    /// `summary` (auto-filled from `title_summary`), a real `created_at`
+    /// timestamp, the originating Agent's `display_name` as `creator`, and
+    /// an initial `WorkspaceWorkEvent { kind: Start }` so the Workspace
+    /// Overview Lifecycle section is never empty on Day-0.
+    #[test]
+    fn workspace_create_autofills_summary_and_metadata_when_current_focus_missing() {
+        let _guard = crate::env_test_lock().lock().unwrap();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push(unassigned_agent("session-1"));
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Create {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace U-6 autofill".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                split_from: None,
+                boundary: None,
+            },
+            &mut out,
+        )
+        .expect("create workspace");
+
+        assert_eq!(code, 0);
+        let saved = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert_eq!(
+            saved.summary.as_deref(),
+            Some("Workspace U-6 autofill"),
+            "summary must fall back to title_summary when --current-focus is omitted"
+        );
+        assert_eq!(
+            saved.lifecycle_stage,
+            gwt_core::workspace_projection::WorkspaceLifecycleStage::Active,
+            "lifecycle_stage must initialize to Active on workspace create"
+        );
+        assert_ne!(
+            saved.created_at,
+            gwt_core::workspace_projection::workspace_projection_default_created_at(),
+            "created_at must be a real timestamp, not the migration sentinel"
+        );
+        assert!(
+            saved.creator.is_some(),
+            "creator must capture the originating Agent's display_name"
+        );
+
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        assert_eq!(
+            items.work_items.len(),
+            1,
+            "Workspace Overview Lifecycle requires at least one Day-0 event"
+        );
     }
 
     #[test]

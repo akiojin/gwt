@@ -21,6 +21,7 @@ pub mod skill_state;
 pub(crate) mod test_support;
 pub mod update;
 pub mod workspace_projection;
+pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
 pub use error::{GwtError, Result};
