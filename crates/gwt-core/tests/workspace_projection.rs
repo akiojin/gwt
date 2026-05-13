@@ -62,6 +62,79 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
     }
 }
 
+/// SPEC-2359 Phase U-6 (FR-132, FR-139, FR-143): `recompute_lifecycle_stage`
+/// derives the high-level lifecycle stage from runtime status + linked PRs.
+/// Done overrides everything; open PR routes to InReview; other activity
+/// signals route to Active; Unknown stays in Planning.
+#[test]
+fn recompute_lifecycle_stage_follows_documented_precedence_rules() {
+    use gwt_core::workspace_projection::{
+        recompute_lifecycle_stage, WorkspaceLifecycleStage, WorkspacePrLink,
+    };
+
+    // Rule 1: Done status wins regardless of PR state.
+    let open_pr = vec![WorkspacePrLink {
+        number: 42,
+        title: None,
+        url: None,
+        state: Some("open".to_string()),
+    }];
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Done, &open_pr),
+        WorkspaceLifecycleStage::Done
+    );
+
+    // Rule 2: open PR routes Active to InReview.
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Active, &open_pr),
+        WorkspaceLifecycleStage::InReview
+    );
+    // Open is case-insensitive.
+    let upper_open = vec![WorkspacePrLink {
+        number: 7,
+        title: None,
+        url: None,
+        state: Some("OPEN".to_string()),
+    }];
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Active, &upper_open),
+        WorkspaceLifecycleStage::InReview
+    );
+
+    // Rule 3: Active / Blocked / Idle without an open PR route to Active.
+    let no_pr: Vec<WorkspacePrLink> = Vec::new();
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Active, &no_pr),
+        WorkspaceLifecycleStage::Active
+    );
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Blocked, &no_pr),
+        WorkspaceLifecycleStage::Active
+    );
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Idle, &no_pr),
+        WorkspaceLifecycleStage::Active
+    );
+
+    // Rule 4: Unknown stays in Planning.
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Unknown, &no_pr),
+        WorkspaceLifecycleStage::Planning
+    );
+
+    // A merged PR (state != "open") does not promote to InReview.
+    let merged_pr = vec![WorkspacePrLink {
+        number: 9,
+        title: None,
+        url: None,
+        state: Some("merged".to_string()),
+    }];
+    assert_eq!(
+        recompute_lifecycle_stage(WorkspaceStatusCategory::Active, &merged_pr),
+        WorkspaceLifecycleStage::Active
+    );
+}
+
 /// SPEC-2359 Phase U-6 (FR-140): when a Workspace's `summary` is missing,
 /// the first incoming Status / Claim / Handoff / Decision Board milestone
 /// must backfill it from the entry body so Workspace Overview Detail pane

@@ -99,6 +99,41 @@ pub struct WorkspacePrLink {
     pub state: Option<String>,
 }
 
+/// SPEC-2359 Phase U-6 (FR-132, FR-139, FR-143): derive a coarse
+/// [`WorkspaceLifecycleStage`] from runtime activity signals. Used by
+/// `gwtd workspace update` (FR-139) to keep the lifecycle chip in sync
+/// when status / events change, by the retroactive migration (FR-143) to
+/// backfill legacy data, and by the default constructor (`Planning` for
+/// fresh projections without events).
+///
+/// Mapping rules (high → low precedence):
+/// 1. `status_category = Done` → `Done` (overrides any pending events).
+/// 2. `linked_prs` contains an open PR → `InReview`.
+/// 3. `status_category = Active` / `Blocked` / `Idle` → `Active`
+///    (runtime activity has begun even if no PR is open yet).
+/// 4. `status_category = Unknown` → `Planning` (no work signal yet).
+pub fn recompute_lifecycle_stage(
+    status_category: WorkspaceStatusCategory,
+    linked_prs: &[WorkspacePrLink],
+) -> WorkspaceLifecycleStage {
+    if status_category == WorkspaceStatusCategory::Done {
+        return WorkspaceLifecycleStage::Done;
+    }
+    if linked_prs
+        .iter()
+        .any(|pr| matches!(pr.state.as_deref(), Some(state) if state.eq_ignore_ascii_case("open")))
+    {
+        return WorkspaceLifecycleStage::InReview;
+    }
+    match status_category {
+        WorkspaceStatusCategory::Active
+        | WorkspaceStatusCategory::Blocked
+        | WorkspaceStatusCategory::Idle => WorkspaceLifecycleStage::Active,
+        WorkspaceStatusCategory::Done => WorkspaceLifecycleStage::Done,
+        WorkspaceStatusCategory::Unknown => WorkspaceLifecycleStage::Planning,
+    }
+}
+
 /// SPEC-2359 Phase U-6 (FR-131): sentinel default for `created_at` when a
 /// legacy `workspace.json` is read without the field present. The retroactive
 /// migration in `workspace_projection_migration` detects this value and
