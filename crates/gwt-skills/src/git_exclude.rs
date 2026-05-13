@@ -189,33 +189,25 @@ fn replace_managed_block_with_patterns(
 
 fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static str> {
     let mut patterns = Vec::new();
-    if !targets.is_empty() {
-        push_unique(&mut patterns, ".gwt/discussion.md");
+    if targets.is_empty() {
+        return patterns;
     }
-    for target in ManagedAssetTarget::ALL {
-        if !targets.contains(&target) {
-            continue;
-        }
-        match target {
-            ManagedAssetTarget::ClaudeCode => {
-                push_unique(&mut patterns, ".claude/skills/gwt-*");
-                push_unique(&mut patterns, ".claude/commands/gwt-*");
-                push_unique(&mut patterns, ".claude/settings.local.json");
-            }
-            ManagedAssetTarget::Codex => {
-                push_unique(&mut patterns, ".codex/skills/gwt-*");
-            }
-            ManagedAssetTarget::OpenCode => {
-                push_unique(&mut patterns, ".gwt/opencode/");
-            }
-            ManagedAssetTarget::OpenClaw => {
-                push_unique(&mut patterns, ".gwt/openclaw/");
-            }
-            ManagedAssetTarget::Hermes => {
-                push_unique(&mut patterns, ".gwt/hermes/");
-            }
-        }
+    // project-local `.gwt/` holds only gwt-managed files (project.toml,
+    // discussion.md, agent homes). Exclude it as a broad pattern so any
+    // future gwt-managed path under `.gwt/` is covered without listing
+    // each subpath individually.
+    push_unique(&mut patterns, ".gwt/");
+    if targets.contains(&ManagedAssetTarget::ClaudeCode) {
+        push_unique(&mut patterns, ".claude/skills/gwt-*");
+        push_unique(&mut patterns, ".claude/commands/gwt-*");
+        push_unique(&mut patterns, ".claude/settings.local.json");
     }
+    if targets.contains(&ManagedAssetTarget::Codex) {
+        push_unique(&mut patterns, ".codex/skills/gwt-*");
+    }
+    // OpenCode / OpenClaw / Hermes need no additional pattern: their agent
+    // homes (`.gwt/opencode/`, `.gwt/openclaw/`, `.gwt/hermes/`) are
+    // subsumed by the broad `.gwt/` pattern above.
     patterns
 }
 
@@ -243,11 +235,12 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
-        assert!(result.contains(".gwt/discussion.md"));
-        assert!(result.contains(".gwt/opencode/"));
-        assert!(result.contains(".gwt/openclaw/"));
-        assert!(result.contains(".gwt/hermes/"));
+        assert!(result.contains("\n.gwt/\n"));
         assert!(result.contains("docker-compose.override.yml"));
+        assert!(!result.contains(".gwt/discussion.md"));
+        assert!(!result.contains(".gwt/opencode/"));
+        assert!(!result.contains(".gwt/openclaw/"));
+        assert!(!result.contains(".gwt/hermes/"));
         assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));
         assert!(!result.contains(".agents/skills/gwt-*"));
@@ -258,12 +251,56 @@ mod tests {
         let result = replace_managed_block_for_targets("", &[ManagedAssetTarget::Hermes]).unwrap();
 
         assert!(result.contains(BEGIN_MARKER));
-        assert!(result.contains(".gwt/hermes/"));
-        assert!(result.contains(".gwt/discussion.md"));
+        assert!(result.contains("\n.gwt/\n"));
         assert!(!result.contains(".claude/skills/gwt-*"));
         assert!(!result.contains(".codex/skills/gwt-*"));
+        assert!(!result.contains(".gwt/discussion.md"));
+        assert!(!result.contains(".gwt/hermes/"));
         assert!(!result.contains(".gwt/opencode/"));
         assert!(!result.contains(".gwt/openclaw/"));
+    }
+
+    #[test]
+    fn adds_broad_gwt_dir_pattern_when_any_target_specified() {
+        let result = replace_managed_block("").unwrap();
+        assert!(
+            result.contains("\n.gwt/\n"),
+            "managed block should contain broad `.gwt/` pattern: {result}"
+        );
+    }
+
+    #[test]
+    fn does_not_emit_individual_gwt_subpaths_when_broad_pattern_included() {
+        let result = replace_managed_block("").unwrap();
+        assert!(
+            !result.contains(".gwt/discussion.md"),
+            "individual .gwt/discussion.md must be subsumed by broad .gwt/ pattern: {result}"
+        );
+        assert!(
+            !result.contains(".gwt/hermes/"),
+            "individual .gwt/hermes/ must be subsumed by broad .gwt/ pattern: {result}"
+        );
+        assert!(
+            !result.contains(".gwt/opencode/"),
+            "individual .gwt/opencode/ must be subsumed by broad .gwt/ pattern: {result}"
+        );
+        assert!(
+            !result.contains(".gwt/openclaw/"),
+            "individual .gwt/openclaw/ must be subsumed by broad .gwt/ pattern: {result}"
+        );
+    }
+
+    #[test]
+    fn broad_gwt_dir_pattern_present_for_single_provider_target() {
+        let result = replace_managed_block_for_targets("", &[ManagedAssetTarget::Codex]).unwrap();
+        assert!(
+            result.contains("\n.gwt/\n"),
+            "single-target managed block should contain broad `.gwt/` pattern: {result}"
+        );
+        assert!(
+            !result.contains(".gwt/discussion.md"),
+            "single-target managed block should not emit .gwt/discussion.md separately: {result}"
+        );
     }
 
     #[test]
