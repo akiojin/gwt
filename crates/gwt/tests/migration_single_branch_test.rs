@@ -33,6 +33,14 @@ fn run_git(args: &[&str], cwd: &Path) {
     );
 }
 
+/// Configure a deterministic identity inside a freshly-created Git repo so
+/// `git commit` works on CI runners that do not provision a global
+/// `user.email` / `user.name` (Linux ubuntu-latest is the canonical case).
+fn set_test_identity(repo: &Path) {
+    run_git(["config", "user.email", "test@example.com"].as_ref(), repo);
+    run_git(["config", "user.name", "Test"].as_ref(), repo);
+}
+
 fn read_remote_fetch_refspec(repo: &Path) -> Option<String> {
     let output = gwt_core::process::hidden_command("git")
         .args(["config", "--get", "remote.origin.fetch"])
@@ -84,6 +92,7 @@ fn build_upstream(workspace: &Path, upstream_dir: &Path) {
     // bare (no working tree) while still owning real history.
     let scratch = tempdir().expect("scratch tempdir for upstream seed");
     run_git(["init"].as_ref(), scratch.path());
+    set_test_identity(scratch.path());
     run_git(
         [
             "remote",
