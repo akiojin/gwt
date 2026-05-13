@@ -17,6 +17,7 @@ import { parseHTML } from "linkedom";
 import {
   applyVisibilityTransition,
   attachHostResizeReflow,
+  classifyProjectWindowVisibility,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
 
@@ -158,6 +159,26 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
   );
 });
 
+test("classifyProjectWindowVisibility keeps inactive project terminals hidden, not removed", () => {
+  const result = classifyProjectWindowVisibility({
+    activeWindowIds: ["tab-a::agent-1", "tab-a::board-1"],
+    allProjectWindowIds: [
+      "tab-a::agent-1",
+      "tab-a::board-1",
+      "tab-b::agent-1",
+    ],
+    mountedWindowIds: [
+      "tab-a::agent-1",
+      "tab-b::agent-1",
+      "orphan::agent-1",
+    ],
+  });
+
+  assert.deepEqual(result.visible, ["tab-a::agent-1", "tab-a::board-1"]);
+  assert.deepEqual(result.hidden, ["tab-b::agent-1"]);
+  assert.deepEqual(result.removed, ["orphan::agent-1"]);
+});
+
 test("attachHostResizeReflow throws when given a non-DOM window", () => {
   assert.throws(
     () =>
@@ -194,5 +215,10 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /viewportEligibleForRefresh\(\{/,
     "canRefreshTerminalViewport must consult the shared predicate",
+  );
+  assert.match(
+    appSource,
+    /classifyProjectWindowVisibility\(\{/,
+    "project tab switches must classify inactive project windows as hidden instead of disposing their terminal runtimes",
   );
 });

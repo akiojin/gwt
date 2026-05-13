@@ -881,6 +881,168 @@ pub fn record_workspace_work_event_paths(
     Ok(())
 }
 
+/// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkspaceWorkEvent`
+/// for `work_item_id` iff no Done event has been recorded for it yet. This is
+/// the canonical write path for auto-done emission from PR merge detection,
+/// user-confirmed cleanup, and startup retroactive migration. Returns
+/// `Ok(true)` when a new Done event was appended, `Ok(false)` when an
+/// existing Done event was found (idempotent noop).
+pub fn emit_workspace_done_event_if_absent_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    if work_item_has_done_event_in_projection(work_items_path, work_item_id)? {
+        return Ok(false);
+    }
+    let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, updated_at);
+    event.status_category = Some(WorkspaceStatusCategory::Done);
+    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    Ok(true)
+}
+
+/// SPEC-2359 US-37 / FR-117..FR-120: Convenience wrapper resolving the
+/// project-scoped work_items and work_events paths from `repo_path` and
+/// invoking [`emit_workspace_done_event_if_absent_paths`].
+pub fn emit_workspace_done_event_if_absent(
+    repo_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    emit_workspace_done_event_if_absent_paths(
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        work_item_id,
+        updated_at,
+    )
+}
+
+fn work_item_has_done_event_in_projection(
+    work_items_path: &Path,
+    work_item_id: &str,
+) -> Result<bool> {
+    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(false);
+    };
+    Ok(projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_item_id)
+        .any(|item| {
+            item.events
+                .iter()
+                .any(|event| event.kind == WorkspaceWorkEventKind::Done)
+        }))
+}
+
+/// SPEC-2359 US-37 / FR-119: Scan all WorkItems in `work_items.json` and
+/// emit a Done event for each WorkItem that is still incomplete and whose
+/// execution container indicates a merged `work/*` Start Work branch.
+/// Eligibility requires at least one [`WorkspaceExecutionContainerRef`]
+/// whose `branch` starts with `"work/"` and whose `pr_state` matches
+/// `"merged"` case-insensitively. Emission is delegated to
+/// [`emit_workspace_done_event_if_absent_paths`] so repeated invocations
+/// are idempotent. Returns the number of WorkItems that were newly Done'd.
+pub fn retroactive_auto_done_scan_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(0);
+    };
+    let candidates: Vec<String> = projection
+        .work_items
+        .iter()
+        .filter(|item| item.is_incomplete())
+        .filter(|item| work_item_is_eligible_for_auto_done(item))
+        .map(|item| item.id.clone())
+        .collect();
+    let mut emitted = 0;
+    for work_item_id in candidates {
+        if emit_workspace_done_event_if_absent_paths(
+            work_items_path,
+            events_path,
+            &work_item_id,
+            now,
+        )? {
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+/// SPEC-2359 US-37 / FR-119: Convenience wrapper resolving the project-scoped
+/// work_items and work_events paths from `repo_path` and invoking
+/// [`retroactive_auto_done_scan_paths`].
+pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
+    retroactive_auto_done_scan_paths(
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        now,
+    )
+}
+
+fn work_item_is_eligible_for_auto_done(item: &WorkspaceWorkItem) -> bool {
+    item.execution_containers.iter().any(|container| {
+        let branch_starts_with_work = container
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with("work/"));
+        let pr_state_merged = container
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+        branch_starts_with_work && pr_state_merged
+    })
+}
+
+/// SPEC-2359 US-37 / FR-118: Emit a Done WorkspaceWorkEvent for the Workspace
+/// WorkItem currently associated with `branch`. The function loads the current
+/// projection at `current_path` and emits Done iff
+/// `projection.git_details.branch` matches `branch`. Used by user-confirmed
+/// cleanup to mark the matching Workspace as completed before worktree/branch
+/// deletion. Idempotent per `work_item_id` via
+/// [`emit_workspace_done_event_if_absent_paths`].
+pub fn emit_workspace_done_event_for_branch_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    branch: &str,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let Some(projection) = load_workspace_projection_from_path(current_path)? else {
+        return Ok(false);
+    };
+    let matches = projection
+        .git_details
+        .as_ref()
+        .and_then(|details| details.branch.as_deref())
+        .is_some_and(|stored_branch| stored_branch == branch);
+    if !matches {
+        return Ok(false);
+    }
+    emit_workspace_done_event_if_absent_paths(work_items_path, events_path, &projection.id, now)
+}
+
+/// SPEC-2359 US-37 / FR-118: Convenience wrapper resolving project-scoped
+/// paths from `repo_path` and invoking
+/// [`emit_workspace_done_event_for_branch_paths`].
+pub fn emit_workspace_done_event_for_branch(
+    repo_path: &Path,
+    branch: &str,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    emit_workspace_done_event_for_branch_paths(
+        &gwt_workspace_projection_path_for_repo_path(repo_path),
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        branch,
+        now,
+    )
+}
+
 pub fn load_or_default_workspace_projection_from_path(
     path: &Path,
     project_root: &Path,
@@ -2405,6 +2567,354 @@ mod tests {
         assert_eq!(
             resolve_workspace_id_for_mention(dir.path(), "branch", "feature/x"),
             None
+        );
+    }
+
+    // SPEC-2359 US-37 / T-236..T-239: auto-done emit helper and retroactive migration scanner.
+
+    #[test]
+    fn auto_done_emit_helper_appends_single_done_event_and_marks_work_item_done() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
+
+        let mut start =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-auto-done", started_at);
+        start.title = Some("Auto-done test work".to_string());
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("record start event");
+
+        let emitted = emit_workspace_done_event_if_absent_paths(
+            &work_items_path,
+            &events_path,
+            "wi-auto-done",
+            done_at,
+        )
+        .expect("emit done");
+        assert!(emitted, "first call must append a Done event");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(projection.work_items.len(), 1);
+        let item = &projection.work_items[0];
+        assert_eq!(item.id, "wi-auto-done");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, Some(done_at));
+
+        let events_text = std::fs::read_to_string(&events_path).expect("read events");
+        let done_lines = events_text
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"done\"") && line.contains("wi-auto-done"))
+            .count();
+        assert_eq!(done_lines, 1, "exactly one Done event must be persisted");
+    }
+
+    #[test]
+    fn auto_done_emit_helper_is_idempotent_per_work_item_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
+        let first_done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
+        let second_done_at = Utc.with_ymd_and_hms(2026, 5, 13, 3, 0, 0).unwrap();
+
+        let mut start =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-idempotent", started_at);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("record start event");
+
+        let first = emit_workspace_done_event_if_absent_paths(
+            &work_items_path,
+            &events_path,
+            "wi-idempotent",
+            first_done_at,
+        )
+        .expect("first emit");
+        let second = emit_workspace_done_event_if_absent_paths(
+            &work_items_path,
+            &events_path,
+            "wi-idempotent",
+            second_done_at,
+        )
+        .expect("second emit");
+
+        assert!(first, "first call must append Done");
+        assert!(!second, "second call must be a noop");
+
+        let events_text = std::fs::read_to_string(&events_path).expect("read events");
+        let done_lines = events_text
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"done\"") && line.contains("wi-idempotent"))
+            .count();
+        assert_eq!(done_lines, 1, "Done event must not be duplicated");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items");
+        let item = &projection.work_items[0];
+        assert_eq!(item.completed_at, Some(first_done_at));
+    }
+
+    #[test]
+    fn retroactive_auto_done_scan_marks_eligible_merged_work_branch_workitems() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
+
+        let mut eligible =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-eligible", started_at);
+        eligible.status_category = Some(WorkspaceStatusCategory::Active);
+        eligible.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260513-0100".to_string()),
+            worktree_path: None,
+            pr_number: Some(1),
+            pr_url: None,
+            pr_state: Some("merged".to_string()),
+        });
+        record_workspace_work_event_paths(&work_items_path, &events_path, eligible)
+            .expect("record eligible start");
+
+        let mut non_work = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "wi-non-work-branch",
+            started_at,
+        );
+        non_work.status_category = Some(WorkspaceStatusCategory::Active);
+        non_work.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("feature/manual".to_string()),
+            worktree_path: None,
+            pr_number: Some(2),
+            pr_url: None,
+            pr_state: Some("merged".to_string()),
+        });
+        record_workspace_work_event_paths(&work_items_path, &events_path, non_work)
+            .expect("record non-work start");
+
+        let mut not_merged =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-not-merged", started_at);
+        not_merged.status_category = Some(WorkspaceStatusCategory::Active);
+        not_merged.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260513-0200".to_string()),
+            worktree_path: None,
+            pr_number: Some(3),
+            pr_url: None,
+            pr_state: Some("open".to_string()),
+        });
+        record_workspace_work_event_paths(&work_items_path, &events_path, not_merged)
+            .expect("record not-merged start");
+
+        let count = retroactive_auto_done_scan_paths(&work_items_path, &events_path, now)
+            .expect("retroactive scan");
+        assert_eq!(count, 1, "only the eligible WorkItem must be auto-Done'd");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items");
+        let eligible_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-eligible")
+            .expect("eligible item");
+        assert_eq!(eligible_item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(eligible_item.completed_at, Some(now));
+
+        let non_work_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-non-work-branch")
+            .expect("non-work item");
+        assert_eq!(
+            non_work_item.status_category,
+            WorkspaceStatusCategory::Active,
+            "non-work/ branch must not be auto-Done'd",
+        );
+
+        let not_merged_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-not-merged")
+            .expect("not-merged item");
+        assert_eq!(
+            not_merged_item.status_category,
+            WorkspaceStatusCategory::Active,
+            "WorkItem without merged PR must not be auto-Done'd",
+        );
+    }
+
+    #[test]
+    fn retroactive_auto_done_scan_is_idempotent_across_invocations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
+        let first_run = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
+        let second_run = Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap();
+
+        let mut eligible =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-twice", started_at);
+        eligible.status_category = Some(WorkspaceStatusCategory::Active);
+        eligible.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260513-0100".to_string()),
+            worktree_path: None,
+            pr_number: Some(7),
+            pr_url: None,
+            pr_state: Some("merged".to_string()),
+        });
+        record_workspace_work_event_paths(&work_items_path, &events_path, eligible)
+            .expect("record start");
+
+        let first = retroactive_auto_done_scan_paths(&work_items_path, &events_path, first_run)
+            .expect("first scan");
+        let second = retroactive_auto_done_scan_paths(&work_items_path, &events_path, second_run)
+            .expect("second scan");
+
+        assert_eq!(first, 1, "first scan must emit Done");
+        assert_eq!(second, 0, "second scan must be noop");
+
+        let events_text = std::fs::read_to_string(&events_path).expect("read events");
+        let done_lines = events_text
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"done\"") && line.contains("wi-twice"))
+            .count();
+        assert_eq!(done_lines, 1);
+    }
+
+    // SPEC-2359 US-37 / T-241: cleanup hook auto-done by branch match.
+
+    #[test]
+    fn emit_workspace_done_event_for_branch_emits_done_when_branch_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create repo");
+
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
+        projection.id = "wi-cleanup-target".to_string();
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/auto-done-branch".to_string()),
+            worktree_path: None,
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
+
+        let mut start = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "wi-cleanup-target",
+            Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
+        );
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("seed start");
+
+        let emitted = emit_workspace_done_event_for_branch_paths(
+            &current_path,
+            &work_items_path,
+            &events_path,
+            "work/auto-done-branch",
+            now,
+        )
+        .expect("emit");
+        assert!(emitted, "branch match must trigger Done emit");
+
+        let work_items = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-cleanup-target")
+            .expect("item");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, Some(now));
+    }
+
+    #[test]
+    fn emit_workspace_done_event_for_branch_is_noop_when_branch_does_not_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create repo");
+
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
+        projection.id = "wi-different-branch".to_string();
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/current-branch".to_string()),
+            worktree_path: None,
+            base_branch: None,
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
+
+        let mut start = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "wi-different-branch",
+            Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
+        );
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("seed start");
+
+        let emitted = emit_workspace_done_event_for_branch_paths(
+            &current_path,
+            &work_items_path,
+            &events_path,
+            "work/different-branch",
+            now,
+        )
+        .expect("emit");
+        assert!(!emitted, "non-matching branch must not trigger Done");
+
+        let work_items = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-different-branch")
+            .expect("item");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    }
+
+    // SPEC-2359 US-37 / T-242: retroactive migration startup robustness.
+
+    #[test]
+    fn retroactive_auto_done_scan_returns_zero_when_work_items_file_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+
+        assert!(!work_items_path.exists());
+        let count = retroactive_auto_done_scan_paths(&work_items_path, &events_path, now)
+            .expect("scan with missing work_items file must not error");
+        assert_eq!(count, 0);
+        assert!(
+            !events_path.exists(),
+            "missing work_items must skip without writing events"
         );
     }
 }

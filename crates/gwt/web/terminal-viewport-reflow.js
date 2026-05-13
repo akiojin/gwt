@@ -58,6 +58,48 @@ export function applyVisibilityTransition({
   return false;
 }
 
+function idSet(values) {
+  const set = new Set();
+  for (const value of values || []) {
+    if (value === null || value === undefined) continue;
+    set.add(String(value));
+  }
+  return set;
+}
+
+/**
+ * Classify mounted workspace windows during a project-tab render.
+ *
+ * Active-project windows are visible, windows that still belong to another
+ * project tab stay mounted but hidden, and only windows missing from every
+ * project tab are safe to dispose. This keeps inactive terminal xterm
+ * runtimes alive so returning to a project can reflow instead of recreating
+ * the terminal surface from scratch.
+ */
+export function classifyProjectWindowVisibility({
+  activeWindowIds,
+  allProjectWindowIds,
+  mountedWindowIds,
+}) {
+  const active = idSet(activeWindowIds);
+  const all = idSet(allProjectWindowIds);
+  const visible = Array.from(active);
+  const hidden = [];
+  const removed = [];
+
+  for (const windowId of mountedWindowIds || []) {
+    const id = String(windowId);
+    if (active.has(id)) continue;
+    if (all.has(id)) {
+      hidden.push(id);
+    } else {
+      removed.push(id);
+    }
+  }
+
+  return { visible, hidden, removed };
+}
+
 /**
  * Predicate used by both the host resize fan-out and the existing
  * `fitTerminal` short-circuit. Pulled out so a unit test can pin the

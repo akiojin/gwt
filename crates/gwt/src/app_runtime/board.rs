@@ -191,11 +191,11 @@ impl AppRuntime {
                     },
                 )];
                 if let Some(entry) = latest_entry.as_ref() {
-                    if let Some(event) =
-                        self.record_workspace_board_milestone_event(&tab_id, &project_root, entry)
-                    {
-                        events.push(event);
-                    }
+                    events.extend(self.record_workspace_board_milestone_event(
+                        &tab_id,
+                        &project_root,
+                        entry,
+                    ));
                 }
                 events
             }
@@ -347,7 +347,8 @@ impl AppRuntime {
         tab_id: &str,
         project_root: &Path,
         entry: &coordination::BoardEntry,
-    ) -> Option<OutboundEvent> {
+    ) -> Vec<OutboundEvent> {
+        let _ = tab_id;
         let mut projection =
             match workspace_projection::load_or_default_workspace_projection(project_root) {
                 Ok(projection) => projection,
@@ -357,11 +358,10 @@ impl AppRuntime {
                         project_root = %project_root.display(),
                         "failed to load workspace projection for board milestone"
                     );
-                    return None;
+                    return Vec::new();
                 }
             };
         projection.record_board_milestone(entry);
-        self.update_agent_window_dynamic_title_for_board_entry(entry);
         if let Err(error) =
             workspace_projection::save_workspace_projection(project_root, &projection)
         {
@@ -370,7 +370,7 @@ impl AppRuntime {
                 project_root = %project_root.display(),
                 "failed to save workspace projection for board milestone"
             );
-            return None;
+            return Vec::new();
         }
         if board_entry_origin_can_record_workspace_work_event(&projection, entry) {
             let work_event =
@@ -386,63 +386,7 @@ impl AppRuntime {
             }
         }
 
-        if self.active_tab_id.as_deref() != Some(tab_id) {
-            return None;
-        }
-        let tab = self.tab(tab_id)?;
-        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
-        Some(OutboundEvent::broadcast(
-            BackendEvent::ActiveWorkProjection {
-                projection: Box::new(projection),
-            },
-        ))
-    }
-
-    fn update_agent_window_dynamic_title_for_board_entry(
-        &mut self,
-        entry: &coordination::BoardEntry,
-    ) -> bool {
-        if !matches!(
-            entry.kind,
-            BoardEntryKind::Claim
-                | BoardEntryKind::Status
-                | BoardEntryKind::Blocked
-                | BoardEntryKind::Handoff
-                | BoardEntryKind::Decision
-                | BoardEntryKind::Next
-        ) {
-            return false;
-        }
-        let Some(origin_session_id) = entry.origin_session_id.as_deref() else {
-            return false;
-        };
-        let Some((window_id, _)) = self
-            .active_agent_sessions
-            .iter()
-            .find(|(_, session)| session.session_id == origin_session_id)
-        else {
-            return false;
-        };
-        let Some(address) = self.window_lookup.get(window_id).cloned() else {
-            return false;
-        };
-        let Some(title_summary) = entry
-            .title_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-        else {
-            return false;
-        };
-        let Some(tab) = self.tab_mut(&address.tab_id) else {
-            return false;
-        };
-        tab.workspace.set_dynamic_title_with_detail(
-            &address.raw_id,
-            Some(title_summary),
-            Some(entry.body.clone()),
-        )
+        self.apply_workspace_projection_title_sync(project_root, &projection)
     }
 }
 
