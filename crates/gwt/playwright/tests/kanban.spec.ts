@@ -32,6 +32,7 @@ const ROOT_MODULES = new Set([
   "theme-manager.js",
   "theme-toggle.js",
   "update-cta.js",
+  "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",
 ]);

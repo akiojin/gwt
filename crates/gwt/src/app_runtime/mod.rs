@@ -1998,7 +1998,14 @@ impl AppRuntime {
                 geometry,
                 cols,
                 rows,
-            } => self.update_window_geometry_events(&id, geometry, cols, rows),
+                base_geometry_revision,
+            } => self.update_window_geometry_events(
+                &id,
+                geometry,
+                cols,
+                rows,
+                base_geometry_revision,
+            ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::PasteImage {
@@ -6465,6 +6472,7 @@ exit 0
                 width: 640.0,
                 height: 420.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status,
             minimized: false,
@@ -9585,6 +9593,7 @@ exit 0
                     },
                     100,
                     30,
+                    None,
                 )
                 .len(),
             1
@@ -9609,6 +9618,76 @@ exit 0
         assert_eq!(window.geometry.y, 78.0);
         assert_eq!(window.geometry.width, 720.0);
         assert_eq!(window.geometry.height, 480.0);
+    }
+
+    #[test]
+    fn app_runtime_geometry_update_rejects_stale_base_revision() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(
+                    &window_id,
+                    WindowGeometry {
+                        x: 56.0,
+                        y: 78.0,
+                        width: 720.0,
+                        height: 480.0,
+                    },
+                    100,
+                    30,
+                    Some(0),
+                )
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(
+                    &window_id,
+                    WindowGeometry {
+                        x: 90.0,
+                        y: 120.0,
+                        width: 960.0,
+                        height: 640.0,
+                    },
+                    120,
+                    40,
+                    Some(0),
+                )
+                .len(),
+            1,
+            "stale updates should return the current workspace state so the frontend can resync"
+        );
+
+        let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");
+        let window = workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "shell-1")
+            .expect("persisted window");
+        assert_eq!(window.geometry.x, 56.0);
+        assert_eq!(window.geometry.y, 78.0);
+        assert_eq!(window.geometry.width, 720.0);
+        assert_eq!(window.geometry.height, 480.0);
+        assert_eq!(window.geometry_revision, 1);
     }
 
     #[test]

@@ -115,6 +115,8 @@ pub enum FrontendEvent {
         geometry: WindowGeometry,
         cols: u16,
         rows: u16,
+        #[serde(default)]
+        base_geometry_revision: Option<u64>,
     },
     CloseWindow {
         id: String,
@@ -907,13 +909,65 @@ mod tests {
             BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
             BranchScope,
         },
-        persistence::WindowState,
+        persistence::{WindowGeometry, WindowState},
     };
 
     use super::{
         BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
         ProfileSnapshotView,
     };
+
+    #[test]
+    fn update_window_geometry_deserializes_base_geometry_revision_contract() {
+        let legacy = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "update_window_geometry",
+            "id": "w-1",
+            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
+            "cols": 80,
+            "rows": 24
+        }))
+        .expect("deserialize legacy update_window_geometry");
+
+        assert!(matches!(
+            legacy,
+            FrontendEvent::UpdateWindowGeometry {
+                id,
+                geometry: WindowGeometry {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 300.0,
+                    height: 200.0,
+                },
+                base_geometry_revision: None,
+                ..
+            } if id == "w-1"
+        ));
+
+        let modern = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "update_window_geometry",
+            "id": "w-1",
+            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
+            "cols": 80,
+            "rows": 24,
+            "base_geometry_revision": 7
+        }))
+        .expect("deserialize modern update_window_geometry");
+
+        assert!(matches!(
+            modern,
+            FrontendEvent::UpdateWindowGeometry {
+                id,
+                geometry: WindowGeometry {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 300.0,
+                    height: 200.0,
+                },
+                base_geometry_revision: Some(7),
+                ..
+            } if id == "w-1"
+        ));
+    }
 
     #[test]
     fn branch_entries_serializes_explicit_phase_contract() {

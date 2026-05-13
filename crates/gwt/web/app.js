@@ -36,6 +36,15 @@
         classifyProjectWindowVisibility,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
+      import {
+        beginLocalGeometryEdit,
+        clearLocalGeometryEdit,
+        commitLocalGeometryEdit,
+        createGeometrySyncState,
+        localGeometryBaseRevision,
+        shouldApplyWorkspaceGeometry,
+        workspaceGeometryRevision,
+      } from "/window-geometry-sync.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -284,6 +293,7 @@
       let windowTabDragState = null;
       let panState = null;
       let resizeState = null;
+      const geometrySyncState = createGeometrySyncState();
       let viewport = { x: 0, y: 0, zoom: 1 };
       let viewportRasterTimer = null;
       let launchWizard = null;
@@ -1691,10 +1701,16 @@
         // observe the up-to-date `element.style.width/height`.
         applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
+        commitLocalGeometryEdit(
+          geometrySyncState,
+          resizeState.id,
+          resizeState.baseGeometryRevision,
+        );
         sendGeometry(
           resizeState.id,
           runtime?.terminal.cols || 80,
           runtime?.terminal.rows || 24,
+          resizeState.baseGeometryRevision,
         );
         runtime?.terminal.focus();
         resizeState = null;
@@ -1799,6 +1815,7 @@
         if (previous.stalenessTimer != null) {
           clearTimeout(previous.stalenessTimer);
         }
+        clearLocalGeometryEdit(geometrySyncState, previous.id);
         resizeState = null;
         delete document.documentElement.dataset.opResizeActive;
       }
@@ -1846,7 +1863,16 @@
         });
       }
 
-      function sendGeometry(windowId, cols, rows) {
+      function sendGeometry(
+        windowId,
+        cols,
+        rows,
+        baseGeometryRevision = localGeometryBaseRevision(
+          geometrySyncState,
+          windowId,
+          workspaceWindowById(windowId),
+        ),
+      ) {
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -1867,6 +1893,7 @@
           },
           cols,
           rows,
+          base_geometry_revision: baseGeometryRevision,
         });
       }
 
@@ -7826,6 +7853,17 @@
             // Force-clear the leaked state on every new pointerdown so the
             // user never has to restart the app to escape a stuck resize.
             forceResetResizeState("new resize started before previous one finished");
+            const currentWindow = workspaceWindowById(windowData.id);
+            const baseGeometryRevision = localGeometryBaseRevision(
+              geometrySyncState,
+              windowData.id,
+              currentWindow || windowData,
+            );
+            beginLocalGeometryEdit(
+              geometrySyncState,
+              windowData.id,
+              baseGeometryRevision,
+            );
             resizeState = {
               id: windowData.id,
               pointerId: event.pointerId,
@@ -7835,6 +7873,7 @@
               latestClientY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
+              baseGeometryRevision,
               fitFrame: null,
               applyFrame: null,
               startedAt: performance.now(),
@@ -7882,23 +7921,35 @@
         const wasMinimized = element.classList.contains("minimized");
         const previousWidth = parseFloat(element.style.width || "0");
         const previousHeight = parseFloat(element.style.height || "0");
+        const applyWorkspaceGeometry = shouldApplyWorkspaceGeometry(geometrySyncState, {
+          id: windowData.id,
+          geometryRevision: workspaceGeometryRevision(windowData),
+        });
         const dimensionsChanged =
-          previousWidth !== windowData.geometry.width ||
-          previousHeight !== windowData.geometry.height;
+          applyWorkspaceGeometry &&
+          (previousWidth !== windowData.geometry.width ||
+            previousHeight !== windowData.geometry.height);
         const shouldPersistTerminalGeometry =
-          (wasMinimized && !windowData.minimized) || dimensionsChanged;
+          applyWorkspaceGeometry &&
+          ((wasMinimized && !windowData.minimized) || dimensionsChanged);
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
-        element.style.left = `${windowData.geometry.x}px`;
-        element.style.top = `${windowData.geometry.y}px`;
-        element.style.width = `${windowData.geometry.width}px`;
-        element.style.height = `${windowData.minimized ? 38 : windowData.geometry.height}px`;
+        if (applyWorkspaceGeometry) {
+          element.style.left = `${windowData.geometry.x}px`;
+          element.style.top = `${windowData.geometry.y}px`;
+          element.style.width = `${windowData.geometry.width}px`;
+          element.style.height = `${windowData.minimized ? 38 : windowData.geometry.height}px`;
+        }
         element.style.zIndex = String(windowData.z_index);
         element.querySelector(".resize-handle").hidden =
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
-        if (presetSurface(windowData.preset) === "terminal" && !windowData.minimized) {
+        if (
+          applyWorkspaceGeometry &&
+          presetSurface(windowData.preset) === "terminal" &&
+          !windowData.minimized
+        ) {
           requestAnimationFrame(() =>
             fitTerminal(windowData.id, shouldPersistTerminalGeometry),
           );
@@ -7962,6 +8013,7 @@
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
           }
+          clearLocalGeometryEdit(geometrySyncState, windowId);
           element.remove();
           windowMap.delete(windowId);
         }

@@ -100,6 +100,7 @@ mod tests {
                 width: 640.0,
                 height: 420.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status,
             minimized: false,

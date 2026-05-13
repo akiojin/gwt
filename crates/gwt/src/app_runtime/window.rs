@@ -311,10 +311,22 @@ impl AppRuntime {
         geometry: WindowGeometry,
         cols: u16,
         rows: u16,
+        base_geometry_revision: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        if let Some(base_geometry_revision) = base_geometry_revision {
+            let Some(tab) = self.tab(&address.tab_id) else {
+                return Vec::new();
+            };
+            let Some(window) = tab.workspace.window(&address.raw_id) else {
+                return Vec::new();
+            };
+            if window.geometry_revision != base_geometry_revision {
+                return vec![self.workspace_state_broadcast()];
+            }
+        }
         let updated = {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
