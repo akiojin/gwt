@@ -64,6 +64,19 @@
       const stage = document.getElementById("canvas-stage");
       const projectTabs = document.getElementById("project-tabs");
       const openProjectButton = document.getElementById("open-project-button");
+      const openProjectMenuButton = document.getElementById(
+        "open-project-menu-button",
+      );
+      const openProjectMenu = document.getElementById("open-project-menu");
+      const openProjectMenuOpenItem = document.getElementById(
+        "open-project-menu-open",
+      );
+      const openProjectMenuCloneItem = document.getElementById(
+        "open-project-menu-clone",
+      );
+      const openProjectMenuRecent = document.getElementById(
+        "open-project-menu-recent",
+      );
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
@@ -1053,28 +1066,121 @@
       }
 
       function renderRecentProjects() {
-        recentProjectList.innerHTML = "";
+        recentProjectList.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           const empty = document.createElement("div");
           empty.className = "file-tree-empty workspace-empty-state";
           empty.textContent = "No recent projects";
           recentProjectList.appendChild(empty);
-          return;
+        } else {
+          for (const project of recentProjects) {
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "recent-project-row";
+            const titleEl = document.createElement("span");
+            titleEl.className = "recent-project-title";
+            titleEl.textContent = project.title;
+            const metaEl = document.createElement("span");
+            metaEl.className = "recent-project-meta";
+            metaEl.textContent = `${project.kind} · ${project.path}`;
+            row.append(titleEl, metaEl);
+            row.addEventListener("click", () => {
+              send({ kind: "reopen_recent_project", path: project.path });
+            });
+            recentProjectList.appendChild(row);
+          }
         }
 
+        renderRecentProjectsIntoMenu();
+      }
+
+      // Issue #2684 — mirror Recent projects inside the split-button dropdown
+      // so users can reach them without first closing every project tab.
+      function renderRecentProjectsIntoMenu() {
+        if (!openProjectMenuRecent) {
+          return;
+        }
+        openProjectMenuRecent.replaceChildren();
+        const recentProjects = appState?.recent_projects || [];
+        if (recentProjects.length === 0) {
+          openProjectMenuRecent.dataset.empty = "true";
+          return;
+        }
+        delete openProjectMenuRecent.dataset.empty;
         for (const project of recentProjects) {
           const row = document.createElement("button");
           row.type = "button";
-          row.className = "recent-project-row";
-          row.innerHTML = `
-            <span class="recent-project-title">${project.title}</span>
-            <span class="recent-project-meta">${project.kind} · ${project.path}</span>
-          `;
+          row.className =
+            "split-button-menu-item split-button-menu-recent-row";
+          row.setAttribute("role", "menuitem");
+          row.tabIndex = -1;
+          const titleEl = document.createElement("span");
+          titleEl.className = "split-button-menu-recent-title";
+          titleEl.textContent = project.title;
+          const metaEl = document.createElement("span");
+          metaEl.className = "split-button-menu-recent-meta";
+          metaEl.textContent = `${project.kind} · ${project.path}`;
+          row.append(titleEl, metaEl);
           row.addEventListener("click", () => {
+            closeOpenProjectMenu();
             send({ kind: "reopen_recent_project", path: project.path });
           });
-          recentProjectList.appendChild(row);
+          openProjectMenuRecent.appendChild(row);
+        }
+      }
+
+      // Issue #2684 — split-button dropdown that mirrors the picker so users
+      // can reach Clone from GitHub while a project tab is active.
+      let openProjectMenuFocusRelease = null;
+
+      function isOpenProjectMenuOpen() {
+        return openProjectMenu?.classList.contains("open") || false;
+      }
+
+      function openOpenProjectMenu() {
+        if (!openProjectMenu || isOpenProjectMenuOpen()) {
+          return;
+        }
+        renderRecentProjectsIntoMenu();
+        openProjectMenu.classList.add("open");
+        openProjectMenu.setAttribute("aria-hidden", "false");
+        openProjectMenuButton.setAttribute("aria-expanded", "true");
+        try {
+          openProjectMenuOpenItem.focus({ preventScroll: true });
+        } catch {
+          openProjectMenuOpenItem.focus();
+        }
+        openProjectMenuFocusRelease = createFocusTrap(openProjectMenu, {
+          document,
+        });
+      }
+
+      function closeOpenProjectMenu({ restoreFocus = false } = {}) {
+        if (!openProjectMenu || !isOpenProjectMenuOpen()) {
+          return;
+        }
+        openProjectMenu.classList.remove("open");
+        openProjectMenu.setAttribute("aria-hidden", "true");
+        openProjectMenuButton.setAttribute("aria-expanded", "false");
+        if (typeof openProjectMenuFocusRelease === "function") {
+          openProjectMenuFocusRelease();
+        }
+        openProjectMenuFocusRelease = null;
+        if (restoreFocus) {
+          try {
+            openProjectMenuButton.focus({ preventScroll: true });
+          } catch {
+            openProjectMenuButton.focus();
+          }
+        }
+      }
+
+      function toggleOpenProjectMenu() {
+        if (isOpenProjectMenuOpen()) {
+          closeOpenProjectMenu({ restoreFocus: true });
+        } else {
+          openOpenProjectMenu();
         }
       }
 
@@ -8783,6 +8889,48 @@
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
       );
+
+      // Issue #2684 — split-button caret toggles the dropdown menu, and each
+      // menu item routes to the same handler the project picker uses. Outside
+      // clicks and Escape close the menu so it never strands keyboard users.
+      if (openProjectMenuButton && openProjectMenu) {
+        openProjectMenuButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggleOpenProjectMenu();
+        });
+        openProjectMenuButton.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown" || event.key === "Down") {
+            event.preventDefault();
+            openOpenProjectMenu();
+          }
+        });
+        openProjectMenuOpenItem.addEventListener("click", () => {
+          closeOpenProjectMenu();
+          frontendUnits.projectWorkspaceShell.sendOpenProjectDialog();
+        });
+        openProjectMenuCloneItem.addEventListener("click", () => {
+          closeOpenProjectMenu();
+          openCloneProjectModal();
+        });
+        document.addEventListener("click", (event) => {
+          if (!isOpenProjectMenuOpen()) {
+            return;
+          }
+          if (
+            openProjectMenu.contains(event.target) ||
+            openProjectMenuButton.contains(event.target)
+          ) {
+            return;
+          }
+          closeOpenProjectMenu();
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && isOpenProjectMenuOpen()) {
+            event.preventDefault();
+            closeOpenProjectMenu({ restoreFocus: true });
+          }
+        });
+      }
       addButton.addEventListener("click", () => {
         if (addButton.disabled) {
           return;
