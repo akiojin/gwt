@@ -523,10 +523,9 @@
         gap: 4px;
       }
 
-      .split-button-menu-recent:empty::before,
-      .split-button-menu-recent[data-empty="true"]::before {
-        content: "No recent projects";
-        display: block;
+      /* Empty-state copy is rendered as a real <div> by JS so assistive tech
+         finds it; this rule only styles that node. */
+      .split-button-menu-empty {
         padding: 8px 10px;
         font-family: var(--font-body);
         font-size: var(--type-sm);

@@ -89,10 +89,82 @@ test.describe("Open Project split-button", () => {
     await expect(caret).toHaveAttribute("aria-expanded", "false");
     await expect(caret).toBeFocused();
   });
+
+  test("ArrowDown / ArrowUp / Home / End rotate focus across menu items", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".project-tab")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    const caret = page.locator("#open-project-menu-button");
+    await caret.click();
+
+    // Menu opens with focus on Open Project... (the first menuitem).
+    await expect(page.locator("#open-project-menu-open")).toBeFocused();
+
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#open-project-menu-clone")).toBeFocused();
+
+    await page.keyboard.press("ArrowDown");
+    // Third menuitem is the only Recent row in the fixture.
+    await expect(
+      page.locator("#open-project-menu .split-button-menu-recent-row"),
+    ).toBeFocused();
+
+    // Wrap around: ArrowDown from the last row goes back to the first item.
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#open-project-menu-open")).toBeFocused();
+
+    // ArrowUp from the first item wraps to the last.
+    await page.keyboard.press("ArrowUp");
+    await expect(
+      page.locator("#open-project-menu .split-button-menu-recent-row"),
+    ).toBeFocused();
+
+    await page.keyboard.press("Home");
+    await expect(page.locator("#open-project-menu-open")).toBeFocused();
+
+    await page.keyboard.press("End");
+    await expect(
+      page.locator("#open-project-menu .split-button-menu-recent-row"),
+    ).toBeFocused();
+  });
+
+  test("empty Recent state renders an explicit text node", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installWorkspaceFixture(page, { recentProjects: [] });
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".project-tab")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.locator("#open-project-menu-button").click();
+    const empty = page.locator(
+      "#open-project-menu-recent .split-button-menu-empty",
+    );
+    await expect(empty).toBeVisible();
+    await expect(empty).toHaveText("No recent projects");
+    await expect(page.locator("#open-project-menu-recent")).toHaveAttribute(
+      "data-empty",
+      "true",
+    );
+  });
 });
 
-async function installWorkspaceFixture(page: any): Promise<void> {
-  await page.addInitScript(() => {
+async function installWorkspaceFixture(
+  page: any,
+  options: { recentProjects?: Array<{ title: string; path: string; kind: string }> } = {},
+): Promise<void> {
+  const recentProjects = options.recentProjects ?? [
+    { title: "Recent A", path: "/recent/a", kind: "git" },
+  ];
+  await page.addInitScript((fixture: any) => {
     const workspaceState = {
       kind: "workspace_state",
       workspace: {
@@ -110,13 +182,7 @@ async function installWorkspaceFixture(page: any): Promise<void> {
           },
         ],
         active_tab_id: "tab-1",
-        recent_projects: [
-          {
-            title: "Recent A",
-            path: "/recent/a",
-            kind: "git",
-          },
-        ],
+        recent_projects: fixture.recentProjects,
       },
     };
 
@@ -166,5 +232,5 @@ async function installWorkspaceFixture(page: any): Promise<void> {
       configurable: true,
       value: FixtureWebSocket,
     });
-  });
+  }, { recentProjects });
 }

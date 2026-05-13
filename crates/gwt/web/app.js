@@ -1105,6 +1105,12 @@
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           openProjectMenuRecent.dataset.empty = "true";
+          // Real DOM node beats CSS pseudo-content so screen readers reach it.
+          const empty = document.createElement("div");
+          empty.className = "split-button-menu-empty";
+          empty.setAttribute("role", "presentation");
+          empty.textContent = "No recent projects";
+          openProjectMenuRecent.appendChild(empty);
           return;
         }
         delete openProjectMenuRecent.dataset.empty;
@@ -1182,6 +1188,47 @@
         } else {
           openOpenProjectMenu();
         }
+      }
+
+      // Issue #2684 — roving focus across menu items. Items carry
+      // tabindex="-1" by ARIA APG convention so Tab does not stop on each
+      // individual entry; arrow keys take over once the menu is open.
+      function openProjectMenuItems() {
+        if (!openProjectMenu) {
+          return [];
+        }
+        return Array.from(
+          openProjectMenu.querySelectorAll('[role="menuitem"]'),
+        ).filter((el) => !el.disabled);
+      }
+
+      function focusOpenProjectMenuItemAt(index) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const wrapped = ((index % items.length) + items.length) % items.length;
+        try {
+          items[wrapped].focus({ preventScroll: true });
+        } catch {
+          items[wrapped].focus();
+        }
+      }
+
+      function moveOpenProjectMenuFocus(direction) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const active = document.activeElement;
+        const currentIndex = items.indexOf(active);
+        const nextIndex =
+          currentIndex === -1
+            ? direction > 0
+              ? 0
+              : items.length - 1
+            : currentIndex + direction;
+        focusOpenProjectMenuItemAt(nextIndex);
       }
 
       function renderProjectPicker() {
@@ -8916,6 +8963,31 @@
           if (event.key === "Escape" && isOpenProjectMenuOpen()) {
             event.preventDefault();
             closeOpenProjectMenu({ restoreFocus: true });
+          }
+        });
+        openProjectMenu.addEventListener("keydown", (event) => {
+          if (!isOpenProjectMenuOpen()) {
+            return;
+          }
+          switch (event.key) {
+            case "ArrowDown":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(1);
+              break;
+            case "ArrowUp":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(-1);
+              break;
+            case "Home":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(0);
+              break;
+            case "End":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(-1);
+              break;
+            default:
+              break;
           }
         });
       }
