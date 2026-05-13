@@ -399,7 +399,7 @@ export function createWorkspaceKanbanSurface({
         "knowledge-section-body",
         cardData.summary ||
           cardData.status_text ||
-          "Summary 未設定 — gwtd workspace update --summary X で追加できます",
+          "Summary not set — add one with `gwtd workspace update --summary X`",
       ),
     );
     scroll.appendChild(summary);
@@ -465,7 +465,7 @@ export function createWorkspaceKanbanSurface({
         createNode(
           "pre",
           "knowledge-section-body workspace-lifecycle-empty",
-          "Workspace created — まだ Lifecycle イベントは記録されていません。Board post 後に表示されます。",
+          "Workspace created — no lifecycle events yet. Activity will appear after the next Board post.",
         ),
       );
     }
