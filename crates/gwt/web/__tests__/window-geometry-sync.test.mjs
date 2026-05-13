@@ -6,6 +6,7 @@ import {
   clearLocalGeometryEdit,
   commitLocalGeometryEdit,
   createGeometrySyncState,
+  localGeometryBaseRevision,
   shouldApplyWorkspaceGeometry,
   workspaceGeometryRevision,
 } from "../window-geometry-sync.js";
@@ -49,6 +50,38 @@ test("pending local resize commit keeps suppressing stale workspace geometry", (
   );
   assert.equal(
     shouldApplyWorkspaceGeometry(state, { id: "w-1", geometryRevision: 9 }),
+    true,
+  );
+});
+
+test("pending local resize commit advances the next local base revision", () => {
+  const state = createGeometrySyncState();
+  beginLocalGeometryEdit(state, "w-1", 0);
+  commitLocalGeometryEdit(state, "w-1", 0);
+
+  assert.equal(
+    localGeometryBaseRevision(state, "w-1", { id: "w-1", geometry_revision: 0 }),
+    1,
+  );
+
+  beginLocalGeometryEdit(
+    state,
+    "w-1",
+    localGeometryBaseRevision(state, "w-1", { id: "w-1", geometry_revision: 0 }),
+  );
+  assert.equal(
+    shouldApplyWorkspaceGeometry(state, { id: "w-1", geometryRevision: 1 }),
+    false,
+    "the first resize ack must not overwrite a second in-flight resize",
+  );
+
+  commitLocalGeometryEdit(state, "w-1", 1);
+  assert.equal(
+    shouldApplyWorkspaceGeometry(state, { id: "w-1", geometryRevision: 1 }),
+    false,
+  );
+  assert.equal(
+    shouldApplyWorkspaceGeometry(state, { id: "w-1", geometryRevision: 2 }),
     true,
   );
 });

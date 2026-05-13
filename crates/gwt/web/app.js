@@ -41,6 +41,7 @@
         clearLocalGeometryEdit,
         commitLocalGeometryEdit,
         createGeometrySyncState,
+        localGeometryBaseRevision,
         shouldApplyWorkspaceGeometry,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
@@ -1866,7 +1867,11 @@
         windowId,
         cols,
         rows,
-        baseGeometryRevision = workspaceGeometryRevision(workspaceWindowById(windowId)),
+        baseGeometryRevision = localGeometryBaseRevision(
+          geometrySyncState,
+          windowId,
+          workspaceWindowById(windowId),
+        ),
       ) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -7849,7 +7854,9 @@
             // user never has to restart the app to escape a stuck resize.
             forceResetResizeState("new resize started before previous one finished");
             const currentWindow = workspaceWindowById(windowData.id);
-            const baseGeometryRevision = workspaceGeometryRevision(
+            const baseGeometryRevision = localGeometryBaseRevision(
+              geometrySyncState,
+              windowData.id,
               currentWindow || windowData,
             );
             beginLocalGeometryEdit(
@@ -8006,6 +8013,7 @@
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
           }
+          clearLocalGeometryEdit(geometrySyncState, windowId);
           element.remove();
           windowMap.delete(windowId);
         }

@@ -19,8 +19,10 @@ export function beginLocalGeometryEdit(state, id, baseRevision) {
   if (!state || !id) {
     return;
   }
+  const normalizedBaseRevision = normalizeRevision(baseRevision);
   state.localEdits.set(id, {
-    baseRevision: normalizeRevision(baseRevision),
+    baseRevision: normalizedBaseRevision,
+    optimisticRevision: normalizedBaseRevision,
     phase: "active",
   });
 }
@@ -30,8 +32,12 @@ export function commitLocalGeometryEdit(state, id, baseRevision) {
     return;
   }
   const existing = state.localEdits.get(id);
+  const normalizedBaseRevision = normalizeRevision(
+    baseRevision ?? existing?.baseRevision ?? 0,
+  );
   state.localEdits.set(id, {
-    baseRevision: normalizeRevision(baseRevision ?? existing?.baseRevision ?? 0),
+    baseRevision: normalizedBaseRevision,
+    optimisticRevision: normalizedBaseRevision + 1,
     phase: "pending",
   });
 }
@@ -52,9 +58,31 @@ export function shouldApplyWorkspaceGeometry(state, { id, geometryRevision }) {
     return true;
   }
   const incomingRevision = normalizeRevision(geometryRevision);
-  if (incomingRevision > localEdit.baseRevision) {
+  const acceptedRevision =
+    localEdit.phase === "pending"
+      ? normalizeRevision(localEdit.optimisticRevision)
+      : localEdit.baseRevision;
+  if (
+    incomingRevision > acceptedRevision ||
+    (localEdit.phase === "pending" && incomingRevision === acceptedRevision)
+  ) {
     state.localEdits.delete(id);
     return true;
   }
   return false;
+}
+
+export function localGeometryBaseRevision(state, id, windowData) {
+  const workspaceRevision = workspaceGeometryRevision(windowData);
+  if (!state || !id) {
+    return workspaceRevision;
+  }
+  const localEdit = state.localEdits.get(id);
+  if (!localEdit) {
+    return workspaceRevision;
+  }
+  return Math.max(
+    workspaceRevision,
+    normalizeRevision(localEdit.optimisticRevision),
+  );
 }
