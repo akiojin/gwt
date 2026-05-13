@@ -40,6 +40,77 @@ export function createWorkspaceKanbanSurface({
     return "inactive";
   }
 
+  // SPEC-2359 Phase U-7 (FR-148): Human-readable label for the Phase U-6
+  // `WorkspaceLifecycleStage` enum. The Rust side serializes the enum in
+  // snake_case (planning / active / in_review / done / archived); the UI
+  // shows a capitalised form to match the existing status chip styling.
+  function formatLifecycleStageLabel(stage) {
+    const normalized = String(stage || "").toLowerCase();
+    switch (normalized) {
+      case "planning":
+        return "Planning";
+      case "active":
+        return "Active";
+      case "in_review":
+        return "In Review";
+      case "done":
+        return "Done";
+      case "archived":
+        return "Archived";
+      default:
+        return normalized
+          ? normalized
+              .split("_")
+              .map((part) =>
+                part.length > 0 ? part[0].toUpperCase() + part.slice(1) : part,
+              )
+              .join(" ")
+          : "";
+    }
+  }
+
+  // SPEC-2359 Phase U-7 (FR-146): structured chip row for Kanban Card
+  // preview. Renders `linked_issues`, `linked_prs`, and `tags` as chips
+  // when present. Returns null if there is nothing to show so callers
+  // can skip appending an empty row.
+  function renderWorkspaceCardChipRow(cardData) {
+    const row = createNode("div", "workspace-card-chips");
+    const linkedIssues = Array.isArray(cardData?.linked_issues)
+      ? cardData.linked_issues
+      : [];
+    const linkedPrs = Array.isArray(cardData?.linked_prs) ? cardData.linked_prs : [];
+    const tags = Array.isArray(cardData?.tags) ? cardData.tags : [];
+
+    for (const issue of linkedIssues) {
+      const number = Number.parseInt(issue?.number, 10);
+      if (!Number.isFinite(number)) continue;
+      row.appendChild(
+        createNode("span", "workspace-card-link-chip workspace-card-link-chip--issue", `#Issue-${number}`),
+      );
+    }
+    for (const pr of linkedPrs) {
+      const number = Number.parseInt(pr?.number, 10);
+      if (!Number.isFinite(number)) continue;
+      const state = pr?.state ? `:${pr.state}` : "";
+      row.appendChild(
+        createNode(
+          "span",
+          "workspace-card-link-chip workspace-card-link-chip--pr",
+          `#PR-${number}${state}`,
+        ),
+      );
+    }
+    for (const tag of tags) {
+      const text = typeof tag === "string" ? tag.trim() : "";
+      if (!text) continue;
+      row.appendChild(
+        createNode("span", "workspace-card-link-chip workspace-card-link-chip--tag", `#${text}`),
+      );
+    }
+
+    return row;
+  }
+
   function ownerIssueNumber(owner) {
     const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
     if (!match) return null;
@@ -312,10 +383,34 @@ export function createWorkspaceKanbanSurface({
         agentStatusLabel(cardData.status_category),
       ),
     );
+    // SPEC-2359 Phase U-7 (FR-146, FR-148): render the Phase U-6
+    // `lifecycle_stage` as its own chip next to the runtime status chip
+    // so user can distinguish "where is this work in its lifecycle"
+    // (Planning / Active / InReview / Done / Archived) from "what are
+    // the agents doing right now" (active / idle / blocked / done).
+    if (cardData.lifecycle_stage) {
+      head.appendChild(
+        createNode(
+          "span",
+          `kanban-card-chip lifecycle-chip lifecycle-chip--${cardData.lifecycle_stage}`,
+          formatLifecycleStageLabel(cardData.lifecycle_stage),
+        ),
+      );
+    }
     selectButton.appendChild(head);
     selectButton.appendChild(createNode("div", "kanban-card-title", cardData.title));
     if (cardData.summary) {
       selectButton.appendChild(createNode("div", "workspace-card-summary", cardData.summary));
+    }
+
+    // SPEC-2359 Phase U-7 (FR-146): structured Issue / PR / tag chips. The
+    // Phase U-6 schema stores them as structured arrays so we can render
+    // each as a chip (#Issue-N, #PR-N, #tag) instead of free-text. The
+    // existing owner / branch / PR meta line below remains for legacy
+    // CSS / a11y.
+    const chips = renderWorkspaceCardChipRow(cardData);
+    if (chips && chips.childElementCount > 0) {
+      selectButton.appendChild(chips);
     }
 
     const meta = createNode("div", "kanban-card-meta");
