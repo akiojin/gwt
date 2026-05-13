@@ -936,48 +936,76 @@ fn work_item_has_done_event_in_projection(
         }))
 }
 
-/// SPEC-2359 US-37 / FR-119: Scan all WorkItems in `work_items.json` and
-/// emit a Done event for each WorkItem that is still incomplete and whose
-/// execution container indicates a merged `work/*` Start Work branch.
-/// Eligibility requires at least one [`WorkspaceExecutionContainerRef`]
-/// whose `branch` starts with `"work/"` and whose `pr_state` matches
-/// `"merged"` case-insensitively. Emission is delegated to
-/// [`emit_workspace_done_event_if_absent_paths`] so repeated invocations
-/// are idempotent. Returns the number of WorkItems that were newly Done'd.
+/// SPEC-2359 US-37 / FR-119: Scan WorkItems and the current Workspace
+/// projection and emit a Done event for each eligible target that is still
+/// incomplete and not yet recorded as Done.
+///
+/// Two eligibility sources are consulted:
+///
+/// 1. Each WorkItem in `work_items.json`: at least one
+///    [`WorkspaceExecutionContainerRef`] whose `branch` starts with `"work/"`
+///    and whose `pr_state` matches `"merged"` case-insensitively.
+/// 2. The current Workspace projection at `current_path`: `git_details.branch`
+///    starts with `"work/"`, `pr_state` matches `"merged"` case-insensitively,
+///    and `created_by_start_work` is true. This catches the case where an
+///    older gwtd version updated `current.json` after a PR merged but never
+///    emitted a corresponding Done event, which would otherwise leave the
+///    WorkItem stuck outside the Completed column.
+///
+/// Emission is delegated to [`emit_workspace_done_event_if_absent_paths`] so
+/// repeated invocations are idempotent. Returns the number of WorkItems that
+/// were newly Done'd. Missing files (`work_items.json`, `current.json`) skip
+/// silently without surfacing an error.
 pub fn retroactive_auto_done_scan_paths(
+    current_path: &Path,
     work_items_path: &Path,
     events_path: &Path,
     now: DateTime<Utc>,
 ) -> Result<usize> {
-    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
-        return Ok(0);
-    };
-    let candidates: Vec<String> = projection
-        .work_items
-        .iter()
-        .filter(|item| item.is_incomplete())
-        .filter(|item| work_item_is_eligible_for_auto_done(item))
-        .map(|item| item.id.clone())
-        .collect();
     let mut emitted = 0;
-    for work_item_id in candidates {
-        if emit_workspace_done_event_if_absent_paths(
-            work_items_path,
-            events_path,
-            &work_item_id,
-            now,
-        )? {
+
+    if let Some(work_items_projection) = load_workspace_work_items_from_path(work_items_path)? {
+        let candidates: Vec<String> = work_items_projection
+            .work_items
+            .iter()
+            .filter(|item| item.is_incomplete())
+            .filter(|item| work_item_is_eligible_for_auto_done(item))
+            .map(|item| item.id.clone())
+            .collect();
+        for work_item_id in candidates {
+            if emit_workspace_done_event_if_absent_paths(
+                work_items_path,
+                events_path,
+                &work_item_id,
+                now,
+            )? {
+                emitted += 1;
+            }
+        }
+    }
+
+    if let Some(current) = load_workspace_projection_from_path(current_path)? {
+        if workspace_projection_is_eligible_for_auto_done(&current)
+            && emit_workspace_done_event_if_absent_paths(
+                work_items_path,
+                events_path,
+                &current.id,
+                now,
+            )?
+        {
             emitted += 1;
         }
     }
+
     Ok(emitted)
 }
 
 /// SPEC-2359 US-37 / FR-119: Convenience wrapper resolving the project-scoped
-/// work_items and work_events paths from `repo_path` and invoking
+/// current, work_items, and work_events paths from `repo_path` and invoking
 /// [`retroactive_auto_done_scan_paths`].
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
     retroactive_auto_done_scan_paths(
+        &gwt_workspace_projection_path_for_repo_path(repo_path),
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
         &gwt_workspace_work_events_path_for_repo_path(repo_path),
         now,
@@ -996,6 +1024,21 @@ fn work_item_is_eligible_for_auto_done(item: &WorkspaceWorkItem) -> bool {
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
         branch_starts_with_work && pr_state_merged
     })
+}
+
+fn workspace_projection_is_eligible_for_auto_done(projection: &WorkspaceProjection) -> bool {
+    let Some(details) = projection.git_details.as_ref() else {
+        return false;
+    };
+    let branch_starts_with_work = details
+        .branch
+        .as_deref()
+        .is_some_and(|branch| branch.starts_with("work/"));
+    let pr_state_merged = details
+        .pr_state
+        .as_deref()
+        .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+    branch_starts_with_work && pr_state_merged && details.created_by_start_work
 }
 
 /// SPEC-2359 US-37 / FR-118: Emit a Done WorkspaceWorkEvent for the Workspace
@@ -2663,6 +2706,7 @@ mod tests {
     #[test]
     fn retroactive_auto_done_scan_marks_eligible_merged_work_branch_workitems() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
         let work_items_path = temp.path().join("workspace/work_items.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
@@ -2710,8 +2754,9 @@ mod tests {
         record_workspace_work_event_paths(&work_items_path, &events_path, not_merged)
             .expect("record not-merged start");
 
-        let count = retroactive_auto_done_scan_paths(&work_items_path, &events_path, now)
-            .expect("retroactive scan");
+        let count =
+            retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
+                .expect("retroactive scan");
         assert_eq!(count, 1, "only the eligible WorkItem must be auto-Done'd");
 
         let projection = load_workspace_work_items_from_path(&work_items_path)
@@ -2751,6 +2796,7 @@ mod tests {
     #[test]
     fn retroactive_auto_done_scan_is_idempotent_across_invocations() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
         let work_items_path = temp.path().join("workspace/work_items.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
         let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
@@ -2770,10 +2816,20 @@ mod tests {
         record_workspace_work_event_paths(&work_items_path, &events_path, eligible)
             .expect("record start");
 
-        let first = retroactive_auto_done_scan_paths(&work_items_path, &events_path, first_run)
-            .expect("first scan");
-        let second = retroactive_auto_done_scan_paths(&work_items_path, &events_path, second_run)
-            .expect("second scan");
+        let first = retroactive_auto_done_scan_paths(
+            &current_path,
+            &work_items_path,
+            &events_path,
+            first_run,
+        )
+        .expect("first scan");
+        let second = retroactive_auto_done_scan_paths(
+            &current_path,
+            &work_items_path,
+            &events_path,
+            second_run,
+        )
+        .expect("second scan");
 
         assert_eq!(first, 1, "first scan must emit Done");
         assert_eq!(second, 0, "second scan must be noop");
@@ -2904,17 +2960,113 @@ mod tests {
     #[test]
     fn retroactive_auto_done_scan_returns_zero_when_work_items_file_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
         let work_items_path = temp.path().join("workspace/work_items.json");
         let events_path = temp.path().join("workspace/work_events.jsonl");
         let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
 
         assert!(!work_items_path.exists());
-        let count = retroactive_auto_done_scan_paths(&work_items_path, &events_path, now)
-            .expect("scan with missing work_items file must not error");
+        assert!(!current_path.exists());
+        let count =
+            retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
+                .expect("scan with missing files must not error");
         assert_eq!(count, 0);
         assert!(
             !events_path.exists(),
-            "missing work_items must skip without writing events"
+            "missing inputs must skip without writing events"
+        );
+    }
+
+    // SPEC-2359 US-37 / FR-119 current.json fallback (upgrade path).
+
+    #[test]
+    fn retroactive_auto_done_scan_emits_done_from_current_projection_when_work_items_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create repo");
+
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
+        projection.id = "wi-current-merged".to_string();
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/20260513-0100".to_string()),
+            worktree_path: None,
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(42),
+            pr_state: Some("MERGED".to_string()),
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
+
+        let count =
+            retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
+                .expect("scan");
+        assert_eq!(
+            count, 1,
+            "current.json with merged work/* + start_work must trigger one Done emit",
+        );
+
+        let work_items = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items projection created via emit");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-current-merged")
+            .expect("WorkItem created from emit");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, Some(now));
+
+        let second =
+            retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
+                .expect("second scan");
+        assert_eq!(
+            second, 0,
+            "second scan must be noop after Done event exists"
+        );
+    }
+
+    #[test]
+    fn retroactive_auto_done_scan_skips_current_projection_without_start_work_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("workspace/current.json");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create repo");
+
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
+        projection.id = "wi-manual-branch".to_string();
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/20260513-0200".to_string()),
+            worktree_path: None,
+            base_branch: None,
+            pr_number: Some(43),
+            pr_state: Some("merged".to_string()),
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: false,
+            created_at: now,
+        });
+        save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
+
+        let count =
+            retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
+                .expect("scan");
+        assert_eq!(
+            count, 0,
+            "non-start_work workspaces must be excluded from current.json fallback",
+        );
+        assert!(
+            !events_path.exists(),
+            "no work_events should be written for ineligible current projection",
         );
     }
 }
