@@ -58,7 +58,7 @@ pub struct GitDetails {
 /// linked Agents. `lifecycle_stage` answers "where is this work in its overall
 /// progression?" (planning → active → in review → done → archived). It is
 /// derived from `events + status_category` via
-/// [`recompute_lifecycle_stage`], but may also be explicitly set by the user
+/// `recompute_lifecycle_stage`, but may also be explicitly set by the user
 /// via `gwtd workspace update --status archived`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -202,7 +202,7 @@ pub struct WorkspaceProjection {
     pub creator: Option<String>,
     /// SPEC-2359 Phase U-6 (FR-131, FR-132, FR-139): high-level lifecycle
     /// stage derived from events + status_category via
-    /// [`recompute_lifecycle_stage`]. Defaults to `Planning` for legacy
+    /// `recompute_lifecycle_stage`. Defaults to `Planning` for legacy
     /// data; the migration recomputes from actual state on first load.
     #[serde(default)]
     pub lifecycle_stage: WorkspaceLifecycleStage,
@@ -253,7 +253,7 @@ impl WorkspaceProjection {
             // SPEC-2359 Phase U-6: a freshly created projection has a
             // real `created_at` timestamp (not the legacy sentinel).
             // `lifecycle_stage` starts at `Planning` and is recomputed by
-            // [`recompute_lifecycle_stage`] as events accumulate.
+            // `recompute_lifecycle_stage` as events accumulate.
             created_at: now,
             creator: None,
             lifecycle_stage: WorkspaceLifecycleStage::Planning,
