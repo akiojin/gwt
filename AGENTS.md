@@ -6,7 +6,7 @@
 
 - **この AGENTS.md は gwt リポジトリ専用**のローカル運用ルールであり、gwt が開く任意プロジェクト向けの汎用 Agent 指示ではない。
 - gwt を使って他プロジェクトを開発する場合、そのプロジェクト自身の `AGENTS.md` / `CLAUDE.md` / README 等を優先する。
-- gwt 共通の Agent 運用（Board/Workspace 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、managed hooks / generated guidance / launch context で注入する。
+- gwt 共通の Agent 運用（Board/Workspace 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Workspace の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
 
 ## エージェント運用原則
 
@@ -189,21 +189,23 @@
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
-### Board 運用 (SPEC-1974)
+### Board / Workspace 運用ガイダンスの所在
 
-Board は Coordination ドメインの shared chat。`gwtd board post --kind <X> --body '<text>'` で投稿、`gwtd board show` で読み取り。詳細な reminder 文言は SessionStart / UserPromptSubmit / Stop hook で `board_reminder.rs` から **動的注入** される（重複ドリフトを避けるため静的ドキュメントには複製しない）。
+Board / Workspace の operational rules（投稿 kind、audience selection、body template、
+tool-unit post 禁止 など）は AGENTS.md には書かない。canonical source は
+`crates/gwt-skills/src/coordination_guidance.rs` のみで、そこから 2 つの経路に配信される:
 
-主要 kind の使い分け:
+- **Generated guidance**: `.claude/skills/gwt-coordination/SKILL.md` および
+  `.codex/skills/gwt-coordination/SKILL.md` に gwt materialization 時に書き込まれる
+  自動配信スキル。target project の `AGENTS.md` / `CLAUDE.md` に Board 記述が無くても
+  gwt-managed worktree であれば必ず適用される。
+- **Managed hook reminder**: SessionStart / UserPromptSubmit / Stop hook で
+  `board_reminder.rs` が動的注入する reminder text。`GWT_SESSION_ID` 環境変数が
+  設定された session で発火する。
 
-- **推論可視化軸**: `status`（フェーズ遷移・思考・懸念）、`decision`（確定した判断）
-- **協調軸**: `claim`（担当宣言で衝突回避）、`next`（協調 next を broadcast）、`blocked`（ブロッカー可視化・unblock 要請）、`handoff`（具体的な引き継ぎ）
-- **その他**: `request`、`impact`、`question`
-
-投稿前に audience を選ぶ。返答や合流を期待する場合は `--mention user:<id>` / `--mention agent:<id>` / `--mention session:<id>` / `--mention workspace:<id>` を優先し、返答不要の全体共有だけ `--broadcast` または mention なしにする。`--target <session-id|branch|agent-id>` は older agent 互換のために残すが、新しい投稿では typed `--mention ...` を優先する。`--owner` は SPEC/Issue 番号、`--topic` は分類タグ、`--parent` は thread reply。
-
-Board の claim や Workspace の類似 work は coordination signal であり、通常の mutation を止める global lock ではない。重複作業を避けたい場合は Board で boundary を明示し、Workspace に束ねる場合は `gwtd workspace candidates` / `join` / `create` / `ensure` の明示的な affiliation 操作で確認する。
-
-ツール単位の報告（"running gcc"等）は **post 禁止**。reasoning milestone (phase / choice / concern) または coordination boundary (claim / next / blocked / handoff / decision) でのみ post する。
+Board は coordination/history log、Workspace は current state という分離は維持する。
+新しい kind や mention 構文の更新は canonical source を編集して再 materialize する。
+AGENTS.md には複製しない（複製ドリフトが SPEC-1935 で問題化したため）。
 
 ## ドキュメント管理
 
