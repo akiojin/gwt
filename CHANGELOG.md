@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.30.0] - 2026-05-13
+
+### Bug Fixes
+
+- **resize:** Resize 固着の防御策と計測ログ (SPEC-2014 Phase C1/C2)
+- **gui:** Preserve terminals across project switches
+
+### Features
+
+- **workspace:** SPEC-2359 US-37 Workspace auto-done on completion signals
+- **app-runtime:** SPEC-2359 Phase U-5 Board path title sync (FR-125/126/129)
+- **workspace:** SPEC-2359 US-37 retroactive auto-done current.json fallback
+
+### Miscellaneous Tasks
+
+- **merge:** ProjectTabRuntime テスト構築箇所に main_worktree_root_cache を追加
+
+### Performance
+
+- **launch-wizard:** Wizard cold-open の git spawn を集約 (SPEC-2014 Phase B)
+
 ## [9.29.0] - 2026-05-13
 
 ### Bug Fixes
