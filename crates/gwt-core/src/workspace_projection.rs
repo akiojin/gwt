@@ -325,6 +325,16 @@ impl WorkspaceProjection {
                     self.status_category = WorkspaceStatusCategory::Blocked;
                     self.status_text = entry.body.clone();
                     self.next_action = Some("Resolve blocker".to_string());
+                    // SPEC-2359 Phase U-6 (FR-141): persist the entry body as
+                    // a dedicated `blocked_reason` so the Detail pane can
+                    // surface it separately from `status_text` (which other
+                    // entry kinds overwrite). Trimmed empty bodies are
+                    // ignored so manual `gwtd workspace update --status
+                    // blocked` paths can still populate via flag instead.
+                    let trimmed = entry.body.trim();
+                    if !trimmed.is_empty() {
+                        self.blocked_reason = Some(trimmed.to_string());
+                    }
                 }
                 BoardEntryKind::Next => {
                     self.next_action = Some(entry.body.clone());
@@ -338,6 +348,17 @@ impl WorkspaceProjection {
                 | BoardEntryKind::Decision => {
                     self.status_category = WorkspaceStatusCategory::Active;
                     self.status_text = entry.body.clone();
+                    // SPEC-2359 Phase U-6 (FR-140): backfill the Workspace
+                    // summary from milestone bodies when previously absent
+                    // so Workspace Overview Detail pane never renders the
+                    // placeholder for in-progress work that has at least one
+                    // status / claim / handoff / decision recorded.
+                    if self.summary.as_deref().map_or(true, |s| s.trim().is_empty()) {
+                        let trimmed = entry.body.trim();
+                        if !trimmed.is_empty() {
+                            self.summary = Some(trimmed.to_string());
+                        }
+                    }
                 }
                 BoardEntryKind::Request | BoardEntryKind::Impact | BoardEntryKind::Question => {}
             }

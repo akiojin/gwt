@@ -62,6 +62,153 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
     }
 }
 
+/// SPEC-2359 Phase U-6 (FR-140): when a Workspace's `summary` is missing,
+/// the first incoming Status / Claim / Handoff / Decision Board milestone
+/// must backfill it from the entry body so Workspace Overview Detail pane
+/// never stays on the "No Workspace summary yet" placeholder for in-progress
+/// work.
+#[test]
+fn record_board_milestone_backfills_summary_when_missing_for_status_entry() {
+    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+
+    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-1".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: None,
+        branch: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("workspace-1".to_string()),
+        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+    });
+    projection.summary = None;
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "Implementing the workspace summary backfill",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_origin_session_id("session-1");
+
+    projection.record_board_milestone(&entry);
+
+    assert_eq!(
+        projection.summary.as_deref(),
+        Some("Implementing the workspace summary backfill"),
+        "summary must be backfilled from Status entry body when previously None"
+    );
+}
+
+/// SPEC-2359 Phase U-6 (FR-141): a `Blocked` Board milestone must populate
+/// `blocked_reason` distinctly from `status_text` so the Detail pane can
+/// render a dedicated Blocked Reason section.
+#[test]
+fn record_board_milestone_sets_blocked_reason_separately_from_status_text() {
+    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+
+    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-1".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: None,
+        branch: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("workspace-1".to_string()),
+        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+    });
+    projection.blocked_reason = None;
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Blocked,
+        "Waiting for review on PR #2671",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_origin_session_id("session-1");
+
+    projection.record_board_milestone(&entry);
+
+    assert_eq!(
+        projection.blocked_reason.as_deref(),
+        Some("Waiting for review on PR #2671"),
+        "blocked_reason must capture the entry body for Blocked milestones"
+    );
+    assert_eq!(
+        projection.status_text, "Waiting for review on PR #2671",
+        "status_text continues to mirror the milestone body for backward compatibility"
+    );
+}
+
+/// SPEC-2359 Phase U-6 (FR-140): when `summary` is already populated, an
+/// incoming Status / Claim / Handoff / Decision must NOT overwrite it. The
+/// backfill is one-way and only fills empty values.
+#[test]
+fn record_board_milestone_preserves_existing_summary_on_status_entry() {
+    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+
+    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-1".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: None,
+        branch: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("workspace-1".to_string()),
+        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+    });
+    projection.summary = Some("Existing summary that should survive".to_string());
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "A newer milestone body that should NOT clobber the summary",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_origin_session_id("session-1");
+
+    projection.record_board_milestone(&entry);
+
+    assert_eq!(
+        projection.summary.as_deref(),
+        Some("Existing summary that should survive"),
+        "existing summary must survive Board milestone updates"
+    );
+}
+
 /// SPEC-2359 Phase U-6 (FR-131, FR-143): legacy `workspace.json` files
 /// written before the schema extension must continue to deserialize. The
 /// new fields populate via `#[serde(default)]` so reads stay
