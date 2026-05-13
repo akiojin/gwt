@@ -140,6 +140,23 @@ export function createWorkspaceKanbanSurface({
         agents: Array.isArray(projection.agents) ? projection.agents : [],
         cleanup_candidate: projection.cleanup_candidate || null,
         updated_at: projection.updated_at || "",
+        // SPEC-2359 Phase U-7 (FR-141, FR-147): surface the new Phase U-6
+        // schema fields on the current-Workspace card so the Detail pane
+        // can render them. Each field falls back to an empty string / null
+        // so the existing rendering code keeps working when the projection
+        // payload lacks the new keys (e.g. older daemon, pre-migration
+        // legacy data).
+        blocked_reason: projection.blocked_reason || "",
+        lifecycle_stage: projection.lifecycle_stage || "",
+        created_at: projection.created_at || "",
+        creator: projection.creator || "",
+        linked_issues: Array.isArray(projection.linked_issues)
+          ? projection.linked_issues
+          : [],
+        linked_prs: Array.isArray(projection.linked_prs) ? projection.linked_prs : [],
+        tags: Array.isArray(projection.tags) ? projection.tags : [],
+        progress_pct:
+          typeof projection.progress_pct === "number" ? projection.progress_pct : null,
         resume_source: "current",
         journal_id: null,
         events: [],
@@ -380,10 +397,26 @@ export function createWorkspaceKanbanSurface({
       createNode(
         "pre",
         "knowledge-section-body",
-        cardData.summary || cardData.status_text || "No Workspace summary yet",
+        cardData.summary ||
+          cardData.status_text ||
+          "Summary 未設定 — gwtd workspace update --summary X で追加できます",
       ),
     );
     scroll.appendChild(summary);
+
+    // SPEC-2359 Phase U-7 (FR-141, FR-147): a dedicated Blocked Reason
+    // section makes the cause of the Blocked status discoverable without
+    // mining the journal. Detail pane renders it between Summary and
+    // Next Action so the user sees "what's blocking" before "what to do
+    // next".
+    if (cardData.blocked_reason) {
+      const blocked = createNode("section", "knowledge-section");
+      blocked.appendChild(createNode("div", "knowledge-section-title", "Blocked Reason"));
+      blocked.appendChild(
+        createNode("pre", "knowledge-section-body", cardData.blocked_reason),
+      );
+      scroll.appendChild(blocked);
+    }
 
     if (cardData.next_action) {
       const next = createNode("section", "knowledge-section");
@@ -399,9 +432,14 @@ export function createWorkspaceKanbanSurface({
       scroll.appendChild(context);
     }
 
+    // SPEC-2359 Phase U-7 (FR-147): the Lifecycle section is now always
+    // rendered. When the Workspace has no recorded events the section
+    // surfaces an informative placeholder so users know where the
+    // timeline will appear once activity arrives — instead of the whole
+    // section vanishing and leaving the Detail pane feeling empty.
+    const lifecycle = createNode("section", "knowledge-section");
+    lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
     if (cardData.events.length > 0) {
-      const lifecycle = createNode("section", "knowledge-section");
-      lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
       lifecycle.appendChild(
         createNode(
           "pre",
@@ -422,8 +460,16 @@ export function createWorkspaceKanbanSurface({
             .join("\n"),
         ),
       );
-      scroll.appendChild(lifecycle);
+    } else {
+      lifecycle.appendChild(
+        createNode(
+          "pre",
+          "knowledge-section-body workspace-lifecycle-empty",
+          "Workspace created — まだ Lifecycle イベントは記録されていません。Board post 後に表示されます。",
+        ),
+      );
     }
+    scroll.appendChild(lifecycle);
 
     if (cardData.agents.length > 0) {
       const agents = createNode("section", "knowledge-section");
