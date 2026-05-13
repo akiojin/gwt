@@ -639,6 +639,49 @@ mod tests {
         );
     }
 
+    /// SPEC-2014 Phase C1: Windows WebView2 で pointerup / pointercancel /
+    /// lostpointercapture のいずれも届かないケースで Wizard / Terminal が永久に
+    /// 固まらないよう、resizeState には auto-clear する staleness guard と
+    /// 二重 resize 検知時の forceReset が組み込まれていなければならない。
+    #[test]
+    fn embedded_web_resize_state_guards_against_lost_pointer_end_events() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function scheduleResizeStalenessGuard(pointerId)"),
+            "expected a staleness guard scheduler that triggers when pointerup/cancel/lostpointercapture all miss"
+        );
+        assert!(
+            html.contains("function cancelResizeStalenessGuard()"),
+            "expected the staleness guard to be cancellable on the normal resize teardown path"
+        );
+        assert!(
+            html.contains("function forceResetResizeState(reason)"),
+            "expected a force-reset helper that clears stale resizeState when a new resize starts"
+        );
+        assert!(
+            html.contains(
+                "forceResetResizeState(\"new resize started before previous one finished\");",
+            ),
+            "expected new pointerdown to force-reset any leaked previous resizeState before opening a new session"
+        );
+        assert!(
+            html.contains("startedAt: performance.now(),"),
+            "expected resizeState to carry a startedAt timestamp so the staleness guard can log elapsed time"
+        );
+        assert!(
+            html.contains("stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),"),
+            "expected the resize start path to schedule the staleness guard"
+        );
+        assert!(
+            html.contains("try {\n              resizeHandle.setPointerCapture(event.pointerId);")
+                && html.contains(
+                    "console.warn(\n                \"[resize] setPointerCapture failed, falling back to window-bound pointer events\"",
+                ),
+            "expected setPointerCapture to be wrapped in try/catch with a warning fallback for WebView2 edge cases"
+        );
+    }
+
     #[test]
     fn embedded_web_terminal_scrolls_refresh_viewport_after_xterm_scroll() {
         let html = frontend_bundle_source();

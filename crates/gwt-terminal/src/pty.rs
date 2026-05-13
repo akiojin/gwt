@@ -173,20 +173,58 @@ impl PtyHandle {
     }
 
     /// Resize the PTY window.
+    ///
+    /// Emits an `info` event at `target = gwt::resize::pty` with the resolved
+    /// dimensions and total wall time so SPEC-2014 Phase C diagnostics can
+    /// pinpoint Windows ConPTY stalls from `~/.gwt/logs/` alone. The lock and
+    /// the underlying `MasterPty::resize` are timed separately because the
+    /// lock contention pattern differs on Windows vs Unix.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        let started = Instant::now();
         let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })
+        let lock_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let resize_started = Instant::now();
+        let outcome = master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        let resize_elapsed_ms =
+            u64::try_from(resize_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let total_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match outcome {
+            Ok(()) => {
+                tracing::info!(
+                    target: "gwt::resize::pty",
+                    cols = cols,
+                    rows = rows,
+                    lock_elapsed_ms = lock_elapsed_ms,
+                    resize_elapsed_ms = resize_elapsed_ms,
+                    total_elapsed_ms = total_elapsed_ms,
+                    outcome = "ok",
+                    "PTY resize completed"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let details = e.to_string();
+                tracing::warn!(
+                    target: "gwt::resize::pty",
+                    cols = cols,
+                    rows = rows,
+                    lock_elapsed_ms = lock_elapsed_ms,
+                    resize_elapsed_ms = resize_elapsed_ms,
+                    total_elapsed_ms = total_elapsed_ms,
+                    outcome = "error",
+                    error = %details,
+                    "PTY resize failed"
+                );
+                Err(TerminalError::PtyIoError { details })
+            }
+        }
     }
 
     /// Terminate the child process and every descendant in its process group.
