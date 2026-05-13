@@ -9,6 +9,7 @@ pub mod diff;
 pub mod issue;
 pub mod migration;
 pub mod pr_status;
+pub mod refs;
 pub mod repository;
 pub mod worktree;
 
@@ -23,6 +24,7 @@ pub use issue::{Issue, IssueCache};
 pub use pr_status::{
     fetch_pr_list, pr_check_report, CiStatus, MergeStatus, PrCheckReport, PrStatus, ReviewStatus,
 };
+pub use refs::list_existing_refs;
 pub use repository::{
     clone_repo, detect_repo_type, initialize_workspace, install_develop_protection, RepoType,
     Repository,

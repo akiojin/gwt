@@ -61,7 +61,7 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
 }
 
 use super::{
-    branch_worktree_path, build_shell_process_launch, combined_window_id,
+    branch_worktree_path, branch_worktree_path_for, build_shell_process_launch, combined_window_id,
     detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
     resolve_shell_launch_worktree, synthetic_branch_entry, workspace_projection_for_current_resume,
@@ -166,7 +166,14 @@ impl AppRuntime {
     ) -> Result<(), String> {
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
-        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
+        // SPEC-2014 FR-PERF-003: reuse the project tab's cached
+        // `main_worktree_root` resolution so the Launch Wizard cold-open path
+        // avoids another `git rev-parse --git-common-dir` spawn on Windows.
+        let main_repo_path = self.tab(tab_id).map(|tab| tab.main_worktree_root());
+        let worktree_path = main_repo_path.as_deref().map_or_else(
+            || branch_worktree_path(project_root, &normalized_branch_name),
+            |main_root| branch_worktree_path_for(main_root, &normalized_branch_name),
+        );
         let quick_start_root = worktree_path
             .clone()
             .unwrap_or_else(|| project_root.to_path_buf());
@@ -398,8 +405,15 @@ impl AppRuntime {
         project_root: &Path,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<(), String> {
-        let base_branch = gwt::start_work::resolve_start_work_base_branch(project_root)
-            .map_err(|error| error.to_string())?;
+        // SPEC-2014 FR-PERF-003: reuse the tab's cached `main_worktree_root`
+        // so Start Work does not spawn another `git rev-parse
+        // --git-common-dir` per open.
+        let git_root = self.tab(tab_id).map(|tab| tab.main_worktree_root());
+        let base_branch = match git_root.as_deref() {
+            Some(root) => gwt::start_work::resolve_start_work_base_branch_in(root),
+            None => gwt::start_work::resolve_start_work_base_branch(project_root),
+        }
+        .map_err(|error| error.to_string())?;
         let work_branch =
             gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
                 .map_err(|error| error.to_string())?;

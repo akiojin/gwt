@@ -1518,6 +1518,30 @@ pub struct ProjectTabRuntime {
     /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
     /// Skip / Quit. Not persisted: re-detected on every launch.
     pub(crate) migration_pending: bool,
+    /// SPEC-2014 FR-PERF-003: cached `git rev-parse --git-common-dir`
+    /// resolution for this tab. `gwt_git::worktree::main_worktree_root`
+    /// spawns `git.exe`; on Windows every spawn costs several hundred
+    /// milliseconds (`CreateProcess` + Defender real-time scan). The Launch
+    /// Wizard / Start Work / Add Agent / Resume Workspace paths used to call
+    /// it on every open, accounting for the bulk of the cold-open delay.
+    /// We resolve the value on first access and reuse it for the lifetime
+    /// of the tab; the [`Arc`] wrapper keeps `ProjectTabRuntime: Clone`.
+    pub(crate) main_worktree_root_cache: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
+}
+
+impl ProjectTabRuntime {
+    /// Return the cached primary repository root for this tab, lazily
+    /// resolving it on first access (FR-PERF-003). Falls back to
+    /// `project_root` when `git rev-parse --git-common-dir` fails so the
+    /// caller never has to deal with `Result`.
+    pub(crate) fn main_worktree_root(&self) -> PathBuf {
+        self.main_worktree_root_cache
+            .get_or_init(|| {
+                gwt_git::worktree::main_worktree_root(&self.project_root)
+                    .unwrap_or_else(|_| self.project_root.clone())
+            })
+            .clone()
+    }
 }
 
 fn recovery_state_label(recovery: gwt_core::migration::RecoveryState) -> &'static str {
@@ -1730,6 +1754,7 @@ impl ProjectTabRuntime {
             // Re-detected at startup via resolve_project_target; persistence
             // does not carry the flag.
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -1800,6 +1825,18 @@ impl AppRuntime {
     }
 
     pub(crate) fn bootstrap(&mut self) {
+        // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
+        // mark historical merged `work/*` Start Work Workspaces as Done so the
+        // Workspace Overview Completed column reflects past completions on the
+        // first startup after auto-done emission lands. The scan is idempotent
+        // per `work_item_id` and skips silently when journal / work_events
+        // files are missing or unreadable.
+        let now = chrono::Utc::now();
+        for tab in &self.tabs {
+            let _ =
+                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
+        }
+
         let windows = self
             .tabs
             .iter()
@@ -2602,6 +2639,7 @@ impl AppRuntime {
                     .map_err(|error| error.to_string())?
             }),
             migration_pending: target.needs_migration,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         });
         self.active_tab_id = Some(tab_id);
         self.remember_recent_project(&target);
@@ -3279,11 +3317,11 @@ impl AppRuntime {
                 })
                 .map(|tab| (tab.id.clone(), tab.project_root.clone()))
             {
-                if let Some(event) =
-                    self.record_workspace_board_milestone_event(&tab_id, &project_root, entry)
-                {
-                    events.push(event);
-                }
+                events.extend(self.record_workspace_board_milestone_event(
+                    &tab_id,
+                    &project_root,
+                    entry,
+                ));
             }
         }
         events
@@ -3776,6 +3814,15 @@ impl AppRuntime {
                 },
             )];
         };
+
+        // SPEC-2359 US-37 / FR-118: emit Done for the Workspace WorkItem whose
+        // git_details.branch matches the cleanup target before delegating to
+        // worktree/branch deletion. Idempotent per work_item_id.
+        let _ = gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
+            &tab.project_root,
+            branch,
+            chrono::Utc::now(),
+        );
 
         spawn_workspace_cleanup_async(
             self.proxy.clone(),
@@ -6233,6 +6280,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -6254,6 +6302,7 @@ exit 0
             kind,
             workspace,
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -8244,6 +8293,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -9776,6 +9826,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -10329,6 +10380,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let current_window_id = combined_window_id("tab-1", "profile-1");
@@ -10801,8 +10853,11 @@ exit 0
         .with_origin_agent_id("codex")
         .with_origin_branch("work/20260504-1234");
 
-        let event = runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
+        let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
+        let event = events
+            .iter()
+            .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
+            .cloned()
             .expect("active projection broadcast");
 
         assert!(matches!(
@@ -10927,9 +10982,7 @@ exit 0
             vec!["SPEC-2359".to_string()],
         )
         .with_origin_session_id("session-1");
-        runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
-            .expect("blocked projection broadcast");
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
         let status = BoardEntry::new(
             AuthorKind::Agent,
             "Codex",
@@ -10942,8 +10995,11 @@ exit 0
         )
         .with_origin_session_id("session-1");
 
-        let event = runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &status)
+        let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &status);
+        let event = events
+            .iter()
+            .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
+            .cloned()
             .expect("active projection broadcast");
 
         assert!(matches!(
@@ -11005,9 +11061,7 @@ exit 0
             vec!["SPEC-2359".to_string()],
         )
         .with_origin_session_id("session-1");
-        runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
-            .expect("blocked projection broadcast");
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &blocked);
         let next = BoardEntry::new(
             AuthorKind::Agent,
             "Codex",
@@ -11020,8 +11074,11 @@ exit 0
         )
         .with_origin_session_id("session-1");
 
-        let event = runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &next)
+        let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &next);
+        let event = events
+            .iter()
+            .find(|e| matches!(e.event, BackendEvent::ActiveWorkProjection { .. }))
+            .cloned()
             .expect("blocked projection broadcast");
 
         assert!(matches!(
@@ -11260,6 +11317,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let first_window_id = combined_window_id("tab-1", "agent-1");
@@ -11316,9 +11374,7 @@ exit 0
         .with_origin_session_id("session-1")
         .with_title_summary("Implement dynamic title sync");
 
-        runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &milestone)
-            .expect("projection broadcast");
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
 
         let tab = runtime.tab("tab-1").expect("tab");
         assert_eq!(
@@ -11347,6 +11403,259 @@ exit 0
         );
     }
 
+    /// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that carries
+    /// `title_summary` must broadcast both `WorkspaceState` (so the pane
+    /// heading rehydrates on WS reconnect / GUI reload) and
+    /// `ActiveWorkProjection` (Active Work card) in the same batch. Prior to
+    /// Phase U-5 the Board path mutated `dynamic_title` in memory but
+    /// silently skipped the `WorkspaceState` broadcast, leaving the pane
+    /// heading stale after reconnect.
+    #[test]
+    fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab_workspace = empty_workspace_state();
+        let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+        agent.title = "Codex".to_string();
+        agent.purpose_title = Some("Initial purpose".to_string());
+        tab_workspace.windows.push(agent);
+        tab_workspace.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260513-0343".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+        save_start_work_workspace_projection(
+            &repo,
+            runtime
+                .active_agent_sessions
+                .get(&window_id)
+                .expect("session"),
+            "develop",
+            None,
+            None,
+        )
+        .expect("save projection");
+        let milestone = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "Implementing Phase U-5 Board path title sync hardening",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1")
+        .with_title_summary("Implementing Phase U-5");
+
+        let events = runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "expected WorkspaceState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+            "expected ActiveWorkProjection broadcast from Board path: {events:?}"
+        );
+    }
+
+    /// Phase U-5 (SPEC-2359 US-38, FR-129, FR-130): the WebSocket reconnect
+    /// path goes through `FrontendEvent::FrontendReady` → `frontend_sync_events`.
+    /// The replied `WorkspaceState` must carry each window's `dynamic_title`
+    /// and `dynamic_title_detail` so the frontend's `windowDisplayTitle()` can
+    /// rehydrate the pane heading without waiting for another mutation. This
+    /// test fails if anyone strips `dynamic_title` from the projected
+    /// `WorkspaceView`, regressing the reconnect contract.
+    #[test]
+    fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab_workspace = empty_workspace_state();
+        let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+        agent.title = "Codex".to_string();
+        agent.purpose_title = Some("Initial purpose".to_string());
+        tab_workspace.windows.push(agent);
+        tab_workspace.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let tab_mut = runtime.tab_mut("tab-1").expect("tab mut");
+        tab_mut.workspace.set_dynamic_title_with_detail(
+            "agent-1",
+            Some("Phase U-5 rehydrate target".to_string()),
+            Some("simulated stale state before reconnect".to_string()),
+        );
+
+        let events = runtime.frontend_sync_events("client-1");
+
+        let workspace_event = events
+            .iter()
+            .find(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
+            .expect("WorkspaceState reply for FrontendReady");
+        let workspace = match &workspace_event.event {
+            BackendEvent::WorkspaceState { workspace } => workspace,
+            _ => unreachable!(),
+        };
+        let projected_window = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-1")
+            .and_then(|tab| {
+                tab.workspace
+                    .windows
+                    .iter()
+                    .find(|window| window.id == combined_window_id("tab-1", "agent-1"))
+            })
+            .expect("agent window in projected WorkspaceState");
+        assert_eq!(
+            projected_window.dynamic_title.as_deref(),
+            Some("Phase U-5 rehydrate target"),
+            "frontend_sync_events must include dynamic_title so reconnect rehydrate restores pane heading"
+        );
+        assert_eq!(
+            projected_window.dynamic_title_detail.as_deref(),
+            Some("simulated stale state before reconnect"),
+            "frontend_sync_events must include dynamic_title_detail so tooltip survives reconnect"
+        );
+    }
+
+    /// Phase U-5: re-asserts the diff gate from
+    /// `apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_resyncs`
+    /// at the Board entrypoint. Re-posting an identical milestone (same
+    /// `title_summary` + same body for `current_focus`) must not emit a
+    /// duplicate `WorkspaceState` broadcast on busy projections.
+    #[test]
+    fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab_workspace = empty_workspace_state();
+        let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+        agent.title = "Codex".to_string();
+        tab_workspace.windows.push(agent);
+        tab_workspace.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260513-0343".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+        save_start_work_workspace_projection(
+            &repo,
+            runtime
+                .active_agent_sessions
+                .get(&window_id)
+                .expect("session"),
+            "develop",
+            None,
+            None,
+        )
+        .expect("save projection");
+        let milestone = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "Stable body for current_focus",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1")
+        .with_title_summary("Stable title");
+
+        let first = runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
+        assert!(
+            first
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "first Board post should broadcast WorkspaceState: {first:?}"
+        );
+
+        let second = runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "second Board post with identical title_summary must not duplicate WorkspaceState: {second:?}"
+        );
+        assert!(
+            second
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+            "ActiveWorkProjection should still broadcast on identical resync: {second:?}"
+        );
+    }
+
     #[test]
     fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window_title() {
         let _env_lock = env_test_lock()
@@ -11370,6 +11679,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11416,9 +11726,7 @@ exit 0
         entry_value["title_summary"] = serde_json::json!("Title summary contract");
         let milestone: BoardEntry = serde_json::from_value(entry_value).expect("milestone");
 
-        runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &milestone)
-            .expect("projection broadcast");
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
 
         let tab = runtime.tab("tab-1").expect("tab");
         assert_eq!(
@@ -11462,6 +11770,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11502,9 +11811,7 @@ exit 0
         )
         .with_origin_session_id("session-1");
 
-        runtime
-            .record_workspace_board_milestone_event("tab-1", &repo, &milestone)
-            .expect("projection broadcast");
+        runtime.record_workspace_board_milestone_event("tab-1", &repo, &milestone);
 
         let tab = runtime.tab("tab-1").expect("tab");
         assert_eq!(
@@ -11539,6 +11846,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11623,6 +11931,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         // Need the path so the temp directory survives until the runtime drops.
         let temp_root = repo.parent().expect("repo has parent").to_path_buf();
@@ -12225,6 +12534,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let all_window_id = combined_window_id("tab-1", "board-all");
@@ -12334,6 +12644,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let other_tab = sample_project_tab_with_window_at(
             "tab-2",
@@ -12378,7 +12689,42 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(empty_workspace_state()),
             migration_pending: true,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// SPEC-2014 FR-PERF-003: ProjectTabRuntime caches `main_worktree_root`
+    /// resolution per tab so the Launch Wizard / Start Work paths do not
+    /// re-spawn `git rev-parse --git-common-dir` on every open.
+    #[test]
+    fn project_tab_runtime_main_worktree_root_caches_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        gwt_core::process::hidden_command("git")
+            .args(["init", repo.to_str().unwrap()])
+            .output()
+            .expect("git init");
+
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        assert!(
+            tab.main_worktree_root_cache.get().is_none(),
+            "cache must start empty"
+        );
+
+        let first = tab.main_worktree_root();
+        let cached = tab
+            .main_worktree_root_cache
+            .get()
+            .expect("cache populated after first access")
+            .clone();
+        assert_eq!(first, cached);
+
+        let second = tab.main_worktree_root();
+        assert_eq!(
+            first, second,
+            "second call must return the cached resolution"
+        );
     }
 
     #[test]
