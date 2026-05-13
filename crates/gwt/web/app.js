@@ -64,6 +64,19 @@
       const stage = document.getElementById("canvas-stage");
       const projectTabs = document.getElementById("project-tabs");
       const openProjectButton = document.getElementById("open-project-button");
+      const openProjectMenuButton = document.getElementById(
+        "open-project-menu-button",
+      );
+      const openProjectMenu = document.getElementById("open-project-menu");
+      const openProjectMenuOpenItem = document.getElementById(
+        "open-project-menu-open",
+      );
+      const openProjectMenuCloneItem = document.getElementById(
+        "open-project-menu-clone",
+      );
+      const openProjectMenuRecent = document.getElementById(
+        "open-project-menu-recent",
+      );
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
@@ -133,6 +146,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
@@ -1053,29 +1067,169 @@
       }
 
       function renderRecentProjects() {
-        recentProjectList.innerHTML = "";
+        recentProjectList.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           const empty = document.createElement("div");
           empty.className = "file-tree-empty workspace-empty-state";
           empty.textContent = "No recent projects";
           recentProjectList.appendChild(empty);
-          return;
+        } else {
+          for (const project of recentProjects) {
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "recent-project-row";
+            const titleEl = document.createElement("span");
+            titleEl.className = "recent-project-title";
+            titleEl.textContent = project.title;
+            const metaEl = document.createElement("span");
+            metaEl.className = "recent-project-meta";
+            metaEl.textContent = `${project.kind} · ${project.path}`;
+            row.append(titleEl, metaEl);
+            row.addEventListener("click", () => {
+              send({ kind: "reopen_recent_project", path: project.path });
+            });
+            recentProjectList.appendChild(row);
+          }
         }
 
+        renderRecentProjectsIntoMenu();
+      }
+
+      // Issue #2684 — mirror Recent projects inside the split-button dropdown
+      // so users can reach them without first closing every project tab.
+      function renderRecentProjectsIntoMenu() {
+        if (!openProjectMenuRecent) {
+          return;
+        }
+        openProjectMenuRecent.replaceChildren();
+        const recentProjects = appState?.recent_projects || [];
+        if (recentProjects.length === 0) {
+          openProjectMenuRecent.dataset.empty = "true";
+          // Real DOM node beats CSS pseudo-content so screen readers reach it.
+          const empty = document.createElement("div");
+          empty.className = "split-button-menu-empty";
+          empty.setAttribute("role", "presentation");
+          empty.textContent = "No recent projects";
+          openProjectMenuRecent.appendChild(empty);
+          return;
+        }
+        delete openProjectMenuRecent.dataset.empty;
         for (const project of recentProjects) {
           const row = document.createElement("button");
           row.type = "button";
-          row.className = "recent-project-row";
-          row.innerHTML = `
-            <span class="recent-project-title">${project.title}</span>
-            <span class="recent-project-meta">${project.kind} · ${project.path}</span>
-          `;
+          row.className =
+            "split-button-menu-item split-button-menu-recent-row";
+          row.setAttribute("role", "menuitem");
+          row.tabIndex = -1;
+          const titleEl = document.createElement("span");
+          titleEl.className = "split-button-menu-recent-title";
+          titleEl.textContent = project.title;
+          const metaEl = document.createElement("span");
+          metaEl.className = "split-button-menu-recent-meta";
+          metaEl.textContent = `${project.kind} · ${project.path}`;
+          row.append(titleEl, metaEl);
           row.addEventListener("click", () => {
+            closeOpenProjectMenu();
             send({ kind: "reopen_recent_project", path: project.path });
           });
-          recentProjectList.appendChild(row);
+          openProjectMenuRecent.appendChild(row);
         }
+      }
+
+      // Issue #2684 — split-button dropdown that mirrors the picker so users
+      // can reach Clone from GitHub while a project tab is active.
+      let openProjectMenuFocusRelease = null;
+
+      function isOpenProjectMenuOpen() {
+        return openProjectMenu?.classList.contains("open") || false;
+      }
+
+      function openOpenProjectMenu() {
+        if (!openProjectMenu || isOpenProjectMenuOpen()) {
+          return;
+        }
+        renderRecentProjectsIntoMenu();
+        openProjectMenu.classList.add("open");
+        openProjectMenu.setAttribute("aria-hidden", "false");
+        openProjectMenuButton.setAttribute("aria-expanded", "true");
+        try {
+          openProjectMenuOpenItem.focus({ preventScroll: true });
+        } catch {
+          openProjectMenuOpenItem.focus();
+        }
+        openProjectMenuFocusRelease = createFocusTrap(openProjectMenu, {
+          document,
+        });
+      }
+
+      function closeOpenProjectMenu({ restoreFocus = false } = {}) {
+        if (!openProjectMenu || !isOpenProjectMenuOpen()) {
+          return;
+        }
+        openProjectMenu.classList.remove("open");
+        openProjectMenu.setAttribute("aria-hidden", "true");
+        openProjectMenuButton.setAttribute("aria-expanded", "false");
+        if (typeof openProjectMenuFocusRelease === "function") {
+          openProjectMenuFocusRelease();
+        }
+        openProjectMenuFocusRelease = null;
+        if (restoreFocus) {
+          try {
+            openProjectMenuButton.focus({ preventScroll: true });
+          } catch {
+            openProjectMenuButton.focus();
+          }
+        }
+      }
+
+      function toggleOpenProjectMenu() {
+        if (isOpenProjectMenuOpen()) {
+          closeOpenProjectMenu({ restoreFocus: true });
+        } else {
+          openOpenProjectMenu();
+        }
+      }
+
+      // Issue #2684 — roving focus across menu items. Items carry
+      // tabindex="-1" by ARIA APG convention so Tab does not stop on each
+      // individual entry; arrow keys take over once the menu is open.
+      function openProjectMenuItems() {
+        if (!openProjectMenu) {
+          return [];
+        }
+        return Array.from(
+          openProjectMenu.querySelectorAll('[role="menuitem"]'),
+        ).filter((el) => !el.disabled);
+      }
+
+      function focusOpenProjectMenuItemAt(index) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const wrapped = ((index % items.length) + items.length) % items.length;
+        try {
+          items[wrapped].focus({ preventScroll: true });
+        } catch {
+          items[wrapped].focus();
+        }
+      }
+
+      function moveOpenProjectMenuFocus(direction) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const active = document.activeElement;
+        const currentIndex = items.indexOf(active);
+        const nextIndex =
+          currentIndex === -1
+            ? direction > 0
+              ? 0
+              : items.length - 1
+            : currentIndex + direction;
+        focusOpenProjectMenuItemAt(nextIndex);
       }
 
       function renderProjectPicker() {
@@ -1286,10 +1440,17 @@
             createNode("div", "knowledge-detail-subtitle", detail.subtitle),
           );
         }
-        if ((detail.labels || []).length > 0) {
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
           const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of detail.labels) {
-            labelRow.appendChild(createNode("span", "kanban-card-chip", label));
+          for (const label of displayLabels) {
+            labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
           }
           body.appendChild(labelRow);
         }
@@ -1299,7 +1460,7 @@
             createNode("div", "kanban-drawer-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "kanban-drawer-section-body", section.body),
+            createKnowledgeMarkdownBody(section, "kanban-drawer-section-body"),
           );
           body.appendChild(card);
         }
@@ -2924,6 +3085,7 @@
             hideDone: readKanbanHideDonePreference(),
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
+            autoRefreshTimer: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -2935,6 +3097,33 @@
           state.pendingPhaseUpdates = new Map();
         }
         return state;
+      }
+
+      function knowledgeAutoRefreshIsBusy(state) {
+        return (
+          state.loading ||
+          state.refreshing ||
+          state.searching ||
+          state.searchInFlight
+        );
+      }
+
+      function ensureKnowledgeAutoRefresh(windowId, knowledgeKind) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        if (state.autoRefreshTimer) {
+          return;
+        }
+        state.autoRefreshTimer = setInterval(() => {
+          if (!windowMap.get(windowId)) {
+            clearInterval(state.autoRefreshTimer);
+            state.autoRefreshTimer = null;
+            return;
+          }
+          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
+            return;
+          }
+          requestKnowledgeBridge(windowId, knowledgeKind, true);
+        }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
       }
 
       function readKanbanHideDonePreference() {
@@ -3203,6 +3392,18 @@
         }
       }
 
+      function replaceKnowledgeEntry(entries, fresh) {
+        if (!fresh || !Array.isArray(entries)) {
+          return false;
+        }
+        const index = entries.findIndex((entry) => entry.number === fresh.number);
+        if (index < 0) {
+          return false;
+        }
+        entries[index] = fresh;
+        return true;
+      }
+
       function knowledgeDetailRequestMatches(state, event) {
         return (
           !event.request_id ||
@@ -3338,6 +3539,18 @@
         }
         if (textContent !== undefined) {
           node.textContent = textContent;
+        }
+        return node;
+      }
+
+      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
+        const node = createNode("div", `${className} knowledge-markdown-body`);
+        const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
+        if (html) {
+          node.innerHTML = html;
+        } else {
+          node.classList.add("is-plaintext");
+          node.textContent = section?.body || "";
         }
         return node;
       }
@@ -5673,6 +5886,91 @@
         }
       }
 
+      const KNOWLEDGE_PHASES = new Set([
+        "draft",
+        "planning",
+        "implementation",
+        "review",
+        "done",
+      ]);
+
+      function isKnowledgePhaseLabel(label) {
+        return typeof label === "string" && label.startsWith("phase/");
+      }
+
+      function canonicalKnowledgePhase(phase) {
+        const value = String(phase || "");
+        return KNOWLEDGE_PHASES.has(value) ? value : null;
+      }
+
+      function knowledgePhaseFromLabels(labels = []) {
+        for (const label of Array.isArray(labels) ? labels : []) {
+          if (!isKnowledgePhaseLabel(label)) continue;
+          const phase = canonicalKnowledgePhase(label.slice("phase/".length));
+          if (phase) return phase;
+        }
+        return null;
+      }
+
+      function effectiveKnowledgePhase(entry) {
+        if (entry?.state === "closed") return "done";
+        return canonicalKnowledgePhase(entry?.phase)
+          || knowledgePhaseFromLabels(entry?.labels)
+          || "backlog";
+      }
+
+      function knowledgePhaseDisplayName(phase) {
+        switch (phase) {
+          case "draft":
+            return "Draft";
+          case "planning":
+            return "Planning";
+          case "implementation":
+            return "Implementation";
+          case "review":
+            return "Review";
+          case "done":
+            return "Done";
+          default:
+            return "Backlog";
+        }
+      }
+
+      function visibleKnowledgeLabels(labels = []) {
+        return (Array.isArray(labels) ? labels : []).filter(
+          (label) => !isKnowledgePhaseLabel(label),
+        );
+      }
+
+      function staleKnowledgePhaseWarning(entry) {
+        const storedPhase = canonicalKnowledgePhase(entry?.phase)
+          || knowledgePhaseFromLabels(entry?.labels);
+        if (entry?.state === "closed" && storedPhase && storedPhase !== "done") {
+          return `Stored phase/${storedPhase}; lifecycle is Done`;
+        }
+        return "";
+      }
+
+      function knowledgeDetailChip(detail) {
+        const effectivePhase = effectiveKnowledgePhase(detail);
+        const rawState = String(detail?.state || "").toLowerCase();
+        if (
+          rawState
+          && rawState !== "open"
+          && rawState !== "closed"
+          && effectivePhase === "backlog"
+        ) {
+          return {
+            className: rawState,
+            label: rawState,
+          };
+        }
+        return {
+          className: effectivePhase === "done" ? "closed" : "open",
+          label: knowledgePhaseDisplayName(effectivePhase),
+        };
+      }
+
       function filteredKnowledgeEntries(state) {
         const query = state.query.trim().toLowerCase();
         if (!query) {
@@ -5771,12 +6069,14 @@
         const card = createNode("button", "kanban-card");
         card.type = "button";
         card.dataset.issueNumber = String(entry.number);
+        const effectivePhase = effectiveKnowledgePhase(entry);
         // Plain (non-spec) Issues cannot be moved through phase columns
         // because they carry no canonical phase labels. We surface a
         // (plain) chip and disable HTML5 D&D so the user understands
         // the constraint at a glance.
         const isPlain = entry.is_spec === false;
-        card.draggable = !isPlain;
+        const isClosed = String(entry?.state || "").toLowerCase() === "closed";
+        card.draggable = !isPlain && !isClosed;
         if (isPlain) {
           card.classList.add("kanban-card--plain");
         }
@@ -5798,12 +6098,12 @@
         head.appendChild(
           createNode("span", "kanban-card-number", `#${entry.number}`),
         );
-        const stateChip = createNode(
+        const phaseChip = createNode(
           "span",
-          `kanban-card-chip kanban-card-chip--state-${entry.state}`,
-          entry.state,
+          `kanban-card-chip kanban-card-chip--phase-${effectivePhase}`,
+          knowledgePhaseDisplayName(effectivePhase),
         );
-        head.appendChild(stateChip);
+        head.appendChild(phaseChip);
         card.appendChild(head);
 
         card.appendChild(
@@ -5855,10 +6155,10 @@
           renderKnowledgeBridge(windowId);
         });
 
-        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
-        // skip these handlers entirely (draggable=false above) so they
-        // can still be clicked but never picked up.
-        if (!isPlain) {
+        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) and closed
+        // cards skip these handlers entirely (draggable=false above) so
+        // they can still be clicked but never picked up.
+        if (!isPlain && !isClosed) {
           card.addEventListener("dragstart", (event) => {
             // Snapshot the original entry so a failed write-back can
             // restore it; the snapshot keeps the entire entry value
@@ -5866,8 +6166,7 @@
             state.dndSnapshot = {
               issueNumber: entry.number,
               entry: { ...entry },
-              originPhase:
-                entry.state === "closed" ? "done" : entry.phase || "backlog",
+              originPhase: effectiveKnowledgePhase(entry),
             };
             card.classList.add("is-dragging");
             if (event.dataTransfer) {
@@ -5954,8 +6253,7 @@
         }
         const counts = new Map();
         for (const entry of visibleEntries) {
-          const phaseKey =
-            entry.state === "closed" ? "done" : entry.phase || "backlog";
+          const phaseKey = effectiveKnowledgePhase(entry);
           const column = columnsByPhase.get(phaseKey) || columnsByPhase.get("backlog");
           if (!column) continue;
           const body = column.querySelector("[data-role='body']");
@@ -5993,8 +6291,13 @@
         const head = createNode("div", "");
         const headRow = createNode("div", "knowledge-detail-head");
         headRow.appendChild(createNode("h3", "knowledge-detail-title", detail.title));
+        const detailChip = knowledgeDetailChip(detail);
         headRow.appendChild(
-          createNode("span", `knowledge-state-chip ${detail.state}`, detail.state),
+          createNode(
+            "span",
+            `knowledge-state-chip ${detailChip.className}`,
+            detailChip.label,
+          ),
         );
         head.appendChild(headRow);
         if (detail.subtitle) {
@@ -6002,10 +6305,17 @@
             createNode("div", "knowledge-detail-subtitle", detail.subtitle),
           );
         }
-        if ((detail.labels || []).length > 0) {
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
           const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of detail.labels) {
+          for (const label of displayLabels) {
             labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
           }
           head.appendChild(labelRow);
         }
@@ -6037,7 +6347,7 @@
             createNode("div", "knowledge-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "knowledge-section-body", section.body),
+            createKnowledgeMarkdownBody(section),
           );
           scroll.appendChild(card);
         }
@@ -6910,6 +7220,7 @@
               false,
             );
           }
+          ensureKnowledgeAutoRefresh(windowData.id, knowledgeKind);
           frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
             windowData.id,
           );
@@ -8214,13 +8525,9 @@
             }
             if (event.result?.kind === "ok") {
               const fresh = event.result.fresh_entry;
-              if (fresh && Array.isArray(state.entries)) {
-                const index = state.entries.findIndex(
-                  (entry) => entry.number === fresh.number,
-                );
-                if (index >= 0) {
-                  state.entries[index] = fresh;
-                }
+              if (fresh) {
+                replaceKnowledgeEntry(state.entries, fresh);
+                replaceKnowledgeEntry(state.baseEntries, fresh);
               }
               state.dndSnapshot = null;
             } else {
@@ -8771,6 +9078,73 @@
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
       );
+
+      // Issue #2684 — split-button caret toggles the dropdown menu, and each
+      // menu item routes to the same handler the project picker uses. Outside
+      // clicks and Escape close the menu so it never strands keyboard users.
+      if (openProjectMenuButton && openProjectMenu) {
+        openProjectMenuButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggleOpenProjectMenu();
+        });
+        openProjectMenuButton.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowDown" || event.key === "Down") {
+            event.preventDefault();
+            openOpenProjectMenu();
+          }
+        });
+        openProjectMenuOpenItem.addEventListener("click", () => {
+          closeOpenProjectMenu();
+          frontendUnits.projectWorkspaceShell.sendOpenProjectDialog();
+        });
+        openProjectMenuCloneItem.addEventListener("click", () => {
+          closeOpenProjectMenu();
+          openCloneProjectModal();
+        });
+        document.addEventListener("click", (event) => {
+          if (!isOpenProjectMenuOpen()) {
+            return;
+          }
+          if (
+            openProjectMenu.contains(event.target) ||
+            openProjectMenuButton.contains(event.target)
+          ) {
+            return;
+          }
+          closeOpenProjectMenu();
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && isOpenProjectMenuOpen()) {
+            event.preventDefault();
+            closeOpenProjectMenu({ restoreFocus: true });
+          }
+        });
+        openProjectMenu.addEventListener("keydown", (event) => {
+          if (!isOpenProjectMenuOpen()) {
+            return;
+          }
+          switch (event.key) {
+            case "ArrowDown":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(1);
+              break;
+            case "ArrowUp":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(-1);
+              break;
+            case "Home":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(0);
+              break;
+            case "End":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(-1);
+              break;
+            default:
+              break;
+          }
+        });
+      }
       addButton.addEventListener("click", () => {
         if (addButton.disabled) {
           return;

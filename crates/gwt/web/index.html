@@ -439,6 +439,122 @@
         background: var(--color-button-bg-hover);
       }
 
+      /* Issue #2684 — split-button group anchors the dropdown menu below the
+         primary Open Project button. */
+      .split-button-group {
+        position: relative;
+        display: inline-flex;
+        align-items: stretch;
+      }
+
+      .split-button-group .split-button-primary {
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+        border-right-width: 0;
+      }
+
+      .split-button-group .split-button-caret {
+        padding: 0 8px;
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+        font-size: var(--type-sm);
+        min-width: 26px;
+      }
+
+      .split-button-group .split-button-caret[aria-expanded="true"] {
+        background: var(--color-button-bg-hover);
+      }
+
+      .split-button-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 260px;
+        max-width: 360px;
+        padding: 8px;
+        display: none;
+        flex-direction: column;
+        gap: 4px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        box-shadow: var(--shadow-2);
+        z-index: 50;
+      }
+
+      .split-button-menu.open {
+        display: flex;
+      }
+
+      .split-button-menu-item {
+        width: 100%;
+        text-align: left;
+        padding: 8px 10px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text);
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .split-button-menu-item:hover,
+      .split-button-menu-item:focus-visible {
+        background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+        outline: none;
+        border-color: var(--color-border);
+      }
+
+      .split-button-menu-section-label {
+        margin: 8px 4px 4px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-weight: 700;
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+      }
+
+      .split-button-menu-recent {
+        display: grid;
+        gap: 4px;
+      }
+
+      /* Empty-state copy is rendered as a real <div> by JS so assistive tech
+         finds it; this rule only styles that node. */
+      .split-button-menu-empty {
+        padding: 8px 10px;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text-muted);
+      }
+
+      .split-button-menu-recent-row {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .split-button-menu-recent-title {
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        font-weight: 600;
+        color: var(--color-text-strong);
+      }
+
+      .split-button-menu-recent-meta {
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .add-button {
         width: 46px;
         height: 46px;
@@ -1310,6 +1426,136 @@
         color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+
+      .knowledge-section-body.knowledge-markdown-body,
+      .kanban-drawer-section-body.knowledge-markdown-body {
+        white-space: normal;
+      }
+
+      .knowledge-markdown-body {
+        min-width: 0;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        line-height: 1.55;
+        color: var(--color-text);
+        overflow-wrap: anywhere;
+      }
+
+      .knowledge-markdown-body.is-plaintext {
+        white-space: pre-wrap;
+      }
+
+      .knowledge-markdown-body :first-child {
+        margin-top: 0;
+      }
+
+      .knowledge-markdown-body :last-child {
+        margin-bottom: 0;
+      }
+
+      .knowledge-markdown-body h1,
+      .knowledge-markdown-body h2,
+      .knowledge-markdown-body h3,
+      .knowledge-markdown-body h4 {
+        margin: var(--space-3) 0 var(--space-2);
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-weight: 700;
+        line-height: 1.2;
+        color: var(--color-text-strong);
+        letter-spacing: 0;
+      }
+
+      .knowledge-markdown-body h1 {
+        font-size: var(--type-lg);
+      }
+
+      .knowledge-markdown-body h2 {
+        font-size: var(--type-md);
+      }
+
+      .knowledge-markdown-body h3,
+      .knowledge-markdown-body h4 {
+        font-size: var(--type-sm);
+      }
+
+      .knowledge-markdown-body p,
+      .knowledge-markdown-body ul,
+      .knowledge-markdown-body ol,
+      .knowledge-markdown-body blockquote,
+      .knowledge-markdown-body pre,
+      .knowledge-markdown-body table {
+        margin: 0 0 var(--space-3);
+      }
+
+      .knowledge-markdown-body ul,
+      .knowledge-markdown-body ol {
+        padding-left: var(--space-5);
+      }
+
+      .knowledge-markdown-body li + li {
+        margin-top: var(--space-1);
+      }
+
+      .knowledge-markdown-body input[type="checkbox"] {
+        margin: 0 var(--space-2) 0 0;
+        transform: translateY(1px);
+      }
+
+      .knowledge-markdown-body code {
+        padding: 1px 4px;
+        border-radius: var(--radius-sm);
+        background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+      }
+
+      .knowledge-markdown-body pre {
+        max-width: 100%;
+        overflow: auto;
+        padding: var(--space-3);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+      }
+
+      .knowledge-markdown-body pre code {
+        padding: 0;
+        border-radius: 0;
+        background: transparent;
+        white-space: pre;
+      }
+
+      .knowledge-markdown-body blockquote {
+        padding-left: var(--space-3);
+        border-left: 3px solid var(--color-link);
+        color: var(--color-text-muted);
+      }
+
+      .knowledge-markdown-body table {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        border-collapse: collapse;
+      }
+
+      .knowledge-markdown-body th,
+      .knowledge-markdown-body td {
+        padding: var(--space-2);
+        border: 1px solid var(--color-border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .knowledge-markdown-body th {
+        color: var(--color-text-strong);
+        background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+      }
+
+      .knowledge-markdown-body a {
+        color: var(--color-link);
       }
 
       .profile-root {
@@ -3220,9 +3466,54 @@
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
             <span class="app-version" id="app-version" hidden></span>
-            <button class="arrange-button" id="open-project-button" aria-label="Open project">
-              Open Project
-            </button>
+            <!-- Issue #2684 — split-button surfaces Clone from GitHub while a
+                 project tab keeps the project-picker overlay hidden. The
+                 primary half preserves the historical native-dialog behavior
+                 so existing muscle memory continues to work. -->
+            <div class="split-button-group" id="open-project-group">
+              <button class="arrange-button split-button-primary" id="open-project-button" aria-label="Open project">
+                Open Project
+              </button>
+              <button
+                class="arrange-button split-button-caret"
+                id="open-project-menu-button"
+                type="button"
+                aria-label="More project actions"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-controls="open-project-menu"
+              >▾</button>
+              <div
+                class="split-button-menu"
+                id="open-project-menu"
+                role="menu"
+                aria-hidden="true"
+                aria-labelledby="open-project-menu-button"
+                tabindex="-1"
+              >
+                <button
+                  class="split-button-menu-item"
+                  id="open-project-menu-open"
+                  role="menuitem"
+                  type="button"
+                  tabindex="-1"
+                >Open Project...</button>
+                <button
+                  class="split-button-menu-item"
+                  id="open-project-menu-clone"
+                  role="menuitem"
+                  type="button"
+                  tabindex="-1"
+                >Clone from GitHub...</button>
+                <div class="split-button-menu-section-label" role="presentation">Recent</div>
+                <div
+                  class="split-button-menu-recent"
+                  id="open-project-menu-recent"
+                  role="group"
+                  aria-label="Recent projects"
+                ></div>
+              </div>
+            </div>
             <div
               class="op-theme-toggle"
               id="op-theme-toggle"

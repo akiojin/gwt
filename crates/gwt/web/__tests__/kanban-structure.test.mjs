@@ -52,6 +52,29 @@ test("Kanban toolbar exposes Hide done toggle id", () => {
   );
 });
 
+test("Knowledge windows install periodic force refresh for external phase changes", () => {
+  assert.match(
+    appSource,
+    /KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS/,
+    "expected a named Knowledge auto-refresh interval constant",
+  );
+  assert.match(
+    appSource,
+    /ensureKnowledgeAutoRefresh/,
+    "expected Knowledge windows to install an auto-refresh helper",
+  );
+  assert.match(
+    appSource,
+    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
+    "expected auto-refresh to force remote cache refresh with refresh=true",
+  );
+  assert.match(
+    appSource,
+    /state\.loading\s*\|\|\s*state\.refreshing\s*\|\|\s*state\.searching\s*\|\|\s*state\.searchInFlight/,
+    "expected auto-refresh to skip while user-visible work is active",
+  );
+});
+
 test("Kanban removes legacy open and closed list scope controls", () => {
   assert.doesNotMatch(
     appSource,
@@ -66,12 +89,13 @@ test("Kanban removes legacy open and closed list scope controls", () => {
 });
 
 test("renderKnowledgeBridge groups entries into kanban columns by phase", () => {
-  // The renderer must use entry.phase to assign data-phase on each card,
-  // and fall back to "backlog" when phase is null.
+  // The renderer must use the shared effective lifecycle helper to assign
+  // cards to columns, including the "backlog" fallback for entries with no
+  // canonical phase.
   assert.match(
     appSource,
-    /entry\.phase\s*\|\|\s*"backlog"/,
-    "expected app.js to fall back to 'backlog' when entry.phase is null",
+    /function effectiveKnowledgePhase[\s\S]{0,600}?"backlog"/,
+    "expected app.js to fall back to 'backlog' in effectiveKnowledgePhase",
   );
   assert.match(
     appSource,
@@ -96,12 +120,12 @@ test("Plain (non-spec) entries fall into the Backlog column", () => {
 });
 
 test("Closed issues land in the Done column", () => {
-  // closed Issues carry GitHub state == "closed" but no phase/done label.
-  // The renderer must promote them to the Done column so they appear with
-  // phase/done open Issues under one header.
+  // closed Issues carry GitHub state == "closed" but may have no phase/done
+  // label or a stale non-done phase. The effective lifecycle helper must
+  // promote them to the Done column under one header.
   assert.match(
     appSource,
-    /entry\.state\s*===\s*"closed"/,
+    /entry\?\.state === "closed"/,
     "expected app.js to detect closed state",
   );
   assert.match(
@@ -220,9 +244,10 @@ test("Kanban cards declare warning indicator hook for unknown phase", () => {
 // SPEC-2017 US-10: plain Issue cards must surface a (plain) chip and
 // stay non-draggable. The renderer derives both off entry.is_spec ===
 // false and never lets a plain Issue acquire phase metadata.
-test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
-  // is_spec=false → isPlain=true → draggable=false. The negation
-  // pattern (`!isPlain`) is the canonical form in renderKanbanCard.
+test("Plain and closed Issue cards declare non-draggable constraints", () => {
+  // is_spec=false or state=closed cards must stay clickable but cannot be
+  // dragged into lifecycle columns because that would write invalid phase
+  // metadata for the card's source of truth.
   assert.match(
     appSource,
     /const isPlain = entry\.is_spec === false/,
@@ -230,8 +255,18 @@ test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
   );
   assert.match(
     appSource,
-    /card\.draggable\s*=\s*!isPlain/,
-    "expected card.draggable to flip on isPlain",
+    /const isClosed = String\(entry\?\.state \|\| ""\)\.toLowerCase\(\) === "closed"/,
+    "expected renderKanbanCard to derive isClosed from state",
+  );
+  assert.match(
+    appSource,
+    /card\.draggable\s*=\s*!isPlain && !isClosed/,
+    "expected card.draggable to require both not plain and not closed",
+  );
+  assert.match(
+    appSource,
+    /if \(!isPlain && !isClosed\)/,
+    "expected D&D handlers to be skipped for closed cards",
   );
   assert.match(
     appSource,
@@ -240,19 +275,88 @@ test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
   );
 });
 
-// SPEC-2017 US-11: closed Issue routing into the Done column. The
-// renderer overrides entry.phase with "done" whenever entry.state is
-// "closed", and the state chip uses kanban-card-chip--state-closed.
-test("Closed Issue cards land in Done with the closed state chip class", () => {
+// SPEC-2017 US-11 follow-up: closed Issue routing into the Done column must
+// be reflected as the card's primary lifecycle label. GitHub state is a data
+// source, not the user-facing Kanban vocabulary, so closed cards should not
+// render a primary CLOSED chip next to the DONE column heading.
+test("Closed Issue cards land in Done with a lifecycle phase chip", () => {
   assert.match(
     appSource,
-    /entry\.state === "closed" \? "done"/,
-    "expected closed entries to be routed to the done column",
+    /effectiveKnowledgePhase/,
+    "expected a shared effective lifecycle phase helper",
   );
   assert.match(
     appSource,
+    /kanban-card-chip--phase-\$\{effectivePhase\}/,
+    "expected the card chip class to use the effective lifecycle phase",
+  );
+  assert.doesNotMatch(
+    appSource,
     /kanban-card-chip--state-\$\{entry\.state\}|kanban-card-chip--state-closed/,
-    "expected the state chip class to be derived from entry.state",
+    "card primary chip must not expose raw GitHub state as CLOSED",
+  );
+});
+
+test("Knowledge detail hides raw phase labels from primary chips", () => {
+  assert.match(
+    appSource,
+    /visibleKnowledgeLabels/,
+    "expected Knowledge detail labels to be filtered through a display helper",
+  );
+  assert.match(
+    appSource,
+    /!isKnowledgePhaseLabel\(label\)/,
+    "expected raw phase/* labels to be excluded from primary label chips",
+  );
+  assert.match(
+    appSource,
+    /staleKnowledgePhaseWarning/,
+    "expected stale closed-vs-phase metadata to be downgraded to a warning",
+  );
+});
+
+test("Knowledge lifecycle parsing is exact and nullable-safe", () => {
+  const canonicalBody = appSource.match(
+    /function canonicalKnowledgePhase\(phase\) \{[\s\S]*?\n      \}/,
+  )?.[0];
+  assert.ok(canonicalBody, "expected canonicalKnowledgePhase helper");
+  assert.doesNotMatch(
+    canonicalBody,
+    /toLowerCase/,
+    "canonical phase parsing must stay case-sensitive",
+  );
+  assert.match(
+    canonicalBody,
+    /KNOWLEDGE_PHASES\.has\(value\)/,
+    "expected canonical phase parsing to require exact phase keys",
+  );
+  assert.match(
+    appSource,
+    /Array\.isArray\(labels\)/,
+    "expected label helpers to normalize nullable or non-array labels",
+  );
+});
+
+test("Kanban drawer uses the same display labels as the detail pane", () => {
+  const drawerStart = appSource.indexOf("function renderKanbanDrawerBody()");
+  const drawerEnd = appSource.indexOf("function clamp(value, min)", drawerStart);
+  assert.ok(drawerStart >= 0, "expected renderKanbanDrawerBody");
+  assert.ok(drawerEnd > drawerStart, "expected drawer body boundary");
+  const drawerBody = appSource.slice(drawerStart, drawerEnd);
+  assert.match(
+    drawerBody,
+    /visibleKnowledgeLabels/,
+    "expected drawer labels to hide raw phase/* labels",
+  );
+  assert.match(
+    drawerBody,
+    /staleKnowledgePhaseWarning/,
+    "expected drawer to surface stale closed-vs-phase metadata",
+  );
+  assert.match(
+    drawerBody,
+    /kanban-card-chip kanban-card-chip--warning/,
+    "expected drawer stale phase warning to use the warning chip class",
   );
 });
 
@@ -271,5 +375,33 @@ test("Kanban card click keeps the selected item in the right detail pane", () =>
     appSource,
     /addEventListener\("click"[\s\S]{0,500}?openKanbanDrawer/,
     "Kanban card click must not open a small Drawer as the primary detail UI",
+  );
+});
+
+test("Knowledge detail pane renders section bodies through sanitized Markdown helper", () => {
+  assert.match(
+    appSource,
+    /function\s+createKnowledgeMarkdownBody\(/,
+    "expected a shared Markdown body helper for Knowledge detail sections",
+  );
+  assert.match(
+    appSource,
+    /section\.body_html/,
+    "expected renderer to prefer sanitized backend-generated section.body_html",
+  );
+  assert.match(
+    appSource,
+    /createKnowledgeMarkdownBody\(section\)/,
+    "expected right detail pane to append section bodies through the Markdown helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("pre",\s*"knowledge-section-body",\s*section\.body\)/,
+    "right detail pane must not render Markdown as plaintext pre blocks",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /\.innerHTML\s*=\s*section\.body\b/,
+    "raw section.body must never be assigned to innerHTML",
   );
 });

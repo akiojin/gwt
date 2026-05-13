@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.33.0] - 2026-05-13
+
+### Bug Fixes
+
+- **ui:** Kanban のライフサイクル表示を統一
+- **skills:** Align coordination guidance contract
+- **gui:** Open Project を split-button 化し Clone from GitHub の到達経路を露出 (#2684)
+- **ui:** Address Kanban lifecycle review feedback
+- **gui:** Split-button menu に roving arrow navigation と empty-state node を追加
+- **gui:** Keep knowledge kanban phase state fresh
+
+### Features
+
+- Render knowledge details as markdown
+
+### Miscellaneous Tasks
+
+- Develop を作業ブランチへマージ
+- Merge develop into markdown detail work
+- Develop を作業ブランチへ再マージ
+
 ## [9.32.0] - 2026-05-13
 
 ### Features
