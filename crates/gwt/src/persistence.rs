@@ -62,6 +62,8 @@ pub struct PersistedWindowState {
     pub dynamic_title_detail: Option<String>,
     pub preset: WindowPreset,
     pub geometry: WindowGeometry,
+    #[serde(default)]
+    pub geometry_revision: u64,
     pub z_index: u32,
     pub status: WindowState,
     #[serde(default)]
@@ -172,6 +174,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     width: 720.0,
                     height: 420.0,
                 },
+                geometry_revision: 0,
                 z_index: 1,
                 status: WindowState::Running,
                 minimized: false,
@@ -196,6 +199,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     width: 720.0,
                     height: 420.0,
                 },
+                geometry_revision: 0,
                 z_index: 2,
                 status: WindowState::Running,
                 minimized: false,
@@ -503,6 +507,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 4,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -532,6 +537,7 @@ mod tests {
                         width: 540.0,
                         height: 360.0,
                     },
+                    geometry_revision: 0,
                     z_index: 5,
                     status: WindowState::Running,
                     minimized: true,
@@ -653,6 +659,26 @@ mod tests {
     }
 
     #[test]
+    fn persisted_window_state_defaults_missing_geometry_revision() {
+        let json = r#"{
+  "id": "terminal-1",
+  "title": "Terminal",
+  "preset": "shell",
+  "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+  "z_index": 1,
+  "status": "ready",
+  "persist": true
+}"#;
+
+        let parsed: PersistedWindowState = serde_json::from_str(json).expect("parse legacy");
+
+        assert_eq!(
+            parsed.geometry_revision, 0,
+            "legacy workspace payloads without geometry_revision must start at revision zero"
+        );
+    }
+
+    #[test]
     fn persisted_window_state_accepts_new_agent_id_field() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
@@ -696,6 +722,7 @@ mod tests {
                 width: 320.0,
                 height: 200.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status: WindowProcessStatus::Running,
             minimized: false,
@@ -766,6 +793,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -790,6 +818,7 @@ mod tests {
                         width: 400.0,
                         height: 500.0,
                     },
+                    geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
                     minimized: false,
@@ -999,6 +1028,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -1023,6 +1053,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
                     minimized: false,

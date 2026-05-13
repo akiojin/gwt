@@ -101,6 +101,11 @@ pub fn terminal_viewport_reflow_js() -> &'static str {
     include_str!("../web/terminal-viewport-reflow.js")
 }
 
+// SPEC-2008 Phase 25 — revision-aware window geometry sync primitives.
+pub fn window_geometry_sync_js() -> &'static str {
+    include_str!("../web/window-geometry-sync.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -186,6 +191,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-viewport-reflow.js",
         source: terminal_viewport_reflow_js,
         marker: "attachHostResizeReflow",
+    },
+    RootJsModuleAsset {
+        path: "/window-geometry-sync.js",
+        source: window_geometry_sync_js,
+        marker: "shouldApplyWorkspaceGeometry",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",

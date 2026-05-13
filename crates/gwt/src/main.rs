@@ -1001,6 +1001,7 @@ mod tests {
                 width: 640.0,
                 height: 420.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status,
             minimized: false,
@@ -2025,7 +2026,7 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1)
+                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1, None)
                 .len(),
             1
         );
@@ -2765,6 +2766,7 @@ mod tests {
                         },
                         cols: 80,
                         rows: 24,
+                        base_geometry_revision: None,
                     },
                 )
                 .len(),

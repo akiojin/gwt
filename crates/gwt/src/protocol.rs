@@ -115,6 +115,8 @@ pub enum FrontendEvent {
         geometry: WindowGeometry,
         cols: u16,
         rows: u16,
+        #[serde(default)]
+        base_geometry_revision: Option<u64>,
     },
     CloseWindow {
         id: String,
