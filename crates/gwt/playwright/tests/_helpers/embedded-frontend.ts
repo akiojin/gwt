@@ -27,6 +27,7 @@ const ROOT_MODULES = new Set([
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
+  "socket-receive-dispatcher.js",
   "terminal-context-menu.js",
   "terminal-viewport-reflow.js",
   "theme-manager.js",

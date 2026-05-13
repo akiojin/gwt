@@ -106,6 +106,12 @@ pub fn window_geometry_sync_js() -> &'static str {
     include_str!("../web/window-geometry-sync.js")
 }
 
+// Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
+// dispatcher.
+pub fn socket_receive_dispatcher_js() -> &'static str {
+    include_str!("../web/socket-receive-dispatcher.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -198,6 +204,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         marker: "shouldApplyWorkspaceGeometry",
     },
     RootJsModuleAsset {
+        path: "/socket-receive-dispatcher.js",
+        source: socket_receive_dispatcher_js,
+        marker: "createSocketReceiveDispatcher",
+    },
+    RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
         source: custom_agent_env_editor_js,
         marker: "renderCustomAgentEnvEditor",
@@ -218,6 +229,13 @@ pub fn styles_typography_css() -> &'static str {
 
 pub fn styles_components_css() -> &'static str {
     include_str!("../web/styles/components.css")
+}
+
+// Issue #2694 Phase D — extracted from the formerly-inline index.html <style>
+// block (~91KB). Served as a separate stylesheet so initial HTML parse is fast
+// and modal/dialog repaints do not re-parse the giant inline block.
+pub fn styles_app_css() -> &'static str {
+    include_str!("../web/styles/app.css")
 }
 
 // SPEC-2356 Operator Design System — fonts (binary).
@@ -317,6 +335,16 @@ pub async fn styles_components_css_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn styles_app_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
+        styles_app_css(),
+    )
+}
+
 fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
     (
         [
@@ -363,6 +391,8 @@ mod tests {
         concat!(
             include_str!("../web/index.html"),
             "\n",
+            include_str!("../web/styles/app.css"),
+            "\n",
             include_str!("../web/app.js"),
             "\n",
             include_str!("../web/board-surface.js"),
@@ -372,6 +402,25 @@ mod tests {
             include_str!("../web/update-cta.js"),
             "\n",
             include_str!("../web/terminal-context-menu.js")
+        )
+    }
+
+    /// Issue #2694 Phase D: surface that combines the embedded HTML with the
+    /// stylesheets served via separate routes (`/styles/{tokens,typography,
+    /// components,app}.css`). Tests that previously grepped the inline
+    /// `<style>` block in `index.html` continue to find the same selectors and
+    /// custom properties after that block was moved to `/styles/app.css`.
+    fn frontend_styles_bundle() -> &'static str {
+        concat!(
+            include_str!("../web/index.html"),
+            "\n",
+            include_str!("../web/styles/tokens.css"),
+            "\n",
+            include_str!("../web/styles/typography.css"),
+            "\n",
+            include_str!("../web/styles/components.css"),
+            "\n",
+            include_str!("../web/styles/app.css")
         )
     }
 
@@ -1052,7 +1101,7 @@ mod tests {
 
     #[test]
     fn embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains(".canvas-stage"),
@@ -1084,7 +1133,7 @@ mod tests {
 
     #[test]
     fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -1111,7 +1160,7 @@ mod tests {
 
     #[test]
     fn embedded_web_window_status_chip_uses_running_waiting_stopped_error_variants() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains(".status-chip.waiting .status-dot"),
@@ -1130,7 +1179,7 @@ mod tests {
 
     #[test]
     fn embedded_web_project_bar_omits_index_status_badge() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
@@ -1204,7 +1253,7 @@ mod tests {
 
     #[test]
     fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains("--agent-claude")
@@ -1282,7 +1331,7 @@ mod tests {
 
     #[test]
     fn embedded_web_window_role_badges_identify_every_window_surface() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -1416,8 +1465,15 @@ mod tests {
     #[test]
     fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
         let html = frontend_bundle_source();
+        // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
+        // per-connection dispatcher before the frontend_ready handshake. The
+        // regex below is intentionally `[\s\S]*?` (non-greedy any) between
+        // setConnectionState and the pendingMessages flush so dispatcher
+        // setup is allowed inside the function, but the ordering assertion
+        // — frontend_ready strictly precedes the queued-message replay — is
+        // preserved.
         let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{\s*setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
         .expect("valid regex");
 
@@ -1434,6 +1490,17 @@ mod tests {
         assert!(
             open_flow.is_match(html),
             "expected socket open flow to announce frontend readiness before replaying queued messages",
+        );
+        // Phase C regression: when the WebSocket cycles, the dispatcher must
+        // be recreated and old generations must be guarded so queued events
+        // from the previous session do not flush into the new one.
+        assert!(
+            html.contains("socketReceiveDispatcherGeneration"),
+            "expected handleSocketOpen / handleSocketClose to track a generation counter for the per-connection dispatcher",
+        );
+        assert!(
+            html.contains("ownGeneration !== socketReceiveDispatcherGeneration"),
+            "expected the dispatcher receive callback to gate on the generation captured at open time",
         );
     }
 
@@ -2459,7 +2526,7 @@ mod tests {
     /// partially transparent and visually distinct from the rest.
     #[test]
     fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let panel_surfaces = [
             ".surface-file-tree",
@@ -2508,7 +2575,7 @@ mod tests {
     /// through the surface's own class.
     #[test]
     fn embedded_web_workspace_layout_primitives_define_shared_contracts() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let primitives: [(&str, &[&str]); 4] = [
             (
@@ -2571,7 +2638,7 @@ mod tests {
     /// surface-specific override.
     #[test]
     fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -2636,7 +2703,7 @@ mod tests {
     /// - `.modal-footer` — bottom action bar
     #[test]
     fn embedded_web_modal_frame_primitives_define_shared_contracts() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         // SPEC-2356 FR-001: modal frame primitives must reference design
         // tokens from `tokens.css` instead of raw colour literals so the
@@ -2817,7 +2884,7 @@ mod tests {
     /// content.
     #[test]
     fn embedded_web_launch_wizard_scrolls_body_without_footer_overlap() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let css_body = |selector: &str| {
             let start = html

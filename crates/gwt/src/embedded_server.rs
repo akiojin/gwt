@@ -55,23 +55,34 @@ impl ClientHub {
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let mut clients = self
-            .clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut stale_clients = Vec::new();
+        // Snapshot sender clones under a short-lived lock so that serialization
+        // and per-client try_send work happen outside the registry mutex. This
+        // keeps register/unregister responsive even when the broadcast batch is
+        // large or one client is slow to drain its queue.
+        let snapshot: Vec<(String, mpsc::Sender<String>)> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .iter()
+                .map(|(id, sender)| (id.clone(), sender.clone()))
+                .collect()
+        };
+
+        let mut stale_clients: Vec<String> = Vec::new();
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
             match outbound.target {
                 DispatchTarget::Broadcast => {
-                    for (client_id, sender) in clients.iter() {
+                    for (client_id, sender) in &snapshot {
                         if sender.try_send(payload.clone()).is_err() {
                             stale_clients.push(client_id.clone());
                         }
                     }
                 }
                 DispatchTarget::Client(client_id) => {
-                    if let Some(sender) = clients.get(&client_id) {
+                    if let Some((_, sender)) = snapshot.iter().find(|(id, _)| id == &client_id) {
                         if sender.try_send(payload).is_err() {
                             stale_clients.push(client_id);
                         }
@@ -79,8 +90,15 @@ impl ClientHub {
                 }
             }
         }
-        for client_id in stale_clients {
-            clients.remove(&client_id);
+
+        if !stale_clients.is_empty() {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for client_id in stale_clients {
+                clients.remove(&client_id);
+            }
         }
     }
 }
@@ -141,6 +159,7 @@ impl EmbeddedServer {
             "/styles/components.css",
             get(embedded_web::styles_components_css_handler),
         )
+        .route("/styles/app.css", get(embedded_web::styles_app_css_handler))
         .route(
             "/assets/fonts/MonaSans.woff2",
             get(embedded_web::font_mona_sans_handler),
@@ -447,7 +466,7 @@ mod tests {
     };
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
-    use tokio::runtime::Runtime;
+    use tokio::{runtime::Runtime, sync::mpsc};
 
     use crate::{AppEventProxy, OutboundEvent, UserEvent};
 
@@ -538,6 +557,123 @@ mod tests {
         assert!(
             !clients.contains_key("slow-client"),
             "lagging websocket client should be unregistered once its queue is full"
+        );
+    }
+
+    #[test]
+    fn client_hub_dispatch_delivers_to_fast_clients_and_drops_only_full_one() {
+        let hub = ClientHub::default();
+        let mut slow_rx = hub.register("slow".to_string());
+        let mut fast_receivers: Vec<(String, mpsc::Receiver<String>)> = (0..5)
+            .map(|i| {
+                let id = format!("fast-{i}");
+                let rx = hub.register(id.clone());
+                (id, rx)
+            })
+            .collect();
+
+        for index in 0..CLIENT_QUEUE_CAPACITY {
+            hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: format!("fill-{index}"),
+                },
+            )]);
+        }
+
+        for (_, rx) in &mut fast_receivers {
+            for _ in 0..CLIENT_QUEUE_CAPACITY {
+                rx.try_recv()
+                    .expect("fast client receives every fill message");
+            }
+        }
+        for _ in 0..CLIENT_QUEUE_CAPACITY {
+            slow_rx
+                .try_recv()
+                .expect("slow client buffers every fill message before going full");
+        }
+
+        for _ in 0..CLIENT_QUEUE_CAPACITY {
+            hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: "saturate".to_string(),
+                },
+            )]);
+        }
+
+        for (_, rx) in &mut fast_receivers {
+            for _ in 0..CLIENT_QUEUE_CAPACITY {
+                rx.try_recv()
+                    .expect("fast client keeps draining while slow client backs up");
+            }
+        }
+
+        hub.dispatch(vec![OutboundEvent::broadcast(
+            BackendEvent::ProjectOpenError {
+                message: "after-saturate".to_string(),
+            },
+        )]);
+
+        let clients = hub
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !clients.contains_key("slow"),
+            "saturated slow client should be evicted"
+        );
+        for i in 0..5 {
+            assert!(
+                clients.contains_key(&format!("fast-{i}")),
+                "fast client {i} should remain registered"
+            );
+        }
+        drop(clients);
+
+        for (_, rx) in &mut fast_receivers {
+            let payload = rx
+                .try_recv()
+                .expect("fast client still receives after slow eviction");
+            assert!(payload.contains("after-saturate"));
+        }
+    }
+
+    #[test]
+    fn client_hub_dispatch_releases_lock_before_serializing_and_sending() {
+        let hub = ClientHub::default();
+        let _receivers: Vec<_> = (0..200)
+            .map(|i| hub.register(format!("client-{i}")))
+            .collect();
+
+        let events: Vec<OutboundEvent> = (0..1000)
+            .map(|i| {
+                OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                    message: format!("event-{i}"),
+                })
+            })
+            .collect();
+
+        let dispatch_hub = hub.clone();
+        let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_flag_for_thread = started_flag.clone();
+        let dispatch_handle = std::thread::spawn(move || {
+            started_flag_for_thread.store(true, std::sync::atomic::Ordering::Release);
+            dispatch_hub.dispatch(events);
+        });
+
+        while !started_flag.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+
+        let register_start = std::time::Instant::now();
+        let _intruder_rx = hub.register("intruder".to_string());
+        let register_elapsed = register_start.elapsed();
+
+        dispatch_handle.join().expect("dispatch thread joins");
+
+        assert!(
+            register_elapsed < std::time::Duration::from_millis(20),
+            "register must not wait for dispatch's serialize+send loop; waited {register_elapsed:?}"
         );
     }
 
