@@ -11433,6 +11433,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11520,6 +11521,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let tab_mut = runtime.tab_mut("tab-1").expect("tab mut");
@@ -11589,6 +11591,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
