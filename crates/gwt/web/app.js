@@ -34,6 +34,7 @@
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
       import {
@@ -1857,9 +1858,35 @@
           if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
             return;
           }
-          fitTerminal(windowId, false);
+          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit + persist
+          // geometry so xterm's cell metrics are populated by the time
+          // proposeDimensions runs. The previous order (fit-then-refresh)
+          // silently no-op'd whenever the terminal had been display:none —
+          // proposeDimensions returns undefined when cell.width === 0,
+          // leaving the viewport stuck on the pre-hidden cols/rows until
+          // the next OS resize.
+          runTerminalActivationSequence({
+            runtime: activeRuntime,
+            windowId,
+            shouldFocus: true,
+            shouldPersistGeometry: true,
+            sendGeometry,
+          });
+          // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
+          // a hidden state, its initial fit handshake never completed
+          // (completeInitialFitHandshake bails when canRefreshTerminalViewport
+          // is false). The hidden → visible transition is the first chance
+          // to drain the pending buffers; complete the handshake here so
+          // subsequent writeOutput calls stop hitting deferredWrites.
+          if (activeRuntime.isReady === false) {
+            completeInitialFitHandshake(windowId);
+          }
+          // Schedule one more viewport refresh on the next frame so the
+          // post-fit cols/rows are reflected in the rendered buffer even
+          // when xterm coalesces internal redraws. This keeps the prior
+          // `viewportRefreshFrame` re-arm path active for repeated
+          // activations.
           scheduleTerminalViewportRefresh(windowId);
-          activeRuntime.terminal.focus();
         });
       }
 
@@ -2903,10 +2930,60 @@
           cleanup,
           viewportRefreshFrame: null,
           activationFrame: null,
+          // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
+          // `isReady` flips to `true` AFTER the first
+          // runTerminalActivationSequence has run inside the rAF below,
+          // i.e. after xterm has reached its real cols/rows. Until then,
+          // all writeOutput / replaceTerminalSnapshot calls are captured
+          // in deferredWrites / pendingSnapshotMap so the bytes are not
+          // written against xterm's default 80x24 grid. Without this,
+          // the early Claude Code TUI bytes (which were generated for
+          // the backend's spawn cols/rows) land at the wrong grid size
+          // and stay layout-locked until the next manual resize,
+          // producing the post-launch corruption symptom.
+          isReady: false,
+          deferredWrites: [],
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
-        requestAnimationFrame(() => fitTerminal(windowId, true));
+        // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
+        // handshake. The handshake only completes once the runtime's
+        // element is actually visible — see completeInitialFitHandshake.
+        // If the window was created in a hidden state (e.g. inactive
+        // tab group member), the rAF below runs but is a no-op; the
+        // handshake then completes on the next hidden → visible
+        // transition via scheduleTerminalFocusActivation.
+        requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+
+        return runtime;
+      }
+
+      // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
+      // pending buffered content. Idempotent and gated on
+      // `canRefreshTerminalViewport(windowId)` so we never flip
+      // `isReady = true` while the runtime element is still hidden —
+      // doing so would let later `writeOutput` calls bypass the
+      // deferredWrites buffer and render against xterm's default 80×24
+      // grid before fit ever had a chance to populate cell metrics.
+      function completeInitialFitHandshake(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.isReady) {
+          return;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          // Still hidden; wait for the next reveal. The hidden →
+          // visible transition handler (scheduleTerminalFocusActivation)
+          // will call back into this helper.
+          return;
+        }
+        runTerminalActivationSequence({
+          runtime,
+          windowId,
+          shouldFocus: false,
+          shouldPersistGeometry: true,
+          sendGeometry,
+        });
+        runtime.isReady = true;
 
         const snapshot = pendingSnapshotMap.get(windowId);
         if (snapshot) {
@@ -2921,7 +2998,17 @@
           }
           pendingOutputMap.delete(windowId);
         }
-        return runtime;
+
+        // Flush any terminal_output WebSocket bytes that arrived
+        // between createTerminalRuntime returning and this handshake
+        // firing.
+        if (runtime.deferredWrites.length) {
+          const flush = runtime.deferredWrites;
+          runtime.deferredWrites = [];
+          for (const chunk of flush) {
+            writeOutput(windowId, chunk);
+          }
+        }
       }
 
       function writeOutput(windowId, base64) {
@@ -2930,6 +3017,15 @@
           const queue = pendingOutputMap.get(windowId) || [];
           queue.push(base64);
           pendingOutputMap.set(windowId, queue);
+          return;
+        }
+        // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
+        // completed its initial fit, hold the chunk in the runtime's
+        // deferred queue. The createTerminalRuntime rAF flushes this
+        // queue after the activation sequence so writes land at the
+        // real cols/rows instead of xterm's default 80×24 grid.
+        if (runtime.isReady === false) {
+          runtime.deferredWrites.push(base64);
           return;
         }
         const decoder = decoderMap.get(windowId);
@@ -2944,9 +3040,36 @@
           pendingSnapshotMap.set(windowId, base64);
           return;
         }
+        // SPEC-2008 Phase 26.A / FR-057: snapshots that arrive before
+        // the initial fit are held in pendingSnapshotMap and replayed
+        // by the createTerminalRuntime rAF after activation completes.
+        // This prevents a snapshot reset+write from rendering at xterm's
+        // default 80×24 grid.
+        if (runtime.isReady === false) {
+          pendingSnapshotMap.set(windowId, base64);
+          return;
+        }
         const decoder = decoderMap.get(windowId);
         runtime.terminal.reset();
         runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
+          // SPEC-2008 Phase 26.B / FR-056: `terminal.reset()` wipes the
+          // internal viewport (scroll position, cell metrics caches,
+          // alternate-buffer marker). The previous code only scheduled a
+          // viewport refresh, which short-circuits whenever the window is
+          // hidden — leaving the next visible activation with stale state
+          // and dead scrollback wheel. Force the render-before-fit
+          // sequence directly so the viewport is consistent the moment the
+          // snapshot lands. We skip focus stealing (`shouldFocus: false`)
+          // because snapshot replays happen on background tabs too.
+          if (canRefreshTerminalViewport(windowId)) {
+            runTerminalActivationSequence({
+              runtime,
+              windowId,
+              shouldFocus: false,
+              shouldPersistGeometry: true,
+              sendGeometry,
+            });
+          }
           scheduleTerminalViewportRefresh(windowId);
         });
       }
@@ -8982,8 +9105,25 @@
           dragState = null;
         }
 
-        if (resizeState && resizeState.pointerId === event.pointerId) {
-          finishWindowResize(event.pointerId);
+        if (resizeState) {
+          if (resizeState.pointerId === event.pointerId) {
+            finishWindowResize(event.pointerId);
+          } else {
+            // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
+            // emits a `pointerup` whose pointerId does not match the one
+            // we captured at pointerdown (the OS pre-released capture
+            // and re-issued a fresh pointer). When that happens neither
+            // the resizeHandle's `lostpointercapture` listener nor the
+            // pointerId-gated branch above ever runs, so resizeState
+            // stays alive until the 30s staleness guard finally tears
+            // it down. Force the cleanup immediately on any window
+            // pointerup while a resize is pending so the user is never
+            // wedged into a stuck resize that requires an app restart.
+            console.warn(
+              `[resize] window pointerup pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
+            );
+            forceResetResizeState("window pointerup pointerId mismatch");
+          }
         }
       });
 
@@ -8991,6 +9131,17 @@
         if (dragState && dragState.pointerId === event.pointerId) {
           clearTitlebarDockPreview();
           dragState = null;
+        }
+        if (resizeState && resizeState.pointerId !== event.pointerId) {
+          // SPEC-2008 Phase 26.C / FR-059 — same pointerId-mismatch
+          // safety as the pointerup handler above. pointercancel from a
+          // different pointerId still indicates the original capture
+          // is gone; do not leave resizeState alive across cancellations.
+          console.warn(
+            `[resize] window pointercancel pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
+          );
+          forceResetResizeState("window pointercancel pointerId mismatch");
+          return;
         }
         finishWindowResize(event.pointerId);
       });
