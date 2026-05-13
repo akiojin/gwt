@@ -855,13 +855,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         ));
     }
 
-    let phase = entry
-        .snapshot
-        .labels
-        .iter()
-        .find(|label| label.starts_with("phase/"))
-        .cloned()
-        .unwrap_or_else(|| "phase/unspecified".to_string());
+    let phase = effective_spec_lifecycle_label(entry);
     KnowledgeDetailView {
         number: Some(entry.snapshot.number.0),
         title: entry.snapshot.title.clone(),
@@ -879,17 +873,30 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
 }
 
 fn spec_list_meta(entry: &CacheEntry) -> String {
-    let phase = entry
-        .snapshot
-        .labels
-        .iter()
-        .find(|label| label.starts_with("phase/"))
-        .cloned()
-        .unwrap_or_else(|| "phase/unspecified".to_string());
+    let phase = effective_spec_lifecycle_label(entry);
     format!(
         "{phase} · Updated {}",
         short_updated_at(&entry.snapshot.updated_at.0)
     )
+}
+
+fn effective_spec_lifecycle_label(entry: &CacheEntry) -> &'static str {
+    if entry.snapshot.state == IssueState::Closed {
+        return "Done";
+    }
+    let phase_info = extract_phase(&entry.snapshot.labels);
+    phase_display_label(phase_info.phase.as_deref())
+}
+
+fn phase_display_label(phase: Option<&str>) -> &'static str {
+    match phase {
+        Some("draft") => "Draft",
+        Some("planning") => "Planning",
+        Some("implementation") => "Implementation",
+        Some("review") => "Review",
+        Some("done") => "Done",
+        _ => "Backlog",
+    }
 }
 
 fn resolve_selected_number(entries: &[CacheEntry], selected_number: Option<u64>) -> Option<u64> {
@@ -1219,8 +1226,11 @@ Extra context.
             .find(|entry| entry.number == 22)
             .expect("spec entry");
         assert_eq!(spec_entry.linked_branch_count, 1);
-        assert!(spec_entry.meta.contains("phase/in-progress"));
+        assert!(spec_entry.meta.contains("Backlog"));
+        assert!(!spec_entry.meta.contains("phase/in-progress"));
         assert_eq!(spec_view.detail.launch_issue_number, Some(22));
+        assert!(spec_view.detail.subtitle.contains("Backlog"));
+        assert!(!spec_view.detail.subtitle.contains("phase/in-progress"));
         assert!(spec_view
             .detail
             .sections
@@ -1242,6 +1252,32 @@ Extra context.
             .sections
             .iter()
             .any(|section| section.title == "notes"));
+    }
+
+    #[test]
+    fn closed_spec_uses_done_as_effective_lifecycle_even_with_stale_phase_label() {
+        let cache_dir = tempfile::tempdir().expect("temp cache");
+        let cache = Cache::new(cache_dir.path().to_path_buf());
+        let mut snapshot = spec_snapshot(23);
+        snapshot.title = "Closed stale SPEC".to_string();
+        snapshot.labels = vec!["gwt-spec".to_string(), "phase/implementation".to_string()];
+        snapshot.state = IssueState::Closed;
+        cache
+            .write_snapshot(&snapshot)
+            .expect("write stale closed spec");
+        let entry = cache
+            .load_entry(gwt_github::IssueNumber(23))
+            .expect("load stale closed spec");
+
+        let list_item = spec_list_item(&entry, &HashMap::new(), None);
+        assert_eq!(list_item.phase.as_deref(), Some("implementation"));
+        assert!(list_item.meta.contains("Done"));
+        assert!(!list_item.meta.contains("phase/implementation"));
+
+        let detail = spec_detail_view(&entry);
+        assert_eq!(detail.state, "closed");
+        assert!(detail.subtitle.contains("Done"));
+        assert!(!detail.subtitle.contains("phase/implementation"));
     }
 
     #[test]
