@@ -353,7 +353,7 @@ impl WorkspaceProjection {
                     // so Workspace Overview Detail pane never renders the
                     // placeholder for in-progress work that has at least one
                     // status / claim / handoff / decision recorded.
-                    if self.summary.as_deref().map_or(true, |s| s.trim().is_empty()) {
+                    if self.summary.as_deref().is_none_or(|s| s.trim().is_empty()) {
                         let trimmed = entry.body.trim();
                         if !trimmed.is_empty() {
                             self.summary = Some(trimmed.to_string());
