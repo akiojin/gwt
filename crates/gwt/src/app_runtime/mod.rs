@@ -143,6 +143,7 @@ pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
 mod migration;
+pub(crate) mod persist_dispatcher;
 mod profile;
 mod title_sync;
 mod window;
@@ -1809,6 +1810,9 @@ pub struct AppRuntime {
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
     pub(crate) pty_writers: PtyWriterRegistry,
+    /// Async writer that flushes session/workspace snapshots off the event
+    /// loop thread (Issue #2694 Phase B).
+    pub(crate) persist_dispatcher: persist_dispatcher::PersistDispatcher,
 }
 
 impl ProjectTabRuntime {
@@ -1861,6 +1865,7 @@ impl AppRuntime {
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
         let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
 
+        let persist_dispatcher = persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
         let mut app = Self {
             tabs,
             active_tab_id,
@@ -1888,6 +1893,7 @@ impl AppRuntime {
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers,
+            persist_dispatcher,
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -1998,7 +2004,14 @@ impl AppRuntime {
                 geometry,
                 cols,
                 rows,
-            } => self.update_window_geometry_events(&id, geometry, cols, rows),
+                base_geometry_revision,
+            } => self.update_window_geometry_events(
+                &id,
+                geometry,
+                cols,
+                rows,
+                base_geometry_revision,
+            ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::PasteImage {
@@ -5788,10 +5801,20 @@ impl AppRuntime {
         }
     }
 
+    /// Capture the current session + workspace state and hand it off to the
+    /// persist dispatcher. The dispatcher writes the snapshot atomically on a
+    /// worker thread, so this call returns without blocking on disk I/O.
+    /// Bursts of `persist()` calls collapse to a single disk write because the
+    /// dispatcher keeps only the latest snapshot.
+    ///
+    /// Issue #2694 Phase B: prior to this change the call wrote
+    /// `session-state.json` and every active workspace file synchronously on
+    /// the tao event-loop thread, which Windows Defender / EDR scans amplified
+    /// into multi-hundred-millisecond freezes during routine UI interactions.
     pub(crate) fn persist(&self) -> std::io::Result<()> {
-        save_session_state(
-            &self.session_state_path,
-            &gwt::PersistedSessionState {
+        let snapshot = persist_dispatcher::PersistSnapshot {
+            session_path: self.session_state_path.clone(),
+            session: gwt::PersistedSessionState {
                 tabs: self
                     .tabs
                     .iter()
@@ -5805,15 +5828,18 @@ impl AppRuntime {
                 active_tab_id: normalize_active_tab_id(&self.tabs, self.active_tab_id.clone()),
                 recent_projects: self.recent_projects.clone(),
             },
-        )?;
-
-        for tab in &self.tabs {
-            save_workspace_state(
-                &workspace_state_path(&tab.project_root),
-                &tab.workspace.persistable_state(),
-            )?;
-        }
-
+            workspaces: self
+                .tabs
+                .iter()
+                .map(|tab| {
+                    (
+                        workspace_state_path(&tab.project_root),
+                        tab.workspace.persistable_state(),
+                    )
+                })
+                .collect(),
+        };
+        self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
 }
@@ -6465,6 +6491,7 @@ exit 0
                 width: 640.0,
                 height: 420.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status,
             minimized: false,
@@ -6837,6 +6864,8 @@ exit 0
         let launch_wizard_cache =
             LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, sample_agent_options());
         let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let blocking_tasks = BlockingTaskSpawner::thread();
+        let persist_dispatcher = super::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
@@ -6850,7 +6879,7 @@ exit 0
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
             proxy,
-            blocking_tasks: BlockingTaskSpawner::thread(),
+            blocking_tasks,
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
@@ -6862,6 +6891,7 @@ exit 0
             issue_link_cache_dir: gwt_cache_dir(),
             pending_update: None,
             pty_writers,
+            persist_dispatcher,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -9585,11 +9615,18 @@ exit 0
                     },
                     100,
                     30,
+                    None,
                 )
                 .len(),
             1
         );
 
+        assert!(
+            runtime
+                .persist_dispatcher
+                .wait_idle(std::time::Duration::from_secs(5)),
+            "persist dispatcher should drain before disk readback",
+        );
         let session = load_session_state(&temp.path().join("session-state.json"))
             .expect("load persisted session state");
         assert_eq!(session.active_tab_id.as_deref(), Some("tab-1"));
@@ -9609,6 +9646,82 @@ exit 0
         assert_eq!(window.geometry.y, 78.0);
         assert_eq!(window.geometry.width, 720.0);
         assert_eq!(window.geometry.height, 480.0);
+    }
+
+    #[test]
+    fn app_runtime_geometry_update_rejects_stale_base_revision() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(
+                    &window_id,
+                    WindowGeometry {
+                        x: 56.0,
+                        y: 78.0,
+                        width: 720.0,
+                        height: 480.0,
+                    },
+                    100,
+                    30,
+                    Some(0),
+                )
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(
+                    &window_id,
+                    WindowGeometry {
+                        x: 90.0,
+                        y: 120.0,
+                        width: 960.0,
+                        height: 640.0,
+                    },
+                    120,
+                    40,
+                    Some(0),
+                )
+                .len(),
+            1,
+            "stale updates should return the current workspace state so the frontend can resync"
+        );
+
+        assert!(
+            runtime
+                .persist_dispatcher
+                .wait_idle(std::time::Duration::from_secs(5)),
+            "persist dispatcher should drain before disk readback",
+        );
+        let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");
+        let window = workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "shell-1")
+            .expect("persisted window");
+        assert_eq!(window.geometry.x, 56.0);
+        assert_eq!(window.geometry.y, 78.0);
+        assert_eq!(window.geometry.width, 720.0);
+        assert_eq!(window.geometry.height, 480.0);
+        assert_eq!(window.geometry_revision, 1);
     }
 
     #[test]

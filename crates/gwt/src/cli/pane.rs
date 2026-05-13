@@ -432,6 +432,7 @@ mod tests {
                 width: 100.0,
                 height: 100.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status: WindowState::Running,
             minimized: false,

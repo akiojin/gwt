@@ -182,7 +182,10 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 
     let exclude =
         std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
-    assert!(exclude.contains(".gwt/hermes/"));
+    // .gwt/hermes/ is subsumed by the broad project-local .gwt/ exclude
+    // emitted for any managed target.
+    assert!(exclude.contains("\n.gwt/\n"));
+    assert!(!exclude.contains(".gwt/hermes/"));
     assert!(!exclude.contains(".claude/skills/gwt-*"));
     assert!(!exclude.contains(".codex/skills/gwt-*"));
 }

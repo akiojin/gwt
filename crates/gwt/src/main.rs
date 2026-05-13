@@ -16,10 +16,10 @@ use gwt::{
     cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
     list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
     load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_agent,
-    resolve_launch_spec, save_session_state, save_workspace_state, workspace_state_path,
-    BackendEvent, BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent,
-    HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    resolve_launch_spec, workspace_state_path, BackendEvent, BranchEntriesPhase, BranchListEntry,
+    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState,
+    LiveSessionEntry, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -1001,6 +1001,7 @@ mod tests {
                 width: 640.0,
                 height: 420.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status,
             minimized: false,
@@ -1481,6 +1482,9 @@ mod tests {
             &sessions_dir,
             sample_wizard_agent_options(),
         );
+        let blocking_tasks = BlockingTaskSpawner::thread();
+        let persist_dispatcher =
+            crate::app_runtime::persist_dispatcher::PersistDispatcher::new(&blocking_tasks);
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
@@ -1494,7 +1498,7 @@ mod tests {
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
             proxy,
-            blocking_tasks: BlockingTaskSpawner::thread(),
+            blocking_tasks,
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
@@ -1506,6 +1510,7 @@ mod tests {
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
+            persist_dispatcher,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -2025,7 +2030,7 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1)
+                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1, None)
                 .len(),
             1
         );
@@ -2765,6 +2770,7 @@ mod tests {
                         },
                         cols: 80,
                         rows: 24,
+                        base_geometry_revision: None,
                     },
                 )
                 .len(),

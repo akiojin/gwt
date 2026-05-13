@@ -19,7 +19,10 @@ const workspaceKanbanSource = existsSync(workspaceKanbanPath)
   : "";
 const workspaceKanbanCombinedSource = `${appSource}\n${workspaceKanbanSource}`;
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
-const inlineStyle = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
+// Issue #2694 Phase D: the formerly-inline <style> block now lives at
+// /styles/app.css and is loaded via `<link rel="stylesheet">`. The grep
+// surface used by the CSS contract tests below remains stable.
+const inlineStyle = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 function cssRemVar(source, name) {
   const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
@@ -874,17 +877,17 @@ test("workspace windows expose draggable tab docking affordances", () => {
     "expected tab click to activate a grouped window tab",
   );
   assert.match(
-    html,
+    inlineStyle,
     /\.workspace-window\.dock-target\s+\.titlebar/,
     "expected dockable titlebar targets to have a visible preview state",
   );
   assert.match(
-    html,
+    inlineStyle,
     /\.workspace-window\.dock-target\s*\{/,
     "expected dockable targets to outline the whole window, not just the titlebar",
   );
   assert.match(
-    html,
+    inlineStyle,
     /\.workspace-window\.dock-target\s+\.window-tab-strip::before/,
     "expected dockable targets to expose a tab insertion indicator",
   );
@@ -1850,7 +1853,7 @@ test("terminal surface body stays on the dark Operator canvas across themes (FR-
   // 枠になるので、ここで結合してしまうのが正解。
   const surfaceTerminalRule =
     /\.surface-terminal\s+\.window-body\s*\{[^}]*background:\s*([^;]+);/;
-  const match = html.match(surfaceTerminalRule);
+  const match = inlineStyle.match(surfaceTerminalRule);
   assert.ok(match, "expected .surface-terminal .window-body rule with explicit background");
   const value = match[1].trim();
   assert.doesNotMatch(
@@ -1882,7 +1885,7 @@ test("non-terminal surface bodies still follow the overall theme (FR-013 boundar
   const otherSurfaceRule =
     /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
-    html,
+    inlineStyle,
     otherSurfaceRule,
     "non-terminal surface bodies must continue to use var(--color-surface)",
   );

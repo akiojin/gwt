@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use gwt_agent::AgentColor;
 use serde::{Deserialize, Serialize};
@@ -62,6 +65,8 @@ pub struct PersistedWindowState {
     pub dynamic_title_detail: Option<String>,
     pub preset: WindowPreset,
     pub geometry: WindowGeometry,
+    #[serde(default)]
+    pub geometry_revision: u64,
     pub z_index: u32,
     pub status: WindowState,
     #[serde(default)]
@@ -172,6 +177,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     width: 720.0,
                     height: 420.0,
                 },
+                geometry_revision: 0,
                 z_index: 1,
                 status: WindowState::Running,
                 minimized: false,
@@ -196,6 +202,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     width: 720.0,
                     height: 420.0,
                 },
+                geometry_revision: 0,
                 z_index: 2,
                 status: WindowState::Running,
                 minimized: false,
@@ -278,8 +285,7 @@ pub fn save_session_state(path: &Path, state: &PersistedSessionState) -> std::io
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, content)?;
-    Ok(())
+    atomic_write(path, content.as_bytes())
 }
 
 pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceState> {
@@ -309,7 +315,35 @@ pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, content)?;
+    atomic_write(path, content.as_bytes())
+}
+
+/// Write `bytes` to `target` via a sibling temp file + rename so callers never
+/// observe a partial file. Used by [`save_session_state`] /
+/// [`save_workspace_state`] so the async persist worker (Issue #2694 Phase B)
+/// cannot leave torn state visible to load_*_state readers.
+///
+/// `sync_all()` failures are surfaced through `tracing::warn!` instead of
+/// being returned. Atomicity (no torn reads) is preserved by the rename
+/// regardless, but durability across a crash/power-loss becomes best-effort
+/// when fsync fails — operators need a visible diagnostic for that case.
+fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic_write target has no parent directory",
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    if let Err(err) = tmp.as_file_mut().sync_all() {
+        tracing::warn!(
+            target = %target.display(),
+            error = %err,
+            "atomic_write sync_all failed; rename will still produce an atomic update but durability across crash is best-effort",
+        );
+    }
+    tmp.persist(target).map_err(|err| err.error)?;
     Ok(())
 }
 
@@ -503,6 +537,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 4,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -532,6 +567,7 @@ mod tests {
                         width: 540.0,
                         height: 360.0,
                     },
+                    geometry_revision: 0,
                     z_index: 5,
                     status: WindowState::Running,
                     minimized: true,
@@ -653,6 +689,26 @@ mod tests {
     }
 
     #[test]
+    fn persisted_window_state_defaults_missing_geometry_revision() {
+        let json = r#"{
+  "id": "terminal-1",
+  "title": "Terminal",
+  "preset": "shell",
+  "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+  "z_index": 1,
+  "status": "ready",
+  "persist": true
+}"#;
+
+        let parsed: PersistedWindowState = serde_json::from_str(json).expect("parse legacy");
+
+        assert_eq!(
+            parsed.geometry_revision, 0,
+            "legacy workspace payloads without geometry_revision must start at revision zero"
+        );
+    }
+
+    #[test]
     fn persisted_window_state_accepts_new_agent_id_field() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
@@ -696,6 +752,7 @@ mod tests {
                 width: 320.0,
                 height: 200.0,
             },
+            geometry_revision: 0,
             z_index: 1,
             status: WindowProcessStatus::Running,
             minimized: false,
@@ -766,6 +823,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -790,6 +848,7 @@ mod tests {
                         width: 400.0,
                         height: 500.0,
                     },
+                    geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
                     minimized: false,
@@ -999,6 +1058,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
                     minimized: false,
@@ -1023,6 +1083,7 @@ mod tests {
                         width: 640.0,
                         height: 420.0,
                     },
+                    geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
                     minimized: false,

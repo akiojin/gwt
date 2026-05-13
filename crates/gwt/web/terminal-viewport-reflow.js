@@ -110,3 +110,59 @@ export function viewportEligibleForRefresh({ element, workspaceWindow }) {
   if (workspaceWindow && workspaceWindow.minimized) return false;
   return true;
 }
+
+/**
+ * SPEC-2008 Phase 26.B / FR-056 — terminal activation must render BEFORE
+ * fit. Phase 24 activation called fitAddon.fit() first, then scheduled a
+ * later viewport refresh. But fitAddon.proposeDimensions() returns
+ * `undefined` whenever `_renderService.dimensions.css.cell.width === 0`,
+ * which is the state right after a hidden → visible transition (xterm
+ * cell metrics are only populated by an actual render). The previous
+ * activation therefore became a silent no-op and the viewport stayed
+ * stuck on the pre-hidden cols/rows until the next OS resize.
+ *
+ * This helper centralises the post-activation sequence so the operation
+ * shape is testable (`__tests__/terminal-viewport-reflow.test.mjs`) and
+ * any future caller (snapshot replay, project switch, manual rehydrate)
+ * goes through the same render-before-fit ordering.
+ *
+ * Steps, in order:
+ *   1. `terminal.refresh(0, rows-1)` — force xterm to paint a frame so
+ *      `_renderService.dimensions.css.cell.{width,height}` are non-zero.
+ *   2. `parentElement.getBoundingClientRect()` — force a synchronous
+ *      layout flush before fit reads the container size, otherwise the
+ *      previous render's pending style changes can leave the parent
+ *      `getComputedStyle` width/height at the pre-visibility value.
+ *   3. `fitAddon.fit()` — proposeDimensions now sees non-zero cell width
+ *      and returns the correct cols/rows.
+ *   4. `sendGeometry(windowId, cols, rows)` — sync backend PTY size.
+ *   5. `terminal.focus()` — restore keyboard focus.
+ *
+ * Returns `{ ran, cols, rows }` so tests can pin which path executed.
+ */
+export function runTerminalActivationSequence({
+  runtime,
+  windowId,
+  shouldFocus = true,
+  shouldPersistGeometry = true,
+  sendGeometry,
+}) {
+  if (!runtime || !runtime.terminal || !runtime.fitAddon) {
+    return { ran: false, cols: 0, rows: 0 };
+  }
+  const { terminal, fitAddon } = runtime;
+  const rowsForRefresh = Math.max((terminal.rows || 1) - 1, 0);
+  terminal.refresh(0, rowsForRefresh);
+  const parent = terminal.element && terminal.element.parentElement;
+  if (parent && typeof parent.getBoundingClientRect === "function") {
+    parent.getBoundingClientRect();
+  }
+  fitAddon.fit();
+  if (shouldPersistGeometry && typeof sendGeometry === "function") {
+    sendGeometry(windowId, terminal.cols, terminal.rows);
+  }
+  if (shouldFocus && typeof terminal.focus === "function") {
+    terminal.focus();
+  }
+  return { ran: true, cols: terminal.cols, rows: terminal.rows };
+}

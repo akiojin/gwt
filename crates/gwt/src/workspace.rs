@@ -282,6 +282,7 @@ impl WorkspaceState {
                 width,
                 height,
             },
+            geometry_revision: 0,
             z_index: self.persisted.next_z_index,
             status: WindowProcessStatus::Running,
             minimized: false,
@@ -316,7 +317,9 @@ impl WorkspaceState {
             height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
         };
 
-        for member in self.group_member_indices(group_id.as_deref(), index) {
+        let members = self.group_member_indices(group_id.as_deref(), index);
+        let geometry_revision = self.next_geometry_revision(&members);
+        for member in members {
             let window = &mut self.persisted.windows[member];
             if was_maximized {
                 if let Some(geometry) = restore_geometry.clone() {
@@ -331,6 +334,7 @@ impl WorkspaceState {
                 window.minimized = false;
                 window.maximized = true;
             }
+            window.geometry_revision = geometry_revision;
         }
         self.bring_to_front(index);
         true
@@ -345,7 +349,9 @@ impl WorkspaceState {
         let was_maximized = self.persisted.windows[index].maximized;
         let restore_geometry = self.persisted.windows[index].pre_maximize_geometry.clone();
 
-        for member in self.group_member_indices(group_id.as_deref(), index) {
+        let members = self.group_member_indices(group_id.as_deref(), index);
+        let geometry_revision = was_maximized.then(|| self.next_geometry_revision(&members));
+        for member in members {
             let window = &mut self.persisted.windows[member];
             if was_minimized {
                 window.minimized = false;
@@ -353,6 +359,9 @@ impl WorkspaceState {
                 if was_maximized {
                     if let Some(geometry) = restore_geometry.clone() {
                         window.geometry = geometry;
+                    }
+                    if let Some(geometry_revision) = geometry_revision {
+                        window.geometry_revision = geometry_revision;
                     }
                     window.pre_maximize_geometry = None;
                     window.maximized = false;
@@ -377,11 +386,16 @@ impl WorkspaceState {
         let group_id = window.tab_group_id.clone();
         let restore_geometry = window.pre_maximize_geometry.clone();
 
-        for member in self.group_member_indices(group_id.as_deref(), index) {
+        let members = self.group_member_indices(group_id.as_deref(), index);
+        let geometry_revision = was_maximized.then(|| self.next_geometry_revision(&members));
+        for member in members {
             let window = &mut self.persisted.windows[member];
             if was_maximized {
                 if let Some(geometry) = restore_geometry.clone() {
                     window.geometry = geometry;
+                }
+                if let Some(geometry_revision) = geometry_revision {
+                    window.geometry_revision = geometry_revision;
                 }
                 window.pre_maximize_geometry = None;
                 window.maximized = false;
@@ -399,9 +413,8 @@ impl WorkspaceState {
             return false;
         };
         let group_id = self.persisted.windows[index].tab_group_id.clone();
-        for member in self.group_member_indices(group_id.as_deref(), index) {
-            self.persisted.windows[member].geometry = geometry.clone();
-        }
+        let members = self.group_member_indices(group_id.as_deref(), index);
+        self.set_geometry_for_indices(&members, &geometry);
         true
     }
 
@@ -439,19 +452,29 @@ impl WorkspaceState {
         let next_z_index = self.persisted.next_z_index;
         self.persisted.next_z_index += 1;
 
-        for window in &mut self.persisted.windows {
-            if window.id == id
-                || window.id == target_id
-                || window.tab_group_id.as_deref() == Some(&group_id)
-            {
-                window.tab_group_id = Some(group_id.clone());
-                window.tab_group_active = window.id == id;
-                window.geometry = group_geometry.clone();
-                window.minimized = false;
-                window.maximized = false;
-                window.pre_maximize_geometry = None;
-                window.z_index = next_z_index;
-            }
+        let affected_indices = self
+            .persisted
+            .windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window.id == id
+                    || window.id == target_id
+                    || window.tab_group_id.as_deref() == Some(&group_id))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let geometry_revision = self.next_geometry_revision(&affected_indices);
+        for index in affected_indices {
+            let window = &mut self.persisted.windows[index];
+            window.tab_group_id = Some(group_id.clone());
+            window.tab_group_active = window.id == id;
+            window.geometry = group_geometry.clone();
+            window.geometry_revision = geometry_revision;
+            window.minimized = false;
+            window.maximized = false;
+            window.pre_maximize_geometry = None;
+            window.z_index = next_z_index;
         }
         if let Some(source_group_id) = source_group_id {
             if source_group_id != group_id {
@@ -487,13 +510,13 @@ impl WorkspaceState {
             return false;
         };
         let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
-            self.persisted.windows[index].geometry = geometry;
+            self.set_geometry_for_indices(&[index], &geometry);
             self.bring_to_front(index);
             return true;
         };
         self.persisted.windows[index].tab_group_id = None;
         self.persisted.windows[index].tab_group_active = false;
-        self.persisted.windows[index].geometry = geometry;
+        self.set_geometry_for_indices(&[index], &geometry);
         self.persisted.windows[index].minimized = false;
         self.persisted.windows[index].maximized = false;
         self.persisted.windows[index].pre_maximize_geometry = None;
@@ -518,6 +541,7 @@ impl WorkspaceState {
         let height = available_height.max(MIN_WINDOW_HEIGHT);
 
         for (index, window_index) in open_indices.iter().enumerate() {
+            let geometry_revision = self.next_geometry_revision(&[*window_index]);
             let window = &mut self.persisted.windows[*window_index];
             let column = index % columns;
             let row = index / columns;
@@ -527,6 +551,7 @@ impl WorkspaceState {
                 width,
                 height,
             };
+            window.geometry_revision = geometry_revision;
             window.maximized = false;
             window.pre_maximize_geometry = None;
         }
@@ -537,6 +562,7 @@ impl WorkspaceState {
         let available_height = (bounds.height - STACK_START_INSET * 2.0).max(MIN_WINDOW_HEIGHT);
 
         for (index, window_index) in open_indices.iter().enumerate() {
+            let geometry_revision = self.next_geometry_revision(&[*window_index]);
             let window = &mut self.persisted.windows[*window_index];
             window.geometry = WindowGeometry {
                 x: bounds.x + STACK_START_INSET + index as f64 * STACK_OFFSET_X,
@@ -552,6 +578,7 @@ impl WorkspaceState {
                     .min(available_height)
                     .max(MIN_WINDOW_HEIGHT),
             };
+            window.geometry_revision = geometry_revision;
             window.maximized = false;
             window.pre_maximize_geometry = None;
         }
@@ -590,11 +617,13 @@ impl WorkspaceState {
         }
 
         for (index, &window_index) in open_indices.iter().enumerate() {
+            let geometry_revision = self.next_geometry_revision(&[window_index]);
             let column = index % columns;
             let row = index / columns;
             let window = &mut self.persisted.windows[window_index];
             window.geometry.x = column_offsets[column];
             window.geometry.y = row_offsets[row];
+            window.geometry_revision = geometry_revision;
             window.maximized = false;
         }
     }
@@ -666,6 +695,27 @@ impl WorkspaceState {
             vec![primary_index]
         } else {
             members
+        }
+    }
+
+    fn next_geometry_revision(&self, indices: &[usize]) -> u64 {
+        indices
+            .iter()
+            .filter_map(|&index| self.persisted.windows.get(index))
+            .map(|window| window.geometry_revision)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn set_geometry_for_indices(&mut self, indices: &[usize], geometry: &WindowGeometry) {
+        let geometry_revision = self.next_geometry_revision(indices);
+        for &index in indices {
+            let Some(window) = self.persisted.windows.get_mut(index) else {
+                continue;
+            };
+            window.geometry = geometry.clone();
+            window.geometry_revision = geometry_revision;
         }
     }
 
@@ -874,6 +924,7 @@ mod tests {
                     width: 720.0,
                     height: 420.0,
                 },
+                geometry_revision: 0,
                 z_index: 1,
                 status: WindowProcessStatus::Running,
                 minimized: false,
@@ -1519,6 +1570,25 @@ mod tests {
             workspace.window("claude-1").expect("claude").geometry,
             new_geometry,
             "grouped sibling tab must adopt the same geometry so tab switch does not reset chrome"
+        );
+        assert_eq!(
+            workspace
+                .window("codex-1")
+                .expect("codex")
+                .geometry_revision,
+            workspace
+                .window("claude-1")
+                .expect("claude")
+                .geometry_revision,
+            "grouped tabs must share the same geometry revision after propagated updates"
+        );
+        assert!(
+            workspace
+                .window("codex-1")
+                .expect("codex")
+                .geometry_revision
+                > 0,
+            "propagated geometry updates must advance the revision"
         );
 
         assert!(workspace.activate_window_tab("claude-1"));

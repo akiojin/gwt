@@ -101,6 +101,17 @@ pub fn terminal_viewport_reflow_js() -> &'static str {
     include_str!("../web/terminal-viewport-reflow.js")
 }
 
+// SPEC-2008 Phase 25 — revision-aware window geometry sync primitives.
+pub fn window_geometry_sync_js() -> &'static str {
+    include_str!("../web/window-geometry-sync.js")
+}
+
+// Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
+// dispatcher.
+pub fn socket_receive_dispatcher_js() -> &'static str {
+    include_str!("../web/socket-receive-dispatcher.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -188,6 +199,16 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         marker: "attachHostResizeReflow",
     },
     RootJsModuleAsset {
+        path: "/window-geometry-sync.js",
+        source: window_geometry_sync_js,
+        marker: "shouldApplyWorkspaceGeometry",
+    },
+    RootJsModuleAsset {
+        path: "/socket-receive-dispatcher.js",
+        source: socket_receive_dispatcher_js,
+        marker: "createSocketReceiveDispatcher",
+    },
+    RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
         source: custom_agent_env_editor_js,
         marker: "renderCustomAgentEnvEditor",
@@ -208,6 +229,13 @@ pub fn styles_typography_css() -> &'static str {
 
 pub fn styles_components_css() -> &'static str {
     include_str!("../web/styles/components.css")
+}
+
+// Issue #2694 Phase D — extracted from the formerly-inline index.html <style>
+// block (~91KB). Served as a separate stylesheet so initial HTML parse is fast
+// and modal/dialog repaints do not re-parse the giant inline block.
+pub fn styles_app_css() -> &'static str {
+    include_str!("../web/styles/app.css")
 }
 
 // SPEC-2356 Operator Design System — fonts (binary).
@@ -307,6 +335,16 @@ pub async fn styles_components_css_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn styles_app_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
+        styles_app_css(),
+    )
+}
+
 fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
     (
         [
@@ -353,6 +391,8 @@ mod tests {
         concat!(
             include_str!("../web/index.html"),
             "\n",
+            include_str!("../web/styles/app.css"),
+            "\n",
             include_str!("../web/app.js"),
             "\n",
             include_str!("../web/board-surface.js"),
@@ -362,6 +402,25 @@ mod tests {
             include_str!("../web/update-cta.js"),
             "\n",
             include_str!("../web/terminal-context-menu.js")
+        )
+    }
+
+    /// Issue #2694 Phase D: surface that combines the embedded HTML with the
+    /// stylesheets served via separate routes (`/styles/{tokens,typography,
+    /// components,app}.css`). Tests that previously grepped the inline
+    /// `<style>` block in `index.html` continue to find the same selectors and
+    /// custom properties after that block was moved to `/styles/app.css`.
+    fn frontend_styles_bundle() -> &'static str {
+        concat!(
+            include_str!("../web/index.html"),
+            "\n",
+            include_str!("../web/styles/tokens.css"),
+            "\n",
+            include_str!("../web/styles/typography.css"),
+            "\n",
+            include_str!("../web/styles/components.css"),
+            "\n",
+            include_str!("../web/styles/app.css")
         )
     }
 
@@ -534,8 +593,20 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
+        // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
+        // activation sequence (refresh → fit → sendGeometry) before
+        // scheduling the deferred viewport refresh, otherwise the hidden
+        // short-circuit on a background tab leaves xterm with stale cell
+        // metrics and dead scrollback wheel until the next OS resize.
+        // The regex now allows a `runTerminalActivationSequence({...})`
+        // call (guarded by `canRefreshTerminalViewport`) before the
+        // existing `scheduleTerminalViewportRefresh` call.
         let snapshot_write = regex::Regex::new(
-            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{(?:[^}]*\})*?[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+        let snapshot_activation = regex::Regex::new(
+            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),[\s\S]*?if \(canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?\}\s*scheduleTerminalViewportRefresh\(windowId\);",
         )
         .expect("valid regex");
         let refresh_call = regex::Regex::new(
@@ -558,6 +629,10 @@ mod tests {
         assert!(
             snapshot_write.is_match(html),
             "expected terminal snapshots to refresh viewport after xterm parses them",
+        );
+        assert!(
+            snapshot_activation.is_match(html),
+            "expected terminal snapshots to force runTerminalActivationSequence under canRefreshTerminalViewport before scheduleTerminalViewportRefresh (FR-056)",
         );
         assert!(
             html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
@@ -590,6 +665,111 @@ mod tests {
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
             "expected terminals to persist fitted geometry to backend on \
              restore-from-minimized OR window resize (Tile/Stack/Align)",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
+        // SPEC-2008 Phase 26.A / FR-057 — writeOutput and
+        // replaceTerminalSnapshot must hold incoming bytes until the
+        // initial runTerminalActivationSequence has run, otherwise the
+        // first Claude Code bytes (generated at the backend's spawn
+        // cols/rows) get written into xterm's default 80×24 grid and
+        // stay layout-locked there until the next manual resize.
+        let html = frontend_bundle_source();
+        // The rAF must dispatch to completeInitialFitHandshake — keeping
+        // the handshake idempotent and gated on visibility (see helper
+        // below). Inlining the activation / replay in the rAF would let
+        // `isReady` flip while the window is still hidden, defeating the
+        // deferredWrites buffer (CodeRabbit PR #2693 concern).
+        let create_runtime_handshake = regex::Regex::new(
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+        )
+        .expect("valid regex");
+        // The helper itself must (a) bail when canRefreshTerminalViewport
+        // is false so we do not flip isReady while hidden, and (b) only
+        // mark the runtime ready after activation succeeds.
+        let handshake_helper = regex::Regex::new(
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+        )
+        .expect("valid regex");
+        // Hidden → visible activation path also needs to drive the
+        // handshake — otherwise a window created hidden never drains
+        // its deferred buffer until the user manually resizes.
+        let reveal_completes_handshake = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
+        )
+        .expect("valid regex");
+        let write_gate = regex::Regex::new(
+            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+        let snapshot_gate = regex::Regex::new(
+            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*pendingSnapshotMap\.set\(windowId, base64\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            create_runtime_handshake.is_match(html),
+            "expected createTerminalRuntime to dispatch its initial-fit handshake through completeInitialFitHandshake instead of inlining the replay (FR-057, CodeRabbit fix)",
+        );
+        assert!(
+            handshake_helper.is_match(html),
+            "expected completeInitialFitHandshake to bail on canRefreshTerminalViewport=false and only set isReady=true after activation succeeds (FR-057, CodeRabbit fix)",
+        );
+        assert!(
+            reveal_completes_handshake.is_match(html),
+            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can still drain deferredWrites (FR-057, CodeRabbit fix)",
+        );
+        assert!(
+            write_gate.is_match(html),
+            "expected writeOutput to push to runtime.deferredWrites when runtime.isReady === false (FR-057)",
+        );
+        assert!(
+            snapshot_gate.is_match(html),
+            "expected replaceTerminalSnapshot to re-queue into pendingSnapshotMap when runtime.isReady === false (FR-057)",
+        );
+        // Sanity: legacy "snapshot replay runs synchronously before fit"
+        // structure must no longer be present, otherwise the regression
+        // can land alongside the new gate and still cause the bug.
+        let legacy_sync_replay = regex::Regex::new(
+            r#"(?s)requestAnimationFrame\(\(\) => fitTerminal\(windowId,\s*true\)\);\s*const snapshot = pendingSnapshotMap\.get\(windowId\);"#,
+        )
+        .expect("valid regex");
+        assert!(
+            !legacy_sync_replay.is_match(html),
+            "legacy synchronous snapshot replay before initial fit must be removed (FR-057 regression guard)",
+        );
+    }
+
+    #[test]
+    fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
+        // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
+        // emits pointerup / pointercancel with a pointerId that does not
+        // match the one captured at pointerdown. The previous handlers
+        // gated finishWindowResize behind a strict pointerId equality
+        // check, so a mismatched pointerup left resizeState alive until
+        // the 30 second staleness guard finally cleaned it up. This
+        // contract pins the new fallback: any window-level pointerup or
+        // pointercancel that fires while a resize is pending must clean
+        // up resizeState immediately via forceResetResizeState.
+        let html = frontend_bundle_source();
+        let pointerup_fallback = regex::Regex::new(
+            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
+        )
+        .expect("valid regex");
+        let pointercancel_fallback = regex::Regex::new(
+            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            pointerup_fallback.is_match(html),
+            "expected window pointerup to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
+        );
+        assert!(
+            pointercancel_fallback.is_match(html),
+            "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
         );
     }
 
@@ -921,7 +1101,7 @@ mod tests {
 
     #[test]
     fn embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains(".canvas-stage"),
@@ -953,7 +1133,7 @@ mod tests {
 
     #[test]
     fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -980,7 +1160,7 @@ mod tests {
 
     #[test]
     fn embedded_web_window_status_chip_uses_running_waiting_stopped_error_variants() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains(".status-chip.waiting .status-dot"),
@@ -999,7 +1179,7 @@ mod tests {
 
     #[test]
     fn embedded_web_project_bar_omits_index_status_badge() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
@@ -1073,7 +1253,7 @@ mod tests {
 
     #[test]
     fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         assert!(
             html.contains("--agent-claude")
@@ -1151,7 +1331,7 @@ mod tests {
 
     #[test]
     fn embedded_web_window_role_badges_identify_every_window_surface() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -1229,8 +1409,14 @@ mod tests {
             r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
         )
         .expect("valid regex");
+        // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
+        // runTerminalActivationSequence so the render-before-fit ordering
+        // is enforced. The previous Phase 24 ordering (fitTerminal → then
+        // scheduleTerminalViewportRefresh → then focus) silently no-op'd
+        // whenever the terminal had been display:none because xterm's
+        // proposeDimensions returns undefined while cell.width === 0.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?fitTerminal\(windowId,\s*false\);.*?scheduleTerminalViewportRefresh\(windowId\);.*?activeRuntime\.terminal\.focus\(\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus: true,[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
@@ -1279,8 +1465,15 @@ mod tests {
     #[test]
     fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
         let html = frontend_bundle_source();
+        // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
+        // per-connection dispatcher before the frontend_ready handshake. The
+        // regex below is intentionally `[\s\S]*?` (non-greedy any) between
+        // setConnectionState and the pendingMessages flush so dispatcher
+        // setup is allowed inside the function, but the ordering assertion
+        // — frontend_ready strictly precedes the queued-message replay — is
+        // preserved.
         let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{\s*setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
         .expect("valid regex");
 
@@ -1297,6 +1490,17 @@ mod tests {
         assert!(
             open_flow.is_match(html),
             "expected socket open flow to announce frontend readiness before replaying queued messages",
+        );
+        // Phase C regression: when the WebSocket cycles, the dispatcher must
+        // be recreated and old generations must be guarded so queued events
+        // from the previous session do not flush into the new one.
+        assert!(
+            html.contains("socketReceiveDispatcherGeneration"),
+            "expected handleSocketOpen / handleSocketClose to track a generation counter for the per-connection dispatcher",
+        );
+        assert!(
+            html.contains("ownGeneration !== socketReceiveDispatcherGeneration"),
+            "expected the dispatcher receive callback to gate on the generation captured at open time",
         );
     }
 
@@ -2322,7 +2526,7 @@ mod tests {
     /// partially transparent and visually distinct from the rest.
     #[test]
     fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let panel_surfaces = [
             ".surface-file-tree",
@@ -2371,7 +2575,7 @@ mod tests {
     /// through the surface's own class.
     #[test]
     fn embedded_web_workspace_layout_primitives_define_shared_contracts() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let primitives: [(&str, &[&str]); 4] = [
             (
@@ -2434,7 +2638,7 @@ mod tests {
     /// surface-specific override.
     #[test]
     fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
         let js = app_js();
 
         assert!(
@@ -2499,7 +2703,7 @@ mod tests {
     /// - `.modal-footer` — bottom action bar
     #[test]
     fn embedded_web_modal_frame_primitives_define_shared_contracts() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         // SPEC-2356 FR-001: modal frame primitives must reference design
         // tokens from `tokens.css` instead of raw colour literals so the
@@ -2680,7 +2884,7 @@ mod tests {
     /// content.
     #[test]
     fn embedded_web_launch_wizard_scrolls_body_without_footer_overlap() {
-        let html = index_html();
+        let html = frontend_styles_bundle();
 
         let css_body = |selector: &str| {
             let start = html

@@ -1,6 +1,40 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.33.1] - 2026-05-13
+
+### Bug Fixes
+
+- Guard window resize geometry revisions
+- Handle rapid resize geometry revisions
+- **skills:** Exclude non-gwt skills from materialization and broaden .gwt/
+- **gui:** Render terminal before fit on activation (SPEC-2008 Phase 26.B)
+- **gui:** Buffer terminal writes until initial fit (SPEC-2008 Phase 26.A)
+- **gui:** Force-reset resize state on window pointer mismatch (SPEC-2008 Phase 26.C)
+- **gui:** Gate isReady flip on visibility for initial-fit handshake (SPEC-2008 Phase 26.A)
+- **persist:** Drain Drop and register socket-receive-dispatcher route (#2694)
+- **persist:** Debounce window, per-connection dispatcher, fsync visibility (#2694)
+- **playwright:** Register socket-receive-dispatcher in kanban fixture (#2694)
+
+### Documentation
+
+- **lessons:** Record xterm fitAddon silent no-op (SPEC-2008 Phase 26)
+
+### Miscellaneous Tasks
+
+- Merge origin develop
+
+### Performance
+
+- **embedded-server:** Release ClientHub lock before serialize and broadcast (#2694)
+- **app-runtime:** Move persist() off the event loop with atomic write (#2694)
+- **gui:** Coalesce inbound WebSocket dispatch on the frontend (#2694)
+- **gui:** Extract 91KB inline index.html style block to /styles/app.css (#2694)
+
+### Testing
+
+- **managed-assets:** Follow .gwt/ broad exclude in Hermes integration test
+
 ## [9.33.0] - 2026-05-13
 
 ### Bug Fixes
