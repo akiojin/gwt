@@ -81,7 +81,8 @@ fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree
         Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0)
             .single()
             .expect("timestamp"),
-    );
+    )
+    .expect("reserve start work branch name");
     let refs_before = git_output(&repo, &["for-each-ref", "refs/heads/work"]);
     assert!(
         refs_before.is_empty(),
