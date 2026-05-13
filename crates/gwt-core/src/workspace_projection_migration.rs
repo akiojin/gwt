@@ -22,12 +22,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, Result};
+#[cfg(test)]
+use crate::workspace_projection::WorkspaceProjection;
 use crate::workspace_projection::{
     load_workspace_projection_from_path, save_workspace_projection_to_path,
     workspace_projection_default_created_at, WorkspaceLifecycleStage, WorkspaceStatusCategory,
 };
-#[cfg(test)]
-use crate::workspace_projection::WorkspaceProjection;
 
 /// Schema version recorded in `workspace.migration.json`. When the
 /// projection schema grows new fields in a future Phase, bump this
@@ -64,7 +64,9 @@ pub enum WorkspaceProjectionMigrationOutcome {
 ///
 /// Errors are surfaced for the caller to log; the daemon-level wrapper
 /// downgrades all errors to debug logs so startup is not blocked.
-pub fn migrate_workspace_projection_path(workspace_json_path: &Path) -> Result<WorkspaceProjectionMigrationOutcome> {
+pub fn migrate_workspace_projection_path(
+    workspace_json_path: &Path,
+) -> Result<WorkspaceProjectionMigrationOutcome> {
     if !workspace_json_path.exists() {
         return Ok(WorkspaceProjectionMigrationOutcome::Missing);
     }
@@ -83,7 +85,10 @@ pub fn migrate_workspace_projection_path(workspace_json_path: &Path) -> Result<W
     // FR-143: summary <- title when None. Skip if title is the
     // hard-coded default ("Workspace") so we do not inject the
     // placeholder into legitimately untitled Workspaces.
-    if projection.summary.as_deref().is_none_or(|s| s.trim().is_empty())
+    if projection
+        .summary
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty())
         && projection.title.trim() != "Workspace"
         && !projection.title.trim().is_empty()
     {
@@ -203,8 +208,11 @@ mod tests {
             "board_refs": [],
             "updated_at": "2026-04-15T10:00:00Z"
         });
-        fs::write(&projection_path, serde_json::to_string(&legacy_json).expect("legacy json"))
-            .expect("write legacy json");
+        fs::write(
+            &projection_path,
+            serde_json::to_string(&legacy_json).expect("legacy json"),
+        )
+        .expect("write legacy json");
 
         let outcome =
             migrate_workspace_projection_path(&projection_path).expect("migrate legacy projection");
@@ -258,8 +266,11 @@ mod tests {
             "board_refs": [],
             "updated_at": "2026-04-15T10:00:00Z"
         });
-        fs::write(&projection_path, serde_json::to_string(&legacy_json).expect("json"))
-            .expect("write legacy");
+        fs::write(
+            &projection_path,
+            serde_json::to_string(&legacy_json).expect("json"),
+        )
+        .expect("write legacy");
 
         let first = migrate_workspace_projection_path(&projection_path).expect("first run");
         assert_eq!(first, WorkspaceProjectionMigrationOutcome::Applied);
@@ -310,11 +321,17 @@ mod tests {
             tags: Vec::new(),
             progress_pct: None,
         };
-        fs::write(&projection_path, serde_json::to_string(&fresh).expect("json"))
-            .expect("write fresh");
+        fs::write(
+            &projection_path,
+            serde_json::to_string(&fresh).expect("json"),
+        )
+        .expect("write fresh");
 
         let outcome = migrate_workspace_projection_path(&projection_path).expect("migrate fresh");
-        assert_eq!(outcome, WorkspaceProjectionMigrationOutcome::NoBackfillNeeded);
+        assert_eq!(
+            outcome,
+            WorkspaceProjectionMigrationOutcome::NoBackfillNeeded
+        );
         let marker_path = workspace_dir.join("workspace.migration.json");
         assert!(
             marker_path.exists(),
