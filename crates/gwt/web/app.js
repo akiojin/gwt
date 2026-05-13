@@ -34,6 +34,7 @@
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
 
@@ -1840,9 +1841,26 @@
           if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
             return;
           }
-          fitTerminal(windowId, false);
+          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit + persist
+          // geometry so xterm's cell metrics are populated by the time
+          // proposeDimensions runs. The previous order (fit-then-refresh)
+          // silently no-op'd whenever the terminal had been display:none —
+          // proposeDimensions returns undefined when cell.width === 0,
+          // leaving the viewport stuck on the pre-hidden cols/rows until
+          // the next OS resize.
+          runTerminalActivationSequence({
+            runtime: activeRuntime,
+            windowId,
+            shouldFocus: true,
+            shouldPersistGeometry: true,
+            sendGeometry,
+          });
+          // Schedule one more viewport refresh on the next frame so the
+          // post-fit cols/rows are reflected in the rendered buffer even
+          // when xterm coalesces internal redraws. This keeps the prior
+          // `viewportRefreshFrame` re-arm path active for repeated
+          // activations.
           scheduleTerminalViewportRefresh(windowId);
-          activeRuntime.terminal.focus();
         });
       }
 
@@ -2920,6 +2938,24 @@
         const decoder = decoderMap.get(windowId);
         runtime.terminal.reset();
         runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
+          // SPEC-2008 Phase 26.B / FR-056: `terminal.reset()` wipes the
+          // internal viewport (scroll position, cell metrics caches,
+          // alternate-buffer marker). The previous code only scheduled a
+          // viewport refresh, which short-circuits whenever the window is
+          // hidden — leaving the next visible activation with stale state
+          // and dead scrollback wheel. Force the render-before-fit
+          // sequence directly so the viewport is consistent the moment the
+          // snapshot lands. We skip focus stealing (`shouldFocus: false`)
+          // because snapshot replays happen on background tabs too.
+          if (canRefreshTerminalViewport(windowId)) {
+            runTerminalActivationSequence({
+              runtime,
+              windowId,
+              shouldFocus: false,
+              shouldPersistGeometry: true,
+              sendGeometry,
+            });
+          }
           scheduleTerminalViewportRefresh(windowId);
         });
       }

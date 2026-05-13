@@ -534,8 +534,20 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
+        // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
+        // activation sequence (refresh → fit → sendGeometry) before
+        // scheduling the deferred viewport refresh, otherwise the hidden
+        // short-circuit on a background tab leaves xterm with stale cell
+        // metrics and dead scrollback wheel until the next OS resize.
+        // The regex now allows a `runTerminalActivationSequence({...})`
+        // call (guarded by `canRefreshTerminalViewport`) before the
+        // existing `scheduleTerminalViewportRefresh` call.
         let snapshot_write = regex::Regex::new(
-            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{(?:[^}]*\})*?[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+        let snapshot_activation = regex::Regex::new(
+            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),[\s\S]*?if \(canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?\}\s*scheduleTerminalViewportRefresh\(windowId\);",
         )
         .expect("valid regex");
         let refresh_call = regex::Regex::new(
@@ -558,6 +570,10 @@ mod tests {
         assert!(
             snapshot_write.is_match(html),
             "expected terminal snapshots to refresh viewport after xterm parses them",
+        );
+        assert!(
+            snapshot_activation.is_match(html),
+            "expected terminal snapshots to force runTerminalActivationSequence under canRefreshTerminalViewport before scheduleTerminalViewportRefresh (FR-056)",
         );
         assert!(
             html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
@@ -1229,8 +1245,14 @@ mod tests {
             r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
         )
         .expect("valid regex");
+        // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
+        // runTerminalActivationSequence so the render-before-fit ordering
+        // is enforced. The previous Phase 24 ordering (fitTerminal → then
+        // scheduleTerminalViewportRefresh → then focus) silently no-op'd
+        // whenever the terminal had been display:none because xterm's
+        // proposeDimensions returns undefined while cell.width === 0.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?fitTerminal\(windowId,\s*false\);.*?scheduleTerminalViewportRefresh\(windowId\);.*?activeRuntime\.terminal\.focus\(\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus: true,[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 

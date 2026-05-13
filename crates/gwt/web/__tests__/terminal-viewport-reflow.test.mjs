@@ -18,6 +18,7 @@ import {
   applyVisibilityTransition,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
+  runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
 
@@ -159,6 +160,106 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
   );
 });
 
+test("runTerminalActivationSequence renders before fit and emits geometry (T-199 / FR-056)", () => {
+  // SPEC-2008 Phase 26.B / FR-056 regression: a hidden -> visible
+  // transition must call terminal.refresh() before fitAddon.fit() so
+  // xterm has populated cell metrics by the time proposeDimensions runs.
+  // The previous Phase 24 ordering (fit-then-refresh) became a silent
+  // no-op because proposeDimensions returns undefined whenever
+  // _renderService.dimensions.css.cell.width === 0, which is exactly
+  // the state of a freshly-revealed display:none element.
+  const callOrder = [];
+  let layoutFlushed = 0;
+  const parent = {
+    getBoundingClientRect: () => {
+      callOrder.push("flush-layout");
+      layoutFlushed += 1;
+      return { width: 800, height: 480 };
+    },
+  };
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: parent },
+      refresh: (start, end) => {
+        callOrder.push(`refresh:${start}-${end}`);
+      },
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+    },
+  };
+  let geometry = null;
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-A",
+    sendGeometry: (id, cols, rows) => {
+      callOrder.push("sendGeometry");
+      geometry = { id, cols, rows };
+    },
+  });
+  assert.deepEqual(
+    callOrder,
+    ["refresh:0-23", "flush-layout", "fit", "sendGeometry", "focus"],
+    "refresh must precede layout flush, fit, sendGeometry, and focus",
+  );
+  assert.equal(layoutFlushed, 1, "parent.getBoundingClientRect must be called exactly once");
+  assert.deepEqual(geometry, { id: "win-A", cols: 80, rows: 24 });
+  assert.equal(result.ran, true);
+  assert.equal(result.cols, 80);
+  assert.equal(result.rows, 24);
+});
+
+test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry flags (T-199)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 100,
+      rows: 30,
+      element: { parentElement: null },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+    },
+  };
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-B",
+    shouldFocus: false,
+    shouldPersistGeometry: false,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+  // No layout flush is recorded because element has no parentElement;
+  // sendGeometry / focus are suppressed by the flags.
+  assert.deepEqual(callOrder, ["refresh", "fit"]);
+  assert.equal(result.ran, true);
+});
+
+test("runTerminalActivationSequence is a no-op when runtime is missing pieces (T-199)", () => {
+  assert.deepEqual(
+    runTerminalActivationSequence({ runtime: null, windowId: "x" }),
+    { ran: false, cols: 0, rows: 0 },
+  );
+  assert.deepEqual(
+    runTerminalActivationSequence({
+      runtime: { terminal: null, fitAddon: { fit() {} } },
+      windowId: "x",
+    }),
+    { ran: false, cols: 0, rows: 0 },
+  );
+  assert.deepEqual(
+    runTerminalActivationSequence({
+      runtime: { terminal: { rows: 24, refresh() {}, focus() {} }, fitAddon: null },
+      windowId: "x",
+    }),
+    { ran: false, cols: 0, rows: 0 },
+  );
+});
+
 test("classifyProjectWindowVisibility keeps inactive project terminals hidden, not removed", () => {
   const result = classifyProjectWindowVisibility({
     activeWindowIds: ["tab-a::agent-1", "tab-a::board-1"],
@@ -220,5 +321,15 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /classifyProjectWindowVisibility\(\{/,
     "project tab switches must classify inactive project windows as hidden instead of disposing their terminal runtimes",
+  );
+  // SPEC-2008 Phase 26.B / FR-056 wiring: activation path must delegate
+  // to runTerminalActivationSequence so refresh-before-fit ordering stays
+  // testable. A future refactor that drops the helper or reverts to the
+  // legacy fit-then-refresh ordering will fail this assertion and
+  // surface the regression in CI immediately.
+  assert.match(
+    appSource,
+    /runTerminalActivationSequence\(\{/,
+    "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
   );
 });
