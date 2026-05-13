@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, Result};
+use crate::paths::gwt_workspace_projection_path_for_repo_path;
 #[cfg(test)]
 use crate::workspace_projection::WorkspaceProjection;
 use crate::workspace_projection::{
@@ -134,6 +135,20 @@ pub fn migrate_workspace_projection_path(
     } else {
         WorkspaceProjectionMigrationOutcome::NoBackfillNeeded
     })
+}
+
+/// Convenience wrapper used by the daemon startup hook: takes a repository
+/// root path, resolves the canonical Workspace projection JSON path via
+/// [`gwt_workspace_projection_path_for_repo_path`], and runs the Phase U-6
+/// migration. Mirrors the signature of
+/// `workspace_projection::retroactive_auto_done_scan` (peer SPEC-2359 US-37)
+/// so the two scans can be called from `AppRuntime::bootstrap` side by
+/// side.
+pub fn migrate_workspace_projection_for_repo(
+    repo_path: &Path,
+) -> Result<WorkspaceProjectionMigrationOutcome> {
+    let projection_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    migrate_workspace_projection_path(&projection_path)
 }
 
 fn marker_path_for_projection(workspace_json_path: &Path) -> PathBuf {
