@@ -1379,6 +1379,7 @@
         }
         const runtime = terminalMap.get(resizeState.id);
         cancelTerminalResizeFit();
+        cancelResizeStalenessGuard();
         fitTerminal(resizeState.id, false);
         sendGeometry(
           resizeState.id,
@@ -1390,6 +1391,56 @@
         // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
         // so pointer events resume on the screen-edge triggers once resize
         // ends.
+        delete document.documentElement.dataset.opResizeActive;
+      }
+
+      // SPEC-2014 Phase C1: maximum wall time (in ms) a single resize gesture
+      // may stay active before we assume the pointer-end event was lost and
+      // force a teardown. Long enough to cover slow Windows ConPTY resizes
+      // (anecdotally a couple of seconds in the worst case) yet short enough
+      // that the user does not have to restart the app when WebView2 drops
+      // the pointerup.
+      const RESIZE_STALENESS_TIMEOUT_MS = 30_000;
+
+      function scheduleResizeStalenessGuard(pointerId) {
+        return setTimeout(() => {
+          if (!resizeState || resizeState.pointerId !== pointerId) {
+            return;
+          }
+          const elapsed = Math.round(
+            performance.now() - (resizeState.startedAt ?? performance.now()),
+          );
+          console.warn(
+            `[resize] staleness guard fired after ${elapsed}ms; clearing stuck resizeState (pointerId=${pointerId})`,
+          );
+          // Trigger the normal teardown path so xterm fit / sendGeometry /
+          // hover-reveal cleanup all run, then null the state.
+          finishWindowResize(pointerId);
+        }, RESIZE_STALENESS_TIMEOUT_MS);
+      }
+
+      function cancelResizeStalenessGuard() {
+        if (resizeState && resizeState.stalenessTimer != null) {
+          clearTimeout(resizeState.stalenessTimer);
+          resizeState.stalenessTimer = null;
+        }
+      }
+
+      function forceResetResizeState(reason) {
+        if (!resizeState) {
+          return;
+        }
+        const previous = resizeState;
+        console.warn(
+          `[resize] force-reset resizeState (reason=${reason}, previousPointerId=${previous.pointerId}, windowId=${previous.id})`,
+        );
+        if (previous.fitFrame != null) {
+          cancelAnimationFrame(previous.fitFrame);
+        }
+        if (previous.stalenessTimer != null) {
+          clearTimeout(previous.stalenessTimer);
+        }
+        resizeState = null;
         delete document.documentElement.dataset.opResizeActive;
       }
 
@@ -7215,6 +7266,12 @@
 
           resizeHandle.addEventListener("pointerdown", (event) => {
             focusWindowRemotely(windowData.id);
+            // SPEC-2014 Phase C1: Windows WebView2 occasionally fails to
+            // deliver pointerup / pointercancel / lostpointercapture, leaving
+            // the previous resizeState alive when the next gesture starts.
+            // Force-clear the leaked state on every new pointerdown so the
+            // user never has to restart the app to escape a stuck resize.
+            forceResetResizeState("new resize started before previous one finished");
             resizeState = {
               id: windowData.id,
               pointerId: event.pointerId,
@@ -7223,12 +7280,27 @@
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
               fitFrame: null,
+              startedAt: performance.now(),
+              stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
             // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
             // hits while resize is active so pointer movements that cross
             // the screen edge do not steal focus mid-resize.
             document.documentElement.dataset.opResizeActive = "true";
-            resizeHandle.setPointerCapture(event.pointerId);
+            try {
+              resizeHandle.setPointerCapture(event.pointerId);
+            } catch (error) {
+              // SPEC-2014 Phase C1: setPointerCapture is best-effort; on
+              // Windows WebView2 it can throw when the pointer has already
+              // been released by the OS between the dispatch and the
+              // callback. We continue without capture so that the
+              // window-bound pointermove / pointerup listeners still
+              // drive the resize.
+              console.warn(
+                "[resize] setPointerCapture failed, falling back to window-bound pointer events",
+                error,
+              );
+            }
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
             finishWindowResize(event.pointerId);
