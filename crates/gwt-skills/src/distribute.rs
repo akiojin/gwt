@@ -82,7 +82,7 @@ pub fn distribute_to_worktree_for_targets(
     prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut report)?;
 
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
-        write_dir_assets(
+        write_gwt_skill_dir_assets(
             &CLAUDE_SKILLS,
             worktree,
             &worktree.join(".claude/skills"),
@@ -99,7 +99,7 @@ pub fn distribute_to_worktree_for_targets(
     }
 
     if targets.contains(&ManagedAssetTarget::Codex) {
-        write_dir_assets(
+        write_gwt_skill_dir_assets(
             &CLAUDE_SKILLS,
             worktree,
             &worktree.join(".codex/skills"),
@@ -150,7 +150,7 @@ fn prune_managed_asset_roots_for_targets(
             worktree,
             &worktree.join(".claude/skills"),
             Some(RootEntryKind::Directories),
-            false,
+            true,
             tracked_paths,
             report,
         )?;
@@ -172,7 +172,7 @@ fn prune_managed_asset_roots_for_targets(
             worktree,
             &worktree.join(".codex/skills"),
             Some(RootEntryKind::Directories),
-            false,
+            true,
             tracked_paths,
             report,
         )?;
@@ -520,6 +520,72 @@ mod tests {
         assert!(
             user_asset.exists(),
             "Hermes distribution must not prune non-gwt skill content"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_skips_non_gwt_claude_skill_for_claude_code() {
+        let dir = tempfile::tempdir().unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::ClaudeCode]).unwrap();
+
+        assert!(
+            !dir.path().join(".claude/skills/tui-design").exists(),
+            "tui-design must not be materialized for ClaudeCode target"
+        );
+        assert!(
+            dir.path()
+                .join(".claude/skills/gwt-manage-pr/SKILL.md")
+                .exists(),
+            "gwt-* skill must still be materialized for ClaudeCode target"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_skips_non_gwt_codex_skill_for_codex() {
+        let dir = tempfile::tempdir().unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::Codex]).unwrap();
+
+        assert!(
+            !dir.path().join(".codex/skills/tui-design").exists(),
+            "tui-design must not be materialized for Codex target"
+        );
+        assert!(
+            dir.path()
+                .join(".codex/skills/gwt-manage-pr/SKILL.md")
+                .exists(),
+            "gwt-* skill must still be materialized for Codex target"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_preserves_user_created_non_gwt_claude_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_asset = dir.path().join(".claude/skills/my-local-skill/SKILL.md");
+        fs::create_dir_all(user_asset.parent().unwrap()).unwrap();
+        fs::write(&user_asset, "user owned").unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::ClaudeCode]).unwrap();
+
+        assert!(
+            user_asset.exists(),
+            "ClaudeCode distribution must not prune user-created non-gwt skill content"
+        );
+    }
+
+    #[test]
+    fn distribute_for_targets_preserves_user_created_non_gwt_codex_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_asset = dir.path().join(".codex/skills/my-local-skill/SKILL.md");
+        fs::create_dir_all(user_asset.parent().unwrap()).unwrap();
+        fs::write(&user_asset, "user owned").unwrap();
+
+        distribute_to_worktree_for_targets(dir.path(), &[ManagedAssetTarget::Codex]).unwrap();
+
+        assert!(
+            user_asset.exists(),
+            "Codex distribution must not prune user-created non-gwt skill content"
         );
     }
 
