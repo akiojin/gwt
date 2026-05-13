@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.32.0] - 2026-05-13
+
+### Features
+
+- **skills:** SPEC-1935 US-7 generated coordination guidance and AGENTS.md cleanup
+
 ## [9.31.0] - 2026-05-13
 
 ### Bug Fixes
