@@ -464,7 +464,7 @@ default = { id = "default", label = "Default", arg = "" }
     }
 
     #[test]
-    fn preset_roundtrip_preserves_all_thirteen_env_entries() {
+    fn preset_roundtrip_preserves_all_twelve_env_entries() {
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
 
@@ -490,9 +490,10 @@ default = { id = "default", label = "Default", arg = "" }
         );
         assert_eq!(
             agent.env.len(),
-            13,
-            "all 13 preset env entries survive TOML round-trip"
+            12,
+            "all 12 preset env entries survive TOML round-trip"
         );
+        assert!(!agent.env.contains_key("CLAUDE_CODE_NO_FLICKER"));
         assert_eq!(
             agent.env.get("ANTHROPIC_API_KEY").map(String::as_str),
             Some("sk-test-key")

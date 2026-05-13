@@ -573,7 +573,6 @@ impl AgentLaunchBuilder {
     fn build_claude_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
         // Claude Code specific env vars
         env_vars.insert("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".into(), "1".into());
-        env_vars.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
 
         // Telemetry/analytics disable
         env_vars.insert("DISABLE_TELEMETRY".into(), "1".into());
@@ -1340,9 +1339,9 @@ mod tests {
     fn build_claude_has_telemetry_disable_vars() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
 
-        assert_eq!(
-            config.env_vars.get("CLAUDE_CODE_NO_FLICKER"),
-            Some(&"1".to_string())
+        assert!(
+            !config.env_vars.contains_key("CLAUDE_CODE_NO_FLICKER"),
+            "Claude Code launches must not force the legacy no-flicker renderer"
         );
         assert_eq!(
             config.env_vars.get("DISABLE_TELEMETRY"),
@@ -1693,10 +1692,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_agent_env_can_override_claude_builtin_env() {
+    fn custom_agent_env_can_still_export_claude_no_flicker() {
         // If a user somehow applies custom_agent_env to a built-in Claude
-        // launch, the custom value should win over the built-in Claude
-        // defaults. This is consistent with FR-063 "custom wins over Common".
+        // launch, an explicit value should still be forwarded even though gwt
+        // no longer sets the legacy no-flicker flag by default.
         let mut env = HashMap::new();
         env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "0".to_string());
 
@@ -1710,7 +1709,7 @@ mod tests {
                 .get("CLAUDE_CODE_NO_FLICKER")
                 .map(String::as_str),
             Some("0"),
-            "custom_agent_env must win over agent-specific built-in env"
+            "custom_agent_env must remain able to pass explicit Claude env"
         );
     }
 

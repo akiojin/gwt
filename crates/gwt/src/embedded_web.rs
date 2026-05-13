@@ -29,6 +29,10 @@ pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
 
+pub fn project_clone_modal_js() -> &'static str {
+    include_str!("../web/project-clone-modal.js")
+}
+
 pub fn window_docking_js() -> &'static str {
     include_str!("../web/window-docking.js")
 }
@@ -112,6 +116,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/migration-modal.js",
         source: migration_modal_js,
         marker: "renderMigrationModal",
+    },
+    RootJsModuleAsset {
+        path: "/project-clone-modal.js",
+        source: project_clone_modal_js,
+        marker: "renderProjectCloneModal",
     },
     RootJsModuleAsset {
         path: "/window-docking.js",
@@ -636,6 +645,47 @@ mod tests {
         assert!(
             html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
             "expected terminal resize fit scheduling to skip non-terminal panel windows",
+        );
+    }
+
+    /// SPEC-2014 Phase C4: 高頻度な pointermove を直接 DOM mutation に
+    /// 流し込まず、`requestAnimationFrame` で 1 フレーム 1 回に絞り込んで
+    /// いることを bundle 上で固定する。Windows WebView2 で layout reflow が
+    /// pointermove 速度に追従できず render thread が枯渇する症状を回避するため。
+    #[test]
+    fn embedded_web_resize_pointermove_is_coalesced_via_request_animation_frame() {
+        let html = frontend_bundle_source();
+        let direct_pointermove_width = regex::Regex::new(
+            r"if\s*\(resizeState && resizeState\.pointerId === event\.pointerId\)\s*\{\s*const element = windowMap\.get\(resizeState\.id\)",
+        )
+        .expect("valid regex");
+        assert!(
+            !direct_pointermove_width.is_match(html),
+            "expected pointermove resize handler to stop directly mutating element.style; the coalesced applyResizePointermove path must replace it"
+        );
+        assert!(
+            html.contains("function scheduleResizePointermoveApply()"),
+            "expected a rAF scheduler that coalesces pointermove-driven DOM writes"
+        );
+        assert!(
+            html.contains("function cancelResizePointermoveApply()"),
+            "expected the coalescing scheduler to be cancellable on resize teardown"
+        );
+        assert!(
+            html.contains("function applyResizePointermove(state)"),
+            "expected a pure helper that translates resizeState into element.style.width/height"
+        );
+        assert!(
+            html.contains("resizeState.latestClientX = event.clientX;"),
+            "expected pointermove to store the latest client coordinates on resizeState"
+        );
+        assert!(
+            html.contains("scheduleResizePointermoveApply();"),
+            "expected pointermove to schedule the coalesced apply rather than write to the DOM directly"
+        );
+        assert!(
+            html.contains("applyFrame: null,"),
+            "expected resizeState to carry an applyFrame slot so the rAF handle can be cancelled"
         );
     }
 
@@ -2569,6 +2619,26 @@ mod tests {
         assert!(
             shell_count >= 3,
             "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
+        );
+    }
+
+    #[test]
+    fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
+        let html = index_html();
+
+        assert!(
+            html.contains("id=\"picker-clone-project\"") && html.contains("Clone from GitHub..."),
+            "Project Picker must expose the GitHub clone action next to Open Project"
+        );
+        assert!(
+            html.contains("id=\"clone-project-modal\"")
+                && html.contains("aria-labelledby=\"clone-project-modal-title\"")
+                && html.contains("id=\"clone-project-modal-title\""),
+            "Clone Project modal must be present in embedded HTML with dialog labels"
+        );
+        assert!(
+            html.contains("data-clone-mode=\"url\"") && html.contains("data-clone-mode=\"search\""),
+            "Clone Project modal must expose URL and Search modes"
         );
     }
 

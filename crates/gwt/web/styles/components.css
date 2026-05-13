@@ -2576,6 +2576,81 @@ kbd.op-kbd {
   color: var(--color-text-muted);
 }
 
+/* SPEC-2359 Phase U-7 (FR-148): Workspace lifecycle stage chips. Each
+   variant uses a distinct hue so the Kanban Card preview communicates
+   "where is this work" (Planning → Active → InReview → Done → Archived)
+   independently of the runtime status chip ("what are the agents doing
+   right now"). Colors reuse SPEC-2356 Operator Design System state
+   tokens so dark and light themes both render correctly. */
+
+.lifecycle-chip {
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  color: var(--color-text-muted);
+}
+
+.lifecycle-chip--planning {
+  background: color-mix(in oklab, var(--color-state-idle) 18%, transparent);
+  color: var(--color-state-idle);
+}
+
+.lifecycle-chip--active {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+}
+
+.lifecycle-chip--in_review {
+  background: color-mix(in oklab, var(--color-focus-ring) 18%, transparent);
+  color: var(--color-focus-ring);
+}
+
+.lifecycle-chip--done {
+  background: color-mix(in oklab, var(--color-state-done) 18%, transparent);
+  color: var(--color-state-done);
+}
+
+.lifecycle-chip--archived {
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+/* SPEC-2359 Phase U-7 (FR-146): structured link / tag chip row rendered
+   between the title / summary and the meta line. Visually consistent
+   with status chips (small, pill-shaped, monospaced) but tinted with
+   text-muted to recede behind the primary status / lifecycle chips. */
+
+.workspace-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.workspace-card-link-chip {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  background: color-mix(in oklab, var(--color-text-muted) 12%, transparent);
+  color: var(--color-text-muted);
+}
+
+.workspace-card-link-chip--issue {
+  background: color-mix(in oklab, var(--color-link) 18%, transparent);
+  color: var(--color-link);
+}
+
+.workspace-card-link-chip--pr {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+}
+
+.workspace-card-link-chip--tag {
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  color: var(--color-text-muted);
+}
+
 .kanban-card-pending {
   display: inline-block;
   width: 0.75em;

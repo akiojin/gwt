@@ -2,6 +2,7 @@
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
+      import { renderProjectCloneModal as renderProjectCloneModalView } from "/project-clone-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -66,6 +67,7 @@
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
+      const pickerCloneProjectButton = document.getElementById("picker-clone-project");
       const recentProjectList = document.getElementById("recent-project-list");
       const projectOnboarding = document.getElementById("project-onboarding");
       const projectOnboardingTitle = document.getElementById(
@@ -104,6 +106,10 @@
       const wizardCloseButton = document.getElementById("wizard-close-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
+      const cloneProjectModal = document.getElementById("clone-project-modal");
+      const cloneProjectDialog = cloneProjectModal
+        ? cloneProjectModal.querySelector(".modal-shell")
+        : null;
       const branchCleanupModal = document.getElementById("branch-cleanup-modal");
       const branchCleanupDialog = branchCleanupModal.querySelector(".modal-shell");
       const migrationModal = document.getElementById("migration-modal");
@@ -300,6 +306,19 @@
         percent: 0,
         message: "",
         recovery: "",
+      };
+      let cloneProjectModalState = {
+        open: false,
+        mode: "url",
+        url: "",
+        parentPath: "",
+        query: "",
+        repositories: [],
+        selectedRepositoryUrl: "",
+        searching: false,
+        cloning: false,
+        progress: "",
+        error: "",
       };
       let versionState = { current: "", latest: "" };
       const indexStatusByProjectRoot = new Map();
@@ -608,6 +627,116 @@
 
       function sendOpenProjectDialog() {
         send({ kind: "open_project_dialog" });
+      }
+
+      function openCloneProjectModal() {
+        cloneProjectModalState = {
+          ...cloneProjectModalState,
+          open: true,
+          error: "",
+          progress: "",
+        };
+        renderProjectCloneModal();
+      }
+
+      function closeCloneProjectModal() {
+        if (cloneProjectModalState.cloning) {
+          return;
+        }
+        cloneProjectModalState = {
+          ...cloneProjectModalState,
+          open: false,
+          searching: false,
+          error: "",
+          progress: "",
+        };
+        renderProjectCloneModal();
+      }
+
+      function renderProjectCloneModal() {
+        if (!cloneProjectModal || !cloneProjectDialog) {
+          return;
+        }
+        renderProjectCloneModalView({
+          modalEl: cloneProjectModal,
+          dialogEl: cloneProjectDialog,
+          state: cloneProjectModalState,
+          createNode: (tagName, className, textContent) => {
+            const node = document.createElement(tagName);
+            if (className) node.className = className;
+            if (textContent !== undefined) node.textContent = textContent;
+            return node;
+          },
+          onClose: closeCloneProjectModal,
+          onModeChange: (mode) => {
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              mode,
+              error: "",
+              progress: "",
+            };
+            renderProjectCloneModal();
+          },
+          onUrlChange: (url) => {
+            cloneProjectModalState = { ...cloneProjectModalState, url };
+          },
+          onParentSelect: () => {
+            send({ kind: "select_clone_project_parent" });
+          },
+          onSearchQueryChange: (query) => {
+            cloneProjectModalState = { ...cloneProjectModalState, query };
+          },
+          onSearch: () => {
+            const query = cloneProjectModalState.query.trim();
+            if (!query) return;
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              searching: true,
+              error: "",
+            };
+            renderProjectCloneModal();
+            send({ kind: "github_repository_search", query });
+          },
+          onRepositorySelect: (url) => {
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              selectedRepositoryUrl: url,
+              url,
+              error: "",
+            };
+            renderProjectCloneModal();
+          },
+          onClone: () => {
+            const url = (
+              cloneProjectModalState.mode === "search"
+                ? cloneProjectModalState.selectedRepositoryUrl
+                : cloneProjectModalState.url
+            ).trim();
+            const parentPath = cloneProjectModalState.parentPath.trim();
+            if (!url || !parentPath) {
+              cloneProjectModalState = {
+                ...cloneProjectModalState,
+                error: !url
+                  ? "Select or enter a repository URL."
+                  : "Choose a destination parent folder.",
+              };
+              renderProjectCloneModal();
+              return;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: true,
+              progress: "Cloning repository...",
+              error: "",
+            };
+            renderProjectCloneModal();
+            send({
+              kind: "clone_project_start",
+              url,
+              parent_path: parentPath,
+            });
+          },
+        });
       }
 
       function updateActionAvailability() {
@@ -1316,7 +1445,11 @@
         if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") {
           return false;
         }
-        if (modal.classList.contains("open") || wizardModal.classList.contains("open")) {
+        if (
+          modal.classList.contains("open") ||
+          wizardModal.classList.contains("open") ||
+          cloneProjectModal?.classList.contains("open")
+        ) {
           return false;
         }
         return true;
@@ -1390,7 +1523,12 @@
         }
         const runtime = terminalMap.get(resizeState.id);
         cancelTerminalResizeFit();
+        cancelResizePointermoveApply();
         cancelResizeStalenessGuard();
+        // Flush the last pointer coordinates to the DOM so the final geometry
+        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // observe the up-to-date `element.style.width/height`.
+        applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
         sendGeometry(
           resizeState.id,
@@ -1403,6 +1541,52 @@
         // so pointer events resume on the screen-edge triggers once resize
         // ends.
         delete document.documentElement.dataset.opResizeActive;
+      }
+
+      // SPEC-2014 Phase C4: coalesce pointermove-driven `style.width/height`
+      // writes via requestAnimationFrame. Without this, fast trackpads /
+      // 120Hz pointers can cause Windows WebView2 to spend more time in
+      // layout than in paint, manifesting as the resize freeze.
+      function scheduleResizePointermoveApply() {
+        if (!resizeState || resizeState.applyFrame != null) {
+          return;
+        }
+        const pointerId = resizeState.pointerId;
+        resizeState.applyFrame = requestAnimationFrame(() => {
+          if (!resizeState || resizeState.pointerId !== pointerId) {
+            return;
+          }
+          resizeState.applyFrame = null;
+          applyResizePointermove(resizeState);
+          scheduleTerminalResizeFit(resizeState.id);
+        });
+      }
+
+      function cancelResizePointermoveApply() {
+        if (resizeState && resizeState.applyFrame != null) {
+          cancelAnimationFrame(resizeState.applyFrame);
+          resizeState.applyFrame = null;
+        }
+      }
+
+      function applyResizePointermove(state) {
+        if (!state) {
+          return;
+        }
+        const element = windowMap.get(state.id);
+        if (!element) {
+          return;
+        }
+        const x = state.latestClientX ?? state.startX;
+        const y = state.latestClientY ?? state.startY;
+        element.style.width = `${clamp(
+          state.width + (x - state.startX) / viewport.zoom,
+          420,
+        )}px`;
+        element.style.height = `${clamp(
+          state.height + (y - state.startY) / viewport.zoom,
+          260,
+        )}px`;
       }
 
       // SPEC-2014 Phase C1: maximum wall time (in ms) a single resize gesture
@@ -1447,6 +1631,9 @@
         );
         if (previous.fitFrame != null) {
           cancelAnimationFrame(previous.fitFrame);
+        }
+        if (previous.applyFrame != null) {
+          cancelAnimationFrame(previous.applyFrame);
         }
         if (previous.stalenessTimer != null) {
           clearTimeout(previous.stalenessTimer);
@@ -1586,6 +1773,27 @@
           return title;
         }
         return "Active Work";
+      }
+
+      // SPEC-2359 Phase U-7 (FR-148): human-readable label for the Phase
+      // U-6 `WorkspaceLifecycleStage` enum on the Active Work card. Mirror
+      // of `formatLifecycleStageLabel` in workspace-kanban-surface.js so
+      // both surfaces show identical strings.
+      function formatActiveWorkLifecycleLabel(stage) {
+        switch (String(stage || "").toLowerCase()) {
+          case "planning":
+            return "Planning";
+          case "active":
+            return "Active";
+          case "in_review":
+            return "In Review";
+          case "done":
+            return "Done";
+          case "archived":
+            return "Archived";
+          default:
+            return "";
+        }
       }
 
       function agentStatusLabel(state) {
@@ -1749,16 +1957,40 @@
         appendMeta(meta, activeWorkProjection.owner);
         const activePr = createWorkspacePrMeta(activeWorkProjection);
         if (activePr) meta.appendChild(activePr);
+        // SPEC-2359 Phase U-7 (FR-148, FR-149): render the Phase U-6
+        // `lifecycle_stage` in the Active Work meta so user can spot at a
+        // glance whether the work is Planning / Active / InReview / Done /
+        // Archived without opening the Workspace Detail pane. Falls back
+        // silently when the field is absent (legacy daemon payload).
+        const lifecycleStage = activeWorkProjection.lifecycle_stage;
+        if (lifecycleStage) {
+          const chip = createNode(
+            "span",
+            `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
+            formatActiveWorkLifecycleLabel(lifecycleStage),
+          );
+          meta.appendChild(chip);
+        }
         activeWorkSummary.appendChild(meta);
-        activeWorkSummary.appendChild(
-          createNode(
-            "div",
-            "op-work-status",
-            activeWorkProjection.next_action ||
-              activeWorkProjection.status_text ||
-              "Work is active",
-          ),
-        );
+        // SPEC-2359 Phase U-7 (FR-141, FR-149): when `blocked_reason` is
+        // populated, surface it directly in the Active Work status line
+        // instead of letting it hide behind `next_action` / `status_text`.
+        // This mirrors the Detail pane Blocked Reason section so the user
+        // sees consistent "what is blocking" copy across surfaces.
+        const blockedReason =
+          typeof activeWorkProjection.blocked_reason === "string"
+            ? activeWorkProjection.blocked_reason.trim()
+            : "";
+        const statusBody =
+          blockedReason ||
+          activeWorkProjection.next_action ||
+          activeWorkProjection.status_text ||
+          "Work is active";
+        const statusNode = createNode("div", "op-work-status", statusBody);
+        if (blockedReason) {
+          statusNode.classList.add("op-work-status--blocked");
+        }
+        activeWorkSummary.appendChild(statusNode);
 
         const actions = createNode("div", "op-work-actions");
         if (activeWorkProjection.branch) {
@@ -7288,9 +7520,12 @@
               pointerId: event.pointerId,
               startX: event.clientX,
               startY: event.clientY,
+              latestClientX: event.clientX,
+              latestClientY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
               fitFrame: null,
+              applyFrame: null,
               startedAt: performance.now(),
               stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
@@ -8065,6 +8300,67 @@
               frontendUnits.projectWorkspaceShell.activeProjectTab(),
             );
             break;
+          case "clone_project_parent_selected":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              parentPath: event.path || "",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "github_repository_search_results":
+            if (event.query !== cloneProjectModalState.query.trim()) {
+              break;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              repositories: event.repositories || [],
+              selectedRepositoryUrl: "",
+              searching: false,
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "github_repository_search_error":
+            if (event.query !== cloneProjectModalState.query.trim()) {
+              break;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              searching: false,
+              error: event.message || "Repository search failed.",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_progress":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: true,
+              progress: event.message || "Cloning repository...",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_done":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              open: false,
+              cloning: false,
+              searching: false,
+              progress: "",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_error":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: false,
+              progress: "",
+              error: event.message || "Clone failed.",
+            };
+            renderProjectCloneModal();
+            break;
           case "launch_wizard_open_error":
             launchWizard = null;
             launchWizardOpenError = {
@@ -8273,19 +8569,18 @@
         }
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
-          const element = windowMap.get(resizeState.id);
-          if (!element) {
-            return;
-          }
-          element.style.width = `${clamp(
-            resizeState.width + (event.clientX - resizeState.startX) / viewport.zoom,
-            420,
-          )}px`;
-          element.style.height = `${clamp(
-            resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
-            260,
-          )}px`;
-          scheduleTerminalResizeFit(resizeState.id);
+          // SPEC-2014 Phase C4: store the latest pointer coordinates and
+          // batch the actual DOM mutation via requestAnimationFrame. The
+          // previous implementation wrote `element.style.width/height` on
+          // every pointermove (potentially 200+ times per second on high
+          // refresh rate displays), triggering layout reflow at the same
+          // rate. On Windows WebView2 this can starve the render thread and
+          // surface as the resize freeze users reported requiring an app
+          // restart. By coalescing to one apply per frame we keep the visual
+          // responsiveness while letting WebView2 paint between updates.
+          resizeState.latestClientX = event.clientX;
+          resizeState.latestClientY = event.clientY;
+          scheduleResizePointermoveApply();
         }
       });
 
@@ -8471,6 +8766,7 @@
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
       );
+      pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
       onboardingOpenProjectButton.addEventListener(
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
@@ -8509,6 +8805,11 @@
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
           closeLaunchWizardFromChrome();
+        }
+      });
+      cloneProjectModal.addEventListener("click", (event) => {
+        if (event.target === cloneProjectModal) {
+          closeCloneProjectModal();
         }
       });
       branchCleanupModal.addEventListener("click", (event) => {
@@ -8565,6 +8866,11 @@
           // closeModal() handles both the .open class flip and the focus
           // restore via the WeakMap-style closure variables.
           closeModal();
+          event.preventDefault();
+          return;
+        }
+        if (cloneProjectModal && cloneProjectModal.classList.contains("open")) {
+          closeCloneProjectModal();
           event.preventDefault();
           return;
         }

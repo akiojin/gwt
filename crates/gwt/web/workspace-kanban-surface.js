@@ -40,6 +40,77 @@ export function createWorkspaceKanbanSurface({
     return "inactive";
   }
 
+  // SPEC-2359 Phase U-7 (FR-148): Human-readable label for the Phase U-6
+  // `WorkspaceLifecycleStage` enum. The Rust side serializes the enum in
+  // snake_case (planning / active / in_review / done / archived); the UI
+  // shows a capitalised form to match the existing status chip styling.
+  function formatLifecycleStageLabel(stage) {
+    const normalized = String(stage || "").toLowerCase();
+    switch (normalized) {
+      case "planning":
+        return "Planning";
+      case "active":
+        return "Active";
+      case "in_review":
+        return "In Review";
+      case "done":
+        return "Done";
+      case "archived":
+        return "Archived";
+      default:
+        return normalized
+          ? normalized
+              .split("_")
+              .map((part) =>
+                part.length > 0 ? part[0].toUpperCase() + part.slice(1) : part,
+              )
+              .join(" ")
+          : "";
+    }
+  }
+
+  // SPEC-2359 Phase U-7 (FR-146): structured chip row for Kanban Card
+  // preview. Renders `linked_issues`, `linked_prs`, and `tags` as chips
+  // when present. Returns null if there is nothing to show so callers
+  // can skip appending an empty row.
+  function renderWorkspaceCardChipRow(cardData) {
+    const row = createNode("div", "workspace-card-chips");
+    const linkedIssues = Array.isArray(cardData?.linked_issues)
+      ? cardData.linked_issues
+      : [];
+    const linkedPrs = Array.isArray(cardData?.linked_prs) ? cardData.linked_prs : [];
+    const tags = Array.isArray(cardData?.tags) ? cardData.tags : [];
+
+    for (const issue of linkedIssues) {
+      const number = Number.parseInt(issue?.number, 10);
+      if (!Number.isFinite(number)) continue;
+      row.appendChild(
+        createNode("span", "workspace-card-link-chip workspace-card-link-chip--issue", `#Issue-${number}`),
+      );
+    }
+    for (const pr of linkedPrs) {
+      const number = Number.parseInt(pr?.number, 10);
+      if (!Number.isFinite(number)) continue;
+      const state = pr?.state ? `:${pr.state}` : "";
+      row.appendChild(
+        createNode(
+          "span",
+          "workspace-card-link-chip workspace-card-link-chip--pr",
+          `#PR-${number}${state}`,
+        ),
+      );
+    }
+    for (const tag of tags) {
+      const text = typeof tag === "string" ? tag.trim() : "";
+      if (!text) continue;
+      row.appendChild(
+        createNode("span", "workspace-card-link-chip workspace-card-link-chip--tag", `#${text}`),
+      );
+    }
+
+    return row;
+  }
+
   function ownerIssueNumber(owner) {
     const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
     if (!match) return null;
@@ -140,6 +211,23 @@ export function createWorkspaceKanbanSurface({
         agents: Array.isArray(projection.agents) ? projection.agents : [],
         cleanup_candidate: projection.cleanup_candidate || null,
         updated_at: projection.updated_at || "",
+        // SPEC-2359 Phase U-7 (FR-141, FR-147): surface the new Phase U-6
+        // schema fields on the current-Workspace card so the Detail pane
+        // can render them. Each field falls back to an empty string / null
+        // so the existing rendering code keeps working when the projection
+        // payload lacks the new keys (e.g. older daemon, pre-migration
+        // legacy data).
+        blocked_reason: projection.blocked_reason || "",
+        lifecycle_stage: projection.lifecycle_stage || "",
+        created_at: projection.created_at || "",
+        creator: projection.creator || "",
+        linked_issues: Array.isArray(projection.linked_issues)
+          ? projection.linked_issues
+          : [],
+        linked_prs: Array.isArray(projection.linked_prs) ? projection.linked_prs : [],
+        tags: Array.isArray(projection.tags) ? projection.tags : [],
+        progress_pct:
+          typeof projection.progress_pct === "number" ? projection.progress_pct : null,
         resume_source: "current",
         journal_id: null,
         events: [],
@@ -295,10 +383,34 @@ export function createWorkspaceKanbanSurface({
         agentStatusLabel(cardData.status_category),
       ),
     );
+    // SPEC-2359 Phase U-7 (FR-146, FR-148): render the Phase U-6
+    // `lifecycle_stage` as its own chip next to the runtime status chip
+    // so user can distinguish "where is this work in its lifecycle"
+    // (Planning / Active / InReview / Done / Archived) from "what are
+    // the agents doing right now" (active / idle / blocked / done).
+    if (cardData.lifecycle_stage) {
+      head.appendChild(
+        createNode(
+          "span",
+          `kanban-card-chip lifecycle-chip lifecycle-chip--${cardData.lifecycle_stage}`,
+          formatLifecycleStageLabel(cardData.lifecycle_stage),
+        ),
+      );
+    }
     selectButton.appendChild(head);
     selectButton.appendChild(createNode("div", "kanban-card-title", cardData.title));
     if (cardData.summary) {
       selectButton.appendChild(createNode("div", "workspace-card-summary", cardData.summary));
+    }
+
+    // SPEC-2359 Phase U-7 (FR-146): structured Issue / PR / tag chips. The
+    // Phase U-6 schema stores them as structured arrays so we can render
+    // each as a chip (#Issue-N, #PR-N, #tag) instead of free-text. The
+    // existing owner / branch / PR meta line below remains for legacy
+    // CSS / a11y.
+    const chips = renderWorkspaceCardChipRow(cardData);
+    if (chips && chips.childElementCount > 0) {
+      selectButton.appendChild(chips);
     }
 
     const meta = createNode("div", "kanban-card-meta");
@@ -380,10 +492,26 @@ export function createWorkspaceKanbanSurface({
       createNode(
         "pre",
         "knowledge-section-body",
-        cardData.summary || cardData.status_text || "No Workspace summary yet",
+        cardData.summary ||
+          cardData.status_text ||
+          "Summary not set — add one with `gwtd workspace update --summary X`",
       ),
     );
     scroll.appendChild(summary);
+
+    // SPEC-2359 Phase U-7 (FR-141, FR-147): a dedicated Blocked Reason
+    // section makes the cause of the Blocked status discoverable without
+    // mining the journal. Detail pane renders it between Summary and
+    // Next Action so the user sees "what's blocking" before "what to do
+    // next".
+    if (cardData.blocked_reason) {
+      const blocked = createNode("section", "knowledge-section");
+      blocked.appendChild(createNode("div", "knowledge-section-title", "Blocked Reason"));
+      blocked.appendChild(
+        createNode("pre", "knowledge-section-body", cardData.blocked_reason),
+      );
+      scroll.appendChild(blocked);
+    }
 
     if (cardData.next_action) {
       const next = createNode("section", "knowledge-section");
@@ -399,9 +527,14 @@ export function createWorkspaceKanbanSurface({
       scroll.appendChild(context);
     }
 
+    // SPEC-2359 Phase U-7 (FR-147): the Lifecycle section is now always
+    // rendered. When the Workspace has no recorded events the section
+    // surfaces an informative placeholder so users know where the
+    // timeline will appear once activity arrives — instead of the whole
+    // section vanishing and leaving the Detail pane feeling empty.
+    const lifecycle = createNode("section", "knowledge-section");
+    lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
     if (cardData.events.length > 0) {
-      const lifecycle = createNode("section", "knowledge-section");
-      lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
       lifecycle.appendChild(
         createNode(
           "pre",
@@ -422,8 +555,16 @@ export function createWorkspaceKanbanSurface({
             .join("\n"),
         ),
       );
-      scroll.appendChild(lifecycle);
+    } else {
+      lifecycle.appendChild(
+        createNode(
+          "pre",
+          "knowledge-section-body workspace-lifecycle-empty",
+          "Workspace created — no lifecycle events yet. Activity will appear after the next Board post.",
+        ),
+      );
     }
+    scroll.appendChild(lifecycle);
 
     if (cardData.agents.length > 0) {
       const agents = createNode("section", "knowledge-section");

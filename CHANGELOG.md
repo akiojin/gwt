@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.31.0] - 2026-05-13
+
+### Bug Fixes
+
+- **windows:** Resize/起動の追加防御策と診断ログ (SPEC-2014 Phase C4-C6)
+- **gui:** Keep workspace detail empty-state copy English (AGENTS.md TUI policy)
+- **workspace:** SPEC-2359 Phase U-6 rustdoc broken intra-doc link
+- **workspace:** Implement recompute_lifecycle_stage helper to resolve broken doc links
+- Include clone modal in playwright fixtures
+- **agent:** Stop forcing Claude no-flicker env
+
+### Features
+
+- **workspace:** SPEC-2359 Phase U-6 schema additions (FR-131..133)
+- **workspace:** SPEC-2359 Phase U-6 auto-populate on workspace create (FR-134/135)
+- **workspace:** SPEC-2359 Phase U-6 Board milestone backfills (FR-140/141)
+- **workspace:** SPEC-2359 Phase U-6 retroactive migration (FR-142..145)
+- **workspace:** SPEC-2359 Phase U-7 detail pane informative empty states (FR-141/147)
+- **workspace:** SPEC-2359 Phase U-6 wire migration to daemon bootstrap
+- **workspace:** SPEC-2359 Phase U-7 Card preview lifecycle + link chips (FR-146/148)
+- **workspace:** SPEC-2359 Phase U-7 Active Work lifecycle + blocked_reason (FR-148/149)
+- Restore GitHub project cloning
+
+### Miscellaneous Tasks
+
+- **workspace:** Use is_none_or for Phase U-6 summary backfill check
+- **workspace:** Rustfmt workspace_projection_migration tests
+- Merge develop into github clone work
+
 ## [9.30.0] - 2026-05-13
 
 ### Bug Fixes

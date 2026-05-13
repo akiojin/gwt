@@ -102,10 +102,10 @@ pub use preset::{
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
-    FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistoryView, WorkspaceJournalEntryView,
-    WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
-    WorkspaceWorkItemView,
+    FrontendEvent, GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistoryView,
+    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView,
+    WorkspaceWorkEventView, WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;

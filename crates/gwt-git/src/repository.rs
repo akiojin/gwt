@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gwt_core::{GwtError, Result};
+use gwt_core::{config::BareProjectConfig, GwtError, Result};
 
 /// The type of repository detected at a given path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +108,230 @@ fn find_develop_worktree(parent: &Path) -> Option<PathBuf> {
     if develop.is_dir() && develop.join(".git").exists() {
         return Some(develop);
     }
-    None
+    let mut worktrees = fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join(".git").is_file())
+        .collect::<Vec<_>>();
+    worktrees.sort();
+    worktrees.into_iter().next()
+}
+
+/// Derived filesystem target for creating a gwt project from a GitHub repo URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubProjectCloneTarget {
+    pub repo_name: String,
+    pub workspace_home: PathBuf,
+    pub bare_repo_path: PathBuf,
+}
+
+/// Outcome of a successful direct Nested Bare+Worktree clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubProjectCloneOutcome {
+    pub workspace_home: PathBuf,
+    pub bare_repo_path: PathBuf,
+    pub initial_worktree_path: PathBuf,
+    pub initial_branch: String,
+}
+
+/// Derive the gwt Workspace Home and nested bare repo path from a repository
+/// URL and the user-selected parent directory.
+pub fn derive_github_project_clone_target(
+    url: &str,
+    parent_dir: &Path,
+) -> Result<GitHubProjectCloneTarget> {
+    let repo_name = repository_name_from_url(url)?;
+    let workspace_home = parent_dir.join(&repo_name);
+    let bare_repo_path = workspace_home.join(format!("{repo_name}.git"));
+    Ok(GitHubProjectCloneTarget {
+        repo_name,
+        workspace_home,
+        bare_repo_path,
+    })
+}
+
+fn repository_name_from_url(url: &str) -> Result<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(GwtError::Git("repository URL is required".to_string()));
+    }
+
+    let without_query = trimmed
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    let path_part = if let Some((_prefix, rest)) = without_query.split_once("://") {
+        rest.rsplit_once('/')
+            .map(|(_parent, name)| name)
+            .unwrap_or(rest)
+    } else if let Some((_prefix, rest)) = without_query.rsplit_once(':') {
+        rest.rsplit_once('/')
+            .map(|(_parent, name)| name)
+            .unwrap_or(rest)
+    } else {
+        without_query
+            .rsplit_once('/')
+            .map(|(_parent, name)| name)
+            .unwrap_or(without_query)
+    };
+
+    let repo_name = path_part.trim_end_matches(".git").trim();
+    let valid = !repo_name.is_empty()
+        && repo_name != "."
+        && repo_name != ".."
+        && repo_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if !valid {
+        return Err(GwtError::Git(format!(
+            "invalid repository URL: unable to derive repository name from '{trimmed}'"
+        )));
+    }
+    Ok(repo_name.to_string())
+}
+
+/// Clone a GitHub repository directly into gwt's Nested Bare+Worktree layout.
+///
+/// The resulting directory structure is:
+///
+/// ```text
+/// <parent>/<repo>/
+/// ├── <repo>.git/
+/// ├── <initial-branch>/
+/// └── .gwt/project.toml
+/// ```
+pub fn clone_project_as_nested_bare(
+    url: &str,
+    parent_dir: &Path,
+) -> Result<GitHubProjectCloneOutcome> {
+    let target = derive_github_project_clone_target(url, parent_dir)?;
+    if target.workspace_home.exists() {
+        return Err(GwtError::Git(format!(
+            "clone target already exists: {}",
+            target.workspace_home.display()
+        )));
+    }
+    if !parent_dir.is_dir() {
+        return Err(GwtError::Git(format!(
+            "clone destination parent is not a directory: {}",
+            parent_dir.display()
+        )));
+    }
+
+    fs::create_dir(&target.workspace_home).map_err(GwtError::Io)?;
+    match clone_project_as_nested_bare_inner(url, &target) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            let cleanup = fs::remove_dir_all(&target.workspace_home);
+            if let Err(cleanup_error) = cleanup {
+                return Err(GwtError::Git(format!(
+                    "{error}; cleanup failed for {}: {cleanup_error}",
+                    target.workspace_home.display()
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn clone_project_as_nested_bare_inner(
+    url: &str,
+    target: &GitHubProjectCloneTarget,
+) -> Result<GitHubProjectCloneOutcome> {
+    let bare_path = target.bare_repo_path.to_str().ok_or_else(|| {
+        GwtError::Git(format!(
+            "invalid bare repository path: {}",
+            target.bare_repo_path.display()
+        ))
+    })?;
+    let clone_output = gwt_core::process::hidden_command("git")
+        .args(["clone", "--bare", url, bare_path])
+        .output()
+        .map_err(|error| GwtError::Git(format!("git clone --bare: {error}")))?;
+    if !clone_output.status.success() {
+        return Err(GwtError::Git(format!(
+            "failed to clone repository as bare repo: {}",
+            git_stderr(&clone_output)
+        )));
+    }
+
+    install_develop_protection(&target.bare_repo_path)?;
+
+    let initial_branch = preferred_initial_branch(&target.bare_repo_path)?;
+    let initial_worktree_path = target.workspace_home.join(&initial_branch);
+    let worktree_path = initial_worktree_path.to_str().ok_or_else(|| {
+        GwtError::Git(format!(
+            "invalid worktree path: {}",
+            initial_worktree_path.display()
+        ))
+    })?;
+    let worktree_output = gwt_core::process::hidden_command("git")
+        .args(["worktree", "add", worktree_path, &initial_branch])
+        .current_dir(&target.bare_repo_path)
+        .output()
+        .map_err(|error| GwtError::Git(format!("git worktree add: {error}")))?;
+    if !worktree_output.status.success() {
+        return Err(GwtError::Git(format!(
+            "failed to create initial worktree for branch '{initial_branch}': {}",
+            git_stderr(&worktree_output)
+        )));
+    }
+
+    BareProjectConfig {
+        bare_repo_name: format!("{}.git", target.repo_name),
+        remote_url: Some(url.to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        migrated_from: None,
+    }
+    .save(&target.workspace_home)?;
+
+    Ok(GitHubProjectCloneOutcome {
+        workspace_home: target.workspace_home.clone(),
+        bare_repo_path: target.bare_repo_path.clone(),
+        initial_worktree_path,
+        initial_branch,
+    })
+}
+
+fn preferred_initial_branch(bare_repo_path: &Path) -> Result<String> {
+    let develop = gwt_core::process::hidden_command("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/develop"])
+        .current_dir(bare_repo_path)
+        .status()
+        .map_err(|error| GwtError::Git(format!("git show-ref develop: {error}")))?;
+    if develop.success() {
+        return Ok("develop".to_string());
+    }
+
+    let output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(bare_repo_path)
+        .output()
+        .map_err(|error| GwtError::Git(format!("git symbolic-ref HEAD: {error}")))?;
+    if !output.status.success() {
+        return Err(GwtError::Git(format!(
+            "failed to determine remote default branch: {}",
+            git_stderr(&output)
+        )));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err(GwtError::Git(
+            "failed to determine remote default branch".to_string(),
+        ));
+    }
+    Ok(branch)
+}
+
+fn git_stderr(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "git command failed without stderr".to_string()
+    } else {
+        stderr
+    }
 }
 
 /// Clone a repository into the target directory using a normal shallow clone.
@@ -451,6 +674,30 @@ mod tests {
     }
 
     #[test]
+    fn detect_repo_type_prefers_any_child_worktree_when_develop_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_dir = tmp.path().join("repo.git");
+        let main_worktree = tmp.path().join("main");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(&main_worktree).unwrap();
+        std::fs::write(
+            main_worktree.join(".git"),
+            "gitdir: ../repo.git/worktrees/main\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_repo_type(tmp.path()),
+            RepoType::Bare {
+                develop_worktree: Some(main_worktree)
+            }
+        );
+    }
+
+    #[test]
     fn detect_repo_type_finds_normal_in_child_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_dir = tmp.path().join("my-project");
@@ -474,6 +721,31 @@ mod tests {
         let target = tmp.path().join("clone-target");
         let result = clone_repo("https://invalid.example.com/no-such-repo.git", &target);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn github_project_clone_target_derives_workspace_from_https_url() {
+        let parent = Path::new("/tmp/projects");
+
+        let target =
+            derive_github_project_clone_target("https://github.com/akiojin/gwt.git", parent)
+                .expect("derive target from https url");
+
+        assert_eq!(target.repo_name, "gwt");
+        assert_eq!(target.workspace_home, parent.join("gwt"));
+        assert_eq!(target.bare_repo_path, parent.join("gwt").join("gwt.git"));
+    }
+
+    #[test]
+    fn github_project_clone_target_derives_workspace_from_ssh_url() {
+        let parent = Path::new("/tmp/projects");
+
+        let target = derive_github_project_clone_target("git@github.com:akiojin/gwt.git", parent)
+            .expect("derive target from ssh url");
+
+        assert_eq!(target.repo_name, "gwt");
+        assert_eq!(target.workspace_home, parent.join("gwt"));
+        assert_eq!(target.bare_repo_path, parent.join("gwt").join("gwt.git"));
     }
 
     // ---- install_develop_protection tests ----
