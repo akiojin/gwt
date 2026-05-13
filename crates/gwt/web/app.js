@@ -1440,10 +1440,17 @@
             createNode("div", "knowledge-detail-subtitle", detail.subtitle),
           );
         }
-        if ((detail.labels || []).length > 0) {
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
           const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of detail.labels) {
-            labelRow.appendChild(createNode("span", "kanban-card-chip", label));
+          for (const label of displayLabels) {
+            labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
           }
           body.appendChild(labelRow);
         }
@@ -5879,6 +5886,91 @@
         }
       }
 
+      const KNOWLEDGE_PHASES = new Set([
+        "draft",
+        "planning",
+        "implementation",
+        "review",
+        "done",
+      ]);
+
+      function isKnowledgePhaseLabel(label) {
+        return typeof label === "string" && label.startsWith("phase/");
+      }
+
+      function canonicalKnowledgePhase(phase) {
+        const value = String(phase || "");
+        return KNOWLEDGE_PHASES.has(value) ? value : null;
+      }
+
+      function knowledgePhaseFromLabels(labels = []) {
+        for (const label of Array.isArray(labels) ? labels : []) {
+          if (!isKnowledgePhaseLabel(label)) continue;
+          const phase = canonicalKnowledgePhase(label.slice("phase/".length));
+          if (phase) return phase;
+        }
+        return null;
+      }
+
+      function effectiveKnowledgePhase(entry) {
+        if (entry?.state === "closed") return "done";
+        return canonicalKnowledgePhase(entry?.phase)
+          || knowledgePhaseFromLabels(entry?.labels)
+          || "backlog";
+      }
+
+      function knowledgePhaseDisplayName(phase) {
+        switch (phase) {
+          case "draft":
+            return "Draft";
+          case "planning":
+            return "Planning";
+          case "implementation":
+            return "Implementation";
+          case "review":
+            return "Review";
+          case "done":
+            return "Done";
+          default:
+            return "Backlog";
+        }
+      }
+
+      function visibleKnowledgeLabels(labels = []) {
+        return (Array.isArray(labels) ? labels : []).filter(
+          (label) => !isKnowledgePhaseLabel(label),
+        );
+      }
+
+      function staleKnowledgePhaseWarning(entry) {
+        const storedPhase = canonicalKnowledgePhase(entry?.phase)
+          || knowledgePhaseFromLabels(entry?.labels);
+        if (entry?.state === "closed" && storedPhase && storedPhase !== "done") {
+          return `Stored phase/${storedPhase}; lifecycle is Done`;
+        }
+        return "";
+      }
+
+      function knowledgeDetailChip(detail) {
+        const effectivePhase = effectiveKnowledgePhase(detail);
+        const rawState = String(detail?.state || "").toLowerCase();
+        if (
+          rawState
+          && rawState !== "open"
+          && rawState !== "closed"
+          && effectivePhase === "backlog"
+        ) {
+          return {
+            className: rawState,
+            label: rawState,
+          };
+        }
+        return {
+          className: effectivePhase === "done" ? "closed" : "open",
+          label: knowledgePhaseDisplayName(effectivePhase),
+        };
+      }
+
       function filteredKnowledgeEntries(state) {
         const query = state.query.trim().toLowerCase();
         if (!query) {
@@ -5977,12 +6069,14 @@
         const card = createNode("button", "kanban-card");
         card.type = "button";
         card.dataset.issueNumber = String(entry.number);
+        const effectivePhase = effectiveKnowledgePhase(entry);
         // Plain (non-spec) Issues cannot be moved through phase columns
         // because they carry no canonical phase labels. We surface a
         // (plain) chip and disable HTML5 D&D so the user understands
         // the constraint at a glance.
         const isPlain = entry.is_spec === false;
-        card.draggable = !isPlain;
+        const isClosed = String(entry?.state || "").toLowerCase() === "closed";
+        card.draggable = !isPlain && !isClosed;
         if (isPlain) {
           card.classList.add("kanban-card--plain");
         }
@@ -6004,12 +6098,12 @@
         head.appendChild(
           createNode("span", "kanban-card-number", `#${entry.number}`),
         );
-        const stateChip = createNode(
+        const phaseChip = createNode(
           "span",
-          `kanban-card-chip kanban-card-chip--state-${entry.state}`,
-          entry.state,
+          `kanban-card-chip kanban-card-chip--phase-${effectivePhase}`,
+          knowledgePhaseDisplayName(effectivePhase),
         );
-        head.appendChild(stateChip);
+        head.appendChild(phaseChip);
         card.appendChild(head);
 
         card.appendChild(
@@ -6061,10 +6155,10 @@
           renderKnowledgeBridge(windowId);
         });
 
-        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
-        // skip these handlers entirely (draggable=false above) so they
-        // can still be clicked but never picked up.
-        if (!isPlain) {
+        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) and closed
+        // cards skip these handlers entirely (draggable=false above) so
+        // they can still be clicked but never picked up.
+        if (!isPlain && !isClosed) {
           card.addEventListener("dragstart", (event) => {
             // Snapshot the original entry so a failed write-back can
             // restore it; the snapshot keeps the entire entry value
@@ -6072,8 +6166,7 @@
             state.dndSnapshot = {
               issueNumber: entry.number,
               entry: { ...entry },
-              originPhase:
-                entry.state === "closed" ? "done" : entry.phase || "backlog",
+              originPhase: effectiveKnowledgePhase(entry),
             };
             card.classList.add("is-dragging");
             if (event.dataTransfer) {
@@ -6160,8 +6253,7 @@
         }
         const counts = new Map();
         for (const entry of visibleEntries) {
-          const phaseKey =
-            entry.state === "closed" ? "done" : entry.phase || "backlog";
+          const phaseKey = effectiveKnowledgePhase(entry);
           const column = columnsByPhase.get(phaseKey) || columnsByPhase.get("backlog");
           if (!column) continue;
           const body = column.querySelector("[data-role='body']");
@@ -6199,8 +6291,13 @@
         const head = createNode("div", "");
         const headRow = createNode("div", "knowledge-detail-head");
         headRow.appendChild(createNode("h3", "knowledge-detail-title", detail.title));
+        const detailChip = knowledgeDetailChip(detail);
         headRow.appendChild(
-          createNode("span", `knowledge-state-chip ${detail.state}`, detail.state),
+          createNode(
+            "span",
+            `knowledge-state-chip ${detailChip.className}`,
+            detailChip.label,
+          ),
         );
         head.appendChild(headRow);
         if (detail.subtitle) {
@@ -6208,10 +6305,17 @@
             createNode("div", "knowledge-detail-subtitle", detail.subtitle),
           );
         }
-        if ((detail.labels || []).length > 0) {
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
           const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of detail.labels) {
+          for (const label of displayLabels) {
             labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
           }
           head.appendChild(labelRow);
         }
