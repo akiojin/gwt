@@ -618,8 +618,27 @@ mod tests {
         // cols/rows) get written into xterm's default 80×24 grid and
         // stay layout-locked there until the next manual resize.
         let html = frontend_bundle_source();
+        // The rAF must dispatch to completeInitialFitHandshake — keeping
+        // the handshake idempotent and gated on visibility (see helper
+        // below). Inlining the activation / replay in the rAF would let
+        // `isReady` flip while the window is still hidden, defeating the
+        // deferredWrites buffer (CodeRabbit PR #2693 concern).
         let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);\s*requestAnimationFrame\(\(\) => \{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}\s*\}\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+        )
+        .expect("valid regex");
+        // The helper itself must (a) bail when canRefreshTerminalViewport
+        // is false so we do not flip isReady while hidden, and (b) only
+        // mark the runtime ready after activation succeeds.
+        let handshake_helper = regex::Regex::new(
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+        )
+        .expect("valid regex");
+        // Hidden → visible activation path also needs to drive the
+        // handshake — otherwise a window created hidden never drains
+        // its deferred buffer until the user manually resizes.
+        let reveal_completes_handshake = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
         let write_gate = regex::Regex::new(
@@ -633,7 +652,15 @@ mod tests {
 
         assert!(
             create_runtime_handshake.is_match(html),
-            "expected createTerminalRuntime to defer snapshot / pending / deferred output replay until the rAF runs runTerminalActivationSequence and sets runtime.isReady = true (FR-057)",
+            "expected createTerminalRuntime to dispatch its initial-fit handshake through completeInitialFitHandshake instead of inlining the replay (FR-057, CodeRabbit fix)",
+        );
+        assert!(
+            handshake_helper.is_match(html),
+            "expected completeInitialFitHandshake to bail on canRefreshTerminalViewport=false and only set isReady=true after activation succeeds (FR-057, CodeRabbit fix)",
+        );
+        assert!(
+            reveal_completes_handshake.is_match(html),
+            "expected scheduleTerminalFocusActivation to invoke completeInitialFitHandshake on hidden -> visible so windows created hidden can still drain deferredWrites (FR-057, CodeRabbit fix)",
         );
         assert!(
             write_gate.is_match(html),

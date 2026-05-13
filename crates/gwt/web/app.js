@@ -1855,6 +1855,15 @@
             shouldPersistGeometry: true,
             sendGeometry,
           });
+          // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
+          // a hidden state, its initial fit handshake never completed
+          // (completeInitialFitHandshake bails when canRefreshTerminalViewport
+          // is false). The hidden → visible transition is the first chance
+          // to drain the pending buffers; complete the handshake here so
+          // subsequent writeOutput calls stop hitting deferredWrites.
+          if (activeRuntime.isReady === false) {
+            completeInitialFitHandshake(windowId);
+          }
           // Schedule one more viewport refresh on the next frame so the
           // post-fit cols/rows are reflected in the rendered buffer even
           // when xterm coalesces internal redraws. This keeps the prior
@@ -2910,47 +2919,69 @@
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
-        requestAnimationFrame(() => {
-          // The activation sequence here populates xterm cell metrics,
-          // runs fit, and sends geometry to the backend BEFORE any
-          // pending snapshot / output gets written. Once it returns we
-          // mark the runtime ready and replay any buffered content in
-          // FIFO order. This also implements FR-AH-01 / FR-057.
-          runTerminalActivationSequence({
-            runtime,
-            windowId,
-            shouldFocus: false,
-            shouldPersistGeometry: true,
-            sendGeometry,
-          });
-          runtime.isReady = true;
-
-          const snapshot = pendingSnapshotMap.get(windowId);
-          if (snapshot) {
-            replaceTerminalSnapshot(windowId, snapshot);
-            pendingSnapshotMap.delete(windowId);
-          }
-
-          const pending = pendingOutputMap.get(windowId);
-          if (pending?.length) {
-            for (const chunk of pending) {
-              writeOutput(windowId, chunk);
-            }
-            pendingOutputMap.delete(windowId);
-          }
-
-          // Flush any terminal_output WebSocket bytes that arrived
-          // between createTerminalRuntime returning and this rAF firing.
-          if (runtime.deferredWrites.length) {
-            const flush = runtime.deferredWrites;
-            runtime.deferredWrites = [];
-            for (const chunk of flush) {
-              writeOutput(windowId, chunk);
-            }
-          }
-        });
+        // SPEC-2008 Phase 26.A / FR-057: schedule the initial fit
+        // handshake. The handshake only completes once the runtime's
+        // element is actually visible — see completeInitialFitHandshake.
+        // If the window was created in a hidden state (e.g. inactive
+        // tab group member), the rAF below runs but is a no-op; the
+        // handshake then completes on the next hidden → visible
+        // transition via scheduleTerminalFocusActivation.
+        requestAnimationFrame(() => completeInitialFitHandshake(windowId));
 
         return runtime;
+      }
+
+      // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
+      // pending buffered content. Idempotent and gated on
+      // `canRefreshTerminalViewport(windowId)` so we never flip
+      // `isReady = true` while the runtime element is still hidden —
+      // doing so would let later `writeOutput` calls bypass the
+      // deferredWrites buffer and render against xterm's default 80×24
+      // grid before fit ever had a chance to populate cell metrics.
+      function completeInitialFitHandshake(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.isReady) {
+          return;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          // Still hidden; wait for the next reveal. The hidden →
+          // visible transition handler (scheduleTerminalFocusActivation)
+          // will call back into this helper.
+          return;
+        }
+        runTerminalActivationSequence({
+          runtime,
+          windowId,
+          shouldFocus: false,
+          shouldPersistGeometry: true,
+          sendGeometry,
+        });
+        runtime.isReady = true;
+
+        const snapshot = pendingSnapshotMap.get(windowId);
+        if (snapshot) {
+          replaceTerminalSnapshot(windowId, snapshot);
+          pendingSnapshotMap.delete(windowId);
+        }
+
+        const pending = pendingOutputMap.get(windowId);
+        if (pending?.length) {
+          for (const chunk of pending) {
+            writeOutput(windowId, chunk);
+          }
+          pendingOutputMap.delete(windowId);
+        }
+
+        // Flush any terminal_output WebSocket bytes that arrived
+        // between createTerminalRuntime returning and this handshake
+        // firing.
+        if (runtime.deferredWrites.length) {
+          const flush = runtime.deferredWrites;
+          runtime.deferredWrites = [];
+          for (const chunk of flush) {
+            writeOutput(windowId, chunk);
+          }
+        }
       }
 
       function writeOutput(windowId, base64) {
