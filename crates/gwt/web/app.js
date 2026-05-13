@@ -1390,7 +1390,12 @@
         }
         const runtime = terminalMap.get(resizeState.id);
         cancelTerminalResizeFit();
+        cancelResizePointermoveApply();
         cancelResizeStalenessGuard();
+        // Flush the last pointer coordinates to the DOM so the final geometry
+        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // observe the up-to-date `element.style.width/height`.
+        applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
         sendGeometry(
           resizeState.id,
@@ -1403,6 +1408,52 @@
         // so pointer events resume on the screen-edge triggers once resize
         // ends.
         delete document.documentElement.dataset.opResizeActive;
+      }
+
+      // SPEC-2014 Phase C4: coalesce pointermove-driven `style.width/height`
+      // writes via requestAnimationFrame. Without this, fast trackpads /
+      // 120Hz pointers can cause Windows WebView2 to spend more time in
+      // layout than in paint, manifesting as the resize freeze.
+      function scheduleResizePointermoveApply() {
+        if (!resizeState || resizeState.applyFrame != null) {
+          return;
+        }
+        const pointerId = resizeState.pointerId;
+        resizeState.applyFrame = requestAnimationFrame(() => {
+          if (!resizeState || resizeState.pointerId !== pointerId) {
+            return;
+          }
+          resizeState.applyFrame = null;
+          applyResizePointermove(resizeState);
+          scheduleTerminalResizeFit(resizeState.id);
+        });
+      }
+
+      function cancelResizePointermoveApply() {
+        if (resizeState && resizeState.applyFrame != null) {
+          cancelAnimationFrame(resizeState.applyFrame);
+          resizeState.applyFrame = null;
+        }
+      }
+
+      function applyResizePointermove(state) {
+        if (!state) {
+          return;
+        }
+        const element = windowMap.get(state.id);
+        if (!element) {
+          return;
+        }
+        const x = state.latestClientX ?? state.startX;
+        const y = state.latestClientY ?? state.startY;
+        element.style.width = `${clamp(
+          state.width + (x - state.startX) / viewport.zoom,
+          420,
+        )}px`;
+        element.style.height = `${clamp(
+          state.height + (y - state.startY) / viewport.zoom,
+          260,
+        )}px`;
       }
 
       // SPEC-2014 Phase C1: maximum wall time (in ms) a single resize gesture
@@ -1447,6 +1498,9 @@
         );
         if (previous.fitFrame != null) {
           cancelAnimationFrame(previous.fitFrame);
+        }
+        if (previous.applyFrame != null) {
+          cancelAnimationFrame(previous.applyFrame);
         }
         if (previous.stalenessTimer != null) {
           clearTimeout(previous.stalenessTimer);
@@ -7288,9 +7342,12 @@
               pointerId: event.pointerId,
               startX: event.clientX,
               startY: event.clientY,
+              latestClientX: event.clientX,
+              latestClientY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
               fitFrame: null,
+              applyFrame: null,
               startedAt: performance.now(),
               stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
@@ -8273,19 +8330,18 @@
         }
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
-          const element = windowMap.get(resizeState.id);
-          if (!element) {
-            return;
-          }
-          element.style.width = `${clamp(
-            resizeState.width + (event.clientX - resizeState.startX) / viewport.zoom,
-            420,
-          )}px`;
-          element.style.height = `${clamp(
-            resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
-            260,
-          )}px`;
-          scheduleTerminalResizeFit(resizeState.id);
+          // SPEC-2014 Phase C4: store the latest pointer coordinates and
+          // batch the actual DOM mutation via requestAnimationFrame. The
+          // previous implementation wrote `element.style.width/height` on
+          // every pointermove (potentially 200+ times per second on high
+          // refresh rate displays), triggering layout reflow at the same
+          // rate. On Windows WebView2 this can starve the render thread and
+          // surface as the resize freeze users reported requiring an app
+          // restart. By coalescing to one apply per frame we keep the visual
+          // responsiveness while letting WebView2 paint between updates.
+          resizeState.latestClientX = event.clientX;
+          resizeState.latestClientY = event.clientY;
+          scheduleResizePointermoveApply();
         }
       });
 
