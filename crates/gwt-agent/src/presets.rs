@@ -230,7 +230,7 @@ pub fn claude_code_openai_compat_preset(
     let api_key = api_key.into();
     let default_model = default_model.into();
 
-    let mut env = HashMap::with_capacity(13);
+    let mut env = HashMap::with_capacity(12);
     env.insert("ANTHROPIC_API_KEY".to_string(), api_key);
     env.insert("ANTHROPIC_BASE_URL".to_string(), base_url);
     env.insert(
@@ -251,7 +251,6 @@ pub fn claude_code_openai_compat_preset(
         "0".to_string(),
     );
     env.insert("DISABLE_TELEMETRY".to_string(), "1".to_string());
-    env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
     env.insert("DISABLE_ERROR_REPORTING".to_string(), "1".to_string());
     env.insert("DISABLE_FEEDBACK_COMMAND".to_string(), "1".to_string());
     env.insert(
@@ -303,12 +302,12 @@ mod tests {
     }
 
     #[test]
-    fn preset_env_contains_thirteen_entries() {
+    fn preset_env_contains_twelve_entries() {
         let preset = claude_code_openai_compat_preset("x", "X", "http://a", "k", "m");
         assert_eq!(
             preset.env.len(),
-            13,
-            "preset must seed exactly 13 env vars (FR-062)"
+            12,
+            "preset must seed exactly 12 env vars and avoid legacy no-flicker defaults"
         );
     }
 
@@ -330,7 +329,6 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL",
             "CLAUDE_CODE_ATTRIBUTION_HEADER",
             "DISABLE_TELEMETRY",
-            "CLAUDE_CODE_NO_FLICKER",
             "DISABLE_ERROR_REPORTING",
             "DISABLE_FEEDBACK_COMMAND",
             "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
@@ -342,6 +340,10 @@ mod tests {
                 "preset env is missing key {key}"
             );
         }
+        assert!(
+            !preset.env.contains_key("CLAUDE_CODE_NO_FLICKER"),
+            "preset must not force the legacy no-flicker renderer"
+        );
     }
 
     #[test]
@@ -386,7 +388,7 @@ mod tests {
         let preset = claude_code_openai_compat_preset("x", "X", "http://a", "k", "m");
         assert_eq!(preset.env["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0");
         assert_eq!(preset.env["DISABLE_TELEMETRY"], "1");
-        assert_eq!(preset.env["CLAUDE_CODE_NO_FLICKER"], "1");
+        assert!(!preset.env.contains_key("CLAUDE_CODE_NO_FLICKER"));
         assert_eq!(preset.env["DISABLE_ERROR_REPORTING"], "1");
         assert_eq!(preset.env["DISABLE_FEEDBACK_COMMAND"], "1");
         assert_eq!(preset.env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1");
@@ -419,7 +421,7 @@ mod tests {
 
         assert_eq!(preset.id, "claude-code-openai");
         assert_eq!(preset.command, "@anthropic-ai/claude-code@latest");
-        assert_eq!(preset.env.len(), 13);
+        assert_eq!(preset.env.len(), 12);
         assert_eq!(
             preset.env["ANTHROPIC_BASE_URL"],
             "https://proxy.example.com"

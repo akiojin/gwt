@@ -229,13 +229,15 @@ mod tests {
         let agent = add_sample_from_preset(&path, &input).expect("save");
 
         assert_eq!(agent.id, input.id);
-        assert_eq!(agent.env.len(), 13);
+        assert_eq!(agent.env.len(), 12);
+        assert!(!agent.env.contains_key("CLAUDE_CODE_NO_FLICKER"));
         assert_eq!(agent.env["ANTHROPIC_API_KEY"], input.api_key);
         assert_eq!(agent.env["ANTHROPIC_BASE_URL"], input.base_url);
 
         let reloaded = list_custom_agents(&path).unwrap();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].env.len(), 13);
+        assert_eq!(reloaded[0].env.len(), 12);
+        assert!(!reloaded[0].env.contains_key("CLAUDE_CODE_NO_FLICKER"));
         assert_eq!(
             reloaded[0].env["ANTHROPIC_DEFAULT_OPUS_MODEL"],
             input.default_model
@@ -253,7 +255,8 @@ mod tests {
             add_from_preset(&path, PresetId::ClaudeCodeOpenaiCompat, &payload).expect("save");
 
         assert_eq!(agent.id, input.id);
-        assert_eq!(agent.env.len(), 13);
+        assert_eq!(agent.env.len(), 12);
+        assert!(!agent.env.contains_key("CLAUDE_CODE_NO_FLICKER"));
         assert_eq!(agent.env["ANTHROPIC_API_KEY"], input.api_key);
         assert_eq!(agent.env["ANTHROPIC_BASE_URL"], input.base_url);
 
