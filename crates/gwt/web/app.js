@@ -146,6 +146,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
@@ -3077,6 +3078,7 @@
             hideDone: readKanbanHideDonePreference(),
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
+            autoRefreshTimer: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -3088,6 +3090,33 @@
           state.pendingPhaseUpdates = new Map();
         }
         return state;
+      }
+
+      function knowledgeAutoRefreshIsBusy(state) {
+        return (
+          state.loading ||
+          state.refreshing ||
+          state.searching ||
+          state.searchInFlight
+        );
+      }
+
+      function ensureKnowledgeAutoRefresh(windowId, knowledgeKind) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        if (state.autoRefreshTimer) {
+          return;
+        }
+        state.autoRefreshTimer = setInterval(() => {
+          if (!windowMap.get(windowId)) {
+            clearInterval(state.autoRefreshTimer);
+            state.autoRefreshTimer = null;
+            return;
+          }
+          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
+            return;
+          }
+          requestKnowledgeBridge(windowId, knowledgeKind, true);
+        }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
       }
 
       function readKanbanHideDonePreference() {
@@ -3354,6 +3383,18 @@
           state.selectedNumber =
             state.entries.length > 0 ? state.entries[0].number : null;
         }
+      }
+
+      function replaceKnowledgeEntry(entries, fresh) {
+        if (!fresh || !Array.isArray(entries)) {
+          return false;
+        }
+        const index = entries.findIndex((entry) => entry.number === fresh.number);
+        if (index < 0) {
+          return false;
+        }
+        entries[index] = fresh;
+        return true;
       }
 
       function knowledgeDetailRequestMatches(state, event) {
@@ -7075,6 +7116,7 @@
               false,
             );
           }
+          ensureKnowledgeAutoRefresh(windowData.id, knowledgeKind);
           frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
             windowData.id,
           );
@@ -8379,13 +8421,9 @@
             }
             if (event.result?.kind === "ok") {
               const fresh = event.result.fresh_entry;
-              if (fresh && Array.isArray(state.entries)) {
-                const index = state.entries.findIndex(
-                  (entry) => entry.number === fresh.number,
-                );
-                if (index >= 0) {
-                  state.entries[index] = fresh;
-                }
+              if (fresh) {
+                replaceKnowledgeEntry(state.entries, fresh);
+                replaceKnowledgeEntry(state.baseEntries, fresh);
               }
               state.dndSnapshot = null;
             } else {

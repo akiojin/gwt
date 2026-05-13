@@ -52,6 +52,29 @@ test("Kanban toolbar exposes Hide done toggle id", () => {
   );
 });
 
+test("Knowledge windows install periodic force refresh for external phase changes", () => {
+  assert.match(
+    appSource,
+    /KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS/,
+    "expected a named Knowledge auto-refresh interval constant",
+  );
+  assert.match(
+    appSource,
+    /ensureKnowledgeAutoRefresh/,
+    "expected Knowledge windows to install an auto-refresh helper",
+  );
+  assert.match(
+    appSource,
+    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
+    "expected auto-refresh to force remote cache refresh with refresh=true",
+  );
+  assert.match(
+    appSource,
+    /state\.loading\s*\|\|\s*state\.refreshing\s*\|\|\s*state\.searching\s*\|\|\s*state\.searchInFlight/,
+    "expected auto-refresh to skip while user-visible work is active",
+  );
+});
+
 test("Kanban removes legacy open and closed list scope controls", () => {
   assert.doesNotMatch(
     appSource,
