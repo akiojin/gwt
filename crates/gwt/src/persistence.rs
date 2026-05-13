@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use gwt_agent::AgentColor;
 use serde::{Deserialize, Serialize};
@@ -282,8 +285,7 @@ pub fn save_session_state(path: &Path, state: &PersistedSessionState) -> std::io
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, content)?;
-    Ok(())
+    atomic_write(path, content.as_bytes())
 }
 
 pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceState> {
@@ -313,7 +315,24 @@ pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    std::fs::write(path, content)?;
+    atomic_write(path, content.as_bytes())
+}
+
+/// Write `bytes` to `target` via a sibling temp file + rename so callers never
+/// observe a partial file. Used by [`save_session_state`] /
+/// [`save_workspace_state`] so the async persist worker (Issue #2694 Phase B)
+/// cannot leave torn state visible to load_*_state readers.
+fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic_write target has no parent directory",
+        )
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file_mut().sync_all().ok();
+    tmp.persist(target).map_err(|err| err.error)?;
     Ok(())
 }
 
