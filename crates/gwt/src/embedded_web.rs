@@ -1338,8 +1338,15 @@ mod tests {
     #[test]
     fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
         let html = frontend_bundle_source();
+        // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
+        // per-connection dispatcher before the frontend_ready handshake. The
+        // regex below is intentionally `[\s\S]*?` (non-greedy any) between
+        // setConnectionState and the pendingMessages flush so dispatcher
+        // setup is allowed inside the function, but the ordering assertion
+        // — frontend_ready strictly precedes the queued-message replay — is
+        // preserved.
         let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{\s*setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
         .expect("valid regex");
 
@@ -1356,6 +1363,17 @@ mod tests {
         assert!(
             open_flow.is_match(html),
             "expected socket open flow to announce frontend readiness before replaying queued messages",
+        );
+        // Phase C regression: when the WebSocket cycles, the dispatcher must
+        // be recreated and old generations must be guarded so queued events
+        // from the previous session do not flush into the new one.
+        assert!(
+            html.contains("socketReceiveDispatcherGeneration"),
+            "expected handleSocketOpen / handleSocketClose to track a generation counter for the per-connection dispatcher",
+        );
+        assert!(
+            html.contains("ownGeneration !== socketReceiveDispatcherGeneration"),
+            "expected the dispatcher receive callback to gate on the generation captured at open time",
         );
     }
 

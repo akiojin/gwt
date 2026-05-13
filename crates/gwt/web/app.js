@@ -288,10 +288,15 @@
       let inputTraceSeq = 0;
 
       let socket = null;
-      // Issue #2694 Phase C — lazy-initialized so the dispatcher captures the
-      // already-hoisted `receive` declaration; constructed on the first inbound
-      // WebSocket message.
+      // Issue #2694 Phase C — per-connection dispatcher so queued messages
+      // from a closed socket cannot flush into the next reconnect session
+      // (replaying stale terminal_output / workspace_state). `generation`
+      // identifies the active WebSocket cycle and is incremented on every
+      // open/close transition; the dispatcher's receive() callback gates on
+      // it so any inbound work scheduled before the swap is silently
+      // dropped after the swap completes.
       let socketReceiveDispatcher = null;
+      let socketReceiveDispatcherGeneration = 0;
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
@@ -496,6 +501,16 @@
       }
 
       function handleSocketOpen() {
+        socketReceiveDispatcherGeneration += 1;
+        const ownGeneration = socketReceiveDispatcherGeneration;
+        socketReceiveDispatcher = createSocketReceiveDispatcher({
+          receive: (event) => {
+            if (ownGeneration !== socketReceiveDispatcherGeneration) {
+              return;
+            }
+            receive(event);
+          },
+        });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         while (pendingMessages.length > 0) {
@@ -505,12 +520,14 @@
 
       function handleSocketMessage(event) {
         if (!socketReceiveDispatcher) {
-          socketReceiveDispatcher = createSocketReceiveDispatcher({ receive });
+          return;
         }
         socketReceiveDispatcher.handle(event);
       }
 
       function handleSocketClose() {
+        socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher = null;
         setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);

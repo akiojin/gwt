@@ -322,6 +322,11 @@ pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std
 /// observe a partial file. Used by [`save_session_state`] /
 /// [`save_workspace_state`] so the async persist worker (Issue #2694 Phase B)
 /// cannot leave torn state visible to load_*_state readers.
+///
+/// `sync_all()` failures are surfaced through `tracing::warn!` instead of
+/// being returned. Atomicity (no torn reads) is preserved by the rename
+/// regardless, but durability across a crash/power-loss becomes best-effort
+/// when fsync fails — operators need a visible diagnostic for that case.
 fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -331,7 +336,13 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
-    tmp.as_file_mut().sync_all().ok();
+    if let Err(err) = tmp.as_file_mut().sync_all() {
+        tracing::warn!(
+            target = %target.display(),
+            error = %err,
+            "atomic_write sync_all failed; rename will still produce an atomic update but durability across crash is best-effort",
+        );
+    }
     tmp.persist(target).map_err(|err| err.error)?;
     Ok(())
 }

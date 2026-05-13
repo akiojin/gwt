@@ -34,6 +34,11 @@ pub(crate) struct PersistSnapshot {
 #[derive(Default)]
 struct DispatcherState {
     latest: Option<PersistSnapshot>,
+    /// `Some(timestamp)` when an unwritten `latest` snapshot exists. Used by
+    /// the worker to enforce the 50ms coalesce window: new enqueues that
+    /// arrive within the window push the deadline forward so a quick burst
+    /// collapses to a single disk write.
+    latest_updated_at: Option<Instant>,
     shutdown: bool,
     enqueued: u64,
     completed: u64,
@@ -56,6 +61,13 @@ pub(crate) struct PersistDispatcher {
 /// pre-Phase-B contract where `persist()` was synchronous and durable at
 /// return.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Coalesce window: the worker waits up to this long after the most recent
+/// `enqueue()` before writing the latest snapshot, so a burst of UI events
+/// (resize / focus / viewport pan / arrange / ...) collapses to a single disk
+/// write per window. On shutdown the worker drains immediately and skips the
+/// wait.
+const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
 impl Drop for PersistDispatcher {
     fn drop(&mut self) {
@@ -134,6 +146,7 @@ impl PersistDispatcher {
             .unwrap_or_else(PoisonError::into_inner);
         state.enqueued = state.enqueued.saturating_add(1);
         state.latest = Some(snapshot);
+        state.latest_updated_at = Some(Instant::now());
         drop(state);
         self.inner.cond.notify_one();
     }
@@ -182,15 +195,41 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
     loop {
         let (snapshot, covered) = {
             let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
-            while state.latest.is_none() && !state.shutdown {
-                state = inner
-                    .cond
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
+            loop {
+                if state.shutdown {
+                    break;
+                }
+                match state.latest_updated_at {
+                    None => {
+                        // No pending snapshot; sleep until enqueue or
+                        // shutdown wakes us.
+                        state = inner
+                            .cond
+                            .wait(state)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    }
+                    Some(updated_at) => {
+                        let remaining = COALESCE_WINDOW.saturating_sub(updated_at.elapsed());
+                        if remaining.is_zero() {
+                            // Coalesce window elapsed; flush the snapshot.
+                            break;
+                        }
+                        // Wait the remaining window. A new enqueue notifies
+                        // us, we re-check the timestamp on the next loop
+                        // iteration so the window restarts from the latest
+                        // enqueue.
+                        let (next_state, _timed_out) = inner
+                            .cond
+                            .wait_timeout(state, remaining)
+                            .unwrap_or_else(|err| err.into_inner());
+                        state = next_state;
+                    }
+                }
             }
             if state.latest.is_none() && state.shutdown {
                 return;
             }
+            state.latest_updated_at = None;
             (state.latest.take(), state.enqueued)
         };
 
@@ -309,6 +348,52 @@ mod tests {
     }
 
     #[test]
+    fn worker_waits_full_coalesce_window_before_writing() {
+        // The first snapshot's deadline is COALESCE_WINDOW after enqueue;
+        // a follow-up snapshot inside that window must postpone the write so
+        // a quick burst (resize / focus / viewport pan / arrange) collapses
+        // to a single disk hit instead of producing one write per call.
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session-state.json");
+        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
+
+        let started = std::time::Instant::now();
+        dispatcher.enqueue(PersistSnapshot {
+            session_path: path.clone(),
+            session: gwt::PersistedSessionState {
+                tabs: Vec::new(),
+                active_tab_id: Some("first".to_string()),
+                recent_projects: Vec::new(),
+            },
+            workspaces: Vec::new(),
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        dispatcher.enqueue(PersistSnapshot {
+            session_path: path.clone(),
+            session: gwt::PersistedSessionState {
+                tabs: Vec::new(),
+                active_tab_id: Some("second".to_string()),
+                recent_projects: Vec::new(),
+            },
+            workspaces: Vec::new(),
+        });
+
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+        let elapsed = started.elapsed();
+
+        let on_disk = load_session_state(&path).expect("load persisted session");
+        assert_eq!(
+            on_disk.active_tab_id.as_deref(),
+            Some("second"),
+            "coalesce window should keep only the latest snapshot",
+        );
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "writer should respect the 50ms coalesce window from the most recent enqueue (elapsed = {elapsed:?})",
+        );
+    }
+
+    #[test]
     fn drop_waits_for_pending_snapshot_to_drain() {
         // Regression for #2694 PR review (P1): dropping the dispatcher must
         // flush a pending snapshot to disk before returning, otherwise an app
@@ -336,6 +421,53 @@ mod tests {
             Some("durable"),
             "Drop must flush the pending snapshot before returning",
         );
+    }
+
+    #[test]
+    fn dispatcher_runs_on_tokio_spawn_blocking_pool() {
+        // Production wires the dispatcher through `BlockingTaskSpawner::tokio`
+        // (`spawn_blocking` on the tao/winit tokio runtime). The thread-based
+        // variant covers the algorithmic contract, but the production
+        // execution path needs its own coverage so a future regression in
+        // spawn_blocking semantics (cancellation, executor shutdown order)
+        // surfaces here.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session-state.json");
+
+        {
+            let dispatcher =
+                PersistDispatcher::new(&BlockingTaskSpawner::tokio(runtime.handle().clone()));
+            for index in 0..25 {
+                dispatcher.enqueue(PersistSnapshot {
+                    session_path: path.clone(),
+                    session: gwt::PersistedSessionState {
+                        tabs: Vec::new(),
+                        active_tab_id: Some(format!("tab-{index}")),
+                        recent_projects: Vec::new(),
+                    },
+                    workspaces: Vec::new(),
+                });
+            }
+            assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+
+            let on_disk = load_session_state(&path).expect("load persisted session");
+            assert_eq!(
+                on_disk.active_tab_id.as_deref(),
+                Some("tab-24"),
+                "tokio spawner must coalesce identically to the thread spawner",
+            );
+            assert!(dispatcher.last_error().is_none());
+            // Drop the dispatcher while the tokio runtime is still alive so
+            // the Drop drain has a worker to wait on.
+        }
+
+        // Shutting the tokio runtime down here proves the worker
+        // (spawn_blocking task) cooperated with shutdown after Drop signalled.
+        runtime.shutdown_timeout(Duration::from_secs(2));
     }
 
     #[test]
