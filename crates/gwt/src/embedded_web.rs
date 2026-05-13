@@ -657,6 +657,37 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
+        // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
+        // emits pointerup / pointercancel with a pointerId that does not
+        // match the one captured at pointerdown. The previous handlers
+        // gated finishWindowResize behind a strict pointerId equality
+        // check, so a mismatched pointerup left resizeState alive until
+        // the 30 second staleness guard finally cleaned it up. This
+        // contract pins the new fallback: any window-level pointerup or
+        // pointercancel that fires while a resize is pending must clean
+        // up resizeState immediately via forceResetResizeState.
+        let html = frontend_bundle_source();
+        let pointerup_fallback = regex::Regex::new(
+            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
+        )
+        .expect("valid regex");
+        let pointercancel_fallback = regex::Regex::new(
+            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            pointerup_fallback.is_match(html),
+            "expected window pointerup to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
+        );
+        assert!(
+            pointercancel_fallback.is_match(html),
+            "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
         let html = frontend_bundle_source();
         let direct_pointermove_fit = regex::Regex::new(

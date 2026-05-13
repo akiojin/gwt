@@ -9022,8 +9022,25 @@
           dragState = null;
         }
 
-        if (resizeState && resizeState.pointerId === event.pointerId) {
-          finishWindowResize(event.pointerId);
+        if (resizeState) {
+          if (resizeState.pointerId === event.pointerId) {
+            finishWindowResize(event.pointerId);
+          } else {
+            // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
+            // emits a `pointerup` whose pointerId does not match the one
+            // we captured at pointerdown (the OS pre-released capture
+            // and re-issued a fresh pointer). When that happens neither
+            // the resizeHandle's `lostpointercapture` listener nor the
+            // pointerId-gated branch above ever runs, so resizeState
+            // stays alive until the 30s staleness guard finally tears
+            // it down. Force the cleanup immediately on any window
+            // pointerup while a resize is pending so the user is never
+            // wedged into a stuck resize that requires an app restart.
+            console.warn(
+              `[resize] window pointerup pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
+            );
+            forceResetResizeState("window pointerup pointerId mismatch");
+          }
         }
       });
 
@@ -9031,6 +9048,17 @@
         if (dragState && dragState.pointerId === event.pointerId) {
           clearTitlebarDockPreview();
           dragState = null;
+        }
+        if (resizeState && resizeState.pointerId !== event.pointerId) {
+          // SPEC-2008 Phase 26.C / FR-059 — same pointerId-mismatch
+          // safety as the pointerup handler above. pointercancel from a
+          // different pointerId still indicates the original capture
+          // is gone; do not leave resizeState alive across cancellations.
+          console.warn(
+            `[resize] window pointercancel pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
+          );
+          forceResetResizeState("window pointercancel pointerId mismatch");
+          return;
         }
         finishWindowResize(event.pointerId);
       });
