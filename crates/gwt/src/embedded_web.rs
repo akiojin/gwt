@@ -2642,6 +2642,38 @@ mod tests {
         );
     }
 
+    // Issue #2684 — top-toolbar Open Project must surface the GitHub clone path
+    // even while an active project tab hides the project picker overlay.
+    #[test]
+    fn embedded_web_top_toolbar_open_project_is_split_button() {
+        let html = index_html();
+
+        assert!(
+            html.contains("id=\"open-project-group\"")
+                && html.contains("class=\"split-button-group\""),
+            "top toolbar must mount an Open Project split-button group"
+        );
+        assert!(
+            html.contains("id=\"open-project-menu-button\"")
+                && html.contains("aria-haspopup=\"menu\"")
+                && html.contains("aria-controls=\"open-project-menu\""),
+            "caret button must declare popup/controls semantics for the menu"
+        );
+        assert!(
+            html.contains("id=\"open-project-menu\"") && html.contains("role=\"menu\""),
+            "dropdown #open-project-menu must mount with role=menu"
+        );
+        assert!(
+            html.contains("id=\"open-project-menu-open\"")
+                && html.contains("id=\"open-project-menu-clone\""),
+            "dropdown must expose Open Project and Clone from GitHub menu items"
+        );
+        assert!(
+            html.contains("id=\"open-project-menu-recent\""),
+            "dropdown must expose a Recent projects container"
+        );
+    }
+
     /// Launch Wizard hydration can add QuickStart, Docker, and Advanced form
     /// content after the initial loading state. The footer must stay outside
     /// that scrollable form body so the Launch button never overlaps hydrated

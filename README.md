@@ -227,11 +227,13 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you choose `Clone from GitHub...` in the
-Project Picker. The clone modal accepts a GitHub HTTPS/SSH URL or lets you
-search repositories through `gh search repos`, then asks for a destination
-parent folder. The new project is created at `<parent>/<project>/`, with a
-bare `<project>.git/` repository and an initial worktree on `develop` when it
+`gwt` auto-creates this layout when you choose `Clone from GitHub...` from
+either the Project Picker (shown when no tab is open) or the top toolbar's
+`Open Project ▾` split-button dropdown (always reachable from an active
+project). The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
+repositories through `gh search repos`, then asks for a destination parent
+folder. The new project is created at `<parent>/<project>/`, with a bare
+`<project>.git/` repository and an initial worktree on `develop` when it
 exists, otherwise on the remote default branch.
 
 Existing Normal Git repositories (`.git/` directly under the project
