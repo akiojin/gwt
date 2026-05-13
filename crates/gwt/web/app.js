@@ -32,6 +32,7 @@
       import {
         applyVisibilityTransition,
         attachHostResizeReflow,
+        classifyProjectWindowVisibility,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
 
@@ -501,6 +502,16 @@
 
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
+      }
+
+      function allProjectWindowIds() {
+        const ids = [];
+        for (const tab of appState?.tabs || []) {
+          for (const windowData of tab.workspace?.windows || []) {
+            ids.push(windowData.id);
+          }
+        }
+        return ids;
       }
 
       function workspaceWindowById(windowId) {
@@ -7284,11 +7295,25 @@
         };
         applyViewport();
 
-        const ids = new Set(workspace.windows.map((windowData) => windowData.id));
-        for (const [windowId, element] of windowMap.entries()) {
-          if (ids.has(windowId)) {
-            continue;
-          }
+        const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
+        const ids = new Set(activeWindowIds);
+        const visibility = classifyProjectWindowVisibility({
+          activeWindowIds,
+          allProjectWindowIds: allProjectWindowIds(),
+          mountedWindowIds: windowMap.keys(),
+        });
+        for (const windowId of visibility.hidden) {
+          const element = windowMap.get(windowId);
+          applyVisibilityTransition({
+            element,
+            shouldHide: true,
+            hasTerminal: terminalMap.has(windowId),
+            onReveal: () => scheduleTerminalFocusActivation(windowId),
+          });
+        }
+        for (const windowId of visibility.removed) {
+          const element = windowMap.get(windowId);
+          if (!element) continue;
           const runtime = terminalMap.get(windowId);
           if (runtime && runtime.viewportRefreshFrame !== null) {
             cancelAnimationFrame(runtime.viewportRefreshFrame);
