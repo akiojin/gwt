@@ -45,6 +45,7 @@
         shouldApplyWorkspaceGeometry,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
+      import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -287,6 +288,10 @@
       let inputTraceSeq = 0;
 
       let socket = null;
+      // Issue #2694 Phase C — lazy-initialized so the dispatcher captures the
+      // already-hoisted `receive` declaration; constructed on the first inbound
+      // WebSocket message.
+      let socketReceiveDispatcher = null;
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
@@ -499,7 +504,10 @@
       }
 
       function handleSocketMessage(event) {
-        receive(JSON.parse(event.data));
+        if (!socketReceiveDispatcher) {
+          socketReceiveDispatcher = createSocketReceiveDispatcher({ receive });
+        }
+        socketReceiveDispatcher.handle(event);
       }
 
       function handleSocketClose() {

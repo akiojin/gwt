@@ -106,6 +106,12 @@ pub fn window_geometry_sync_js() -> &'static str {
     include_str!("../web/window-geometry-sync.js")
 }
 
+// Issue #2694 Phase C — kind-coalesced, rAF-flushed WebSocket inbound
+// dispatcher.
+pub fn socket_receive_dispatcher_js() -> &'static str {
+    include_str!("../web/socket-receive-dispatcher.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -196,6 +202,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/window-geometry-sync.js",
         source: window_geometry_sync_js,
         marker: "shouldApplyWorkspaceGeometry",
+    },
+    RootJsModuleAsset {
+        path: "/socket-receive-dispatcher.js",
+        source: socket_receive_dispatcher_js,
+        marker: "createSocketReceiveDispatcher",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",

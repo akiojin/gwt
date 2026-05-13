@@ -1,0 +1,156 @@
+// Issue #2694 Phase C — coalesced, rAF-flushed dispatch for WebSocket inbound
+// events.
+//
+// Previously `handleSocketMessage(event)` ran `JSON.parse(event.data)` then
+// invoked the 150+ case `receive()` switch synchronously, so a burst of
+// inbound events (Codex thinking stream, board updates, workspace_state
+// during window operations, ...) saturated the main thread and made clicks /
+// tab switches / settings interactions feel stuck on Windows.
+//
+// `createSocketReceiveDispatcher` wraps `receive` so:
+// - inbound events accumulate in a queue,
+// - the queue is flushed on the next animation frame,
+// - idempotent global-state kinds (e.g. workspace_state) collapse to the
+//   latest occurrence, sparing redundant DOM mutations,
+// - per-frame time budget (default 8ms) bounds long tasks; remaining events
+//   defer to the next frame.
+
+const DEFAULT_BUDGET_MS = 8;
+
+// Idempotent kinds where only the latest occurrence carries information. Any
+// kind not in this set preserves original order and every occurrence.
+export const DEFAULT_COALESCE_KINDS = Object.freeze(
+  new Set([
+    "workspace_state",
+    "active_work_projection",
+    "window_list",
+    "project_index_status",
+    "launch_wizard_state",
+    "launch_wizard_open",
+    "agent_options_state",
+    "update_state",
+    "knowledge_bridge_state",
+    "system_status",
+  ]),
+);
+
+export function createSocketReceiveDispatcher({
+  receive,
+  schedule,
+  now,
+  budgetMs = DEFAULT_BUDGET_MS,
+  coalesceKinds = DEFAULT_COALESCE_KINDS,
+} = {}) {
+  if (typeof receive !== "function") {
+    throw new TypeError(
+      "createSocketReceiveDispatcher requires a receive callback",
+    );
+  }
+  const scheduleImpl = schedule
+    ?? ((cb) => {
+      if (typeof requestAnimationFrame === "function") {
+        return requestAnimationFrame(cb);
+      }
+      return setTimeout(cb, 0);
+    });
+  const nowImpl = now ?? (() => {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  });
+
+  const queue = [];
+  let scheduled = false;
+
+  function flush() {
+    scheduled = false;
+    if (queue.length === 0) {
+      return;
+    }
+    const ready = coalesceEvents(queue, coalesceKinds);
+    queue.length = 0;
+    const start = nowImpl();
+    let cursor = 0;
+    while (cursor < ready.length) {
+      receive(ready[cursor]);
+      cursor += 1;
+      if (cursor < ready.length && nowImpl() - start > budgetMs) {
+        for (let i = ready.length - 1; i >= cursor; i -= 1) {
+          queue.unshift(ready[i]);
+        }
+        scheduled = true;
+        scheduleImpl(flush);
+        return;
+      }
+    }
+  }
+
+  function enqueue(event) {
+    queue.push(event);
+    if (!scheduled) {
+      scheduled = true;
+      scheduleImpl(flush);
+    }
+  }
+
+  function handle(messageEvent) {
+    let payload;
+    if (messageEvent && typeof messageEvent.data === "string") {
+      payload = JSON.parse(messageEvent.data);
+    } else if (
+      messageEvent
+      && typeof messageEvent === "object"
+      && Object.hasOwn(messageEvent, "kind")
+    ) {
+      payload = messageEvent;
+    } else {
+      throw new TypeError(
+        "createSocketReceiveDispatcher.handle expects a WebSocket message event or parsed payload",
+      );
+    }
+    enqueue(payload);
+  }
+
+  function flushNow() {
+    if (scheduled || queue.length > 0) {
+      flush();
+    }
+  }
+
+  function pendingCount() {
+    return queue.length;
+  }
+
+  return { handle, enqueue, flushNow, pendingCount };
+}
+
+export function coalesceEvents(queue, coalesceKinds = DEFAULT_COALESCE_KINDS) {
+  if (!queue || queue.length <= 1) {
+    return queue ? queue.slice() : [];
+  }
+  const lastIndexByKind = new Map();
+  for (let i = 0; i < queue.length; i += 1) {
+    const event = queue[i];
+    const kind = event && event.kind;
+    if (kind && coalesceKinds.has(kind)) {
+      lastIndexByKind.set(kind, i);
+    }
+  }
+  if (lastIndexByKind.size === 0) {
+    return queue.slice();
+  }
+  const result = [];
+  for (let i = 0; i < queue.length; i += 1) {
+    const event = queue[i];
+    const kind = event && event.kind;
+    if (kind && coalesceKinds.has(kind)) {
+      if (lastIndexByKind.get(kind) === i) {
+        result.push(event);
+      }
+    } else {
+      result.push(event);
+    }
+  }
+  return result;
+}
