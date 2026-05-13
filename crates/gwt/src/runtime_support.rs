@@ -219,16 +219,28 @@ pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> 
     }
 }
 
+/// Resolve the on-disk worktree path for `branch_name` (FR-PERF-002).
+///
+/// Earlier revisions probed `git branch --show-current` first as a fast path
+/// when the requested branch happened to be checked out at `repo_path`.
+/// `WorktreeManager::list` is authoritative for that information, so the
+/// extra spawn was pure overhead on Windows (one `CreateProcess` +
+/// Defender scan per Launch Wizard open). The current implementation skips
+/// `current_git_branch` entirely and relies on the worktree list.
 pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
-    if current_git_branch(repo_path)
-        .as_ref()
-        .is_ok_and(|current| current == branch_name)
-    {
-        return Some(repo_path.to_path_buf());
-    }
-
     let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    branch_worktree_path_for(&main_repo_path, branch_name)
+}
+
+/// Like [`branch_worktree_path`] but starts from a pre-resolved
+/// `main_repo_path`, so the caller can re-use a cached value across multiple
+/// Launch Wizard / Start Work / Resume Workspace invocations (FR-PERF-003).
+/// Windows pays a hefty `CreateProcess` cost per `git.exe` spawn; reusing the
+/// `git rev-parse --git-common-dir` resolution that `branch_worktree_path`
+/// would otherwise perform halves the cold-open git spawn count for branch
+/// resolution.
+pub fn branch_worktree_path_for(main_repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
+    let manager = gwt_git::WorktreeManager::new(main_repo_path);
     let mut worktrees = manager.list().ok()?;
     if let Some(path) = usable_worktree_path_for_branch(&worktrees, branch_name) {
         return Some(path);
@@ -895,6 +907,101 @@ upstream\tgit@github.com:anthropics/example.git (push)
                 (s("origin"), s("https://github.com/akiojin/gwt")),
                 (s("upstream"), s("git@github.com:anthropics/example.git")),
             ]
+        );
+    }
+
+    fn seed_git_identity(path: &std::path::Path) {
+        for (key, value) in [
+            ("user.email", "tests@example.com"),
+            ("user.name", "Test User"),
+        ] {
+            gwt_core::process::hidden_command("git")
+                .args(["config", key, value])
+                .current_dir(path)
+                .output()
+                .expect("git config");
+        }
+    }
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git command should run");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            repo.display()
+        );
+    }
+
+    /// SPEC-2014 FR-PERF-002: branch_worktree_path must locate the worktree
+    /// path for a non-HEAD branch by consulting the WorktreeManager list
+    /// alone, without first spawning `git branch --show-current`.
+    #[test]
+    fn branch_worktree_path_resolves_linked_worktree_for_target_branch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init", "--initial-branch=main"]);
+        seed_git_identity(&repo);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        run_git(&repo, &["branch", "feature/alpha"]);
+        let alpha_path = tmp.path().join("alpha");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                alpha_path.to_str().unwrap(),
+                "feature/alpha",
+            ],
+        );
+
+        let resolved = super::branch_worktree_path(&repo, "feature/alpha")
+            .expect("branch worktree path must resolve");
+        assert!(
+            super::same_worktree_path(&resolved, &alpha_path),
+            "expected {} to resolve to {}",
+            resolved.display(),
+            alpha_path.display(),
+        );
+    }
+
+    #[test]
+    fn branch_worktree_path_returns_none_for_unknown_branch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init", "--initial-branch=main"]);
+        seed_git_identity(&repo);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+        assert!(super::branch_worktree_path(&repo, "feature/never-exists").is_none());
+    }
+
+    #[test]
+    fn branch_worktree_path_resolves_head_branch_via_main_worktree_listing() {
+        // SPEC-2014 FR-PERF-002 regression: when the requested branch is the
+        // HEAD of the main worktree, branch_worktree_path must still return
+        // that worktree's path. Earlier revisions short-circuited this case
+        // through `git branch --show-current`; the WorktreeManager list now
+        // owns the resolution alone.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init", "--initial-branch=main"]);
+        seed_git_identity(&repo);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+        let resolved =
+            super::branch_worktree_path(&repo, "main").expect("HEAD branch must resolve");
+        assert!(
+            super::same_worktree_path(&resolved, &repo),
+            "expected {} to resolve to {}",
+            resolved.display(),
+            repo.display(),
         );
     }
 }

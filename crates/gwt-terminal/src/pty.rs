@@ -16,6 +16,14 @@ use tracing::instrument;
 
 use crate::TerminalError;
 
+/// Phase C5 threshold (ms) above which a successful PTY resize is logged at
+/// `warn` instead of `info`. Windows ConPTY's `ResizePseudoConsole` should
+/// complete in single-digit milliseconds; anything north of 250 ms is a
+/// strong signal of OS-level contention (Defender real-time scanning,
+/// stalled child process, etc.) and worth surfacing in `~/.gwt/logs/`
+/// without having to hand-correlate elapsed-time fields.
+pub const SLOW_RESIZE_WARN_MS: u64 = 250;
+
 mod process_group;
 #[cfg(windows)]
 mod windows_spawn;
@@ -173,20 +181,77 @@ impl PtyHandle {
     }
 
     /// Resize the PTY window.
+    ///
+    /// Emits an `info` event at `target = gwt::resize::pty` with the resolved
+    /// dimensions and total wall time so SPEC-2014 Phase C diagnostics can
+    /// pinpoint Windows ConPTY stalls from `~/.gwt/logs/` alone. The lock and
+    /// the underlying `MasterPty::resize` are timed separately because the
+    /// lock contention pattern differs on Windows vs Unix.
+    ///
+    /// Phase C5: when `total_elapsed_ms` exceeds [`SLOW_RESIZE_WARN_MS`] the
+    /// `info` event is upgraded to a `warn` so slow-path operators (and
+    /// `~/.gwt/logs/` greps) can flag Windows ConPTY hangs without having to
+    /// hand-correlate the elapsed-time field.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        let started = Instant::now();
         let master = self.master.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })
+        let lock_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let resize_started = Instant::now();
+        let outcome = master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        let resize_elapsed_ms =
+            u64::try_from(resize_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let total_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match outcome {
+            Ok(()) => {
+                if total_elapsed_ms >= SLOW_RESIZE_WARN_MS {
+                    tracing::warn!(
+                        target: "gwt::resize::pty",
+                        cols = cols,
+                        rows = rows,
+                        lock_elapsed_ms = lock_elapsed_ms,
+                        resize_elapsed_ms = resize_elapsed_ms,
+                        total_elapsed_ms = total_elapsed_ms,
+                        outcome = "slow",
+                        threshold_ms = SLOW_RESIZE_WARN_MS,
+                        "PTY resize completed but exceeded slow-path threshold"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "gwt::resize::pty",
+                        cols = cols,
+                        rows = rows,
+                        lock_elapsed_ms = lock_elapsed_ms,
+                        resize_elapsed_ms = resize_elapsed_ms,
+                        total_elapsed_ms = total_elapsed_ms,
+                        outcome = "ok",
+                        "PTY resize completed"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let details = e.to_string();
+                tracing::warn!(
+                    target: "gwt::resize::pty",
+                    cols = cols,
+                    rows = rows,
+                    lock_elapsed_ms = lock_elapsed_ms,
+                    resize_elapsed_ms = resize_elapsed_ms,
+                    total_elapsed_ms = total_elapsed_ms,
+                    outcome = "error",
+                    error = %details,
+                    "PTY resize failed"
+                );
+                Err(TerminalError::PtyIoError { details })
+            }
+        }
     }
 
     /// Terminate the child process and every descendant in its process group.

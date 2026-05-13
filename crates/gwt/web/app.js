@@ -1523,6 +1523,12 @@
         }
         const runtime = terminalMap.get(resizeState.id);
         cancelTerminalResizeFit();
+        cancelResizePointermoveApply();
+        cancelResizeStalenessGuard();
+        // Flush the last pointer coordinates to the DOM so the final geometry
+        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // observe the up-to-date `element.style.width/height`.
+        applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
         sendGeometry(
           resizeState.id,
@@ -1534,6 +1540,105 @@
         // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
         // so pointer events resume on the screen-edge triggers once resize
         // ends.
+        delete document.documentElement.dataset.opResizeActive;
+      }
+
+      // SPEC-2014 Phase C4: coalesce pointermove-driven `style.width/height`
+      // writes via requestAnimationFrame. Without this, fast trackpads /
+      // 120Hz pointers can cause Windows WebView2 to spend more time in
+      // layout than in paint, manifesting as the resize freeze.
+      function scheduleResizePointermoveApply() {
+        if (!resizeState || resizeState.applyFrame != null) {
+          return;
+        }
+        const pointerId = resizeState.pointerId;
+        resizeState.applyFrame = requestAnimationFrame(() => {
+          if (!resizeState || resizeState.pointerId !== pointerId) {
+            return;
+          }
+          resizeState.applyFrame = null;
+          applyResizePointermove(resizeState);
+          scheduleTerminalResizeFit(resizeState.id);
+        });
+      }
+
+      function cancelResizePointermoveApply() {
+        if (resizeState && resizeState.applyFrame != null) {
+          cancelAnimationFrame(resizeState.applyFrame);
+          resizeState.applyFrame = null;
+        }
+      }
+
+      function applyResizePointermove(state) {
+        if (!state) {
+          return;
+        }
+        const element = windowMap.get(state.id);
+        if (!element) {
+          return;
+        }
+        const x = state.latestClientX ?? state.startX;
+        const y = state.latestClientY ?? state.startY;
+        element.style.width = `${clamp(
+          state.width + (x - state.startX) / viewport.zoom,
+          420,
+        )}px`;
+        element.style.height = `${clamp(
+          state.height + (y - state.startY) / viewport.zoom,
+          260,
+        )}px`;
+      }
+
+      // SPEC-2014 Phase C1: maximum wall time (in ms) a single resize gesture
+      // may stay active before we assume the pointer-end event was lost and
+      // force a teardown. Long enough to cover slow Windows ConPTY resizes
+      // (anecdotally a couple of seconds in the worst case) yet short enough
+      // that the user does not have to restart the app when WebView2 drops
+      // the pointerup.
+      const RESIZE_STALENESS_TIMEOUT_MS = 30_000;
+
+      function scheduleResizeStalenessGuard(pointerId) {
+        return setTimeout(() => {
+          if (!resizeState || resizeState.pointerId !== pointerId) {
+            return;
+          }
+          const elapsed = Math.round(
+            performance.now() - (resizeState.startedAt ?? performance.now()),
+          );
+          console.warn(
+            `[resize] staleness guard fired after ${elapsed}ms; clearing stuck resizeState (pointerId=${pointerId})`,
+          );
+          // Trigger the normal teardown path so xterm fit / sendGeometry /
+          // hover-reveal cleanup all run, then null the state.
+          finishWindowResize(pointerId);
+        }, RESIZE_STALENESS_TIMEOUT_MS);
+      }
+
+      function cancelResizeStalenessGuard() {
+        if (resizeState && resizeState.stalenessTimer != null) {
+          clearTimeout(resizeState.stalenessTimer);
+          resizeState.stalenessTimer = null;
+        }
+      }
+
+      function forceResetResizeState(reason) {
+        if (!resizeState) {
+          return;
+        }
+        const previous = resizeState;
+        console.warn(
+          `[resize] force-reset resizeState (reason=${reason}, previousPointerId=${previous.pointerId}, windowId=${previous.id})`,
+        );
+        if (previous.fitFrame != null) {
+          cancelAnimationFrame(previous.fitFrame);
+        }
+        if (previous.applyFrame != null) {
+          cancelAnimationFrame(previous.applyFrame);
+        }
+        if (previous.stalenessTimer != null) {
+          clearTimeout(previous.stalenessTimer);
+        }
+        resizeState = null;
         delete document.documentElement.dataset.opResizeActive;
       }
 
@@ -7359,20 +7464,44 @@
 
           resizeHandle.addEventListener("pointerdown", (event) => {
             focusWindowRemotely(windowData.id);
+            // SPEC-2014 Phase C1: Windows WebView2 occasionally fails to
+            // deliver pointerup / pointercancel / lostpointercapture, leaving
+            // the previous resizeState alive when the next gesture starts.
+            // Force-clear the leaked state on every new pointerdown so the
+            // user never has to restart the app to escape a stuck resize.
+            forceResetResizeState("new resize started before previous one finished");
             resizeState = {
               id: windowData.id,
               pointerId: event.pointerId,
               startX: event.clientX,
               startY: event.clientY,
+              latestClientX: event.clientX,
+              latestClientY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
               fitFrame: null,
+              applyFrame: null,
+              startedAt: performance.now(),
+              stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
             // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
             // hits while resize is active so pointer movements that cross
             // the screen edge do not steal focus mid-resize.
             document.documentElement.dataset.opResizeActive = "true";
-            resizeHandle.setPointerCapture(event.pointerId);
+            try {
+              resizeHandle.setPointerCapture(event.pointerId);
+            } catch (error) {
+              // SPEC-2014 Phase C1: setPointerCapture is best-effort; on
+              // Windows WebView2 it can throw when the pointer has already
+              // been released by the OS between the dispatch and the
+              // callback. We continue without capture so that the
+              // window-bound pointermove / pointerup listeners still
+              // drive the resize.
+              console.warn(
+                "[resize] setPointerCapture failed, falling back to window-bound pointer events",
+                error,
+              );
+            }
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
             finishWindowResize(event.pointerId);
@@ -8395,19 +8524,18 @@
         }
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
-          const element = windowMap.get(resizeState.id);
-          if (!element) {
-            return;
-          }
-          element.style.width = `${clamp(
-            resizeState.width + (event.clientX - resizeState.startX) / viewport.zoom,
-            420,
-          )}px`;
-          element.style.height = `${clamp(
-            resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
-            260,
-          )}px`;
-          scheduleTerminalResizeFit(resizeState.id);
+          // SPEC-2014 Phase C4: store the latest pointer coordinates and
+          // batch the actual DOM mutation via requestAnimationFrame. The
+          // previous implementation wrote `element.style.width/height` on
+          // every pointermove (potentially 200+ times per second on high
+          // refresh rate displays), triggering layout reflow at the same
+          // rate. On Windows WebView2 this can starve the render thread and
+          // surface as the resize freeze users reported requiring an app
+          // restart. By coalescing to one apply per frame we keep the visual
+          // responsiveness while letting WebView2 paint between updates.
+          resizeState.latestClientX = event.clientX;
+          resizeState.latestClientY = event.clientY;
+          scheduleResizePointermoveApply();
         }
       });
 

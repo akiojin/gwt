@@ -87,13 +87,14 @@ pub(crate) use launch_runtime::{
 };
 pub(crate) use runtime_support::{
     app_state_view_from_parts, attach_parent_console_for_cli, branch_worktree_path,
-    close_window_from_workspace, combined_window_id, current_git_branch, dedupe_recent_projects,
-    fallback_project_target, first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
-    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
-    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
-    workspace_view_for_tab, worktrees_have_stale_branch_entry,
+    branch_worktree_path_for, close_window_from_workspace, combined_window_id, current_git_branch,
+    dedupe_recent_projects, fallback_project_target, first_available_worktree_path,
+    front_door_route, geometry_to_pty_size, knowledge_kind_for_preset, local_branch_exists,
+    normalize_active_tab_id, normalize_branch_name, origin_remote_ref,
+    prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
+    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
+    synthetic_branch_entry, usable_worktree_path_for_branch, workspace_view_for_tab,
+    worktrees_have_stale_branch_entry,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -1418,6 +1419,7 @@ mod tests {
             kind: gwt::ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -1453,6 +1455,7 @@ mod tests {
             kind,
             workspace,
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
