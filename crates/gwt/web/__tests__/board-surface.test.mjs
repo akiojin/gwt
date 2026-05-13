@@ -18,7 +18,13 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
-const indexSource = readFileSync(resolve(here, "../index.html"), "utf8");
+// Issue #2694 Phase D: the formerly-inline <style> block lives at
+// /styles/app.css now; the styles bundle keeps the same grep surface that the
+// CSS contract tests rely on.
+const indexSource =
+  readFileSync(resolve(here, "../index.html"), "utf8")
+  + "\n"
+  + readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 test("Board surface requests older history with cursor-based paging", () => {
   assert.match(appSource, /function\s+requestOlderBoardEntries/);

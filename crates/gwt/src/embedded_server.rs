@@ -159,6 +159,7 @@ impl EmbeddedServer {
             "/styles/components.css",
             get(embedded_web::styles_components_css_handler),
         )
+        .route("/styles/app.css", get(embedded_web::styles_app_css_handler))
         .route(
             "/assets/fonts/MonaSans.woff2",
             get(embedded_web::font_mona_sans_handler),
