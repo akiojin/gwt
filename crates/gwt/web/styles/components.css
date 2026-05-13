@@ -2566,12 +2566,20 @@ kbd.op-kbd {
   color: var(--color-state-blocked);
 }
 
-.kanban-card-chip--state-open {
+.kanban-card-chip--phase-backlog,
+.kanban-card-chip--phase-draft,
+.kanban-card-chip--phase-planning {
   background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
   color: var(--color-state-active);
 }
 
-.kanban-card-chip--state-closed {
+.kanban-card-chip--phase-implementation,
+.kanban-card-chip--phase-review {
+  background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
+  color: var(--agent-codex);
+}
+
+.kanban-card-chip--phase-done {
   background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
   color: var(--color-text-muted);
 }

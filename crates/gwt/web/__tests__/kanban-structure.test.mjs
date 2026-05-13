@@ -66,12 +66,13 @@ test("Kanban removes legacy open and closed list scope controls", () => {
 });
 
 test("renderKnowledgeBridge groups entries into kanban columns by phase", () => {
-  // The renderer must use entry.phase to assign data-phase on each card,
-  // and fall back to "backlog" when phase is null.
+  // The renderer must use the shared effective lifecycle helper to assign
+  // cards to columns, including the "backlog" fallback for entries with no
+  // canonical phase.
   assert.match(
     appSource,
-    /entry\.phase\s*\|\|\s*"backlog"/,
-    "expected app.js to fall back to 'backlog' when entry.phase is null",
+    /function effectiveKnowledgePhase[\s\S]{0,600}?"backlog"/,
+    "expected app.js to fall back to 'backlog' in effectiveKnowledgePhase",
   );
   assert.match(
     appSource,
@@ -96,12 +97,12 @@ test("Plain (non-spec) entries fall into the Backlog column", () => {
 });
 
 test("Closed issues land in the Done column", () => {
-  // closed Issues carry GitHub state == "closed" but no phase/done label.
-  // The renderer must promote them to the Done column so they appear with
-  // phase/done open Issues under one header.
+  // closed Issues carry GitHub state == "closed" but may have no phase/done
+  // label or a stale non-done phase. The effective lifecycle helper must
+  // promote them to the Done column under one header.
   assert.match(
     appSource,
-    /entry\.state\s*===\s*"closed"/,
+    /entry\?\.state === "closed"/,
     "expected app.js to detect closed state",
   );
   assert.match(
@@ -240,19 +241,43 @@ test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
   );
 });
 
-// SPEC-2017 US-11: closed Issue routing into the Done column. The
-// renderer overrides entry.phase with "done" whenever entry.state is
-// "closed", and the state chip uses kanban-card-chip--state-closed.
-test("Closed Issue cards land in Done with the closed state chip class", () => {
+// SPEC-2017 US-11 follow-up: closed Issue routing into the Done column must
+// be reflected as the card's primary lifecycle label. GitHub state is a data
+// source, not the user-facing Kanban vocabulary, so closed cards should not
+// render a primary CLOSED chip next to the DONE column heading.
+test("Closed Issue cards land in Done with a lifecycle phase chip", () => {
   assert.match(
     appSource,
-    /entry\.state === "closed" \? "done"/,
-    "expected closed entries to be routed to the done column",
+    /effectiveKnowledgePhase/,
+    "expected a shared effective lifecycle phase helper",
   );
   assert.match(
     appSource,
+    /kanban-card-chip--phase-\$\{effectivePhase\}/,
+    "expected the card chip class to use the effective lifecycle phase",
+  );
+  assert.doesNotMatch(
+    appSource,
     /kanban-card-chip--state-\$\{entry\.state\}|kanban-card-chip--state-closed/,
-    "expected the state chip class to be derived from entry.state",
+    "card primary chip must not expose raw GitHub state as CLOSED",
+  );
+});
+
+test("Knowledge detail hides raw phase labels from primary chips", () => {
+  assert.match(
+    appSource,
+    /visibleKnowledgeLabels/,
+    "expected Knowledge detail labels to be filtered through a display helper",
+  );
+  assert.match(
+    appSource,
+    /!isKnowledgePhaseLabel\(label\)/,
+    "expected raw phase/* labels to be excluded from primary label chips",
+  );
+  assert.match(
+    appSource,
+    /staleKnowledgePhaseWarning/,
+    "expected stale closed-vs-phase metadata to be downgraded to a warning",
   );
 });
 

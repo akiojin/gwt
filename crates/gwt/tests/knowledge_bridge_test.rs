@@ -129,8 +129,12 @@ fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
     assert_eq!(loaded.entries.len(), 1);
     assert_eq!(loaded.entries[0].number, 2017);
     assert!(
-        loaded.entries[0].meta.contains("phase/draft"),
-        "expected phase label in list metadata"
+        loaded.entries[0].meta.contains("Draft"),
+        "expected user-facing lifecycle label in list metadata"
+    );
+    assert!(
+        !loaded.entries[0].meta.contains("phase/draft"),
+        "raw phase label should not be primary list metadata"
     );
     assert!(
         loaded
