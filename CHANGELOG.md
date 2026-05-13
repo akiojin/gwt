@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.29.0] - 2026-05-13
+
+### Bug Fixes
+
+- **test:** Seed test git identity in migration_single_branch_test for Linux CI
+
+### Documentation
+
+- AGENTS運用ガイドを現行仕様に同期
+- AGENTSのfix適用除外を整理
+
+### Features
+
+- **migration:** SPEC-1934 US-7 で fetch refspec 正規化と Start Work ガードを追加
+- **migration:** SPEC-1934 US-7 modal Accept 化 / origin 無 fetch 補完 / E2E smoke
+
 ## [9.28.0] - 2026-05-12
 
 ### Bug Fixes
