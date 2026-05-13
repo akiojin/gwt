@@ -1392,10 +1392,17 @@
             createNode("div", "knowledge-detail-subtitle", detail.subtitle),
           );
         }
-        if ((detail.labels || []).length > 0) {
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
           const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of detail.labels) {
-            labelRow.appendChild(createNode("span", "kanban-card-chip", label));
+          for (const label of displayLabels) {
+            labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
           }
           body.appendChild(labelRow);
         }
@@ -5792,12 +5799,12 @@
       }
 
       function canonicalKnowledgePhase(phase) {
-        const value = String(phase || "").toLowerCase();
+        const value = String(phase || "");
         return KNOWLEDGE_PHASES.has(value) ? value : null;
       }
 
       function knowledgePhaseFromLabels(labels = []) {
-        for (const label of labels) {
+        for (const label of Array.isArray(labels) ? labels : []) {
           if (!isKnowledgePhaseLabel(label)) continue;
           const phase = canonicalKnowledgePhase(label.slice("phase/".length));
           if (phase) return phase;
@@ -5830,7 +5837,9 @@
       }
 
       function visibleKnowledgeLabels(labels = []) {
-        return labels.filter((label) => !isKnowledgePhaseLabel(label));
+        return (Array.isArray(labels) ? labels : []).filter(
+          (label) => !isKnowledgePhaseLabel(label),
+        );
       }
 
       function staleKnowledgePhaseWarning(entry) {
@@ -5966,7 +5975,8 @@
         // (plain) chip and disable HTML5 D&D so the user understands
         // the constraint at a glance.
         const isPlain = entry.is_spec === false;
-        card.draggable = !isPlain;
+        const isClosed = String(entry?.state || "").toLowerCase() === "closed";
+        card.draggable = !isPlain && !isClosed;
         if (isPlain) {
           card.classList.add("kanban-card--plain");
         }
@@ -6045,10 +6055,10 @@
           renderKnowledgeBridge(windowId);
         });
 
-        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
-        // skip these handlers entirely (draggable=false above) so they
-        // can still be clicked but never picked up.
-        if (!isPlain) {
+        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) and closed
+        // cards skip these handlers entirely (draggable=false above) so
+        // they can still be clicked but never picked up.
+        if (!isPlain && !isClosed) {
           card.addEventListener("dragstart", (event) => {
             // Snapshot the original entry so a failed write-back can
             // restore it; the snapshot keeps the entire entry value

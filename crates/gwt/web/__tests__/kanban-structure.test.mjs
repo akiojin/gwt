@@ -221,9 +221,10 @@ test("Kanban cards declare warning indicator hook for unknown phase", () => {
 // SPEC-2017 US-10: plain Issue cards must surface a (plain) chip and
 // stay non-draggable. The renderer derives both off entry.is_spec ===
 // false and never lets a plain Issue acquire phase metadata.
-test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
-  // is_spec=false → isPlain=true → draggable=false. The negation
-  // pattern (`!isPlain`) is the canonical form in renderKanbanCard.
+test("Plain and closed Issue cards declare non-draggable constraints", () => {
+  // is_spec=false or state=closed cards must stay clickable but cannot be
+  // dragged into lifecycle columns because that would write invalid phase
+  // metadata for the card's source of truth.
   assert.match(
     appSource,
     /const isPlain = entry\.is_spec === false/,
@@ -231,8 +232,18 @@ test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
   );
   assert.match(
     appSource,
-    /card\.draggable\s*=\s*!isPlain/,
-    "expected card.draggable to flip on isPlain",
+    /const isClosed = String\(entry\?\.state \|\| ""\)\.toLowerCase\(\) === "closed"/,
+    "expected renderKanbanCard to derive isClosed from state",
+  );
+  assert.match(
+    appSource,
+    /card\.draggable\s*=\s*!isPlain && !isClosed/,
+    "expected card.draggable to require both not plain and not closed",
+  );
+  assert.match(
+    appSource,
+    /if \(!isPlain && !isClosed\)/,
+    "expected D&D handlers to be skipped for closed cards",
   );
   assert.match(
     appSource,
@@ -278,6 +289,51 @@ test("Knowledge detail hides raw phase labels from primary chips", () => {
     appSource,
     /staleKnowledgePhaseWarning/,
     "expected stale closed-vs-phase metadata to be downgraded to a warning",
+  );
+});
+
+test("Knowledge lifecycle parsing is exact and nullable-safe", () => {
+  const canonicalBody = appSource.match(
+    /function canonicalKnowledgePhase\(phase\) \{[\s\S]*?\n      \}/,
+  )?.[0];
+  assert.ok(canonicalBody, "expected canonicalKnowledgePhase helper");
+  assert.doesNotMatch(
+    canonicalBody,
+    /toLowerCase/,
+    "canonical phase parsing must stay case-sensitive",
+  );
+  assert.match(
+    canonicalBody,
+    /KNOWLEDGE_PHASES\.has\(value\)/,
+    "expected canonical phase parsing to require exact phase keys",
+  );
+  assert.match(
+    appSource,
+    /Array\.isArray\(labels\)/,
+    "expected label helpers to normalize nullable or non-array labels",
+  );
+});
+
+test("Kanban drawer uses the same display labels as the detail pane", () => {
+  const drawerStart = appSource.indexOf("function renderKanbanDrawerBody()");
+  const drawerEnd = appSource.indexOf("function clamp(value, min)", drawerStart);
+  assert.ok(drawerStart >= 0, "expected renderKanbanDrawerBody");
+  assert.ok(drawerEnd > drawerStart, "expected drawer body boundary");
+  const drawerBody = appSource.slice(drawerStart, drawerEnd);
+  assert.match(
+    drawerBody,
+    /visibleKnowledgeLabels/,
+    "expected drawer labels to hide raw phase/* labels",
+  );
+  assert.match(
+    drawerBody,
+    /staleKnowledgePhaseWarning/,
+    "expected drawer to surface stale closed-vs-phase metadata",
+  );
+  assert.match(
+    drawerBody,
+    /kanban-card-chip kanban-card-chip--warning/,
+    "expected drawer stale phase warning to use the warning chip class",
   );
 });
 
