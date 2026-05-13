@@ -174,9 +174,29 @@ impl Pane {
     }
 
     /// Resize the pane (PTY + vt100 parser).
+    ///
+    /// Emits an `info` event at `target = gwt::resize::pane` capturing the
+    /// requested dimensions and total wall time so SPEC-2014 Phase C can tell
+    /// PTY ConPTY stalls (logged at `gwt::resize::pty`) apart from
+    /// `resize_parser_preserving_state` regressions inside the parser.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        let started = std::time::Instant::now();
         self.pty.resize(cols, rows)?;
+        let pty_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let parser_started = std::time::Instant::now();
         resize_parser_preserving_state(&mut self.parser, rows, cols);
+        let parser_elapsed_ms =
+            u64::try_from(parser_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let total_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(
+            target: "gwt::resize::pane",
+            cols = cols,
+            rows = rows,
+            pty_elapsed_ms = pty_elapsed_ms,
+            parser_elapsed_ms = parser_elapsed_ms,
+            total_elapsed_ms = total_elapsed_ms,
+            "pane resize completed"
+        );
         Ok(())
     }
 

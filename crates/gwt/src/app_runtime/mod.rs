@@ -1518,6 +1518,30 @@ pub struct ProjectTabRuntime {
     /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
     /// Skip / Quit. Not persisted: re-detected on every launch.
     pub(crate) migration_pending: bool,
+    /// SPEC-2014 FR-PERF-003: cached `git rev-parse --git-common-dir`
+    /// resolution for this tab. `gwt_git::worktree::main_worktree_root`
+    /// spawns `git.exe`; on Windows every spawn costs several hundred
+    /// milliseconds (`CreateProcess` + Defender real-time scan). The Launch
+    /// Wizard / Start Work / Add Agent / Resume Workspace paths used to call
+    /// it on every open, accounting for the bulk of the cold-open delay.
+    /// We resolve the value on first access and reuse it for the lifetime
+    /// of the tab; the [`Arc`] wrapper keeps `ProjectTabRuntime: Clone`.
+    pub(crate) main_worktree_root_cache: std::sync::Arc<std::sync::OnceLock<PathBuf>>,
+}
+
+impl ProjectTabRuntime {
+    /// Return the cached primary repository root for this tab, lazily
+    /// resolving it on first access (FR-PERF-003). Falls back to
+    /// `project_root` when `git rev-parse --git-common-dir` fails so the
+    /// caller never has to deal with `Result`.
+    pub(crate) fn main_worktree_root(&self) -> PathBuf {
+        self.main_worktree_root_cache
+            .get_or_init(|| {
+                gwt_git::worktree::main_worktree_root(&self.project_root)
+                    .unwrap_or_else(|_| self.project_root.clone())
+            })
+            .clone()
+    }
 }
 
 fn recovery_state_label(recovery: gwt_core::migration::RecoveryState) -> &'static str {
@@ -1730,6 +1754,7 @@ impl ProjectTabRuntime {
             // Re-detected at startup via resolve_project_target; persistence
             // does not carry the flag.
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -2614,6 +2639,7 @@ impl AppRuntime {
                     .map_err(|error| error.to_string())?
             }),
             migration_pending: target.needs_migration,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         });
         self.active_tab_id = Some(tab_id);
         self.remember_recent_project(&target);
@@ -6254,6 +6280,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -6275,6 +6302,7 @@ exit 0
             kind,
             workspace,
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -8265,6 +8293,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -9797,6 +9826,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -10350,6 +10380,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let current_window_id = combined_window_id("tab-1", "profile-1");
@@ -11286,6 +11317,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let first_window_id = combined_window_id("tab-1", "agent-1");
@@ -11401,6 +11433,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11488,6 +11521,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let tab_mut = runtime.tab_mut("tab-1").expect("tab mut");
@@ -11557,6 +11591,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11644,6 +11679,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11734,6 +11770,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11809,6 +11846,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
@@ -11893,6 +11931,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         // Need the path so the temp directory survives until the runtime drops.
         let temp_root = repo.parent().expect("repo has parent").to_path_buf();
@@ -12495,6 +12534,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let all_window_id = combined_window_id("tab-1", "board-all");
@@ -12604,6 +12644,7 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
             migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         let other_tab = sample_project_tab_with_window_at(
             "tab-2",
@@ -12648,7 +12689,42 @@ exit 0
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(empty_workspace_state()),
             migration_pending: true,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// SPEC-2014 FR-PERF-003: ProjectTabRuntime caches `main_worktree_root`
+    /// resolution per tab so the Launch Wizard / Start Work paths do not
+    /// re-spawn `git rev-parse --git-common-dir` on every open.
+    #[test]
+    fn project_tab_runtime_main_worktree_root_caches_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        gwt_core::process::hidden_command("git")
+            .args(["init", repo.to_str().unwrap()])
+            .output()
+            .expect("git init");
+
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        assert!(
+            tab.main_worktree_root_cache.get().is_none(),
+            "cache must start empty"
+        );
+
+        let first = tab.main_worktree_root();
+        let cached = tab
+            .main_worktree_root_cache
+            .get()
+            .expect("cache populated after first access")
+            .clone();
+        assert_eq!(first, cached);
+
+        let second = tab.main_worktree_root();
+        assert_eq!(
+            first, second,
+            "second call must return the cached resolution"
+        );
     }
 
     #[test]
