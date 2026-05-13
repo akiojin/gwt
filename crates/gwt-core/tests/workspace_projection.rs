@@ -51,7 +51,108 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
         }),
         board_refs: vec!["board-1".to_string()],
         updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 1, 0).unwrap(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 4, 11, 30, 0).unwrap(),
+        creator: Some("codex".to_string()),
+        lifecycle_stage: gwt_core::workspace_projection::WorkspaceLifecycleStage::Active,
+        blocked_reason: None,
+        linked_issues: Vec::new(),
+        linked_prs: Vec::new(),
+        tags: Vec::new(),
+        progress_pct: None,
     }
+}
+
+/// SPEC-2359 Phase U-6 (FR-131, FR-143): legacy `workspace.json` files
+/// written before the schema extension must continue to deserialize. The
+/// new fields populate via `#[serde(default)]` so reads stay
+/// backward-compatible; the retroactive migration backfills meaningful
+/// values on the next startup.
+#[test]
+fn workspace_projection_legacy_json_deserializes_with_serde_defaults() {
+    let legacy_json = serde_json::json!({
+        "id": "legacy-1",
+        "project_root": "/repo",
+        "title": "Legacy workspace",
+        "status_category": "active",
+        "status_text": "Existing work",
+        "summary": null,
+        "owner": null,
+        "next_action": null,
+        "agents": [],
+        "git_details": null,
+        "board_refs": [],
+        "updated_at": "2026-04-01T12:00:00Z"
+    });
+
+    let projection: WorkspaceProjection =
+        serde_json::from_value(legacy_json).expect("legacy projection deserializes");
+
+    assert_eq!(projection.id, "legacy-1");
+    assert_eq!(projection.title, "Legacy workspace");
+    // New fields populate via serde defaults so legacy data does not panic.
+    assert_eq!(
+        projection.created_at,
+        gwt_core::workspace_projection::workspace_projection_default_created_at(),
+        "legacy data lacks created_at; default is UNIX_EPOCH sentinel for migration"
+    );
+    assert_eq!(projection.creator, None);
+    assert_eq!(
+        projection.lifecycle_stage,
+        gwt_core::workspace_projection::WorkspaceLifecycleStage::Planning,
+        "legacy data defaults to Planning until migration recomputes"
+    );
+    assert_eq!(projection.blocked_reason, None);
+    assert!(projection.linked_issues.is_empty());
+    assert!(projection.linked_prs.is_empty());
+    assert!(projection.tags.is_empty());
+    assert_eq!(projection.progress_pct, None);
+}
+
+/// SPEC-2359 Phase U-6 (FR-131): every new schema field must survive a
+/// serde round-trip so the retroactive migration backfill, GUI mutations,
+/// and CLI updates all persist losslessly.
+#[test]
+fn workspace_projection_serde_round_trip_preserves_new_fields() {
+    use gwt_core::workspace_projection::{
+        WorkspaceIssueLink, WorkspaceLifecycleStage, WorkspacePrLink,
+    };
+
+    let original = WorkspaceProjection {
+        id: "round-trip-1".to_string(),
+        project_root: PathBuf::from("/repo"),
+        title: "Schema round-trip".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        status_text: "Implementing Phase U-6".to_string(),
+        summary: Some("Schema additions for Workspace Content Coherence".to_string()),
+        owner: Some("SPEC-2359".to_string()),
+        next_action: Some("Auto-populate".to_string()),
+        agents: Vec::new(),
+        git_details: None,
+        board_refs: Vec::new(),
+        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap(),
+        creator: Some("codex".to_string()),
+        lifecycle_stage: WorkspaceLifecycleStage::InReview,
+        blocked_reason: Some("Waiting for review".to_string()),
+        linked_issues: vec![WorkspaceIssueLink {
+            number: 2359,
+            title: Some("SPEC-2359".to_string()),
+            url: Some("https://github.com/akiojin/gwt/issues/2359".to_string()),
+        }],
+        linked_prs: vec![WorkspacePrLink {
+            number: 2671,
+            title: Some("Phase U-5 PR".to_string()),
+            url: Some("https://github.com/akiojin/gwt/pull/2671".to_string()),
+            state: Some("open".to_string()),
+        }],
+        tags: vec!["title-sync".to_string(), "phase-u-6".to_string()],
+        progress_pct: Some(40),
+    };
+
+    let json = serde_json::to_string(&original).expect("serialize");
+    let restored: WorkspaceProjection = serde_json::from_str(&json).expect("deserialize");
+
+    assert_eq!(restored, original);
 }
 
 #[test]

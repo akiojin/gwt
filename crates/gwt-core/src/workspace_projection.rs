@@ -53,6 +53,63 @@ pub struct GitDetails {
     pub created_at: DateTime<Utc>,
 }
 
+/// SPEC-2359 Phase U-6 (FR-132): coarse Workspace lifecycle stage. Distinct
+/// from [`WorkspaceStatusCategory`], which tracks the runtime activity of the
+/// linked Agents. `lifecycle_stage` answers "where is this work in its overall
+/// progression?" (planning → active → in review → done → archived). It is
+/// derived from `events + status_category` via
+/// [`recompute_lifecycle_stage`], but may also be explicitly set by the user
+/// via `gwtd workspace update --status archived`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLifecycleStage {
+    #[default]
+    Planning,
+    Active,
+    InReview,
+    Done,
+    Archived,
+}
+
+/// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
+/// linked to a Workspace. Workspace Card preview and Detail pane render these
+/// as chips (`#Issue-1234`) instead of free-text. The number is required;
+/// title / url are populated when known and default to None for legacy data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceIssueLink {
+    pub number: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Pull
+/// Request linked to a Workspace. Carries `state` (e.g. open / merged /
+/// closed) so UI can render lifecycle hints alongside `lifecycle_stage`
+/// without re-querying GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePrLink {
+    pub number: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// SPEC-2359 Phase U-6 (FR-131): sentinel default for `created_at` when a
+/// legacy `workspace.json` is read without the field present. The retroactive
+/// migration in `workspace_projection_migration` detects this value and
+/// backfills from the oldest event timestamp or `updated_at`. Using the
+/// UNIX_EPOCH sentinel (instead of `Utc::now()`) keeps deserialization
+/// deterministic for tests and avoids "this workspace was created at
+/// startup" lies for legacy data.
+pub fn workspace_projection_default_created_at() -> DateTime<Utc> {
+    DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceCleanupReason {
@@ -129,10 +186,57 @@ pub struct WorkspaceProjection {
     pub git_details: Option<GitDetails>,
     pub board_refs: Vec<String>,
     pub updated_at: DateTime<Utc>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-135, FR-143): Workspace creation
+    /// timestamp, distinct from `updated_at`. Legacy files without the
+    /// field deserialize to UNIX_EPOCH via
+    /// [`workspace_projection_default_created_at`]; the retroactive
+    /// migration backfills the actual value from event timestamps or
+    /// `updated_at`.
+    #[serde(default = "workspace_projection_default_created_at")]
+    pub created_at: DateTime<Utc>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-135): identifier of the Agent or
+    /// user that created the Workspace, used for the Detail pane
+    /// "Created by @..." line. None for legacy data; the migration
+    /// backfills from the first agent's `agent_id` when available.
+    #[serde(default)]
+    pub creator: Option<String>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-132, FR-139): high-level lifecycle
+    /// stage derived from events + status_category via
+    /// [`recompute_lifecycle_stage`]. Defaults to `Planning` for legacy
+    /// data; the migration recomputes from actual state on first load.
+    #[serde(default)]
+    pub lifecycle_stage: WorkspaceLifecycleStage,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-141): separate from `status_text`,
+    /// `blocked_reason` carries the Board entry body that triggered the
+    /// Blocked state so the Detail pane can render a dedicated section
+    /// instead of mixing it into the status line.
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-133, FR-146): GitHub Issues linked
+    /// to this Workspace, rendered as `#Issue-N` chips in Kanban Card
+    /// preview / Detail pane.
+    #[serde(default)]
+    pub linked_issues: Vec<WorkspaceIssueLink>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-133, FR-146): GitHub PRs linked
+    /// to this Workspace, rendered as `#PR-N` chips with optional state
+    /// (open / merged / closed) hint.
+    #[serde(default)]
+    pub linked_prs: Vec<WorkspacePrLink>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-138): freeform tags (e.g.
+    /// "bugfix", "onboarding"). Rendered as `#tag` chips in Kanban Card
+    /// preview / Detail pane.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// SPEC-2359 Phase U-6 (FR-131, FR-138): optional self-reported
+    /// progress percentage (0-100). The Detail pane renders a progress
+    /// bar when set, hides the section when None.
+    #[serde(default)]
+    pub progress_pct: Option<u8>,
 }
 
 impl WorkspaceProjection {
     pub fn default_for_project(project_root: impl Into<PathBuf>) -> Self {
+        let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
             project_root: project_root.into(),
@@ -145,7 +249,19 @@ impl WorkspaceProjection {
             agents: Vec::new(),
             git_details: None,
             board_refs: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: now,
+            // SPEC-2359 Phase U-6: a freshly created projection has a
+            // real `created_at` timestamp (not the legacy sentinel).
+            // `lifecycle_stage` starts at `Planning` and is recomputed by
+            // [`recompute_lifecycle_stage`] as events accumulate.
+            created_at: now,
+            creator: None,
+            lifecycle_stage: WorkspaceLifecycleStage::Planning,
+            blocked_reason: None,
+            linked_issues: Vec::new(),
+            linked_prs: Vec::new(),
+            tags: Vec::new(),
+            progress_pct: None,
         }
     }
 
