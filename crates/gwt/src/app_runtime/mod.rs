@@ -1619,6 +1619,77 @@ fn validate_update_log_path(raw: &str, logs_root: &Path) -> Option<PathBuf> {
     Some(candidate)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct GhRepositorySearchRecord {
+    #[serde(rename = "fullName")]
+    full_name: Option<String>,
+    description: Option<String>,
+    url: Option<String>,
+    #[serde(rename = "defaultBranch")]
+    default_branch: Option<String>,
+    visibility: Option<String>,
+    #[serde(rename = "updatedAt")]
+    updated_at: Option<String>,
+}
+
+pub(crate) fn parse_github_repository_search_results(
+    raw: &str,
+) -> Result<Vec<gwt::GitHubRepositorySearchResultView>, String> {
+    let records: Vec<GhRepositorySearchRecord> =
+        serde_json::from_str(raw).map_err(|error| format!("parse gh search JSON: {error}"))?;
+    let mut repositories = Vec::new();
+    for record in records {
+        let Some(full_name) = record.full_name.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        let Some(url) = record.url.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        repositories.push(gwt::GitHubRepositorySearchResultView {
+            full_name,
+            description: record.description.filter(|value| !value.trim().is_empty()),
+            url,
+            default_branch: record
+                .default_branch
+                .filter(|value| !value.trim().is_empty()),
+            visibility: record.visibility.filter(|value| !value.trim().is_empty()),
+            updated_at: record.updated_at.filter(|value| !value.trim().is_empty()),
+        });
+    }
+    Ok(repositories)
+}
+
+fn search_github_repositories(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<gwt::GitHubRepositorySearchResultView>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err("repository search query is required".to_string());
+    }
+    let output = gwt_core::process::hidden_command("gh")
+        .args([
+            "search",
+            "repos",
+            trimmed,
+            "--json",
+            "fullName,description,url,defaultBranch,visibility,updatedAt",
+            "--limit",
+            &limit.to_string(),
+        ])
+        .output()
+        .map_err(|error| format!("gh search repos: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "gh search repos failed".to_string()
+        } else {
+            stderr
+        });
+    }
+    parse_github_repository_search_results(&String::from_utf8_lossy(&output.stdout))
+}
+
 /// SPEC-2041 Phase 19 (FR-065): launch the platform default opener
 /// (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows). Errors are
 /// silently dropped so the modal does not surface noise; the path is logged
@@ -1882,6 +1953,15 @@ impl AppRuntime {
         match event {
             FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
+            FrontendEvent::SelectCloneProjectParent => {
+                self.select_clone_project_parent_events(&client_id)
+            }
+            FrontendEvent::GithubRepositorySearch { query } => {
+                self.github_repository_search_events(&client_id, &query)
+            }
+            FrontendEvent::CloneProjectStart { url, parent_path } => {
+                self.clone_project_start_events(&client_id, &url, &parent_path)
+            }
             FrontendEvent::ReopenRecentProject { path } => {
                 self.open_project_path_events(PathBuf::from(path))
             }
@@ -2602,6 +2682,96 @@ impl AppRuntime {
         self.open_project_path_events(path)
     }
 
+    pub(crate) fn select_clone_project_parent_events(
+        &mut self,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let selected = rfd::FileDialog::new().pick_folder();
+        let Some(path) = selected else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::CloneProjectParentSelected {
+                path: path.display().to_string(),
+            },
+        )]
+    }
+
+    pub(crate) fn github_repository_search_events(
+        &mut self,
+        client_id: &str,
+        query: &str,
+    ) -> Vec<OutboundEvent> {
+        match search_github_repositories(query, 20) {
+            Ok(repositories) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::GithubRepositorySearchResults {
+                    query: query.to_string(),
+                    repositories,
+                },
+            )],
+            Err(message) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::GithubRepositorySearchError {
+                    query: query.to_string(),
+                    message,
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn clone_project_start_events(
+        &mut self,
+        client_id: &str,
+        url: &str,
+        parent_path: &str,
+    ) -> Vec<OutboundEvent> {
+        let trimmed_url = url.trim();
+        if trimmed_url.is_empty() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::CloneProjectError {
+                    message: "repository URL is required".to_string(),
+                },
+            )];
+        }
+        let trimmed_parent = parent_path.trim();
+        if trimmed_parent.is_empty() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::CloneProjectError {
+                    message: "destination parent folder is required".to_string(),
+                },
+            )];
+        }
+
+        let proxy = self.proxy.clone();
+        let url = trimmed_url.to_string();
+        let parent = PathBuf::from(trimmed_parent);
+        self.blocking_tasks.spawn(move || {
+            proxy.send(UserEvent::CloneProjectProgress {
+                message: "Cloning repository...".to_string(),
+            });
+            match gwt_git::clone_project_as_nested_bare(&url, &parent) {
+                Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
+                    workspace_home: outcome.workspace_home,
+                    initial_worktree_path: outcome.initial_worktree_path,
+                }),
+                Err(error) => proxy.send(UserEvent::CloneProjectError {
+                    message: error.to_string(),
+                }),
+            }
+        });
+
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::CloneProjectProgress {
+                message: "Cloning repository...".to_string(),
+            },
+        )]
+    }
+
     pub(crate) fn open_project_path_events(&mut self, path: PathBuf) -> Vec<OutboundEvent> {
         match self.open_project_path(path) {
             Ok(wizard_closed) => {
@@ -2622,6 +2792,60 @@ impl AppRuntime {
             Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
                 message: error,
             })],
+        }
+    }
+
+    pub(crate) fn handle_clone_project_done(
+        &mut self,
+        workspace_home: &Path,
+        initial_worktree_path: &Path,
+    ) -> Vec<OutboundEvent> {
+        match self.open_project_path(initial_worktree_path.to_path_buf()) {
+            Ok(wizard_closed) => {
+                self.remember_recent_clone_workspace_home(workspace_home, initial_worktree_path);
+                let _ = self.persist();
+                let mut events = vec![
+                    self.workspace_state_broadcast(),
+                    OutboundEvent::broadcast(BackendEvent::CloneProjectDone {
+                        workspace_home: workspace_home.display().to_string(),
+                        initial_worktree_path: initial_worktree_path.display().to_string(),
+                    }),
+                ];
+                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                    events.push(event);
+                }
+                if wizard_closed {
+                    events.push(self.launch_wizard_state_broadcast(None));
+                }
+                events
+            }
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::CloneProjectError {
+                message: error,
+            })],
+        }
+    }
+
+    fn remember_recent_clone_workspace_home(
+        &mut self,
+        workspace_home: &Path,
+        initial_worktree_path: &Path,
+    ) {
+        let canonical_home =
+            dunce::canonicalize(workspace_home).unwrap_or_else(|_| workspace_home.to_path_buf());
+        self.recent_projects.retain(|entry| {
+            !same_worktree_path(&entry.path, &canonical_home)
+                && !same_worktree_path(&entry.path, initial_worktree_path)
+        });
+        self.recent_projects.insert(
+            0,
+            gwt::RecentProjectEntry {
+                path: canonical_home.clone(),
+                title: gwt::project_title_from_path(&canonical_home),
+                kind: gwt::ProjectKind::Git,
+            },
+        );
+        if self.recent_projects.len() > 12 {
+            self.recent_projects.truncate(12);
         }
     }
 
@@ -12855,6 +13079,107 @@ exit 0
             )),
             "Start Work on a migration_pending tab must surface a clear error: {events:?}"
         );
+    }
+
+    #[test]
+    fn github_repository_search_parser_maps_gh_json_fields() {
+        let raw = r#"[
+          {
+            "fullName": "akiojin/gwt",
+            "description": "Git Worktree Manager",
+            "url": "https://github.com/akiojin/gwt",
+            "defaultBranch": "develop",
+            "visibility": "public",
+            "updatedAt": "2026-05-13T00:00:00Z"
+          }
+        ]"#;
+
+        let repositories =
+            super::parse_github_repository_search_results(raw).expect("parse gh search json");
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].full_name, "akiojin/gwt");
+        assert_eq!(
+            repositories[0].description.as_deref(),
+            Some("Git Worktree Manager")
+        );
+        assert_eq!(repositories[0].url, "https://github.com/akiojin/gwt");
+        assert_eq!(repositories[0].default_branch.as_deref(), Some("develop"));
+        assert_eq!(repositories[0].visibility.as_deref(), Some("public"));
+        assert_eq!(
+            repositories[0].updated_at.as_deref(),
+            Some("2026-05-13T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn clone_project_done_opens_initial_worktree_and_broadcasts_done() {
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("sample");
+        let worktree = workspace_home.join("develop");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        init_repo(&worktree);
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        let events = runtime.handle_clone_project_done(&workspace_home, &worktree);
+
+        assert_eq!(runtime.tabs.len(), 1);
+        assert_eq!(
+            runtime.tabs[0].project_root,
+            dunce::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(runtime.recent_projects.len(), 1);
+        assert_eq!(
+            runtime.recent_projects[0].path,
+            dunce::canonicalize(&workspace_home).unwrap()
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::CloneProjectDone {
+                    workspace_home: emitted_workspace_home,
+                    initial_worktree_path,
+                },
+            } if emitted_workspace_home == &workspace_home.display().to_string()
+                && initial_worktree_path == &worktree.display().to_string()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::WorkspaceState { .. },
+            }
+        )));
+    }
+
+    #[test]
+    fn clone_project_start_validation_uses_clone_project_error_event() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::CloneProjectStart {
+                url: "".to_string(),
+                parent_path: "".to_string(),
+            },
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::CloneProjectError { message },
+            } if client_id == "client-1" && message.contains("repository URL")
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                event: BackendEvent::ProjectOpenError { .. },
+                ..
+            }
+        )));
     }
 
     #[test]

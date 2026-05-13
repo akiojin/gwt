@@ -26,7 +26,8 @@ pub use pr_status::{
 };
 pub use refs::list_existing_refs;
 pub use repository::{
-    clone_repo, detect_repo_type, initialize_workspace, install_develop_protection, RepoType,
-    Repository,
+    clone_project_as_nested_bare, clone_repo, derive_github_project_clone_target, detect_repo_type,
+    initialize_workspace, install_develop_protection, GitHubProjectCloneOutcome,
+    GitHubProjectCloneTarget, RepoType, Repository,
 };
 pub use worktree::{sibling_worktree_path, RemoteDeleteOutcome, WorktreeInfo, WorktreeManager};

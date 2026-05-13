@@ -128,7 +128,8 @@ the named-pipe path lands.
 
 ## Agent Workflow
 
-1. Open a project directory or restore the previous project.
+1. Open a project directory, clone from GitHub, or restore the previous
+   project.
 2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
 3. Choose `Start Work` from the Project Bar or Command Palette when the task is
@@ -226,8 +227,14 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you clone through the Initialization
-wizard. Existing Normal Git repositories (`.git/` directly under the project
+`gwt` auto-creates this layout when you choose `Clone from GitHub...` in the
+Project Picker. The clone modal accepts a GitHub HTTPS/SSH URL or lets you
+search repositories through `gh search repos`, then asks for a destination
+parent folder. The new project is created at `<parent>/<project>/`, with a
+bare `<project>.git/` repository and an initial worktree on `develop` when it
+exists, otherwise on the remote default branch.
+
+Existing Normal Git repositories (`.git/` directly under the project
 directory) are recognised so a migration to the Nested Bare + Worktree layout
 can be run on demand. The migration safely backs up the original tree to
 `.gwt-migration-backup/`, rebuilds the bare repo, recreates each worktree,
@@ -236,15 +243,12 @@ and rolls back automatically if any phase fails. Tracking work is captured in
 
 To migrate an existing Normal Git project, open it from gwt's project
 picker (or via `Reopen Recent`). gwt detects the layout and shows a
-confirmation modal with three actions:
+Migrate confirmation modal.
 
-- **Migrate** — run the migration now. Progress is streamed phase by phase
-  (Validate → Backup → Bareify → Worktrees → Submodules → Tracking →
-  Cleanup → Done). On success the project tab reloads onto the new branch
-  worktree without restarting the app.
-- **Skip** — open the project as a Normal Git checkout. The modal will
-  reappear the next time you open the project.
-- **Quit** — close the app without touching the repository.
+Choose **Migrate** to run the migration now. Progress is streamed phase by
+phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
+Cleanup -> Done). On success the project tab reloads onto the new branch
+worktree without restarting the app.
 
 ## Canvas Operations
 
