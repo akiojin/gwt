@@ -16,10 +16,8 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Condvar, Mutex, PoisonError},
+    time::{Duration, Instant},
 };
-
-#[cfg(test)]
-use std::time::{Duration, Instant};
 
 use gwt::{save_session_state, save_workspace_state};
 
@@ -52,9 +50,66 @@ pub(crate) struct PersistDispatcher {
     inner: Arc<DispatcherInner>,
 }
 
+/// Bounded wait on shutdown so process exit cannot drop a pending snapshot on
+/// the floor while still guaranteeing that a stuck disk (e.g. Defender holding
+/// an open handle) does not hang the shutdown indefinitely. Mirrors the
+/// pre-Phase-B contract where `persist()` was synchronous and durable at
+/// return.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl Drop for PersistDispatcher {
     fn drop(&mut self) {
-        self.shutdown();
+        // Signal shutdown so the worker drains the latest snapshot (if any)
+        // and exits its loop.
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.shutdown = true;
+        }
+        self.inner.cond.notify_all();
+
+        // Wait for the worker to flush every enqueued snapshot before we
+        // return. Without this, callers that relied on the synchronous
+        // pre-Phase-B `persist()` (state was durable at return time) could
+        // lose the most recent write when the process exits immediately
+        // after a state change.
+        let deadline = Instant::now() + SHUTDOWN_DRAIN_TIMEOUT;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while state.enqueued > state.completed {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                tracing::warn!(
+                    pending = state.enqueued - state.completed,
+                    "persist dispatcher drop timed out before drain completed"
+                );
+                break;
+            }
+            let (next_state, timed_out) = self
+                .inner
+                .cond
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|err| {
+                    let (guard, timed_out) = err.into_inner();
+                    (guard, timed_out)
+                });
+            state = next_state;
+            if timed_out.timed_out() {
+                if state.enqueued > state.completed {
+                    tracing::warn!(
+                        pending = state.enqueued - state.completed,
+                        "persist dispatcher drop timed out before drain completed"
+                    );
+                }
+                break;
+            }
+        }
     }
 }
 
@@ -81,19 +136,6 @@ impl PersistDispatcher {
         state.latest = Some(snapshot);
         drop(state);
         self.inner.cond.notify_one();
-    }
-
-    /// Best-effort shutdown signal. The worker drains the latest snapshot
-    /// (if any) and then exits.
-    pub(crate) fn shutdown(&self) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        state.shutdown = true;
-        drop(state);
-        self.inner.cond.notify_all();
     }
 
     #[cfg(test)]
@@ -267,7 +309,10 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_drains_pending_snapshot_before_exit() {
+    fn drop_waits_for_pending_snapshot_to_drain() {
+        // Regression for #2694 PR review (P1): dropping the dispatcher must
+        // flush a pending snapshot to disk before returning, otherwise an app
+        // shutdown immediately after a state change loses the latest write.
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session-state.json");
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
@@ -276,16 +321,21 @@ mod tests {
             session_path: path.clone(),
             session: gwt::PersistedSessionState {
                 tabs: Vec::new(),
-                active_tab_id: Some("final".to_string()),
+                active_tab_id: Some("durable".to_string()),
                 recent_projects: Vec::new(),
             },
             workspaces: Vec::new(),
         });
-        dispatcher.shutdown();
-        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+
+        // Do NOT call wait_idle here — rely on Drop alone to drain.
+        drop(dispatcher);
 
         let on_disk = load_session_state(&path).expect("load persisted session");
-        assert_eq!(on_disk.active_tab_id.as_deref(), Some("final"));
+        assert_eq!(
+            on_disk.active_tab_id.as_deref(),
+            Some("durable"),
+            "Drop must flush the pending snapshot before returning",
+        );
     }
 
     #[test]
