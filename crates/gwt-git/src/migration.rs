@@ -373,6 +373,25 @@ pub const ORIGIN_WILDCARD_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/orig
 /// caller can record it in the migration backup for rollback, or `None` when
 /// the repository already had the canonical wildcard form (idempotent).
 pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
+    // First confirm an `origin` remote exists at all. `git clone --bare`
+    // sets `remote.origin.url` but on some git versions omits
+    // `remote.origin.fetch`, so we must distinguish "no origin" (skip) from
+    // "origin without fetch refspec" (write the wildcard).
+    let has_origin = hidden_command("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            GwtError::Git(format!(
+                "normalize_fetch_refspec: read remote.origin.url: {e}"
+            ))
+        })?
+        .status
+        .success();
+    if !has_origin {
+        return Ok(None);
+    }
+
     let read = hidden_command("git")
         .args(["config", "--get", "remote.origin.fetch"])
         .current_dir(repo)
@@ -383,17 +402,24 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
             ))
         })?;
 
-    if !read.status.success() {
-        // No `origin` remote (or no `fetch` configured for it). Migration has
-        // nothing to normalize here; the caller may proceed without rollback
-        // state for this phase.
+    let current = if read.status.success() {
+        String::from_utf8_lossy(&read.stdout).trim().to_string()
+    } else {
+        // Origin exists but has no `fetch` refspec — treat as the same
+        // "needs canonicalization" path the single-branch case takes.
+        String::new()
+    };
+    if current == ORIGIN_WILDCARD_FETCH_REFSPEC {
         return Ok(None);
     }
-
-    let current = String::from_utf8_lossy(&read.stdout).trim().to_string();
-    if current.is_empty() || current == ORIGIN_WILDCARD_FETCH_REFSPEC {
-        return Ok(None);
-    }
+    // For rollback bookkeeping we report `None` when there was no prior
+    // value (origin had no `fetch`) so the executor knows nothing must be
+    // restored; we still proceed to write + fetch below.
+    let previous = if current.is_empty() {
+        None
+    } else {
+        Some(current.clone())
+    };
 
     let write = hidden_command("git")
         .args([
@@ -431,7 +457,7 @@ pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
         )));
     }
 
-    Ok(Some(current))
+    Ok(previous)
 }
 
 /// Set upstream tracking for `<branch>` to `origin/<branch>` in `worktree`.

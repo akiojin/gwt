@@ -517,6 +517,54 @@ fn t150_normalize_fetch_refspec_preserves_other_remotes() {
 }
 
 #[test]
+fn t152_normalize_fetch_refspec_writes_wildcard_when_origin_has_no_fetch_refspec() {
+    // RED: bare clones (`git clone --bare`) sometimes set
+    // `remote.origin.url` but omit `remote.origin.fetch`. The migration
+    // still has to leave the bare repo with the wildcard refspec so future
+    // `git fetch origin --prune` can sync new branches into
+    // `refs/remotes/origin/*`.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream.path().to_str().expect("upstream path"),
+    );
+    // Force a no-fetch origin by removing the auto-generated fetch entry
+    // that `git remote add` writes.
+    let status = gwt_core::process::hidden_command("git")
+        .args(["config", "--unset", "remote.origin.fetch"])
+        .current_dir(local.path())
+        .status()
+        .expect("git config --unset remote.origin.fetch");
+    assert!(
+        status.success(),
+        "fixture must be able to unset remote.origin.fetch"
+    );
+    assert!(
+        read_remote_fetch_refspec(local.path(), "origin").is_none(),
+        "fixture must reproduce the bare-clone shape with origin URL but no fetch"
+    );
+
+    let previous = normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    assert!(
+        previous.is_none(),
+        "no prior refspec means nothing to roll back (previous == None)"
+    );
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "origin").as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "wildcard refspec must be written even when origin had no fetch entry"
+    );
+}
+
+#[test]
 fn t151_normalize_fetch_refspec_runs_fetch_origin_prune_after_rewrite() {
     // RED: after rewriting the refspec, the function must run
     // `git fetch origin --prune` so that branches outside the previous

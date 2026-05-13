@@ -1683,10 +1683,19 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /branchCleanupModal\.classList\.contains\("open"\)[\s\S]*closeBranchCleanupModal/,
     "expected Esc to call closeBranchCleanupModal when that modal is open",
   );
+  // SPEC-1934 US-7 / FR-032: the confirmation modal is Accept-only. Esc no
+  // longer routes to skip_migration; at the confirm stage it is swallowed
+  // (no backend send), at the error stage it dismisses the UI without
+  // flipping `migration_pending`.
+  assert.doesNotMatch(
+    appSource,
+    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]{0,400}skip_migration/,
+    "Esc must not send skip_migration when the Accept-only migration modal is open",
+  );
   assert.match(
     appSource,
-    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*skip_migration/,
-    "expected Esc to send skip_migration when migration modal is open",
+    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModalState\.stage\s*===\s*"error"[\s\S]*migrationModalState\.open\s*=\s*false/,
+    "expected Esc on the migration modal error stage to dismiss the dialog without backend skip",
   );
   assert.match(
     appSource,
