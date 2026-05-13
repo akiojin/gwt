@@ -1800,6 +1800,18 @@ impl AppRuntime {
     }
 
     pub(crate) fn bootstrap(&mut self) {
+        // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
+        // mark historical merged `work/*` Start Work Workspaces as Done so the
+        // Workspace Overview Completed column reflects past completions on the
+        // first startup after auto-done emission lands. The scan is idempotent
+        // per `work_item_id` and skips silently when journal / work_events
+        // files are missing or unreadable.
+        let now = chrono::Utc::now();
+        for tab in &self.tabs {
+            let _ =
+                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
+        }
+
         let windows = self
             .tabs
             .iter()
@@ -3776,6 +3788,15 @@ impl AppRuntime {
                 },
             )];
         };
+
+        // SPEC-2359 US-37 / FR-118: emit Done for the Workspace WorkItem whose
+        // git_details.branch matches the cleanup target before delegating to
+        // worktree/branch deletion. Idempotent per work_item_id.
+        let _ = gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
+            &tab.project_root,
+            branch,
+            chrono::Utc::now(),
+        );
 
         spawn_workspace_cleanup_async(
             self.proxy.clone(),
