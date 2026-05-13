@@ -2894,24 +2894,62 @@
           cleanup,
           viewportRefreshFrame: null,
           activationFrame: null,
+          // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
+          // `isReady` flips to `true` AFTER the first
+          // runTerminalActivationSequence has run inside the rAF below,
+          // i.e. after xterm has reached its real cols/rows. Until then,
+          // all writeOutput / replaceTerminalSnapshot calls are captured
+          // in deferredWrites / pendingSnapshotMap so the bytes are not
+          // written against xterm's default 80x24 grid. Without this,
+          // the early Claude Code TUI bytes (which were generated for
+          // the backend's spawn cols/rows) land at the wrong grid size
+          // and stay layout-locked until the next manual resize,
+          // producing the post-launch corruption symptom.
+          isReady: false,
+          deferredWrites: [],
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
-        requestAnimationFrame(() => fitTerminal(windowId, true));
+        requestAnimationFrame(() => {
+          // The activation sequence here populates xterm cell metrics,
+          // runs fit, and sends geometry to the backend BEFORE any
+          // pending snapshot / output gets written. Once it returns we
+          // mark the runtime ready and replay any buffered content in
+          // FIFO order. This also implements FR-AH-01 / FR-057.
+          runTerminalActivationSequence({
+            runtime,
+            windowId,
+            shouldFocus: false,
+            shouldPersistGeometry: true,
+            sendGeometry,
+          });
+          runtime.isReady = true;
 
-        const snapshot = pendingSnapshotMap.get(windowId);
-        if (snapshot) {
-          replaceTerminalSnapshot(windowId, snapshot);
-          pendingSnapshotMap.delete(windowId);
-        }
-
-        const pending = pendingOutputMap.get(windowId);
-        if (pending?.length) {
-          for (const chunk of pending) {
-            writeOutput(windowId, chunk);
+          const snapshot = pendingSnapshotMap.get(windowId);
+          if (snapshot) {
+            replaceTerminalSnapshot(windowId, snapshot);
+            pendingSnapshotMap.delete(windowId);
           }
-          pendingOutputMap.delete(windowId);
-        }
+
+          const pending = pendingOutputMap.get(windowId);
+          if (pending?.length) {
+            for (const chunk of pending) {
+              writeOutput(windowId, chunk);
+            }
+            pendingOutputMap.delete(windowId);
+          }
+
+          // Flush any terminal_output WebSocket bytes that arrived
+          // between createTerminalRuntime returning and this rAF firing.
+          if (runtime.deferredWrites.length) {
+            const flush = runtime.deferredWrites;
+            runtime.deferredWrites = [];
+            for (const chunk of flush) {
+              writeOutput(windowId, chunk);
+            }
+          }
+        });
+
         return runtime;
       }
 
@@ -2923,6 +2961,15 @@
           pendingOutputMap.set(windowId, queue);
           return;
         }
+        // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
+        // completed its initial fit, hold the chunk in the runtime's
+        // deferred queue. The createTerminalRuntime rAF flushes this
+        // queue after the activation sequence so writes land at the
+        // real cols/rows instead of xterm's default 80×24 grid.
+        if (runtime.isReady === false) {
+          runtime.deferredWrites.push(base64);
+          return;
+        }
         const decoder = decoderMap.get(windowId);
         runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
           scheduleTerminalViewportRefresh(windowId);
@@ -2932,6 +2979,15 @@
       function replaceTerminalSnapshot(windowId, base64) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
+          pendingSnapshotMap.set(windowId, base64);
+          return;
+        }
+        // SPEC-2008 Phase 26.A / FR-057: snapshots that arrive before
+        // the initial fit are held in pendingSnapshotMap and replayed
+        // by the createTerminalRuntime rAF after activation completes.
+        // This prevents a snapshot reset+write from rendering at xterm's
+        // default 80×24 grid.
+        if (runtime.isReady === false) {
           pendingSnapshotMap.set(windowId, base64);
           return;
         }

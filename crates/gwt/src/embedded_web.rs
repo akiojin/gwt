@@ -610,6 +610,53 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
+        // SPEC-2008 Phase 26.A / FR-057 — writeOutput and
+        // replaceTerminalSnapshot must hold incoming bytes until the
+        // initial runTerminalActivationSequence has run, otherwise the
+        // first Claude Code bytes (generated at the backend's spawn
+        // cols/rows) get written into xterm's default 80×24 grid and
+        // stay layout-locked there until the next manual resize.
+        let html = frontend_bundle_source();
+        let create_runtime_handshake = regex::Regex::new(
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);\s*requestAnimationFrame\(\(\) => \{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}\s*\}\);"#,
+        )
+        .expect("valid regex");
+        let write_gate = regex::Regex::new(
+            r#"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*runtime\.deferredWrites\.push\(base64\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+        let snapshot_gate = regex::Regex::new(
+            r#"(?s)function replaceTerminalSnapshot\(windowId, base64\) \{[\s\S]*?if \(runtime\.isReady === false\) \{\s*pendingSnapshotMap\.set\(windowId, base64\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            create_runtime_handshake.is_match(html),
+            "expected createTerminalRuntime to defer snapshot / pending / deferred output replay until the rAF runs runTerminalActivationSequence and sets runtime.isReady = true (FR-057)",
+        );
+        assert!(
+            write_gate.is_match(html),
+            "expected writeOutput to push to runtime.deferredWrites when runtime.isReady === false (FR-057)",
+        );
+        assert!(
+            snapshot_gate.is_match(html),
+            "expected replaceTerminalSnapshot to re-queue into pendingSnapshotMap when runtime.isReady === false (FR-057)",
+        );
+        // Sanity: legacy "snapshot replay runs synchronously before fit"
+        // structure must no longer be present, otherwise the regression
+        // can land alongside the new gate and still cause the bug.
+        let legacy_sync_replay = regex::Regex::new(
+            r#"(?s)requestAnimationFrame\(\(\) => fitTerminal\(windowId,\s*true\)\);\s*const snapshot = pendingSnapshotMap\.get\(windowId\);"#,
+        )
+        .expect("valid regex");
+        assert!(
+            !legacy_sync_replay.is_match(html),
+            "legacy synchronous snapshot replay before initial fit must be removed (FR-057 regression guard)",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
         let html = frontend_bundle_source();
         let direct_pointermove_fit = regex::Regex::new(
