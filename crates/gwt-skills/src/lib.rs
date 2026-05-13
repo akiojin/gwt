@@ -1,6 +1,7 @@
 //! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
 pub mod assets;
+pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
@@ -9,6 +10,10 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
+pub use coordination_guidance::{
+    generate_coordination_guidance, generate_coordination_guidance_for_claude,
+    generate_coordination_guidance_for_codex,
+};
 pub use distribute::{
     distribute_to_worktree, distribute_to_worktree_for_targets, prune_stale_gwt_assets,
     prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
@@ -1601,5 +1606,50 @@ mod tests {
             !agents.contains("新規 SPEC を作成した場合、現在のブランチでは実装に入らず"),
             "AGENTS.md must not require agents to create a separate worktree after new SPEC creation"
         );
+    }
+
+    #[test]
+    fn agents_does_not_duplicate_generated_guidance_body() {
+        // SPEC-1935 US-* (Coordination Guidance Generator):
+        // Board / Workspace operational rules (kind taxonomy, audience
+        // selection, body template, tool-unit post prohibition) live
+        // ONLY in `crates/gwt-skills/src/coordination_guidance.rs` and
+        // the `board_reminder` hook. Earlier, AGENTS.md duplicated the
+        // same body which silently elevated agent compliance inside the
+        // gwt repo while leaving other projects without the guidance.
+        // The cleanup mandates removal of the duplicated wording so
+        // every gwt-managed worktree relies on the generated SKILL.md
+        // and runtime reminder.
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+
+        for retired in [
+            "### Board 運用 (SPEC-1974)",
+            "Board は Coordination ドメインの shared chat",
+            "推論可視化軸",
+            "ツール単位の報告（\"running gcc\"等）",
+        ] {
+            assert!(
+                !agents.contains(retired),
+                "AGENTS.md must not duplicate Board operational content (now lives only in generated guidance): {retired}"
+            );
+        }
+
+        // Positive guard: AGENTS.md must point at the canonical
+        // generated-guidance surface so future maintainers find the
+        // single source of truth instead of re-adding the duplicate.
+        for needle in [
+            ".claude/skills/gwt-coordination/SKILL.md",
+            ".codex/skills/gwt-coordination/SKILL.md",
+            "crates/gwt-skills/src/coordination_guidance.rs",
+            "generated guidance",
+        ] {
+            assert!(
+                agents.contains(needle),
+                "AGENTS.md must reference the canonical coordination guidance surface: {needle}"
+            );
+        }
     }
 }

@@ -37,6 +37,29 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         .exists());
     assert!(dir.path().join(".claude/settings.local.json").exists());
     assert!(dir.path().join(".codex/hooks.json").exists());
+    // SPEC-1935 US-* (Coordination Guidance Generator): the generated
+    // coordination skill must appear under both Claude and Codex skill
+    // roots after a full materialize.
+    let claude_coordination = dir.path().join(".claude/skills/gwt-coordination/SKILL.md");
+    let codex_coordination = dir.path().join(".codex/skills/gwt-coordination/SKILL.md");
+    assert!(
+        claude_coordination.exists(),
+        "Claude gwt-coordination SKILL.md not generated at {claude_coordination:?}"
+    );
+    assert!(
+        codex_coordination.exists(),
+        "Codex gwt-coordination SKILL.md not generated at {codex_coordination:?}"
+    );
+    let coordination_body =
+        std::fs::read_to_string(&claude_coordination).expect("read coordination skill");
+    assert!(
+        coordination_body.contains("gwtd workspace update"),
+        "coordination skill must contain canonical Workspace update directive"
+    );
+    assert!(
+        coordination_body.contains("regardless of project AGENTS.md / CLAUDE.md content"),
+        "coordination skill description must declare project-AGENTS.md-independence"
+    );
     let claude_settings = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
         .expect("read claude");
     let codex_hooks =
@@ -106,6 +129,21 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
         .exists());
     assert!(!dir.path().join(".claude/settings.local.json").exists());
     assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+    // SPEC-1935 US-*: when only Codex is the target, the coordination
+    // skill must be written under .codex/skills only and NOT under
+    // .claude/skills.
+    assert!(
+        dir.path()
+            .join(".codex/skills/gwt-coordination/SKILL.md")
+            .exists(),
+        "Codex coordination skill must materialize for Codex-only target"
+    );
+    assert!(
+        !dir.path()
+            .join(".claude/skills/gwt-coordination/SKILL.md")
+            .exists(),
+        "Claude coordination skill must NOT appear when only Codex is targeted"
+    );
 
     let exclude =
         std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
