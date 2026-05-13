@@ -146,6 +146,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
@@ -1105,6 +1106,12 @@
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           openProjectMenuRecent.dataset.empty = "true";
+          // Real DOM node beats CSS pseudo-content so screen readers reach it.
+          const empty = document.createElement("div");
+          empty.className = "split-button-menu-empty";
+          empty.setAttribute("role", "presentation");
+          empty.textContent = "No recent projects";
+          openProjectMenuRecent.appendChild(empty);
           return;
         }
         delete openProjectMenuRecent.dataset.empty;
@@ -1182,6 +1189,47 @@
         } else {
           openOpenProjectMenu();
         }
+      }
+
+      // Issue #2684 — roving focus across menu items. Items carry
+      // tabindex="-1" by ARIA APG convention so Tab does not stop on each
+      // individual entry; arrow keys take over once the menu is open.
+      function openProjectMenuItems() {
+        if (!openProjectMenu) {
+          return [];
+        }
+        return Array.from(
+          openProjectMenu.querySelectorAll('[role="menuitem"]'),
+        ).filter((el) => !el.disabled);
+      }
+
+      function focusOpenProjectMenuItemAt(index) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const wrapped = ((index % items.length) + items.length) % items.length;
+        try {
+          items[wrapped].focus({ preventScroll: true });
+        } catch {
+          items[wrapped].focus();
+        }
+      }
+
+      function moveOpenProjectMenuFocus(direction) {
+        const items = openProjectMenuItems();
+        if (items.length === 0) {
+          return;
+        }
+        const active = document.activeElement;
+        const currentIndex = items.indexOf(active);
+        const nextIndex =
+          currentIndex === -1
+            ? direction > 0
+              ? 0
+              : items.length - 1
+            : currentIndex + direction;
+        focusOpenProjectMenuItemAt(nextIndex);
       }
 
       function renderProjectPicker() {
@@ -1412,7 +1460,7 @@
             createNode("div", "kanban-drawer-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "kanban-drawer-section-body", section.body),
+            createKnowledgeMarkdownBody(section, "kanban-drawer-section-body"),
           );
           body.appendChild(card);
         }
@@ -3037,6 +3085,7 @@
             hideDone: readKanbanHideDonePreference(),
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
+            autoRefreshTimer: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -3048,6 +3097,33 @@
           state.pendingPhaseUpdates = new Map();
         }
         return state;
+      }
+
+      function knowledgeAutoRefreshIsBusy(state) {
+        return (
+          state.loading ||
+          state.refreshing ||
+          state.searching ||
+          state.searchInFlight
+        );
+      }
+
+      function ensureKnowledgeAutoRefresh(windowId, knowledgeKind) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        if (state.autoRefreshTimer) {
+          return;
+        }
+        state.autoRefreshTimer = setInterval(() => {
+          if (!windowMap.get(windowId)) {
+            clearInterval(state.autoRefreshTimer);
+            state.autoRefreshTimer = null;
+            return;
+          }
+          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
+            return;
+          }
+          requestKnowledgeBridge(windowId, knowledgeKind, true);
+        }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
       }
 
       function readKanbanHideDonePreference() {
@@ -3316,6 +3392,18 @@
         }
       }
 
+      function replaceKnowledgeEntry(entries, fresh) {
+        if (!fresh || !Array.isArray(entries)) {
+          return false;
+        }
+        const index = entries.findIndex((entry) => entry.number === fresh.number);
+        if (index < 0) {
+          return false;
+        }
+        entries[index] = fresh;
+        return true;
+      }
+
       function knowledgeDetailRequestMatches(state, event) {
         return (
           !event.request_id ||
@@ -3451,6 +3539,18 @@
         }
         if (textContent !== undefined) {
           node.textContent = textContent;
+        }
+        return node;
+      }
+
+      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
+        const node = createNode("div", `${className} knowledge-markdown-body`);
+        const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
+        if (html) {
+          node.innerHTML = html;
+        } else {
+          node.classList.add("is-plaintext");
+          node.textContent = section?.body || "";
         }
         return node;
       }
@@ -6247,7 +6347,7 @@
             createNode("div", "knowledge-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "knowledge-section-body", section.body),
+            createKnowledgeMarkdownBody(section),
           );
           scroll.appendChild(card);
         }
@@ -7120,6 +7220,7 @@
               false,
             );
           }
+          ensureKnowledgeAutoRefresh(windowData.id, knowledgeKind);
           frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
             windowData.id,
           );
@@ -8424,13 +8525,9 @@
             }
             if (event.result?.kind === "ok") {
               const fresh = event.result.fresh_entry;
-              if (fresh && Array.isArray(state.entries)) {
-                const index = state.entries.findIndex(
-                  (entry) => entry.number === fresh.number,
-                );
-                if (index >= 0) {
-                  state.entries[index] = fresh;
-                }
+              if (fresh) {
+                replaceKnowledgeEntry(state.entries, fresh);
+                replaceKnowledgeEntry(state.baseEntries, fresh);
               }
               state.dndSnapshot = null;
             } else {
@@ -9020,6 +9117,31 @@
           if (event.key === "Escape" && isOpenProjectMenuOpen()) {
             event.preventDefault();
             closeOpenProjectMenu({ restoreFocus: true });
+          }
+        });
+        openProjectMenu.addEventListener("keydown", (event) => {
+          if (!isOpenProjectMenuOpen()) {
+            return;
+          }
+          switch (event.key) {
+            case "ArrowDown":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(1);
+              break;
+            case "ArrowUp":
+              event.preventDefault();
+              moveOpenProjectMenuFocus(-1);
+              break;
+            case "Home":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(0);
+              break;
+            case "End":
+              event.preventDefault();
+              focusOpenProjectMenuItemAt(-1);
+              break;
+            default:
+              break;
           }
         });
       }

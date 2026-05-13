@@ -52,6 +52,29 @@ test("Kanban toolbar exposes Hide done toggle id", () => {
   );
 });
 
+test("Knowledge windows install periodic force refresh for external phase changes", () => {
+  assert.match(
+    appSource,
+    /KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS/,
+    "expected a named Knowledge auto-refresh interval constant",
+  );
+  assert.match(
+    appSource,
+    /ensureKnowledgeAutoRefresh/,
+    "expected Knowledge windows to install an auto-refresh helper",
+  );
+  assert.match(
+    appSource,
+    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
+    "expected auto-refresh to force remote cache refresh with refresh=true",
+  );
+  assert.match(
+    appSource,
+    /state\.loading\s*\|\|\s*state\.refreshing\s*\|\|\s*state\.searching\s*\|\|\s*state\.searchInFlight/,
+    "expected auto-refresh to skip while user-visible work is active",
+  );
+});
+
 test("Kanban removes legacy open and closed list scope controls", () => {
   assert.doesNotMatch(
     appSource,
@@ -352,5 +375,33 @@ test("Kanban card click keeps the selected item in the right detail pane", () =>
     appSource,
     /addEventListener\("click"[\s\S]{0,500}?openKanbanDrawer/,
     "Kanban card click must not open a small Drawer as the primary detail UI",
+  );
+});
+
+test("Knowledge detail pane renders section bodies through sanitized Markdown helper", () => {
+  assert.match(
+    appSource,
+    /function\s+createKnowledgeMarkdownBody\(/,
+    "expected a shared Markdown body helper for Knowledge detail sections",
+  );
+  assert.match(
+    appSource,
+    /section\.body_html/,
+    "expected renderer to prefer sanitized backend-generated section.body_html",
+  );
+  assert.match(
+    appSource,
+    /createKnowledgeMarkdownBody\(section\)/,
+    "expected right detail pane to append section bodies through the Markdown helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("pre",\s*"knowledge-section-body",\s*section\.body\)/,
+    "right detail pane must not render Markdown as plaintext pre blocks",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /\.innerHTML\s*=\s*section\.body\b/,
+    "raw section.body must never be assigned to innerHTML",
   );
 });

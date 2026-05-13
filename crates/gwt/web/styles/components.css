@@ -2728,6 +2728,136 @@ kbd.op-kbd {
   overflow-wrap: anywhere;
 }
 
+.knowledge-section-body.knowledge-markdown-body,
+.kanban-drawer-section-body.knowledge-markdown-body {
+  white-space: normal;
+}
+
+.knowledge-markdown-body {
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.55;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.knowledge-markdown-body.is-plaintext {
+  white-space: pre-wrap;
+}
+
+.knowledge-markdown-body :first-child {
+  margin-top: 0;
+}
+
+.knowledge-markdown-body :last-child {
+  margin-bottom: 0;
+}
+
+.knowledge-markdown-body h1,
+.knowledge-markdown-body h2,
+.knowledge-markdown-body h3,
+.knowledge-markdown-body h4 {
+  margin: var(--space-3) 0 var(--space-2);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--color-text-strong);
+  letter-spacing: 0;
+}
+
+.knowledge-markdown-body h1 {
+  font-size: var(--type-lg);
+}
+
+.knowledge-markdown-body h2 {
+  font-size: var(--type-md);
+}
+
+.knowledge-markdown-body h3,
+.knowledge-markdown-body h4 {
+  font-size: var(--type-sm);
+}
+
+.knowledge-markdown-body p,
+.knowledge-markdown-body ul,
+.knowledge-markdown-body ol,
+.knowledge-markdown-body blockquote,
+.knowledge-markdown-body pre,
+.knowledge-markdown-body table {
+  margin: 0 0 var(--space-3);
+}
+
+.knowledge-markdown-body ul,
+.knowledge-markdown-body ol {
+  padding-left: var(--space-5);
+}
+
+.knowledge-markdown-body li + li {
+  margin-top: var(--space-1);
+}
+
+.knowledge-markdown-body input[type="checkbox"] {
+  margin: 0 var(--space-2) 0 0;
+  transform: translateY(1px);
+}
+
+.knowledge-markdown-body code {
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.knowledge-markdown-body pre {
+  max-width: 100%;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+}
+
+.knowledge-markdown-body pre code {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.knowledge-markdown-body blockquote {
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-link);
+  color: var(--color-text-muted);
+}
+
+.knowledge-markdown-body table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.knowledge-markdown-body th,
+.knowledge-markdown-body td {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.knowledge-markdown-body th {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+}
+
+.knowledge-markdown-body a {
+  color: var(--color-link);
+}
+
 /* ============================================================
    SPEC-1933 Phase: System Settings (Output Language)
    Settings surface: tab strip + System tab content.

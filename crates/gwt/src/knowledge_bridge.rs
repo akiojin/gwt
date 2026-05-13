@@ -5,6 +5,7 @@ use std::{
 
 use gwt_core::paths::gwt_cache_dir;
 use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
+use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -114,6 +115,8 @@ pub struct KnowledgeListItem {
 pub struct KnowledgeDetailSection {
     pub title: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_html: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,11 +591,10 @@ fn disabled_pr_view() -> KnowledgeBridgeView {
             subtitle: "Unavailable".to_string(),
             state: "unavailable".to_string(),
             labels: Vec::new(),
-            sections: vec![KnowledgeDetailSection {
-                title: "Status".to_string(),
-                body: "PR Bridge is waiting for cache-backed PR list support before it can render data."
-                    .to_string(),
-            }],
+            sections: vec![knowledge_detail_section(
+                "Status",
+                "PR Bridge is waiting for cache-backed PR list support before it can render data.",
+            )],
             launch_issue_number: None,
         },
     }
@@ -624,12 +626,42 @@ fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
         subtitle: String::new(),
         state: "idle".to_string(),
         labels: Vec::new(),
-        sections: vec![KnowledgeDetailSection {
-            title: "Status".to_string(),
-            body: body.to_string(),
-        }],
+        sections: vec![knowledge_detail_section("Status", body)],
         launch_issue_number: None,
     }
+}
+
+fn knowledge_detail_section(
+    title: impl Into<String>,
+    body: impl Into<String>,
+) -> KnowledgeDetailSection {
+    let body = body.into();
+    KnowledgeDetailSection {
+        title: title.into(),
+        body_html: Some(render_markdown_body_html(&body)),
+        body,
+    }
+}
+
+fn render_markdown_body_html(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut raw_html = String::new();
+    html::push_html(&mut raw_html, parser);
+
+    sanitize_markdown_html(&raw_html)
+}
+
+fn sanitize_markdown_html(raw_html: &str) -> String {
+    ammonia::Builder::default()
+        .add_tags(&["input", "table", "thead", "tbody", "tr", "th", "td"])
+        .add_tag_attributes("input", &["checked", "disabled", "type"])
+        .clean(raw_html)
+        .to_string()
 }
 
 fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
@@ -752,32 +784,29 @@ fn issue_detail_view(
     let mut sections = Vec::new();
     let body = entry.snapshot.body.trim();
     if !body.is_empty() {
-        sections.push(KnowledgeDetailSection {
-            title: "Description".to_string(),
-            body: body.to_string(),
-        });
+        sections.push(knowledge_detail_section("Description", body));
     }
     for (index, comment) in entry.snapshot.comments.iter().enumerate() {
         let comment_body = comment.body.trim();
         if comment_body.is_empty() {
             continue;
         }
-        sections.push(KnowledgeDetailSection {
-            title: format!("Comment {}", index + 1),
-            body: comment_body.to_string(),
-        });
+        sections.push(knowledge_detail_section(
+            format!("Comment {}", index + 1),
+            comment_body,
+        ));
     }
     if let Some(branches) = linked_branches.filter(|branches| !branches.is_empty()) {
-        sections.push(KnowledgeDetailSection {
-            title: "Linked branches".to_string(),
-            body: linked_branches_markdown(branches),
-        });
+        sections.push(knowledge_detail_section(
+            "Linked branches",
+            linked_branches_markdown(branches),
+        ));
     }
     if sections.is_empty() {
-        sections.push(KnowledgeDetailSection {
-            title: "Status".to_string(),
-            body: "No cached issue details available.".to_string(),
-        });
+        sections.push(knowledge_detail_section(
+            "Status",
+            "No cached issue details available.",
+        ));
     }
 
     KnowledgeDetailView {
@@ -809,10 +838,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
     for name in ["spec", "plan", "tasks"] {
         if let Some(body) = entry.spec_body.sections.get(&SectionName(name.to_string())) {
             if !body.trim().is_empty() {
-                sections.push(KnowledgeDetailSection {
-                    title: name.to_string(),
-                    body: body.trim().to_string(),
-                });
+                sections.push(knowledge_detail_section(name, body.trim()));
             }
         }
     }
@@ -820,16 +846,13 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         if matches!(name.0.as_str(), "spec" | "plan" | "tasks") || body.trim().is_empty() {
             continue;
         }
-        sections.push(KnowledgeDetailSection {
-            title: name.0.clone(),
-            body: body.trim().to_string(),
-        });
+        sections.push(knowledge_detail_section(name.0.clone(), body.trim()));
     }
     if sections.is_empty() {
-        sections.push(KnowledgeDetailSection {
-            title: "Status".to_string(),
-            body: "No cached SPEC sections available.".to_string(),
-        });
+        sections.push(knowledge_detail_section(
+            "Status",
+            "No cached SPEC sections available.",
+        ));
     }
 
     let phase = effective_spec_lifecycle_label(entry);
@@ -1255,6 +1278,65 @@ Extra context.
         assert_eq!(detail.state, "closed");
         assert!(detail.subtitle.contains("Done"));
         assert!(!detail.subtitle.contains("phase/implementation"));
+    }
+
+    #[test]
+    fn knowledge_detail_sections_include_sanitized_markdown_html() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let raw_body = concat!(
+            "# Markdown title\n\n",
+            "- [x] Accepted item\n",
+            "- Plain item\n\n",
+            "| Key | Value |\n",
+            "| --- | --- |\n",
+            "| A | B |\n\n",
+            "<script>alert('xss')</script>\n",
+            "<a href=\"javascript:alert(1)\" onclick=\"alert(2)\">bad link</a>\n",
+        );
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        Cache::new(cache_root)
+            .write_snapshot(&issue_snapshot(
+                31,
+                "Markdown issue",
+                raw_body,
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write markdown issue snapshot");
+
+        let view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(31), false)
+            .expect("issue bridge");
+        let description = view
+            .detail
+            .sections
+            .iter()
+            .find(|section| section.title == "Description")
+            .expect("description section");
+
+        assert_eq!(description.body, raw_body.trim());
+        let html = description
+            .body_html
+            .as_deref()
+            .expect("description should include sanitized markdown html");
+        assert!(html.contains("<h1>Markdown title</h1>"), "{html}");
+        assert!(html.contains("<table>"), "{html}");
+        assert!(html.contains("type=\"checkbox\""), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("onclick"), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
     }
 
     #[derive(Debug, Default)]

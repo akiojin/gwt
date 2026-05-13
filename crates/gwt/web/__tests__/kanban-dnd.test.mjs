@@ -96,6 +96,19 @@ test("knowledge_bridge_phase_updated Ok response clears pendingPhaseUpdates", ()
   );
 });
 
+test("knowledge_bridge_phase_updated Ok response refreshes baseEntries too", () => {
+  assert.match(
+    appSource,
+    /replaceKnowledgeEntry\(\s*state\.entries,\s*fresh\s*\)/,
+    "expected success path to replace the visible entry with fresh_entry",
+  );
+  assert.match(
+    appSource,
+    /replaceKnowledgeEntry\(\s*state\.baseEntries,\s*fresh\s*\)/,
+    "expected success path to replace baseEntries so search reset cannot restore stale phase",
+  );
+});
+
 test("knowledge_phase_updated Error response triggers rollback from dndSnapshot", () => {
   // SPEC-2017 US-8: GitHub label write-back can fail (network,
   // permission, rate limit). The error path must restore the card
