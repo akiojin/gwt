@@ -1588,6 +1588,27 @@
         return "Active Work";
       }
 
+      // SPEC-2359 Phase U-7 (FR-148): human-readable label for the Phase
+      // U-6 `WorkspaceLifecycleStage` enum on the Active Work card. Mirror
+      // of `formatLifecycleStageLabel` in workspace-kanban-surface.js so
+      // both surfaces show identical strings.
+      function formatActiveWorkLifecycleLabel(stage) {
+        switch (String(stage || "").toLowerCase()) {
+          case "planning":
+            return "Planning";
+          case "active":
+            return "Active";
+          case "in_review":
+            return "In Review";
+          case "done":
+            return "Done";
+          case "archived":
+            return "Archived";
+          default:
+            return "";
+        }
+      }
+
       function agentStatusLabel(state) {
         switch (String(state || "").toLowerCase()) {
           case "active":
@@ -1749,16 +1770,40 @@
         appendMeta(meta, activeWorkProjection.owner);
         const activePr = createWorkspacePrMeta(activeWorkProjection);
         if (activePr) meta.appendChild(activePr);
+        // SPEC-2359 Phase U-7 (FR-148, FR-149): render the Phase U-6
+        // `lifecycle_stage` in the Active Work meta so user can spot at a
+        // glance whether the work is Planning / Active / InReview / Done /
+        // Archived without opening the Workspace Detail pane. Falls back
+        // silently when the field is absent (legacy daemon payload).
+        const lifecycleStage = activeWorkProjection.lifecycle_stage;
+        if (lifecycleStage) {
+          const chip = createNode(
+            "span",
+            `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
+            formatActiveWorkLifecycleLabel(lifecycleStage),
+          );
+          meta.appendChild(chip);
+        }
         activeWorkSummary.appendChild(meta);
-        activeWorkSummary.appendChild(
-          createNode(
-            "div",
-            "op-work-status",
-            activeWorkProjection.next_action ||
-              activeWorkProjection.status_text ||
-              "Work is active",
-          ),
-        );
+        // SPEC-2359 Phase U-7 (FR-141, FR-149): when `blocked_reason` is
+        // populated, surface it directly in the Active Work status line
+        // instead of letting it hide behind `next_action` / `status_text`.
+        // This mirrors the Detail pane Blocked Reason section so the user
+        // sees consistent "what is blocking" copy across surfaces.
+        const blockedReason =
+          typeof activeWorkProjection.blocked_reason === "string"
+            ? activeWorkProjection.blocked_reason.trim()
+            : "";
+        const statusBody =
+          blockedReason ||
+          activeWorkProjection.next_action ||
+          activeWorkProjection.status_text ||
+          "Work is active";
+        const statusNode = createNode("div", "op-work-status", statusBody);
+        if (blockedReason) {
+          statusNode.classList.add("op-work-status--blocked");
+        }
+        activeWorkSummary.appendChild(statusNode);
 
         const actions = createNode("div", "op-work-actions");
         if (activeWorkProjection.branch) {
