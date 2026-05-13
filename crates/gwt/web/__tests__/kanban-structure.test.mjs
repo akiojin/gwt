@@ -273,3 +273,31 @@ test("Kanban card click keeps the selected item in the right detail pane", () =>
     "Kanban card click must not open a small Drawer as the primary detail UI",
   );
 });
+
+test("Knowledge detail pane renders section bodies through sanitized Markdown helper", () => {
+  assert.match(
+    appSource,
+    /function\s+createKnowledgeMarkdownBody\(/,
+    "expected a shared Markdown body helper for Knowledge detail sections",
+  );
+  assert.match(
+    appSource,
+    /section\.body_html/,
+    "expected renderer to prefer sanitized backend-generated section.body_html",
+  );
+  assert.match(
+    appSource,
+    /createKnowledgeMarkdownBody\(section\)/,
+    "expected right detail pane to append section bodies through the Markdown helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("pre",\s*"knowledge-section-body",\s*section\.body\)/,
+    "right detail pane must not render Markdown as plaintext pre blocks",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /\.innerHTML\s*=\s*section\.body\b/,
+    "raw section.body must never be assigned to innerHTML",
+  );
+});

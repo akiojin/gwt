@@ -117,3 +117,31 @@ test("Card click no longer opens the Drawer as the primary detail UI", () => {
     "card click must keep detail in the right pane, not open the Drawer",
   );
 });
+
+test("Drawer renders section bodies through sanitized Markdown helper", () => {
+  assert.match(
+    appSource,
+    /function\s+createKnowledgeMarkdownBody\(/,
+    "expected a shared Markdown body helper for Knowledge detail sections",
+  );
+  assert.match(
+    appSource,
+    /section\.body_html/,
+    "expected Drawer renderer to use sanitized backend-generated section.body_html",
+  );
+  assert.match(
+    appSource,
+    /createKnowledgeMarkdownBody\(section,\s*"kanban-drawer-section-body"\)/,
+    "expected Drawer section bodies to flow through the Markdown helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("pre",\s*"kanban-drawer-section-body",\s*section\.body\)/,
+    "Drawer must not render Markdown as plaintext pre blocks",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /\.innerHTML\s*=\s*section\.body\b/,
+    "raw section.body must never be assigned to innerHTML",
+  );
+});

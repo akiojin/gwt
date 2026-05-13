@@ -1299,7 +1299,7 @@
             createNode("div", "kanban-drawer-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "kanban-drawer-section-body", section.body),
+            createKnowledgeMarkdownBody(section, "kanban-drawer-section-body"),
           );
           body.appendChild(card);
         }
@@ -3338,6 +3338,18 @@
         }
         if (textContent !== undefined) {
           node.textContent = textContent;
+        }
+        return node;
+      }
+
+      function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
+        const node = createNode("div", `${className} knowledge-markdown-body`);
+        const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
+        if (html) {
+          node.innerHTML = html;
+        } else {
+          node.classList.add("is-plaintext");
+          node.textContent = section?.body || "";
         }
         return node;
       }
@@ -6037,7 +6049,7 @@
             createNode("div", "knowledge-section-title", section.title),
           );
           card.appendChild(
-            createNode("pre", "knowledge-section-body", section.body),
+            createKnowledgeMarkdownBody(section),
           );
           scroll.appendChild(card);
         }
