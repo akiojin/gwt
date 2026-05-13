@@ -2,6 +2,7 @@
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
+      import { renderProjectCloneModal as renderProjectCloneModalView } from "/project-clone-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -66,6 +67,7 @@
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
+      const pickerCloneProjectButton = document.getElementById("picker-clone-project");
       const recentProjectList = document.getElementById("recent-project-list");
       const projectOnboarding = document.getElementById("project-onboarding");
       const projectOnboardingTitle = document.getElementById(
@@ -104,6 +106,10 @@
       const wizardCloseButton = document.getElementById("wizard-close-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
+      const cloneProjectModal = document.getElementById("clone-project-modal");
+      const cloneProjectDialog = cloneProjectModal
+        ? cloneProjectModal.querySelector(".modal-shell")
+        : null;
       const branchCleanupModal = document.getElementById("branch-cleanup-modal");
       const branchCleanupDialog = branchCleanupModal.querySelector(".modal-shell");
       const migrationModal = document.getElementById("migration-modal");
@@ -300,6 +306,19 @@
         percent: 0,
         message: "",
         recovery: "",
+      };
+      let cloneProjectModalState = {
+        open: false,
+        mode: "url",
+        url: "",
+        parentPath: "",
+        query: "",
+        repositories: [],
+        selectedRepositoryUrl: "",
+        searching: false,
+        cloning: false,
+        progress: "",
+        error: "",
       };
       let versionState = { current: "", latest: "" };
       const indexStatusByProjectRoot = new Map();
@@ -608,6 +627,116 @@
 
       function sendOpenProjectDialog() {
         send({ kind: "open_project_dialog" });
+      }
+
+      function openCloneProjectModal() {
+        cloneProjectModalState = {
+          ...cloneProjectModalState,
+          open: true,
+          error: "",
+          progress: "",
+        };
+        renderProjectCloneModal();
+      }
+
+      function closeCloneProjectModal() {
+        if (cloneProjectModalState.cloning) {
+          return;
+        }
+        cloneProjectModalState = {
+          ...cloneProjectModalState,
+          open: false,
+          searching: false,
+          error: "",
+          progress: "",
+        };
+        renderProjectCloneModal();
+      }
+
+      function renderProjectCloneModal() {
+        if (!cloneProjectModal || !cloneProjectDialog) {
+          return;
+        }
+        renderProjectCloneModalView({
+          modalEl: cloneProjectModal,
+          dialogEl: cloneProjectDialog,
+          state: cloneProjectModalState,
+          createNode: (tagName, className, textContent) => {
+            const node = document.createElement(tagName);
+            if (className) node.className = className;
+            if (textContent !== undefined) node.textContent = textContent;
+            return node;
+          },
+          onClose: closeCloneProjectModal,
+          onModeChange: (mode) => {
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              mode,
+              error: "",
+              progress: "",
+            };
+            renderProjectCloneModal();
+          },
+          onUrlChange: (url) => {
+            cloneProjectModalState = { ...cloneProjectModalState, url };
+          },
+          onParentSelect: () => {
+            send({ kind: "select_clone_project_parent" });
+          },
+          onSearchQueryChange: (query) => {
+            cloneProjectModalState = { ...cloneProjectModalState, query };
+          },
+          onSearch: () => {
+            const query = cloneProjectModalState.query.trim();
+            if (!query) return;
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              searching: true,
+              error: "",
+            };
+            renderProjectCloneModal();
+            send({ kind: "github_repository_search", query });
+          },
+          onRepositorySelect: (url) => {
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              selectedRepositoryUrl: url,
+              url,
+              error: "",
+            };
+            renderProjectCloneModal();
+          },
+          onClone: () => {
+            const url = (
+              cloneProjectModalState.mode === "search"
+                ? cloneProjectModalState.selectedRepositoryUrl
+                : cloneProjectModalState.url
+            ).trim();
+            const parentPath = cloneProjectModalState.parentPath.trim();
+            if (!url || !parentPath) {
+              cloneProjectModalState = {
+                ...cloneProjectModalState,
+                error: !url
+                  ? "Select or enter a repository URL."
+                  : "Choose a destination parent folder.",
+              };
+              renderProjectCloneModal();
+              return;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: true,
+              progress: "Cloning repository...",
+              error: "",
+            };
+            renderProjectCloneModal();
+            send({
+              kind: "clone_project_start",
+              url,
+              parent_path: parentPath,
+            });
+          },
+        });
       }
 
       function updateActionAvailability() {
@@ -1316,7 +1445,11 @@
         if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") {
           return false;
         }
-        if (modal.classList.contains("open") || wizardModal.classList.contains("open")) {
+        if (
+          modal.classList.contains("open") ||
+          wizardModal.classList.contains("open") ||
+          cloneProjectModal?.classList.contains("open")
+        ) {
           return false;
         }
         return true;
@@ -7993,6 +8126,67 @@
               frontendUnits.projectWorkspaceShell.activeProjectTab(),
             );
             break;
+          case "clone_project_parent_selected":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              parentPath: event.path || "",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "github_repository_search_results":
+            if (event.query !== cloneProjectModalState.query.trim()) {
+              break;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              repositories: event.repositories || [],
+              selectedRepositoryUrl: "",
+              searching: false,
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "github_repository_search_error":
+            if (event.query !== cloneProjectModalState.query.trim()) {
+              break;
+            }
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              searching: false,
+              error: event.message || "Repository search failed.",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_progress":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: true,
+              progress: event.message || "Cloning repository...",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_done":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              open: false,
+              cloning: false,
+              searching: false,
+              progress: "",
+              error: "",
+            };
+            renderProjectCloneModal();
+            break;
+          case "clone_project_error":
+            cloneProjectModalState = {
+              ...cloneProjectModalState,
+              cloning: false,
+              progress: "",
+              error: event.message || "Clone failed.",
+            };
+            renderProjectCloneModal();
+            break;
           case "launch_wizard_open_error":
             launchWizard = null;
             launchWizardOpenError = {
@@ -8399,6 +8593,7 @@
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
       );
+      pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
       onboardingOpenProjectButton.addEventListener(
         "click",
         frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
@@ -8437,6 +8632,11 @@
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
           closeLaunchWizardFromChrome();
+        }
+      });
+      cloneProjectModal.addEventListener("click", (event) => {
+        if (event.target === cloneProjectModal) {
+          closeCloneProjectModal();
         }
       });
       branchCleanupModal.addEventListener("click", (event) => {
@@ -8493,6 +8693,11 @@
           // closeModal() handles both the .open class flip and the focus
           // restore via the WeakMap-style closure variables.
           closeModal();
+          event.preventDefault();
+          return;
+        }
+        if (cloneProjectModal && cloneProjectModal.classList.contains("open")) {
+          closeCloneProjectModal();
           event.preventDefault();
           return;
         }

@@ -2575,6 +2575,136 @@
         color: var(--color-focus-ring);
       }
 
+      .clone-project-subtitle {
+        margin: 0;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
+      }
+
+      .clone-project-body {
+        gap: 12px;
+      }
+
+      .clone-project-mode-row,
+      .clone-project-search-row,
+      .clone-project-destination,
+      .clone-project-footer {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .clone-project-mode-button {
+        min-width: 72px;
+        padding: 7px 10px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        color: var(--color-text);
+        cursor: pointer;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+      }
+
+      .clone-project-mode-button[aria-pressed="true"] {
+        border-color: var(--color-button-bg);
+        background: var(--color-button-bg);
+        color: var(--color-button-fg);
+      }
+
+      .clone-project-field {
+        display: grid;
+        gap: 5px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .clone-project-field-label {
+        font-family: var(--font-display);
+        font-size: var(--type-xs);
+        font-weight: 700;
+        text-transform: uppercase;
+        color: var(--color-text-muted);
+      }
+
+      .clone-project-field input {
+        width: 100%;
+        min-width: 0;
+        padding: 8px 10px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+      }
+
+      .clone-project-destination {
+        align-items: flex-end;
+        flex-wrap: wrap;
+      }
+
+      .clone-project-path {
+        flex: 1;
+        min-width: 180px;
+        padding: 8px 10px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .clone-project-results {
+        display: grid;
+        gap: 8px;
+        max-height: 220px;
+        overflow: auto;
+      }
+
+      .clone-project-result {
+        display: grid;
+        gap: 4px;
+        width: 100%;
+        padding: 10px 12px;
+        text-align: left;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface);
+        color: var(--color-text);
+        cursor: pointer;
+      }
+
+      .clone-project-result.selected {
+        border-color: var(--color-focus-ring);
+        background: var(--color-surface-elevated);
+      }
+
+      .clone-project-result-title {
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
+        font-weight: 700;
+      }
+
+      .clone-project-result-description,
+      .clone-project-result-meta,
+      .clone-project-empty,
+      .clone-project-progress,
+      .clone-project-error {
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
+      }
+
+      .clone-project-error {
+        color: var(--agent-claude);
+      }
+
       /* Launch Wizard backdrop and shell are unified with the shared modal
          primitives above (`.modal-backdrop` + `.modal-shell.is-wizard`).
          `.wizard-header` and `.wizard-footer` are layered on the
@@ -3216,6 +3346,9 @@
               <button class="wizard-button primary" id="picker-open-project">
                 Open Project...
               </button>
+              <button class="wizard-button" id="picker-clone-project">
+                Clone from GitHub...
+              </button>
               <div class="picker-section-label">Recent</div>
               <div class="project-recent-list" id="recent-project-list"></div>
             </div>
@@ -3496,6 +3629,19 @@
               <button class="wizard-button primary" id="wizard-submit-button">Launch</button>
             </div>
           </div>
+        </div>
+      </div>
+      <div class="modal-backdrop" id="clone-project-modal" aria-hidden="true">
+        <div
+          class="modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="clone-project-modal-title"
+          tabindex="-1"
+        >
+          <h2 id="clone-project-modal-title">Clone Project</h2>
+          <button type="button" data-clone-mode="url" hidden>URL</button>
+          <button type="button" data-clone-mode="search" hidden>Search</button>
         </div>
       </div>
       <div

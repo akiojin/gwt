@@ -666,6 +666,16 @@ enum UserEvent {
         message: String,
         recovery: gwt_core::migration::RecoveryState,
     },
+    CloneProjectProgress {
+        message: String,
+    },
+    CloneProjectDone {
+        workspace_home: PathBuf,
+        initial_worktree_path: PathBuf,
+    },
+    CloneProjectError {
+        message: String,
+    },
     /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The event
     /// loop exits through the same cleanup path as a window close request.
     QuitApp,
@@ -5635,6 +5645,26 @@ fn main() -> wry::Result<()> {
             }) => {
                 let events = app.handle_migration_error(&tab_id, phase, message, recovery);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::CloneProjectProgress { message }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::CloneProjectProgress { message },
+                )]);
+            }
+            Event::UserEvent(UserEvent::CloneProjectDone {
+                workspace_home,
+                initial_worktree_path,
+            }) => {
+                let events = app.handle_clone_project_done(&workspace_home, &initial_worktree_path);
+                board_projection_watchers.sync(&app, proxy.clone());
+                #[cfg(unix)]
+                board_daemon_subscribers.sync(&app, proxy.clone());
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::CloneProjectError { message }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::CloneProjectError { message },
+                )]);
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {

@@ -52,6 +52,14 @@ pub enum WorkspaceResumeSource {
 pub enum FrontendEvent {
     FrontendReady,
     OpenProjectDialog,
+    SelectCloneProjectParent,
+    GithubRepositorySearch {
+        query: String,
+    },
+    CloneProjectStart {
+        url: String,
+        parent_path: String,
+    },
     ReopenRecentProject {
         path: String,
     },
@@ -383,6 +391,16 @@ pub struct RecentProjectView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubRepositorySearchResultView {
+    pub full_name: String,
+    pub description: Option<String>,
+    pub url: String,
+    pub default_branch: Option<String>,
+    pub visibility: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileEnvEntryView {
     pub key: String,
     pub value: String,
@@ -676,6 +694,27 @@ pub enum BackendEvent {
         message: String,
     },
     ProjectOpenError {
+        message: String,
+    },
+    CloneProjectParentSelected {
+        path: String,
+    },
+    GithubRepositorySearchResults {
+        query: String,
+        repositories: Vec<GitHubRepositorySearchResultView>,
+    },
+    GithubRepositorySearchError {
+        query: String,
+        message: String,
+    },
+    CloneProjectProgress {
+        message: String,
+    },
+    CloneProjectDone {
+        workspace_home: String,
+        initial_worktree_path: String,
+    },
+    CloneProjectError {
         message: String,
     },
     LaunchWizardOpenError {
@@ -1088,6 +1127,79 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_github_project_clone_commands() {
+        let parent: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "select_clone_project_parent"
+        }))
+        .expect("deserialize parent picker event");
+        assert!(matches!(parent, FrontendEvent::SelectCloneProjectParent));
+
+        let search: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "github_repository_search",
+            "query": "akiojin/gwt"
+        }))
+        .expect("deserialize repository search event");
+        assert!(matches!(
+            search,
+            FrontendEvent::GithubRepositorySearch { query } if query == "akiojin/gwt"
+        ));
+
+        let clone: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "clone_project_start",
+            "url": "https://github.com/akiojin/gwt.git",
+            "parent_path": "/tmp/projects"
+        }))
+        .expect("deserialize clone start event");
+        assert!(matches!(
+            clone,
+            FrontendEvent::CloneProjectStart { url, parent_path }
+                if url == "https://github.com/akiojin/gwt.git"
+                    && parent_path == "/tmp/projects"
+        ));
+    }
+
+    #[test]
+    fn clone_project_backend_events_use_distinct_wire_contract() {
+        let results = BackendEvent::GithubRepositorySearchResults {
+            query: "gwt".to_string(),
+            repositories: vec![super::GitHubRepositorySearchResultView {
+                full_name: "akiojin/gwt".to_string(),
+                description: Some("Git Worktree Manager".to_string()),
+                url: "https://github.com/akiojin/gwt".to_string(),
+                default_branch: Some("develop".to_string()),
+                visibility: Some("public".to_string()),
+                updated_at: Some("2026-05-13T00:00:00Z".to_string()),
+            }],
+        };
+        let value = serde_json::to_value(results).expect("serialize search results");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String(
+                "github_repository_search_results".to_string()
+            ))
+        );
+        assert_eq!(
+            value
+                .pointer("/repositories/0/full_name")
+                .and_then(Value::as_str),
+            Some("akiojin/gwt")
+        );
+
+        let error = BackendEvent::CloneProjectError {
+            message: "target already exists".to_string(),
+        };
+        let value = serde_json::to_value(error).expect("serialize clone error");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("clone_project_error".to_string()))
+        );
+        assert_eq!(
+            value.get("message").and_then(Value::as_str),
+            Some("target already exists")
         );
     }
 
