@@ -200,6 +200,17 @@ fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head:
     details.pr_created_at = pr.created_at;
     projection.updated_at = chrono::Utc::now();
     let _ = gwt_core::workspace_projection::save_workspace_projection(env.repo_path(), &projection);
+
+    // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
+    // when the PR transitions to merged. The helper is idempotent per work_item_id,
+    // so repeated polling does not duplicate Done events.
+    if pr.state.to_string().eq_ignore_ascii_case("merged") {
+        let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+            env.repo_path(),
+            &projection.id,
+            chrono::Utc::now(),
+        );
+    }
 }
 
 fn should_sync_workspace_pr_metadata(
@@ -864,5 +875,94 @@ mod tests {
                 .expect("resolved after retry");
             assert_eq!(resolved, 2);
         });
+    }
+
+    // SPEC-2359 US-37 / T-240: PR state polling auto-done on merged
+
+    #[test]
+    fn pr_family_current_emits_workspace_auto_done_when_pr_is_merged() {
+        use crate::cli::test_support::ScopedEnvVar;
+        use chrono::TimeZone;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
+        env.repo_path = repo.clone();
+        env.seed_current_pr(Some(gwt_git::PrStatus {
+            number: 9999,
+            title: "Auto-done PR".to_string(),
+            state: gwt_git::pr_status::PrState::Merged,
+            url: "https://github.com/akiojin/gwt/pull/9999".to_string(),
+            created_at: None,
+            ci_status: "SUCCESS".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
+            review_status: "APPROVED".to_string(),
+        }));
+
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.id = "wi-pr-merge-auto-done".to_string();
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260513-0500".to_string()),
+            worktree_path: Some(repo.join("work/20260513-0500")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let mut start = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+            "wi-pr-merge-auto-done",
+            chrono::Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
+        );
+        start.title = Some("Auto-done PR work".to_string());
+        start.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+            .expect("seed start event");
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Current, &mut out).expect("run pr current");
+        assert_eq!(code, 0);
+
+        let projection_after = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert_eq!(
+            projection_after
+                .git_details
+                .as_ref()
+                .expect("git details")
+                .pr_state
+                .as_deref(),
+            Some("MERGED")
+        );
+
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == "wi-pr-merge-auto-done")
+            .expect("work item");
+        assert_eq!(
+            item.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            "PR merge must auto-emit Done for the linked Workspace WorkItem",
+        );
     }
 }
