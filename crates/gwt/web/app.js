@@ -6067,24 +6067,16 @@
             renderMigrationModal();
             send({ kind: "start_migration", tab_id: tabId });
           },
-          onSkip: () => {
-            const tabId = migrationModalState.tabId;
+          // SPEC-1934 US-7 / FR-032: only the error stage exposes a dismissal
+          // affordance ("Close"), and it must not flip migration_pending —
+          // the tab keeps its pending status so the next Open Project shows
+          // the Accept-only modal again.
+          onClose: () => {
             migrationModalState.open = false;
             migrationModalState.stage = "confirm";
             migrationModalState.message = "";
             migrationModalState.recovery = "";
             renderMigrationModal();
-            if (tabId) {
-              send({ kind: "skip_migration", tab_id: tabId });
-            }
-          },
-          onQuit: () => {
-            const tabId = migrationModalState.tabId;
-            migrationModalState.open = false;
-            renderMigrationModal();
-            if (tabId) {
-              send({ kind: "quit_migration", tab_id: tabId });
-            }
           },
         });
       }
@@ -8480,17 +8472,17 @@
           return;
         }
         if (migrationModal && migrationModal.classList.contains("open")) {
-          // Migration "skip" is the cancellation path; map Esc to the
-          // same intent so the modal isn't a keyboard trap. Must use
-          // tab_id (not id) to match the backend protocol.
-          const tabId = migrationModalState.tabId;
-          migrationModalState.open = false;
-          migrationModalState.stage = "confirm";
-          migrationModalState.message = "";
-          migrationModalState.recovery = "";
-          renderMigrationModal();
-          if (tabId) {
-            send({ kind: "skip_migration", tab_id: tabId });
+          // SPEC-1934 US-7 / FR-032: the confirmation modal is Accept-only.
+          // Esc no longer routes to skip — at the confirm stage it is
+          // swallowed (so the user can't bypass migration), at the error
+          // stage it dismisses the failure UI without flipping
+          // migration_pending so the next Open Project re-presents Accept.
+          if (migrationModalState.stage === "error") {
+            migrationModalState.open = false;
+            migrationModalState.stage = "confirm";
+            migrationModalState.message = "";
+            migrationModalState.recovery = "";
+            renderMigrationModal();
           }
           event.preventDefault();
           return;

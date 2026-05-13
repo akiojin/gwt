@@ -67,15 +67,14 @@ test("closed migration modal: clears dialog and removes .open", () => {
     state: { migrationModal: { open: false } },
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   assert.equal(modalEl.classList.contains("open"), false);
   assert.equal(dialogEl.firstChild, null);
 });
 
-test("confirm stage paints title, project root, and three action buttons", () => {
+test("confirm stage paints title, project root, and an Accept-only action button (SPEC-1934 US-7 / FR-032)", () => {
   const { modalEl, dialogEl, createNode } = mount();
   renderMigrationModal({
     modalEl,
@@ -83,8 +82,7 @@ test("confirm stage paints title, project root, and three action buttons", () =>
     state: makeState(),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   assert.equal(modalEl.classList.contains("open"), true);
@@ -95,9 +93,13 @@ test("confirm stage paints title, project root, and three action buttons", () =>
   );
   assert.match(dialogEl.textContent, /gwt/);
   const buttons = dialogEl.querySelectorAll("button");
-  assert.equal(buttons.length, 3, "Quit / Skip / Migrate buttons");
+  assert.equal(buttons.length, 1, "Accept-only: Migrate is the sole action");
   const labels = Array.from(buttons).map((b) => b.textContent);
-  assert.deepEqual(labels, ["Quit", "Skip", "Migrate"]);
+  assert.deepEqual(
+    labels,
+    ["Migrate"],
+    "Skip / Quit buttons must not be rendered",
+  );
 });
 
 test("confirm stage disables Migrate when locked worktrees are present", () => {
@@ -108,8 +110,7 @@ test("confirm stage disables Migrate when locked worktrees are present", () => {
     state: makeState({ hasLocked: true }),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   const buttons = Array.from(dialogEl.querySelectorAll("button"));
@@ -126,8 +127,7 @@ test("running stage shows phase label and progress bar", () => {
     state: makeState({ stage: "running", phase: "bareify", percent: 42 }),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   assert.match(dialogEl.textContent, /Migrating repository/);
@@ -150,8 +150,7 @@ test("error stage exposes the failing phase, message, and recovery hint", () => 
     }),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   assert.match(dialogEl.textContent, /Migration failed/);
@@ -163,6 +162,37 @@ test("error stage exposes the failing phase, message, and recovery hint", () => 
   assert.equal(buttons[0].textContent, "Close");
 });
 
+test("error stage Close button invokes onClose without flipping migration_pending (SPEC-1934 US-7 / FR-032)", () => {
+  const { modalEl, dialogEl, createNode } = mount();
+  let closed = 0;
+  renderMigrationModal({
+    modalEl,
+    dialogEl,
+    state: makeState({
+      stage: "error",
+      phase: "worktrees",
+      message: "boom",
+      recovery: "rolled_back",
+    }),
+    createNode,
+    onMigrate: noop,
+    onClose: () => {
+      closed += 1;
+    },
+  });
+
+  const close = Array.from(dialogEl.querySelectorAll("button")).find(
+    (b) => b.textContent === "Close",
+  );
+  assert.ok(close, "Close button must exist on the error stage");
+  close.dispatchEvent(new modalEl.ownerDocument.defaultView.Event("click"));
+  assert.equal(
+    closed,
+    1,
+    "Close routes through onClose (UI-only dismiss); no skip/quit fan-out",
+  );
+});
+
 test("running and error stages expose selectable DOM text without overlay copy shim", () => {
   const { modalEl, dialogEl, createNode } = mount();
   renderMigrationModal({
@@ -171,8 +201,7 @@ test("running and error stages expose selectable DOM text without overlay copy s
     state: makeState({ stage: "running", phase: "bareify", percent: 42 }),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   assert.match(dialogEl.textContent, /Building bare repository/);
@@ -197,8 +226,7 @@ test("running and error stages expose selectable DOM text without overlay copy s
     }),
     createNode,
     onMigrate: noop,
-    onSkip: noop,
-    onQuit: noop,
+    onClose: noop,
   });
 
   const errorMessage = dialogEl.querySelector(".migration-modal-error-message");
