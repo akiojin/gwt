@@ -115,6 +115,13 @@ impl AppRuntime {
         if window.preset != WindowPreset::Branches {
             return launch_agent_open_error(client_id, "Window is not a branches list");
         }
+        // SPEC-1934 US-7 / FR-034
+        if tab.migration_pending {
+            return launch_agent_open_error(
+                client_id,
+                "Complete the project migration before launching an agent",
+            );
+        }
 
         let project_root = tab.project_root.clone();
         let tab_id = address.tab_id.clone();
@@ -213,6 +220,13 @@ impl AppRuntime {
         if tab.kind != gwt::ProjectKind::Git {
             return launch_agent_open_error(client_id, "Add Agent requires a Git project");
         }
+        // SPEC-1934 US-7 / FR-034
+        if tab.migration_pending {
+            return launch_agent_open_error(
+                client_id,
+                "Complete the project migration before adding an agent",
+            );
+        }
 
         let project_root = tab.project_root.clone();
         match self.open_launch_wizard_for_branch(
@@ -236,6 +250,17 @@ impl AppRuntime {
         };
         if tab.kind != gwt::ProjectKind::Git {
             return start_work_open_error(client_id, "Start Work requires a Git project");
+        }
+        // SPEC-1934 US-7 / FR-034: refuse Start Work on a project whose
+        // Nested Bare+Worktree migration has not completed. Without this
+        // gate, `git fetch origin --prune` on a single-branch refspec leaves
+        // the new `work/*` branch unsynchronized and the launch path dies
+        // with `fatal: invalid reference: origin/work/<branch>`.
+        if tab.migration_pending {
+            return start_work_open_error(
+                client_id,
+                "Complete the project migration before starting work",
+            );
         }
 
         let project_root = tab.project_root.clone();
@@ -264,6 +289,10 @@ impl AppRuntime {
         };
         if tab.kind != gwt::ProjectKind::Git {
             return error_event("Resume Workspace requires a Git project");
+        }
+        // SPEC-1934 US-7 / FR-034
+        if tab.migration_pending {
+            return error_event("Complete the project migration before resuming work");
         }
         let project_root = tab.project_root.clone();
         let tab_title = tab.title.clone();
@@ -455,6 +484,19 @@ impl AppRuntime {
                 ),
             )];
         };
+        // SPEC-1934 US-7 / FR-034
+        if tab.migration_pending {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Complete the project migration before launching from an Issue",
+                    None,
+                    None,
+                ),
+            )];
+        }
 
         let project_root = tab.project_root.clone();
         let tab_id = address.tab_id.clone();

@@ -356,6 +356,84 @@ pub fn init_submodules(worktree: &Path) -> Result<()> {
     }
 }
 
+/// Wildcard `fetch` refspec used as the canonical form on `origin` after
+/// migration. This matches what `git clone` (without `--single-branch`)
+/// configures by default and lets Workspace Start Work / Launch Wizard sync
+/// new `work/*` branches into `refs/remotes/origin/*` after pushing them.
+pub const ORIGIN_WILDCARD_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
+
+/// Normalize the `remote.origin.fetch` refspec to the wildcard form (SPEC-1934
+/// FR-033, US-7). GitHub-UI `--single-branch` clones leave a refspec like
+/// `+refs/heads/develop:refs/remotes/origin/develop`, which blocks subsequent
+/// `git fetch origin --prune` from materializing newly pushed `work/*`
+/// branches into `refs/remotes/origin/*`. Migration normalizes the refspec
+/// and runs a follow-up prune-fetch so the local mirror is complete.
+///
+/// Returns the previous refspec value (`Some`) when a rewrite happened so the
+/// caller can record it in the migration backup for rollback, or `None` when
+/// the repository already had the canonical wildcard form (idempotent).
+pub fn normalize_fetch_refspec(repo: &Path) -> Result<Option<String>> {
+    let read = hidden_command("git")
+        .args(["config", "--get", "remote.origin.fetch"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            GwtError::Git(format!(
+                "normalize_fetch_refspec: read remote.origin.fetch: {e}"
+            ))
+        })?;
+
+    if !read.status.success() {
+        // No `origin` remote (or no `fetch` configured for it). Migration has
+        // nothing to normalize here; the caller may proceed without rollback
+        // state for this phase.
+        return Ok(None);
+    }
+
+    let current = String::from_utf8_lossy(&read.stdout).trim().to_string();
+    if current.is_empty() || current == ORIGIN_WILDCARD_FETCH_REFSPEC {
+        return Ok(None);
+    }
+
+    let write = hidden_command("git")
+        .args([
+            "config",
+            "remote.origin.fetch",
+            ORIGIN_WILDCARD_FETCH_REFSPEC,
+        ])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            GwtError::Git(format!(
+                "normalize_fetch_refspec: write remote.origin.fetch: {e}"
+            ))
+        })?;
+    if !write.status.success() {
+        let stderr = String::from_utf8_lossy(&write.stderr).to_string();
+        return Err(GwtError::Git(format!(
+            "normalize_fetch_refspec: write failed: {stderr}"
+        )));
+    }
+
+    let fetch = hidden_command("git")
+        .args(["fetch", "origin", "--prune"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            GwtError::Git(format!(
+                "normalize_fetch_refspec: fetch origin --prune: {e}"
+            ))
+        })?;
+    if !fetch.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch.stderr).to_string();
+        return Err(GwtError::Git(format!(
+            "normalize_fetch_refspec: fetch failed: {stderr}"
+        )));
+    }
+
+    Ok(Some(current))
+}
+
 /// Set upstream tracking for `<branch>` to `origin/<branch>` in `worktree`.
 /// FR-026 requires this to succeed silently when `origin/<branch>` is missing
 /// (e.g. local-only branches), so we treat any non-zero git exit as a no-op.
