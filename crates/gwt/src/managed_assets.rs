@@ -10,9 +10,11 @@ use crate::cli::gwtd_resolver::{
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_agent::AgentId;
 use gwt_skills::{
-    distribute_to_worktree_for_targets, generate_codex_hooks, generate_hermes_hooks,
-    generate_openclaw_hooks, generate_opencode_hooks, generate_settings_local, update_git_exclude,
-    update_git_exclude_for_targets, ManagedAssetTarget,
+    distribute_to_worktree_for_targets, generate_codex_hooks,
+    generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
+    generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
+    generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
+    ManagedAssetTarget,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
@@ -61,10 +63,20 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to regenerate Claude hook settings: {error}"
             ))
         })?;
+        generate_coordination_guidance_for_claude(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to generate Claude coordination skill: {error}"
+            ))
+        })?;
     }
     if targets.contains(&ManagedAssetTarget::Codex) {
         generate_codex_hooks(worktree).map_err(|error| {
             io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+        })?;
+        generate_coordination_guidance_for_codex(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to generate Codex coordination skill: {error}"
+            ))
         })?;
     }
     if targets.contains(&ManagedAssetTarget::OpenCode) {
