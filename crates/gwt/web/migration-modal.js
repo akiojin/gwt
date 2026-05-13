@@ -51,8 +51,11 @@ export function renderMigrationModal({
   state,
   createNode,
   onMigrate,
-  onSkip,
-  onQuit,
+  // SPEC-1934 US-7 / FR-032: the confirmation modal is Accept-only; closing
+  // the OS window remains the sole abort path. `onClose` is still used by the
+  // error stage so the user can dismiss a failure dialog without sending a
+  // skip event to the backend.
+  onClose,
 }) {
   if (!state || !state.migrationModal || !state.migrationModal.open) {
     const wasOpenBeforeClose = modalEl.classList.contains("open");
@@ -166,7 +169,10 @@ export function renderMigrationModal({
     const footer = createNode("div", "modal-footer");
     const close = createNode("button", "wizard-button primary", "Close");
     close.type = "button";
-    close.addEventListener("click", onSkip);
+    // SPEC-1934 US-7 / FR-032: dismiss the error UI without sending a skip
+    // event; the tab remains migration_pending so the Accept-only modal can
+    // be re-presented on the next Open Project.
+    close.addEventListener("click", onClose);
     footer.appendChild(close);
     dialogEl.appendChild(footer);
     return;
@@ -232,17 +238,12 @@ export function renderMigrationModal({
     ),
   );
 
+  // SPEC-1934 US-7 / FR-032 / SC-024: the confirm stage offers Accept only.
+  // Skip / Quit / Cancel buttons are intentionally not rendered — closing
+  // the OS window remains the sole abort path so a migration_pending tab can
+  // never proceed to Start Work / Launch / Materialize while the layout is
+  // still Normal Git.
   const footer = createNode("div", "modal-footer");
-  const quit = createNode("button", "wizard-button", "Quit");
-  quit.type = "button";
-  quit.addEventListener("click", onQuit);
-  footer.appendChild(quit);
-
-  const skip = createNode("button", "wizard-button", "Skip");
-  skip.type = "button";
-  skip.addEventListener("click", onSkip);
-  footer.appendChild(skip);
-
   const migrate = createNode("button", "wizard-button primary", "Migrate");
   migrate.type = "button";
   migrate.disabled = Boolean(m.hasLocked);

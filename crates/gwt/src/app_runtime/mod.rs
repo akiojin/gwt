@@ -12472,6 +12472,35 @@ exit 0
     }
 
     #[test]
+    fn open_start_work_refuses_while_migration_pending() {
+        // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
+        // whose Normal → Nested Bare+Worktree migration is still pending.
+        // Without this gate, the launch path tries to fetch
+        // `origin/work/<branch>` on a single-branch refspec and dies with
+        // `fatal: invalid reference: origin/work/<branch>`.
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+
+        let tab = migration_pending_tab("tab-1", project);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.open_start_work("client-1");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Client(_),
+                    event: BackendEvent::LaunchWizardOpenError { title, message },
+                } if title == "Start Work"
+                    && message == "Complete the project migration before starting work"
+            )),
+            "Start Work on a migration_pending tab must surface a clear error: {events:?}"
+        );
+    }
+
+    #[test]
     fn skip_migration_events_clears_pending_flag_without_broadcast() {
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");

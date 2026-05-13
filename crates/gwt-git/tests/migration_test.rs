@@ -6,8 +6,8 @@
 
 use gwt_git::migration::{
     add_worktree_clean, add_worktree_no_checkout, bareify_local, clone_bare_from_normal,
-    copy_hooks_to_bare, evacuate_dirty_files, init_submodules, parse_worktree_list_porcelain,
-    restore_evacuated_files, set_upstream,
+    copy_hooks_to_bare, evacuate_dirty_files, init_submodules, normalize_fetch_refspec,
+    parse_worktree_list_porcelain, restore_evacuated_files, set_upstream,
 };
 use gwt_git::repository::{detect_repo_type, install_develop_protection, RepoType};
 
@@ -343,5 +343,297 @@ fn t042_bareify_local_converts_local_dot_git_when_origin_missing() {
     assert!(
         !String::from_utf8_lossy(&output.stdout).is_empty(),
         "bareified repo must list at least one branch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SPEC-1934 US-7 / 2026-05-13 Mandatory Migration Hardening
+//
+// FR-033: Migration executor must normalize a single-branch `fetch` refspec
+// (e.g. `+refs/heads/develop:refs/remotes/origin/develop` produced by
+// GitHub-UI `--single-branch` clones) into the wildcard form
+// `+refs/heads/*:refs/remotes/origin/*` so that subsequent Workspace Start
+// Work can pull new `work/*` branches into the local remote-tracking refs.
+// ---------------------------------------------------------------------------
+
+fn read_remote_fetch_refspec(repo: &std::path::Path, remote: &str) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", &format!("remote.{remote}.fetch")])
+        .current_dir(repo)
+        .output()
+        .expect("git config --get remote.<remote>.fetch");
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn set_remote_fetch_refspec(repo: &std::path::Path, remote: &str, refspec: &str) {
+    let status = gwt_core::process::hidden_command("git")
+        .args(["config", &format!("remote.{remote}.fetch"), refspec])
+        .current_dir(repo)
+        .status()
+        .expect("git config remote.<remote>.fetch");
+    assert!(
+        status.success(),
+        "git config remote.{remote}.fetch must succeed"
+    );
+}
+
+fn add_remote(repo: &std::path::Path, remote: &str, url: &str) {
+    let status = gwt_core::process::hidden_command("git")
+        .args(["remote", "add", remote, url])
+        .current_dir(repo)
+        .status()
+        .expect("git remote add");
+    assert!(status.success(), "git remote add {remote} must succeed");
+}
+
+#[test]
+fn t148_normalize_fetch_refspec_replaces_single_branch_refspec() {
+    // RED: normalize_fetch_refspec must rewrite a `--single-branch` style
+    // refspec into the wildcard form and return the previous value so the
+    // migration executor can record it in the backup for rollback.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream.path().to_str().expect("upstream path"),
+    );
+    set_remote_fetch_refspec(
+        local.path(),
+        "origin",
+        "+refs/heads/develop:refs/remotes/origin/develop",
+    );
+
+    let previous = normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    assert_eq!(
+        previous.as_deref(),
+        Some("+refs/heads/develop:refs/remotes/origin/develop"),
+        "previous refspec must be returned for rollback"
+    );
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "origin").as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "origin fetch refspec must be normalized to wildcard form"
+    );
+}
+
+#[test]
+fn t149_normalize_fetch_refspec_is_idempotent_when_already_wildcard() {
+    // RED: when the refspec is already the wildcard form, normalize must be a
+    // no-op and return None so the executor records nothing to roll back.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream.path().to_str().expect("upstream path"),
+    );
+    set_remote_fetch_refspec(
+        local.path(),
+        "origin",
+        "+refs/heads/*:refs/remotes/origin/*",
+    );
+
+    let previous = normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    assert!(
+        previous.is_none(),
+        "no rewrite must report None for idempotency"
+    );
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "origin").as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "wildcard refspec must remain unchanged"
+    );
+}
+
+#[test]
+fn t150_normalize_fetch_refspec_preserves_other_remotes() {
+    // RED: only the `origin` remote should be touched; user-managed remotes
+    // such as `upstream` must keep whatever refspec the user configured.
+    let upstream_repo = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream_repo.path());
+    commit_initial(upstream_repo.path());
+
+    let other_repo = tempfile::tempdir().unwrap();
+    init_normal_repo(other_repo.path());
+    commit_initial(other_repo.path());
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream_repo.path().to_str().expect("upstream path"),
+    );
+    set_remote_fetch_refspec(
+        local.path(),
+        "origin",
+        "+refs/heads/develop:refs/remotes/origin/develop",
+    );
+    add_remote(
+        local.path(),
+        "upstream",
+        other_repo.path().to_str().expect("other path"),
+    );
+    set_remote_fetch_refspec(
+        local.path(),
+        "upstream",
+        "+refs/heads/feature/*:refs/remotes/upstream/feature/*",
+    );
+
+    normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "origin").as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "origin must be normalized"
+    );
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "upstream").as_deref(),
+        Some("+refs/heads/feature/*:refs/remotes/upstream/feature/*"),
+        "upstream refspec must be preserved verbatim"
+    );
+}
+
+#[test]
+fn t152_normalize_fetch_refspec_writes_wildcard_when_origin_has_no_fetch_refspec() {
+    // RED: bare clones (`git clone --bare`) sometimes set
+    // `remote.origin.url` but omit `remote.origin.fetch`. The migration
+    // still has to leave the bare repo with the wildcard refspec so future
+    // `git fetch origin --prune` can sync new branches into
+    // `refs/remotes/origin/*`.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream.path().to_str().expect("upstream path"),
+    );
+    // Force a no-fetch origin by removing the auto-generated fetch entry
+    // that `git remote add` writes.
+    let status = gwt_core::process::hidden_command("git")
+        .args(["config", "--unset", "remote.origin.fetch"])
+        .current_dir(local.path())
+        .status()
+        .expect("git config --unset remote.origin.fetch");
+    assert!(
+        status.success(),
+        "fixture must be able to unset remote.origin.fetch"
+    );
+    assert!(
+        read_remote_fetch_refspec(local.path(), "origin").is_none(),
+        "fixture must reproduce the bare-clone shape with origin URL but no fetch"
+    );
+
+    let previous = normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    assert!(
+        previous.is_none(),
+        "no prior refspec means nothing to roll back (previous == None)"
+    );
+    assert_eq!(
+        read_remote_fetch_refspec(local.path(), "origin").as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "wildcard refspec must be written even when origin had no fetch entry"
+    );
+}
+
+#[test]
+fn t151_normalize_fetch_refspec_runs_fetch_origin_prune_after_rewrite() {
+    // RED: after rewriting the refspec, the function must run
+    // `git fetch origin --prune` so that branches outside the previous
+    // single-branch refspec become available as `refs/remotes/origin/*`.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    // Create an initial commit on `main`, then add an additional branch that
+    // the single-branch refspec would have hidden from the local mirror.
+    commit_initial(upstream.path());
+    let rename_status = gwt_core::process::hidden_command("git")
+        .args(["branch", "-M", "develop"])
+        .current_dir(upstream.path())
+        .status()
+        .expect("git branch -M develop");
+    assert!(rename_status.success(), "rename to develop must succeed");
+    let extra_branch_status = gwt_core::process::hidden_command("git")
+        .args(["branch", "work/20260513-test"])
+        .current_dir(upstream.path())
+        .status()
+        .expect("git branch work/20260513-test");
+    assert!(
+        extra_branch_status.success(),
+        "create extra branch on upstream must succeed"
+    );
+
+    let local = tempfile::tempdir().unwrap();
+    init_normal_repo(local.path());
+    commit_initial(local.path());
+    add_remote(
+        local.path(),
+        "origin",
+        upstream.path().to_str().expect("upstream path"),
+    );
+    set_remote_fetch_refspec(
+        local.path(),
+        "origin",
+        "+refs/heads/develop:refs/remotes/origin/develop",
+    );
+
+    // Sanity: before normalize, the additional branch is not visible locally.
+    let before = gwt_core::process::hidden_command("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ])
+        .current_dir(local.path())
+        .output()
+        .expect("git for-each-ref");
+    let before_refs = String::from_utf8_lossy(&before.stdout).to_string();
+    assert!(
+        !before_refs.contains("refs/remotes/origin/work/20260513-test"),
+        "extra branch must not be visible before normalize: {before_refs}"
+    );
+
+    normalize_fetch_refspec(local.path()).expect("normalize_fetch_refspec");
+
+    let after = gwt_core::process::hidden_command("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ])
+        .current_dir(local.path())
+        .output()
+        .expect("git for-each-ref");
+    let after_refs = String::from_utf8_lossy(&after.stdout).to_string();
+    assert!(
+        after_refs.contains("refs/remotes/origin/work/20260513-test"),
+        "extra branch must be present after normalize + fetch: {after_refs}"
     );
 }
