@@ -118,6 +118,33 @@ fn run_post_backup(
         recovery: RecoveryState::Partial,
     })?;
 
+    // SPEC-1934 US-7 / FR-033: rewrite a `--single-branch` style fetch refspec
+    // on the new bare repo to the canonical `+refs/heads/*:refs/remotes/origin/*`
+    // and refresh remote-tracking refs. Config rewrite is strict (a failure
+    // means the new bare repo cannot serve later Start Work). The follow-up
+    // `git fetch origin --prune` is best-effort: a network or auth failure
+    // here still leaves a correctly-configured repo whose next manual fetch
+    // will succeed, so we swallow that specific failure to avoid forcing
+    // rollback when the bare contents are otherwise complete.
+    match git_migration::normalize_fetch_refspec(&bare_repo_path) {
+        Ok(_) => {}
+        Err(gwt_core::GwtError::Git(msg)) if msg.contains("fetch failed") => {
+            tracing::warn!(
+                bare = %bare_repo_path.display(),
+                error = %msg,
+                "normalize_fetch_refspec: post-rewrite fetch did not succeed; \
+                 continuing because refspec was already normalized",
+            );
+        }
+        Err(e) => {
+            return Err(MigrationError {
+                phase: MigrationPhase::Bareify,
+                message: format!("normalize fetch refspec: {e}"),
+                recovery: RecoveryState::Partial,
+            });
+        }
+    }
+
     progress(MigrationPhase::Worktrees, 0);
     let mut worktrees = migration_worktrees(
         project_root,
