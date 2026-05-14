@@ -48,6 +48,7 @@
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
+      import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -1590,11 +1591,35 @@
         }, 300);
       }
 
+      // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
+      // stream. Previously every wheel/zoom event fired a send (up
+      // to 60-120/sec on a Retina trackpad). Backend re-broadcasts
+      // the resulting workspace_state to every client, so the spam
+      // turns into a frontend re-render storm. The throttle keeps
+      // sustained gestures under ~5 msg/sec while a `tailMs`-delay
+      // commit lands when the user finally stops scrolling.
+      const persistViewportThrottle = createViewportPersistThrottle({
+        send: (payload) => {
+          send({
+            kind: "update_viewport",
+            viewport: payload,
+          });
+        },
+        tailMs: 100,
+        maxWaitMs: 500,
+      });
+
       function persistViewport() {
-        send({
-          kind: "update_viewport",
-          viewport,
-        });
+        persistViewportThrottle.schedule(viewport);
+      }
+
+      function flushPersistViewport() {
+        // Definitive commit points (pointerup, window close,
+        // visibility change) should not wait for the tail window.
+        // Re-schedule first so the throttle captures the latest
+        // viewport reference, then drain immediately.
+        persistViewportThrottle.schedule(viewport);
+        persistViewportThrottle.flushNow();
       }
 
       function canvasCenterAnchor() {
@@ -9146,10 +9171,10 @@
       window.addEventListener("pointerup", (event) => {
         if (panState && panState.pointerId === event.pointerId) {
           canvas.classList.remove("panning");
-          send({
-            kind: "update_viewport",
-            viewport,
-          });
+          // Issue #2698 PR 2 (B1) — pan-end is a definitive commit
+          // point. Flush the throttle so backend receives the final
+          // viewport without a tail-debounce delay.
+          flushPersistViewport();
           panState = null;
         }
 

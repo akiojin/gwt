@@ -119,6 +119,14 @@ pub fn interaction_guard_js() -> &'static str {
     include_str!("../web/interaction-guard.js")
 }
 
+// Issue #2698 PR 2 (B1) — viewport-persist throttle that caps the
+// `update_viewport` WebSocket rate during sustained wheel/zoom
+// gestures so the backend feedback loop stops driving a frontend
+// re-render storm.
+pub fn viewport_persist_throttle_js() -> &'static str {
+    include_str!("../web/viewport-persist-throttle.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -219,6 +227,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/interaction-guard.js",
         source: interaction_guard_js,
         marker: "createInteractionGuard",
+    },
+    RootJsModuleAsset {
+        path: "/viewport-persist-throttle.js",
+        source: viewport_persist_throttle_js,
+        marker: "createViewportPersistThrottle",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
