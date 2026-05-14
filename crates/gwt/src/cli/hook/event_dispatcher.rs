@@ -9,7 +9,7 @@ use std::{path::Path, time::Instant};
 
 use super::{
     board_reminder, diagnostics, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, workflow_policy, HookError, HookOutput,
+    skill_plan_spec_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
 };
 
 pub fn handle_with_input(
@@ -50,9 +50,15 @@ fn handle_user_prompt_submit(event: &str, input: &str) -> Result<HookOutput, Hoo
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
-    run_step(event, "board-reminder", || {
+    let identity = run_step(event, "workspace-identity", || {
+        workspace_identity::handle_user_prompt_submit(input)
+    })?;
+    let reminder = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
-    })
+    })?;
+    Ok(workspace_identity::append_identity_context(
+        reminder, identity,
+    ))
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {

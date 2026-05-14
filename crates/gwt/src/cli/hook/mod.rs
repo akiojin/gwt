@@ -30,6 +30,7 @@ pub mod skill_build_spec_stop_check;
 pub mod skill_discussion_stop_check;
 pub mod skill_plan_spec_stop_check;
 pub mod workflow_policy;
+mod workspace_identity;
 pub mod worktree;
 
 use std::io::{self, Read};
