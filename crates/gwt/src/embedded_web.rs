@@ -119,6 +119,14 @@ pub fn interaction_guard_js() -> &'static str {
     include_str!("../web/interaction-guard.js")
 }
 
+// Issue #2704 — terminal-focus guard that lets `scheduleTerminalFocusActivation`
+// skip its xterm `terminal.focus()` step while a modal is open or a text
+// input owns focus. Without this, the Clone Project modal URL/Search input
+// loses focus on every backend `workspace_state` event.
+pub fn clone_modal_focus_guard_js() -> &'static str {
+    include_str!("../web/clone-modal-focus-guard.js")
+}
+
 // Issue #2698 PR 2 (B1) — viewport-persist throttle that caps the
 // `update_viewport` WebSocket rate during sustained wheel/zoom
 // gestures so the backend feedback loop stops driving a frontend
@@ -227,6 +235,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/interaction-guard.js",
         source: interaction_guard_js,
         marker: "createInteractionGuard",
+    },
+    RootJsModuleAsset {
+        path: "/clone-modal-focus-guard.js",
+        source: clone_modal_focus_guard_js,
+        marker: "shouldSkipTerminalFocusActivation",
     },
     RootJsModuleAsset {
         path: "/viewport-persist-throttle.js",
@@ -1440,8 +1453,14 @@ mod tests {
         // scheduleTerminalViewportRefresh → then focus) silently no-op'd
         // whenever the terminal had been display:none because xterm's
         // proposeDimensions returns undefined while cell.width === 0.
+        //
+        // Issue #2704: shouldFocus is now computed by the
+        // clone-modal-focus-guard so modal/text-input focus is preserved
+        // across `workspace_state` events. The regex accepts either the
+        // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
+        // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus: true,[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
@@ -1451,7 +1470,7 @@ mod tests {
         );
         assert!(
             activation_helper.is_match(js),
-            "expected programmatic terminal activation to refit, refresh, and focus xterm after render",
+            "expected programmatic terminal activation to refit, refresh, and pass a computed shouldFocus to xterm after render",
         );
         assert!(
             render_activation.is_match(js),

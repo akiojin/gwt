@@ -19,6 +19,8 @@ const ROOT_MODULES = new Set([
   "app.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
+  // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
+  "clone-modal-focus-guard.js",
   "custom-agent-env-editor.js",
   "focus-trap.js",
   "hotkey.js",
