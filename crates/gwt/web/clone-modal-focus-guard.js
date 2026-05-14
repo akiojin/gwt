@@ -17,6 +17,7 @@
 // blurred.
 
 const TEXT_INPUT_TAGS = new Set(["INPUT", "TEXTAREA"]);
+const XTERM_HELPER_TEXTAREA_CLASS = "xterm-helper-textarea";
 
 function modalOwnsFocus(modalElements) {
   if (!Array.isArray(modalElements)) {
@@ -39,6 +40,9 @@ function modalOwnsFocus(modalElements) {
 function textInputOwnsFocus(doc) {
   const active = doc && doc.activeElement;
   if (!active) {
+    return false;
+  }
+  if (active.classList?.contains?.(XTERM_HELPER_TEXTAREA_CLASS)) {
     return false;
   }
   if (TEXT_INPUT_TAGS.has(active.tagName)) {
