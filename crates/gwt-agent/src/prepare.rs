@@ -452,7 +452,14 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     }
     if let Some(resolved) = env_vars.get(GWT_BIN_PATH_ENV).cloned() {
         if let Some(parent) = Path::new(&resolved).parent() {
-            prepend_dir_to_path(env_vars, parent);
+            match runtime_target {
+                LaunchRuntimeTarget::Docker => {
+                    prepend_posix_dir_to_path(env_vars, parent);
+                }
+                LaunchRuntimeTarget::Host => {
+                    prepend_dir_to_path(env_vars, parent);
+                }
+            }
         }
     }
     Ok(())
@@ -497,6 +504,38 @@ pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -
         return false;
     };
     env_vars.insert(key, joined.to_string_lossy().into_owned());
+    true
+}
+
+/// Prepend `dir` to a POSIX PATH value used inside Docker containers.
+pub fn prepend_posix_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -> bool {
+    if dir.as_os_str().is_empty() {
+        return false;
+    }
+    let existing_key = env_vars
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .cloned();
+    let key = existing_key.unwrap_or_else(|| "PATH".to_string());
+    let existing_path = env_vars
+        .get(&key)
+        .map(String::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let dir_value = dir.to_string_lossy().into_owned();
+    if dir_value.is_empty() {
+        return false;
+    }
+    let mut entries: Vec<String> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        existing_path.split(':').map(str::to_string).collect()
+    };
+    if entries.iter().any(|entry| entry == &dir_value) {
+        return false;
+    }
+    entries.insert(0, dir_value);
+    env_vars.insert(key, entries.join(":"));
     true
 }
 
@@ -1935,6 +1974,17 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    fn test_path(entries: &[&str]) -> String {
+        std::env::join_paths(entries.iter().map(Path::new))
+            .expect("join test PATH entries")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn posix_path_entries(path: &str) -> Vec<&str> {
+        path.split(':').collect()
+    }
+
     // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
     // install_launch_gwt_bin_env_with_lookup must prepend the GWT_BIN_PATH
     // parent directory to env_vars["PATH"] so agent subshells can resolve
@@ -1942,7 +1992,7 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
-        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
@@ -1971,7 +2021,7 @@ mod tests {
     fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
         let mut env_vars = HashMap::from([(
             "PATH".to_string(),
-            "/Applications/GWT.app/Contents/MacOS:/usr/bin".to_string(),
+            test_path(&["/Applications/GWT.app/Contents/MacOS", "/usr/bin"]),
         )]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
@@ -1996,7 +2046,8 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
-        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let original_path = test_path(&["/usr/bin", "/bin"]);
+        let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
         let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
         // Lookup returns a bare filename (Path::parent => Some(""))
         install_launch_gwt_bin_env_with_lookup(
@@ -2013,7 +2064,7 @@ mod tests {
         );
         assert_eq!(
             env_vars.get("PATH").map(String::as_str),
-            Some("/usr/bin:/bin"),
+            Some(original_path.as_str()),
             "empty GWT_BIN_PATH parent must be a no-op",
         );
     }
@@ -2054,11 +2105,10 @@ mod tests {
             env_vars.get(GWT_BIN_PATH_ENV).map(String::as_str),
             Some("/usr/local/bin/gwtd"),
         );
-        let entries: Vec<PathBuf> =
-            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        let entries = posix_path_entries(env_vars.get("PATH").expect("PATH"));
         assert_eq!(
             entries,
-            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"),],
+            vec!["/usr/local/bin", "/usr/bin"],
             "Docker dir already on PATH must dedup",
         );
     }
@@ -2074,11 +2124,10 @@ mod tests {
         )
         .expect("install");
 
-        let entries: Vec<PathBuf> =
-            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        let entries = posix_path_entries(env_vars.get("PATH").expect("PATH"));
         assert_eq!(
-            entries.first().map(|p| p.as_path()),
-            Some(Path::new("/usr/local/bin")),
+            entries.first().copied(),
+            Some("/usr/local/bin"),
             "Docker dir not on PATH must be prepended; got entries: {entries:?}",
         );
     }
@@ -2153,8 +2202,10 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_preserves_existing_path_order() {
-        let mut env_vars =
-            HashMap::from([("PATH".to_string(), "/profile/bin:/usr/bin:/bin".to_string())]);
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            test_path(&["/profile/bin", "/usr/bin", "/bin"]),
+        )]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
@@ -2188,7 +2239,7 @@ mod tests {
         let mut config = sample_versioned_launch_config(&worktree);
         config
             .env_vars
-            .insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+            .insert("PATH".to_string(), test_path(&["/usr/bin", "/bin"]));
 
         let mut probe_host_runner =
             |_command: &str,

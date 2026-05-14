@@ -1877,6 +1877,45 @@ test("terminal surface body stays on the dark Operator canvas across themes (FR-
   );
 });
 
+test("terminal root spacing stays inside the window body (SPEC-2008 FR-060)", () => {
+  const terminalRootRule = inlineStyle.match(/\.terminal-root\s*\{([^}]*)\}/);
+  assert.ok(terminalRootRule, "expected .terminal-root CSS rule");
+  const body = terminalRootRule[1];
+
+  assert.match(
+    body,
+    /position:\s*absolute/,
+    ".terminal-root must remain absolutely positioned inside .window-body",
+  );
+  assert.match(
+    body,
+    /inset:\s*8px\s+10px\s+10px\s*;/,
+    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body",
+  );
+  assert.match(
+    body,
+    /overflow:\s*hidden/,
+    ".terminal-root must clip xterm internals within the in-bounds terminal host box",
+  );
+});
+
+test("terminal root does not combine full inset with padding overflow (SPEC-2008 SC-039)", () => {
+  const terminalRootRule = inlineStyle.match(/\.terminal-root\s*\{([^}]*)\}/);
+  assert.ok(terminalRootRule, "expected .terminal-root CSS rule");
+  const body = terminalRootRule[1];
+
+  assert.doesNotMatch(
+    body,
+    /inset:\s*0\s*;[\s\S]*padding:\s*(?!0\b)[^;]+;/,
+    ".terminal-root must not use inset:0 plus nonzero padding; content-box padding extends past .window-body and clips the bottom prompt",
+  );
+  assert.match(
+    body,
+    /padding:\s*0\s*;/,
+    ".terminal-root padding must stay zero so FitAddon measures the same box xterm can paint into",
+  );
+});
+
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Mock / Profile) must

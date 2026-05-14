@@ -600,7 +600,14 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     }
     if let Some(resolved) = env_vars.get(gwt_agent::session::GWT_BIN_PATH_ENV).cloned() {
         if let Some(parent) = Path::new(&resolved).parent() {
-            gwt_agent::prepare::prepend_dir_to_path(env_vars, parent);
+            match runtime_target {
+                gwt_agent::LaunchRuntimeTarget::Docker => {
+                    gwt_agent::prepare::prepend_posix_dir_to_path(env_vars, parent);
+                }
+                gwt_agent::LaunchRuntimeTarget::Host => {
+                    gwt_agent::prepare::prepend_dir_to_path(env_vars, parent);
+                }
+            }
         }
     }
     Ok(())
@@ -609,6 +616,17 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_path(entries: &[&str]) -> String {
+        std::env::join_paths(entries.iter().map(Path::new))
+            .expect("join test PATH entries")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn posix_path_entries(path: &str) -> Vec<&str> {
+        path.split(':').collect()
+    }
 
     #[test]
     fn windows_shell_process_command_maps_all_variants() {
@@ -648,7 +666,7 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
-        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut env_vars = HashMap::from([("PATH".to_string(), test_path(&["/usr/bin", "/bin"]))]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
@@ -678,7 +696,7 @@ mod tests {
     fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
         let mut env_vars = HashMap::from([(
             "PATH".to_string(),
-            "/Applications/GWT.app/Contents/MacOS:/usr/bin".to_string(),
+            test_path(&["/Applications/GWT.app/Contents/MacOS", "/usr/bin"]),
         )]);
         let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
         install_launch_gwt_bin_env_with_lookup(
@@ -702,7 +720,8 @@ mod tests {
 
     #[test]
     fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
-        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let original_path = test_path(&["/usr/bin", "/bin"]);
+        let mut env_vars = HashMap::from([("PATH".to_string(), original_path.clone())]);
         let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
         install_launch_gwt_bin_env_with_lookup(
             &mut env_vars,
@@ -717,7 +736,7 @@ mod tests {
         // meaningful parent dir.
         assert_eq!(
             env_vars.get("PATH").map(String::as_str),
-            Some("/usr/bin:/bin"),
+            Some(original_path.as_str()),
         );
     }
 
@@ -758,12 +777,8 @@ mod tests {
                 .map(String::as_str),
             Some("/usr/local/bin/gwtd"),
         );
-        let entries: Vec<PathBuf> =
-            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
-        assert_eq!(
-            entries.first().map(|p| p.as_path()),
-            Some(Path::new("/usr/local/bin")),
-        );
+        let entries = posix_path_entries(env_vars.get("PATH").expect("PATH"));
+        assert_eq!(entries.first().copied(), Some("/usr/local/bin"),);
     }
 
     #[test]
@@ -778,11 +793,7 @@ mod tests {
         )
         .expect("install");
 
-        let entries: Vec<PathBuf> =
-            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
-        assert_eq!(
-            entries,
-            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"),],
-        );
+        let entries = posix_path_entries(env_vars.get("PATH").expect("PATH"));
+        assert_eq!(entries, vec!["/usr/local/bin", "/usr/bin"],);
     }
 }
