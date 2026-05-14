@@ -11,6 +11,10 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const projectTabsRendererSource = readFileSync(
+  resolve(here, "../project-tabs-renderer.js"),
+  "utf8",
+);
 const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const workspaceKanbanPath = resolve(here, "../workspace-kanban-surface.js");
@@ -18,6 +22,7 @@ const workspaceKanbanSource = existsSync(workspaceKanbanPath)
   ? readFileSync(workspaceKanbanPath, "utf8")
   : "";
 const workspaceKanbanCombinedSource = `${appSource}\n${workspaceKanbanSource}`;
+const appAndProjectTabsSource = `${appSource}\n${projectTabsRendererSource}`;
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
 // Issue #2694 Phase D: the formerly-inline <style> block now lives at
 // /styles/app.css and is loaded via `<link rel="stylesheet">`. The grep
@@ -1373,8 +1378,10 @@ test("Selected list rows mark active item with aria-current", () => {
   }
   // Count occurrences: knowledge, profile, logs, file-tree, plus the
   // project-tabs case from PR #2455.
-  const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
-  const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
+  const setMatches =
+    appAndProjectTabsSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
+  const removeMatches =
+    appAndProjectTabsSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
     setMatches.length >= 5,
     `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
@@ -1392,12 +1399,12 @@ test("Project tabs mark the active project with aria-current=\"page\"", () => {
   // must explicitly clear the attribute so the previously-active tab
   // doesn't retain the marker after a switch.
   assert.match(
-    appSource,
+    projectTabsRendererSource,
     /button\.setAttribute\("aria-current",\s*"page"\)/,
     "expected the active project tab to set aria-current=\"page\"",
   );
   assert.match(
-    appSource,
+    projectTabsRendererSource,
     /button\.removeAttribute\("aria-current"\)/,
     "expected inactive project tabs to remove aria-current",
   );

@@ -2363,7 +2363,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 4);
+        assert_eq!(error_events.len(), 3);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -2373,17 +2373,17 @@ mod tests {
             Some("boom")
         );
         assert!(matches!(
-            error_events[1].event,
+            error_events[0].event,
             BackendEvent::ActiveWorkProjection { ref projection }
                 if projection.active_agents == 1 && projection.agents.len() == 1
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[1].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[3].event,
+            error_events[2].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
@@ -3211,15 +3211,15 @@ mod tests {
 
         let status_events =
             runtime.handle_runtime_status(shell_id.clone(), WindowProcessStatus::Error, None);
-        assert_eq!(status_events.len(), 3);
+        assert_eq!(status_events.len(), 2);
         assert!(!runtime.window_details.contains_key(&shell_id));
         assert!(matches!(
-            status_events[1].event,
+            status_events[0].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &shell_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            status_events[2].event,
+            status_events[1].event,
             BackendEvent::TerminalStatus { ref detail, .. } if detail.is_none()
         ));
 

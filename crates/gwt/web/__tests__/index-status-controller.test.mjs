@@ -19,6 +19,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const projectTabsRendererSource = readFileSync(
+  resolve(here, "../project-tabs-renderer.js"),
+  "utf8",
+);
+const projectTabSource = `${appSource}\n${projectTabsRendererSource}`;
 
 test("dispatchOpenIndexSettings emits settings:open with target=index", () => {
   const { document } = parseHTML(`<!doctype html><body><button id="badge"></button></body>`);
@@ -125,7 +130,7 @@ test("aggregateProjectTabDotState returns '' when no worktree health is reported
 
 test("app.js still wires the per-tab dot aggregator", () => {
   assert.ok(
-    appSource.includes("aggregateProjectTabDotState(status)"),
+    projectTabSource.includes("aggregateProjectTabDotState(status)"),
     "renderProjectTabs should consume the shared aggregator",
   );
   assert.ok(
