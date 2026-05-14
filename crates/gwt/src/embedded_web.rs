@@ -153,6 +153,10 @@ pub fn ui_trace_profiler_js() -> &'static str {
     include_str!("../web/ui-trace-profiler.js")
 }
 
+pub fn ui_trace_wiring_js() -> &'static str {
+    include_str!("../web/ui-trace-wiring.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -278,6 +282,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/ui-trace-profiler.js",
         source: ui_trace_profiler_js,
         marker: "createUiTraceProfiler",
+    },
+    RootJsModuleAsset {
+        path: "/ui-trace-wiring.js",
+        source: ui_trace_wiring_js,
+        marker: "createUiTraceWiring",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",

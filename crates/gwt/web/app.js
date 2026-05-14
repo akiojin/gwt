@@ -56,6 +56,7 @@
       import { createViewportSyncState } from "/viewport-sync.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
+      import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -541,51 +542,21 @@
         pendingMessages.push(message);
       }
 
-      function traceUi(kind, fields = {}) {
-        uiTraceProfiler.record(kind, fields);
-      }
-
-      function tracePointer(kind, event, fields = {}) {
-        uiTraceProfiler.recordPointer(kind, event, fields);
-      }
-
-      function traceMeasure(kind, fields, callback) {
-        return uiTraceProfiler.measure(kind, fields, callback);
-      }
-
-      function startUiTrace() {
-        const trace = uiTraceProfiler.start();
-        console.info(`[ui-trace] started ${trace.session_id}`);
-      }
-
-      function stopUiTrace() {
-        const trace = uiTraceProfiler.stop();
-        if (!trace) {
-          window.alert("UI trace is not running.");
-          return;
-        }
-        send({
-          kind: "save_ui_trace",
-          trace,
-        });
-      }
+      const uiTraceWiring = createUiTraceWiring({
+        profiler: uiTraceProfiler,
+        send,
+        alert: (message) => window.alert(message),
+        log: (message) => console.info(message),
+      });
+      const traceUi = uiTraceWiring.traceUi;
+      const tracePointer = uiTraceWiring.tracePointer;
+      const traceMeasure = uiTraceWiring.traceMeasure;
 
       // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
       // the Command Palette. The dry-run entry previews the plan; the apply
       // entry confirms before mutating projection files on disk.
       if (window.__operatorShell?.palette) {
-        window.__operatorShell.palette.register({
-          id: "diagnostics-ui-trace-start",
-          label: "Start UI Trace",
-          group: "Diagnostics",
-          handler: startUiTrace,
-        });
-        window.__operatorShell.palette.register({
-          id: "diagnostics-ui-trace-stop",
-          label: "Stop UI Trace",
-          group: "Diagnostics",
-          handler: stopUiTrace,
-        });
+        uiTraceWiring.registerPalette(window.__operatorShell.palette);
         window.__operatorShell.palette.register({
           id: "workspace-projection-prune-dry-run",
           label: "Workspace: Prune Stale Projections (dry-run)",
@@ -670,7 +641,7 @@
             receive(event);
           },
           onTrace: (kind, fields) => {
-            uiTraceProfiler.record(kind, fields);
+            traceUi(kind, fields);
           },
         });
         setConnectionState(true);
@@ -1409,7 +1380,7 @@
       function renderAppState(nextState) {
         dismissOperatorBriefing();
         return traceMeasure(
-          "render_app_state",
+          UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
             appState = nextState || {
@@ -1683,7 +1654,7 @@
           stage.style.willChange = "auto";
           viewportRasterTimer = null;
         }, 300);
-        traceUi("apply_viewport", {
+        traceUi(UI_TRACE_EVENT.applyViewport, {
           x: viewport.x,
           y: viewport.y,
           zoom: viewport.zoom,
@@ -1835,7 +1806,7 @@
 
       function fitTerminal(windowId, persist = false) {
         return traceMeasure(
-          "fit_terminal",
+          UI_TRACE_EVENT.fitTerminal,
           { window_id: windowId, persist },
           () => {
             const runtime = terminalMap.get(windowId);
@@ -1925,7 +1896,7 @@
         const pointerId = resizeState.pointerId;
         const windowId = resizeState.id;
         const scheduledAt = performance.now();
-        traceUi("resize_pointermove_frame_scheduled", {
+        traceUi(UI_TRACE_EVENT.resizePointermoveFrameScheduled, {
           window_id: windowId,
           pointer_id: pointerId,
         });
@@ -1934,7 +1905,7 @@
             return;
           }
           resizeState.applyFrame = null;
-          traceUi("resize_pointermove_frame", {
+          traceUi(UI_TRACE_EVENT.resizePointermoveFrame, {
             window_id: windowId,
             pointer_id: pointerId,
             delay_ms: performance.now() - scheduledAt,
@@ -1971,7 +1942,7 @@
         );
         element.style.width = `${width}px`;
         element.style.height = `${height}px`;
-        traceUi("resize_pointermove_apply", {
+        traceUi(UI_TRACE_EVENT.resizePointermoveApply, {
           window_id: state.id,
           pointer_id: state.pointerId,
           client_x: x,
@@ -2548,7 +2519,7 @@
 
       function applyStatus(windowId, status, detail) {
         return traceMeasure(
-          "apply_status",
+          UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
           () => {
             const windowData = workspaceWindowById(windowId);
@@ -3249,7 +3220,7 @@
 
       function writeOutput(windowId, base64) {
         return traceMeasure(
-          "write_output",
+          UI_TRACE_EVENT.writeOutput,
           { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
           () => {
             const runtime = terminalMap.get(windowId);
@@ -8285,7 +8256,7 @@
               startedAt: performance.now(),
               stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
-            tracePointer("pointer_resize_start", event, {
+            tracePointer(UI_TRACE_EVENT.pointerResizeStart, event, {
               gesture: "resize",
               accepted: true,
               window_id: windowData.id,
@@ -8297,7 +8268,7 @@
             document.documentElement.dataset.opResizeActive = "true";
             try {
               resizeHandle.setPointerCapture(event.pointerId);
-              tracePointer("pointer_capture_set", event, {
+              tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
                 gesture: "resize",
                 accepted: true,
                 window_id: windowData.id,
@@ -8313,7 +8284,7 @@
                 "[resize] setPointerCapture failed, falling back to window-bound pointer events",
                 error,
               );
-              tracePointer("pointer_capture_failed", event, {
+              tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
                 gesture: "resize",
                 accepted: false,
                 reason: "set_pointer_capture_failed",
@@ -8323,7 +8294,7 @@
             }
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
-            tracePointer("pointer_lost_capture", event, {
+            tracePointer(UI_TRACE_EVENT.pointerLostCapture, event, {
               gesture: "resize",
               accepted: true,
               window_id: windowData.id,
@@ -8387,7 +8358,7 @@
 
       function renderWorkspace(workspace) {
         return traceMeasure(
-          "render_workspace",
+          UI_TRACE_EVENT.renderWorkspace,
           { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
           () => {
             viewport = viewportSyncState.applyServerViewport(workspace.viewport, {
@@ -9444,7 +9415,7 @@
 
       window.addEventListener("pointermove", (event) => {
         if (panState && panState.pointerId !== event.pointerId) {
-          tracePointer("pointer_move_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
             gesture: "pan",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9452,7 +9423,7 @@
           });
         }
         if (panState && panState.pointerId === event.pointerId) {
-          tracePointer("pointer_pan_move", event, {
+          tracePointer(UI_TRACE_EVENT.pointerPanMove, event, {
             gesture: "pan",
             accepted: true,
           });
@@ -9464,7 +9435,7 @@
         }
 
         if (dragState && dragState.pointerId !== event.pointerId) {
-          tracePointer("pointer_move_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
             gesture: "drag",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9477,7 +9448,7 @@
           if (!element) {
             return;
           }
-          tracePointer("pointer_drag_move", event, {
+          tracePointer(UI_TRACE_EVENT.pointerDragMove, event, {
             gesture: "drag",
             accepted: true,
             window_id: dragState.id,
@@ -9497,7 +9468,7 @@
         }
 
         if (resizeState && resizeState.pointerId !== event.pointerId) {
-          tracePointer("pointer_move_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
             gesture: "resize",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9515,7 +9486,7 @@
           // surface as the resize freeze users reported requiring an app
           // restart. By coalescing to one apply per frame we keep the visual
           // responsiveness while letting WebView2 paint between updates.
-          tracePointer("pointer_resize_move", event, {
+          tracePointer(UI_TRACE_EVENT.pointerResizeMove, event, {
             gesture: "resize",
             accepted: true,
             window_id: resizeState.id,
@@ -9530,7 +9501,7 @@
 
       window.addEventListener("pointerup", (event) => {
         if (panState && panState.pointerId === event.pointerId) {
-          tracePointer("pointer_pan_end", event, {
+          tracePointer(UI_TRACE_EVENT.pointerPanEnd, event, {
             gesture: "pan",
             accepted: true,
           });
@@ -9541,7 +9512,7 @@
           flushPersistViewport();
           panState = null;
         } else if (panState) {
-          tracePointer("pointer_up_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
             gesture: "pan",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9550,7 +9521,7 @@
         }
 
         if (dragState && dragState.pointerId === event.pointerId) {
-          tracePointer("pointer_drag_end", event, {
+          tracePointer(UI_TRACE_EVENT.pointerDragEnd, event, {
             gesture: "drag",
             accepted: true,
             window_id: dragState.id,
@@ -9580,7 +9551,7 @@
           }
           dragState = null;
         } else if (dragState) {
-          tracePointer("pointer_up_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
             gesture: "drag",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9591,7 +9562,7 @@
 
         if (resizeState) {
           if (resizeState.pointerId === event.pointerId) {
-            tracePointer("pointer_resize_end", event, {
+            tracePointer(UI_TRACE_EVENT.pointerResizeEnd, event, {
               gesture: "resize",
               accepted: true,
               window_id: resizeState.id,
@@ -9611,7 +9582,7 @@
             console.warn(
               `[resize] window pointerup pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
             );
-            tracePointer("pointer_up_ignored", event, {
+            tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
               gesture: "resize",
               accepted: false,
               reason: "pointer_id_mismatch_force_reset",
@@ -9627,8 +9598,8 @@
         if (panState) {
           tracePointer(
             panState.pointerId === event.pointerId
-              ? "pointer_pan_cancel"
-              : "pointer_cancel_ignored",
+              ? UI_TRACE_EVENT.pointerPanCancel
+              : UI_TRACE_EVENT.pointerCancelIgnored,
             event,
             {
               gesture: "pan",
@@ -9641,7 +9612,7 @@
           );
         }
         if (dragState && dragState.pointerId === event.pointerId) {
-          tracePointer("pointer_drag_cancel", event, {
+          tracePointer(UI_TRACE_EVENT.pointerDragCancel, event, {
             gesture: "drag",
             accepted: true,
             window_id: dragState.id,
@@ -9649,7 +9620,7 @@
           clearTitlebarDockPreview();
           dragState = null;
         } else if (dragState) {
-          tracePointer("pointer_cancel_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {
             gesture: "drag",
             accepted: false,
             reason: "pointer_id_mismatch",
@@ -9665,7 +9636,7 @@
           console.warn(
             `[resize] window pointercancel pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
           );
-          tracePointer("pointer_cancel_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {
             gesture: "resize",
             accepted: false,
             reason: "pointer_id_mismatch_force_reset",
@@ -9676,7 +9647,7 @@
           return;
         }
         if (resizeState) {
-          tracePointer("pointer_resize_cancel", event, {
+          tracePointer(UI_TRACE_EVENT.pointerResizeCancel, event, {
             gesture: "resize",
             accepted: true,
             window_id: resizeState.id,
@@ -9708,7 +9679,7 @@
             x: viewport.x,
             y: viewport.y,
           };
-          tracePointer("pointer_pan_start", event, {
+          tracePointer(UI_TRACE_EVENT.pointerPanStart, event, {
             gesture: "pan",
             accepted: true,
             button_mode: "middle",
@@ -9716,13 +9687,13 @@
           canvas.classList.add("panning");
           try {
             canvas.setPointerCapture(event.pointerId);
-            tracePointer("pointer_capture_set", event, {
+            tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
               gesture: "pan",
               accepted: true,
               button_mode: "middle",
             });
           } catch (error) {
-            tracePointer("pointer_capture_failed", event, {
+            tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
               gesture: "pan",
               accepted: false,
               reason: "set_pointer_capture_failed",
@@ -9741,7 +9712,7 @@
           return;
         }
         if (event.target !== canvas && event.target !== stage) {
-          tracePointer("pointer_down_ignored", event, {
+          tracePointer(UI_TRACE_EVENT.pointerDownIgnored, event, {
             gesture: "pan",
             accepted: false,
             reason: "target_not_canvas",
@@ -9755,7 +9726,7 @@
           x: viewport.x,
           y: viewport.y,
         };
-        tracePointer("pointer_pan_start", event, {
+        tracePointer(UI_TRACE_EVENT.pointerPanStart, event, {
           gesture: "pan",
           accepted: true,
           button_mode: "left",
@@ -9763,13 +9734,13 @@
         canvas.classList.add("panning");
         try {
           canvas.setPointerCapture(event.pointerId);
-          tracePointer("pointer_capture_set", event, {
+          tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
             gesture: "pan",
             accepted: true,
             button_mode: "left",
           });
         } catch (error) {
-          tracePointer("pointer_capture_failed", event, {
+          tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
             gesture: "pan",
             accepted: false,
             reason: "set_pointer_capture_failed",
