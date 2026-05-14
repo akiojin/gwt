@@ -1,10 +1,14 @@
-use chrono::Utc;
+use std::path::Path;
+
+use chrono::{DateTime, Utc};
+use gwt_core::paths::gwt_projects_dir;
 use gwt_core::workspace_projection::{
-    load_or_default_workspace_projection, load_or_synthesize_workspace_work_items,
-    record_workspace_work_event, save_workspace_projection,
-    update_workspace_projection_with_journal, WorkspaceAgentAffiliationStatus,
-    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
-    WorkspaceProjectionUpdate, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
+    apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
+    load_or_synthesize_workspace_work_items, record_workspace_work_event,
+    save_workspace_projection, update_workspace_projection_with_journal, ClassifiedProjection,
+    PruneAction, PruneSkipReason, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
+    WorkspaceRetentionConfig, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
     WorkspaceWorkItem,
 };
 use gwt_github::{ApiError, SpecOpsError};
@@ -19,8 +23,44 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         "join" => parse_join(rest),
         "create" => parse_create(rest),
         "ensure" => parse_ensure(rest),
+        "projection-list" => parse_projection_list(rest),
+        "projection-prune" => parse_projection_prune(rest),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
+}
+
+fn parse_projection_list(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
+    let mut stale = false;
+    let mut all = false;
+    for arg in args {
+        match arg.as_str() {
+            "--stale" => stale = true,
+            "--all" => all = true,
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+    }
+    Ok(WorkspaceCommand::ProjectionList { stale, all })
+}
+
+fn parse_projection_prune(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
+    let mut dry_run = false;
+    let mut ids: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--id" => {
+                let value = parse_required_value(args, i, "--id")?;
+                ids.push(value);
+                i += 2;
+            }
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+    }
+    Ok(WorkspaceCommand::ProjectionPrune { dry_run, ids })
 }
 
 fn parse_required_value(
@@ -518,6 +558,145 @@ pub(super) fn run<E: CliEnv>(
             ));
             Ok(0)
         }
+        WorkspaceCommand::ProjectionList { stale, all } => {
+            let scan_root = gwt_projects_dir();
+            run_projection_list_with_scan_root(
+                &scan_root,
+                &WorkspaceRetentionConfig::default(),
+                Utc::now(),
+                stale,
+                all,
+                |_| false,
+                out,
+            )
+        }
+        WorkspaceCommand::ProjectionPrune { dry_run, ids } => {
+            let scan_root = gwt_projects_dir();
+            run_projection_prune_with_scan_root(
+                &scan_root,
+                &WorkspaceRetentionConfig::default(),
+                Utc::now(),
+                dry_run,
+                &ids,
+                |_| false,
+                out,
+            )
+        }
+    }
+}
+
+/// SPEC-2359 US-41 (FR-153): implement `gwtd workspace projection-list` over a
+/// caller-provided `scan_root` so the production path uses `gwt_projects_dir()`
+/// and tests can pass a tempdir. `is_active_session` bridges in the live-window
+/// registry from `app_runtime` (default `false` in CLI-only contexts).
+fn run_projection_list_with_scan_root<F>(
+    scan_root: &Path,
+    config: &WorkspaceRetentionConfig,
+    now: DateTime<Utc>,
+    stale: bool,
+    all: bool,
+    is_active_session: F,
+    out: &mut String,
+) -> Result<i32, SpecOpsError>
+where
+    F: Fn(&WorkspaceProjection) -> bool,
+{
+    let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
+    let filtered = filter_projection_list(&plan, stale, all);
+    out.push_str(&format!(
+        "# workspace projection list (mode: {}, count: {})\n",
+        list_mode_label(stale, all),
+        filtered.len()
+    ));
+    for entry in filtered {
+        let reason = entry
+            .stale_reason
+            .map(|r| r.as_str().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let action = format_prune_action(&entry.action);
+        out.push_str(&format!(
+            "{} | {} | {:?} | {} | {} | {}\n",
+            entry.workspace_id,
+            entry.project_root.display(),
+            entry.lifecycle_stage,
+            reason,
+            action,
+            entry.updated_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        ));
+    }
+    Ok(0)
+}
+
+/// SPEC-2359 US-41 (FR-153, FR-154): implement `gwtd workspace projection-prune`
+/// over a caller-provided `scan_root`. `ids` lets the user scope the prune to
+/// specific workspace IDs; empty means "every classified entry".
+fn run_projection_prune_with_scan_root<F>(
+    scan_root: &Path,
+    config: &WorkspaceRetentionConfig,
+    now: DateTime<Utc>,
+    dry_run: bool,
+    ids: &[String],
+    is_active_session: F,
+    out: &mut String,
+) -> Result<i32, SpecOpsError>
+where
+    F: Fn(&WorkspaceProjection) -> bool,
+{
+    let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
+    let filtered: Vec<ClassifiedProjection> = if ids.is_empty() {
+        plan
+    } else {
+        plan.into_iter()
+            .filter(|item| ids.iter().any(|id| id == &item.workspace_id))
+            .collect()
+    };
+    let summary = apply_prune_plan(&filtered, dry_run).map_err(core_error)?;
+    let mode = if dry_run { "DRY-RUN" } else { "APPLIED" };
+    out.push_str(&format!(
+        "{}: archive={} delete={} skip={}\n",
+        mode, summary.archived, summary.deleted, summary.skipped,
+    ));
+    Ok(0)
+}
+
+fn filter_projection_list(
+    plan: &[ClassifiedProjection],
+    stale: bool,
+    all: bool,
+) -> Vec<&ClassifiedProjection> {
+    if all {
+        plan.iter().collect()
+    } else if stale {
+        plan.iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.action,
+                    PruneAction::Skip {
+                        reason: PruneSkipReason::NotStale,
+                    }
+                )
+            })
+            .collect()
+    } else {
+        plan.iter()
+            .filter(|entry| matches!(entry.action, PruneAction::Archive | PruneAction::Delete))
+            .collect()
+    }
+}
+
+fn list_mode_label(stale: bool, all: bool) -> &'static str {
+    match (stale, all) {
+        (_, true) => "all",
+        (true, _) => "stale-or-archived",
+        _ => "actionable",
+    }
+}
+
+fn format_prune_action(action: &PruneAction) -> String {
+    match action {
+        PruneAction::Skip { reason } => format!("skip:{:?}", reason),
+        PruneAction::Archive => "archive".to_string(),
+        PruneAction::Delete => "delete".to_string(),
     }
 }
 
@@ -1655,5 +1834,292 @@ mod tests {
             .expect("load workspace history")
             .expect("workspace history");
         assert_eq!(items.work_items.len(), 1);
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_workspace_projection_list_defaults_to_no_flags() {
+        let cmd = parse(&args(&["projection-list"])).expect("parse projection-list");
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::ProjectionList {
+                stale: false,
+                all: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_projection_list_accepts_stale_and_all_flags() {
+        let cmd = parse(&args(&["projection-list", "--stale", "--all"]))
+            .expect("parse projection-list --stale --all");
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::ProjectionList {
+                stale: true,
+                all: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_projection_prune_defaults_to_apply_mode() {
+        let cmd = parse(&args(&["projection-prune"])).expect("parse projection-prune");
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::ProjectionPrune {
+                dry_run: false,
+                ids: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_projection_prune_accepts_dry_run() {
+        let cmd = parse(&args(&["projection-prune", "--dry-run"]))
+            .expect("parse projection-prune --dry-run");
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::ProjectionPrune {
+                dry_run: true,
+                ids: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_projection_prune_accepts_repeated_ids() {
+        let cmd = parse(&args(&[
+            "projection-prune",
+            "--id",
+            "abc-123",
+            "--id",
+            "def-456",
+        ]))
+        .expect("parse projection-prune --id ... --id ...");
+        assert_eq!(
+            cmd,
+            WorkspaceCommand::ProjectionPrune {
+                dry_run: false,
+                ids: vec!["abc-123".to_string(), "def-456".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_projection_prune_rejects_unknown_flag() {
+        let err =
+            parse(&args(&["projection-prune", "--bogus"])).expect_err("unknown flag should fail");
+        assert!(matches!(err, CliParseError::UnknownSubcommand(_)));
+    }
+
+    use gwt_core::workspace_projection::{
+        save_workspace_projection_to_path, WorkspaceLifecycleStage,
+    };
+
+    fn seed_stale_workspace(
+        scan_root: &std::path::Path,
+        id: &str,
+        hash: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        lifecycle: WorkspaceLifecycleStage,
+    ) {
+        let project_dir = scan_root.join(hash);
+        let workspace_dir = project_dir.join("workspace");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
+        let mut projection = WorkspaceProjection::default_for_project(&project_dir);
+        projection.id = id.to_string();
+        projection.updated_at = updated_at;
+        projection.lifecycle_stage = lifecycle;
+        save_workspace_projection_to_path(&workspace_dir.join("current.json"), &projection)
+            .expect("save");
+    }
+
+    #[test]
+    fn run_projection_list_with_scan_root_emits_actionable_only_by_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-stale",
+            "stale-hash",
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-fresh",
+            "fresh-hash",
+            now,
+            WorkspaceLifecycleStage::Active,
+        );
+
+        let mut out = String::new();
+        let code = run_projection_list_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            now,
+            false,
+            false,
+            |_| false,
+            &mut out,
+        )
+        .expect("list");
+        assert_eq!(code, 0);
+        assert!(out.contains("ws-stale"), "stale workspace must be listed");
+        assert!(
+            !out.contains("ws-fresh"),
+            "fresh workspace must be filtered out in default (actionable) mode",
+        );
+        assert!(out.contains("mode: actionable"));
+    }
+
+    #[test]
+    fn run_projection_list_with_scan_root_includes_fresh_when_all_flag_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-fresh",
+            "fresh-hash",
+            now,
+            WorkspaceLifecycleStage::Active,
+        );
+
+        let mut out = String::new();
+        let code = run_projection_list_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            now,
+            false,
+            true,
+            |_| false,
+            &mut out,
+        )
+        .expect("list");
+        assert_eq!(code, 0);
+        assert!(out.contains("ws-fresh"));
+        assert!(out.contains("mode: all"));
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_dry_run_reports_plan_without_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-archive-me",
+            "stale-hash",
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+
+        let mut out = String::new();
+        let code = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            now,
+            true,
+            &[],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune dry-run");
+        assert_eq!(code, 0);
+        assert!(out.contains("DRY-RUN: archive=1 delete=0 skip=0"));
+        // dry-run should not mutate lifecycle_stage
+        let projection_path = tmp.path().join("stale-hash/workspace/current.json");
+        let loaded =
+            gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
+                .expect("load")
+                .expect("present");
+        assert_eq!(loaded.lifecycle_stage, WorkspaceLifecycleStage::Active);
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_apply_persists_archive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-archive-me",
+            "stale-hash",
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+
+        let mut out = String::new();
+        let code = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            now,
+            false,
+            &[],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune apply");
+        assert_eq!(code, 0);
+        assert!(out.contains("APPLIED: archive=1"));
+
+        let projection_path = tmp.path().join("stale-hash/workspace/current.json");
+        let loaded =
+            gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
+                .expect("load")
+                .expect("present");
+        assert_eq!(loaded.lifecycle_stage, WorkspaceLifecycleStage::Archived);
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_filters_by_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-keep",
+            "keep-hash",
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        seed_stale_workspace(
+            tmp.path(),
+            "ws-take",
+            "take-hash",
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+
+        let mut out = String::new();
+        let _ = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            now,
+            false,
+            &["ws-take".to_string()],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune by id");
+        assert!(out.contains("APPLIED: archive=1"));
+
+        let keep = gwt_core::workspace_projection::load_workspace_projection_from_path(
+            &tmp.path().join("keep-hash/workspace/current.json"),
+        )
+        .expect("load keep")
+        .expect("present");
+        assert_eq!(
+            keep.lifecycle_stage,
+            WorkspaceLifecycleStage::Active,
+            "id filter must leave non-matching workspaces untouched",
+        );
+        let take = gwt_core::workspace_projection::load_workspace_projection_from_path(
+            &tmp.path().join("take-hash/workspace/current.json"),
+        )
+        .expect("load take")
+        .expect("present");
+        assert_eq!(take.lifecycle_stage, WorkspaceLifecycleStage::Archived);
     }
 }
