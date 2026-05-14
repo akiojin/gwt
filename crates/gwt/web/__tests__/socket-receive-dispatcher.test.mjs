@@ -159,3 +159,66 @@ test("flushNow synchronously drains pending events without waiting for the sched
   assert.equal(received.length, 1);
   assert.equal(received[0].revision, 2);
 });
+
+// Issue #2698 PR 3 — terminal_output (streamed) flushes ahead of
+// idempotent kinds within the same rAF tick. Backend state
+// broadcasts (workspace_state, etc.) can pile up while the user is
+// typing; without prioritization, terminal echo waits behind a
+// heavy renderWorkspaceState call and the user feels keystroke lag.
+
+test("streamed events flush before idempotent kinds even when idempotent arrived first", () => {
+  const queue = [
+    { kind: "workspace_state", n: 1 },
+    { kind: "workspace_state", n: 2 },
+    { kind: "terminal_output", id: "shell", data: "echo" },
+    { kind: "active_work_projection", v: 1 },
+  ];
+
+  const coalesced = coalesceEvents(queue, DEFAULT_COALESCE_KINDS);
+  assert.deepEqual(coalesced, [
+    { kind: "terminal_output", id: "shell", data: "echo" },
+    { kind: "workspace_state", n: 2 },
+    { kind: "active_work_projection", v: 1 },
+  ]);
+});
+
+test("multiple streamed events maintain relative order, then idempotent follows", () => {
+  const queue = [
+    { kind: "workspace_state", n: 1 },
+    { kind: "terminal_output", id: "a", data: "x" },
+    { kind: "notification", id: 1 },
+    { kind: "workspace_state", n: 2 },
+    { kind: "terminal_output", id: "a", data: "y" },
+    { kind: "active_work_projection", v: 5 },
+  ];
+
+  const coalesced = coalesceEvents(queue, DEFAULT_COALESCE_KINDS);
+  assert.deepEqual(coalesced, [
+    { kind: "terminal_output", id: "a", data: "x" },
+    { kind: "notification", id: 1 },
+    { kind: "terminal_output", id: "a", data: "y" },
+    { kind: "workspace_state", n: 2 },
+    { kind: "active_work_projection", v: 5 },
+  ]);
+});
+
+test("dispatcher delivers terminal_output ahead of pending workspace_state in the same flush", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  // 20 idempotent state updates piled up before a single terminal echo.
+  for (let i = 0; i < 20; i += 1) {
+    dispatcher.enqueue({ kind: "workspace_state", revision: i });
+  }
+  dispatcher.enqueue({ kind: "terminal_output", id: "shell", data: "a" });
+  scheduler.runOnce();
+
+  assert.equal(received.length, 2, "coalesced workspace_state + 1 terminal_output");
+  assert.equal(received[0].kind, "terminal_output", "echo lands first");
+  assert.equal(received[1].kind, "workspace_state", "state update follows");
+});

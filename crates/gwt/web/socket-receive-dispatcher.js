@@ -140,17 +140,26 @@ export function coalesceEvents(queue, coalesceKinds = DEFAULT_COALESCE_KINDS) {
   if (lastIndexByKind.size === 0) {
     return queue.slice();
   }
-  const result = [];
+  // Issue #2698 PR 3 — partition the result so streamed (non-
+  // coalesced) events are delivered ahead of idempotent state
+  // updates. terminal_output / notification / error need low
+  // round-trip latency; a single rAF tick that flushes 20 piled-up
+  // workspace_state messages before the next keystroke echo makes
+  // typing feel sluggish on Windows even when CPU is idle. The
+  // relative order WITHIN each partition is preserved from the
+  // original queue.
+  const streamed = [];
+  const idempotent = [];
   for (let i = 0; i < queue.length; i += 1) {
     const event = queue[i];
     const kind = event && event.kind;
     if (kind && coalesceKinds.has(kind)) {
       if (lastIndexByKind.get(kind) === i) {
-        result.push(event);
+        idempotent.push(event);
       }
     } else {
-      result.push(event);
+      streamed.push(event);
     }
   }
-  return result;
+  return streamed.concat(idempotent);
 }
