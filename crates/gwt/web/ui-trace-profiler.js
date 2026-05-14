@@ -210,6 +210,9 @@ export function createUiTraceProfiler({
   }
 
   function recordPointer(kind, event, fields = {}) {
+    if (!active) {
+      return;
+    }
     if (!event || typeof event !== "object") {
       record(kind, fields);
       return;

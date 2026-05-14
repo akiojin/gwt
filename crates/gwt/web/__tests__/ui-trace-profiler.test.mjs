@@ -120,3 +120,21 @@ test("UI trace profiler restarts capture with a fresh buffer", () => {
     ["trace_start", "new_event"],
   );
 });
+
+test("UI trace profiler does not inspect pointer events while inactive", () => {
+  const profiler = createUiTraceProfiler();
+  const event = {};
+  for (const key of ["pointerId", "button", "buttons", "clientX", "clientY", "target"]) {
+    Object.defineProperty(event, key, {
+      get() {
+        throw new Error(`${key} should not be read while tracing is inactive`);
+      },
+    });
+  }
+
+  assert.doesNotThrow(() => {
+    profiler.recordPointer("pointer_move_ignored", event, {
+      gesture: "resize",
+    });
+  });
+});
