@@ -49,6 +49,7 @@
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
+      import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -2008,6 +2009,22 @@
           if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
             return;
           }
+          // Issue #2704 — suppress only the trailing `terminal.focus()`
+          // step when a modal is open or a text input owns focus, so the
+          // Clone Project URL/Search field (and other modal inputs) keep
+          // keyboard focus while the background terminal keeps streaming
+          // `workspace_state` events. Geometry sync still runs every
+          // cycle so xterm reflows are unaffected.
+          const shouldFocus = !shouldSkipTerminalFocusActivation({
+            doc: document,
+            modalElements: [
+              modal,
+              wizardModal,
+              cloneProjectModal,
+              branchCleanupModal,
+              migrationModal,
+            ],
+          });
           // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit + persist
           // geometry so xterm's cell metrics are populated by the time
           // proposeDimensions runs. The previous order (fit-then-refresh)
@@ -2018,7 +2035,7 @@
           runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
-            shouldFocus: true,
+            shouldFocus,
             shouldPersistGeometry: true,
             sendGeometry,
           });
