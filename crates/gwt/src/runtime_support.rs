@@ -227,6 +227,7 @@ pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> 
 /// extra spawn was pure overhead on Windows (one `CreateProcess` +
 /// Defender scan per Launch Wizard open). The current implementation skips
 /// `current_git_branch` entirely and relies on the worktree list.
+#[cfg(test)]
 pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
     let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
     branch_worktree_path_for(&main_repo_path, branch_name)
@@ -239,6 +240,7 @@ pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathB
 /// `git rev-parse --git-common-dir` resolution that `branch_worktree_path`
 /// would otherwise perform halves the cold-open git spawn count for branch
 /// resolution.
+#[cfg(test)]
 pub fn branch_worktree_path_for(main_repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
     let manager = gwt_git::WorktreeManager::new(main_repo_path);
     let mut worktrees = manager.list().ok()?;

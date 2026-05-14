@@ -408,6 +408,10 @@ impl LaunchWizardMemoryCache {
         )
     }
 
+    fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
+        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
+    }
+
     fn previous_profiles(&self, repo_path: &Path) -> gwt::LaunchWizardPreviousProfiles {
         gwt::launch_wizard::previous_launch_profiles_for_repo_from_sessions(
             repo_path,
@@ -7875,7 +7879,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_open_launch_wizard_uses_branch_worktree_for_docker_context() {
+    fn app_runtime_open_launch_wizard_does_not_probe_branch_worktree_for_docker_context() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -7919,19 +7923,127 @@ exit 0
             .expect("open launch wizard");
 
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(wizard.context.worktree_path.is_none());
+        assert!(same_worktree_path(&wizard.context.quick_start_root, &repo));
+        let view = wizard.view();
+        assert!(!view.runtime_context_resolved);
+        assert!(!view.show_runtime_target);
+        assert!(view.selected_docker_service.is_none());
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        fs::write(
+            repo.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+        run_git(&repo, &["add", "README.md", "docker-compose.yml"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
+            .expect("open launch wizard");
+        assert!(
+            !runtime
+                .launch_wizard
+                .as_ref()
+                .expect("wizard")
+                .wizard
+                .view()
+                .runtime_context_resolved
+        );
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        ));
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
         assert!(wizard
             .context
             .worktree_path
             .as_ref()
-            .is_some_and(|path| same_worktree_path(path, &branch_worktree)));
-        assert!(same_worktree_path(
-            &wizard.context.quick_start_root,
-            &branch_worktree
-        ));
+            .is_some_and(|path| same_worktree_path(path, &repo)));
         let view = wizard.view();
+        assert!(view.runtime_context_resolved);
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker_context() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let mut session = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("app".to_string());
+        session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        session.save(&sessions_dir).expect("save session");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
+            .expect("open launch wizard");
+        let phase_one = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(!phase_one.runtime_context_resolved);
+        assert_eq!(phase_one.selected_runtime_target, "host");
+        assert!(!phase_one.show_runtime_target);
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(view.runtime_context_resolved);
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(!view.show_runtime_target);
+        assert!(view.selected_docker_service.is_none());
     }
 
     #[test]
