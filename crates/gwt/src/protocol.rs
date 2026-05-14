@@ -732,7 +732,6 @@ pub enum BackendEvent {
     },
     CloneProjectDone {
         workspace_home: String,
-        initial_worktree_path: String,
     },
     CloneProjectError {
         message: String,

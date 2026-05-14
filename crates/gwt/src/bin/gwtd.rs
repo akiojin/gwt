@@ -276,7 +276,7 @@ fn format_discuss_help() -> String {
         "Usage: gwtd discuss <action> --proposal <label>",
         "",
         "Actions:",
-        "  resolve --proposal <label>              Mark a proposal chosen",
+        "  resolve --proposal <label>              Mark a proposal chosen after Evidence Gate",
         "  park --proposal <label>                 Mark a proposal parked",
         "  reject --proposal <label>               Mark a proposal rejected",
         "  clear-next-question --proposal <label>  Clear the open question (Stop unblock)",

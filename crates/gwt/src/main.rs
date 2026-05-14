@@ -679,7 +679,6 @@ enum UserEvent {
     },
     CloneProjectDone {
         workspace_home: PathBuf,
-        initial_worktree_path: PathBuf,
     },
     CloneProjectError {
         message: String,
@@ -4541,7 +4540,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_launch_worktree_refalls_back_when_start_work_develop_ref_is_stale() {
+    fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
@@ -4593,11 +4592,25 @@ mod tests {
             &mut working_dir,
             &mut env_vars,
         )
-        .expect("stale Start Work base should refallback after fetch");
+        .expect("stale Start Work base should recreate origin/develop after fetch");
 
         let worktree = working_dir.expect("materialized worktree");
-        assert_eq!(base_branch.as_deref(), Some("origin/HEAD"));
+        assert_eq!(base_branch.as_deref(), Some("origin/develop"));
         assert!(worktree.exists());
+        let restored_develop = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check restored origin/develop");
+        assert!(
+            restored_develop.success(),
+            "origin/develop tracking ref must be restored"
+        );
         assert!(env_vars
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &worktree)));
@@ -5667,11 +5680,8 @@ fn main() -> wry::Result<()> {
                     BackendEvent::CloneProjectProgress { message },
                 )]);
             }
-            Event::UserEvent(UserEvent::CloneProjectDone {
-                workspace_home,
-                initial_worktree_path,
-            }) => {
-                let events = app.handle_clone_project_done(&workspace_home, &initial_worktree_path);
+            Event::UserEvent(UserEvent::CloneProjectDone { workspace_home }) => {
+                let events = app.handle_clone_project_done(&workspace_home);
                 board_projection_watchers.sync(&app, proxy.clone());
                 #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());

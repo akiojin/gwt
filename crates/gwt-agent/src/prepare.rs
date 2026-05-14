@@ -22,12 +22,7 @@ const DOCKER_GWT_OVERRIDE_HEADER: &str =
     "# Auto-generated docker-compose override for gwt bundle mounting";
 const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
 const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
-const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 4] = [
-    "origin/develop",
-    "origin/HEAD",
-    "origin/main",
-    "origin/master",
-];
+const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 1] = ["origin/develop"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
@@ -327,9 +322,17 @@ pub fn resolve_launch_worktree_request(
     let mut remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
 
-    manager
-        .fetch_origin()
-        .map_err(|err| format!("failed to fetch origin: {err}"))?;
+    if is_start_work_branch_name(&branch_name) {
+        manager
+            .prepare_start_work_remote_develop()
+            .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
+        base_branch = "origin/develop".to_string();
+        remote_base_ref = origin_remote_ref(&base_branch);
+    } else {
+        manager
+            .fetch_origin()
+            .map_err(|err| format!("failed to fetch origin: {err}"))?;
+    }
 
     if !manager
         .remote_branch_exists(&remote_base_ref)

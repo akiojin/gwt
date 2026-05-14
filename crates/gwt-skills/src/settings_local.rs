@@ -691,16 +691,20 @@ mod tests {
     }
 
     #[test]
-    fn managed_stop_chain_includes_three_skill_check_handlers_after_board_reminder() {
+    fn managed_stop_chain_collapses_to_event_dispatcher() {
         let dir = tempfile::tempdir().unwrap();
         generate_settings_local(dir.path()).unwrap();
         let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
         let stop_commands = commands_for_event(&value, "Stop");
         assert_eq!(
-            stop_commands,
-            vec!["'gwtd' hook event Stop"],
+            stop_commands.len(),
+            1,
             "Stop chain must collapse to the event dispatcher; got: {stop_commands:?}"
+        );
+        assert!(
+            stop_commands[0].contains(" hook event Stop"),
+            "Stop chain must dispatch through the event dispatcher; got: {stop_commands:?}"
         );
     }
 

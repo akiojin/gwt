@@ -811,6 +811,22 @@ mod tests {
                 "expected discussion skill to define a depth gate with coverage and exit blocker tracking in {relative}"
             );
             assert!(
+                discussion_skill.contains("## Evidence Gate")
+                    && discussion_skill.contains("Implementation Proof")
+                    && discussion_skill.contains("SPEC/Issue Proof")
+                    && discussion_skill.contains("Gap Check Proof")
+                    && discussion_skill.contains("Official Docs Proof")
+                    && discussion_skill.contains("External Research Proof")
+                    && discussion_skill.contains("Evidence Gate: complete"),
+                "expected discussion skill to require evidence proof fields in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("official documentation")
+                    && discussion_skill.contains("X search")
+                    && discussion_skill.contains("X API Search Posts"),
+                "expected discussion skill to require official docs and X research policy in {relative}"
+            );
+            assert!(
                 discussion_skill.contains("scope boundary")
                     && discussion_skill.contains("ownership / integration")
                     && discussion_skill.contains("failure / edge case")

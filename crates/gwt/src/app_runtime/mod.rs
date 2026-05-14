@@ -2844,7 +2844,6 @@ impl AppRuntime {
             match gwt_git::clone_project_as_nested_bare(&url, &parent) {
                 Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
                     workspace_home: outcome.workspace_home,
-                    initial_worktree_path: outcome.initial_worktree_path,
                 }),
                 Err(error) => proxy.send(UserEvent::CloneProjectError {
                     message: error.to_string(),
@@ -2886,17 +2885,15 @@ impl AppRuntime {
     pub(crate) fn handle_clone_project_done(
         &mut self,
         workspace_home: &Path,
-        initial_worktree_path: &Path,
     ) -> Vec<OutboundEvent> {
-        match self.open_project_path(initial_worktree_path.to_path_buf()) {
+        match self.open_project_path(workspace_home.to_path_buf()) {
             Ok(wizard_closed) => {
-                self.remember_recent_clone_workspace_home(workspace_home, initial_worktree_path);
+                self.remember_recent_clone_workspace_home(workspace_home);
                 let _ = self.persist();
                 let mut events = vec![
                     self.workspace_state_broadcast(),
                     OutboundEvent::broadcast(BackendEvent::CloneProjectDone {
                         workspace_home: workspace_home.display().to_string(),
-                        initial_worktree_path: initial_worktree_path.display().to_string(),
                     }),
                 ];
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
@@ -2913,17 +2910,11 @@ impl AppRuntime {
         }
     }
 
-    fn remember_recent_clone_workspace_home(
-        &mut self,
-        workspace_home: &Path,
-        initial_worktree_path: &Path,
-    ) {
+    fn remember_recent_clone_workspace_home(&mut self, workspace_home: &Path) {
         let canonical_home =
             dunce::canonicalize(workspace_home).unwrap_or_else(|_| workspace_home.to_path_buf());
-        self.recent_projects.retain(|entry| {
-            !same_worktree_path(&entry.path, &canonical_home)
-                && !same_worktree_path(&entry.path, initial_worktree_path)
-        });
+        self.recent_projects
+            .retain(|entry| !same_worktree_path(&entry.path, &canonical_home));
         self.recent_projects.insert(
             0,
             gwt::RecentProjectEntry {
@@ -8033,20 +8024,19 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_open_start_work_uses_active_project_without_creating_git_environment() {
+    fn app_runtime_open_start_work_ensures_remote_develop_without_creating_work_branch() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        run_git(&repo, &["init", "-q", "-b", "main"]);
-        run_git(&repo, &["config", "user.name", "Codex"]);
-        run_git(&repo, &["config", "user.email", "codex@example.com"]);
-        fs::write(repo.join("README.md"), "repo\n").expect("readme");
-        run_git(&repo, &["add", "README.md"]);
-        run_git(&repo, &["commit", "-qm", "init"]);
-        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let origin = init_git_clone_with_origin(&repo);
+        run_git(&repo, &["checkout", "-qb", "main"]);
+        run_git(&repo, &["push", "origin", "main"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&repo, &["checkout", "develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        run_git(&origin, &["branch", "-D", "develop"]);
 
         let tab = sample_project_tab(
             "tab-1",
@@ -8073,8 +8063,23 @@ exit 0
         assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
         assert_eq!(view.title, "Start Work");
         assert!(!view.show_branch_controls);
-        assert_eq!(view.selected_branch_name, "origin/main");
+        assert_eq!(view.selected_branch_name, "origin/develop");
         assert!(view.branch_name.starts_with("work/"));
+
+        let develop = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check origin/develop");
+        assert!(
+            develop.success(),
+            "opening Start Work should restore origin/develop from the remote default branch"
+        );
 
         let refs = gwt_core::process::hidden_command("git")
             .args([
@@ -13301,20 +13306,28 @@ exit 0
     }
 
     #[test]
-    fn clone_project_done_opens_initial_worktree_and_broadcasts_done() {
+    fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         let temp = tempdir().expect("tempdir");
         let workspace_home = temp.path().join("sample");
-        let worktree = workspace_home.join("develop");
-        fs::create_dir_all(&worktree).expect("worktree dir");
-        init_repo(&worktree);
+        let bare_repo = workspace_home.join("sample.git");
+        fs::create_dir_all(&workspace_home).expect("workspace home");
+        let output = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().expect("bare path")])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
-        let events = runtime.handle_clone_project_done(&workspace_home, &worktree);
+        let events = runtime.handle_clone_project_done(&workspace_home);
 
         assert_eq!(runtime.tabs.len(), 1);
         assert_eq!(
             runtime.tabs[0].project_root,
-            dunce::canonicalize(&worktree).unwrap()
+            dunce::canonicalize(&workspace_home).unwrap()
         );
         assert_eq!(runtime.recent_projects.len(), 1);
         assert_eq!(
@@ -13327,10 +13340,8 @@ exit 0
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::CloneProjectDone {
                     workspace_home: emitted_workspace_home,
-                    initial_worktree_path,
                 },
             } if emitted_workspace_home == &workspace_home.display().to_string()
-                && initial_worktree_path == &worktree.display().to_string()
         )));
         assert!(events.iter().any(|event| matches!(
             event,
