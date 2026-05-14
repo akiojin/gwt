@@ -1216,9 +1216,14 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
     /let\s+launchWizardOpenError\s*=\s*null/,
     "expected frontend to track launch wizard open errors separately from project_open_error",
   );
+  // Issue #2698 PR 1 (B7) — the case body now defers via
+  // `wizardInteractionGuard.defer(...)` before mutating the error
+  // state, so the regex window between the case label and the
+  // assignment must permit the guard preamble. The intent is
+  // unchanged: this case populates `launchWizardOpenError`.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenError\s*=/,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,600}?launchWizardOpenError\s*=/,
     "expected launch_wizard_open_error events to populate wizard error state",
   );
   assert.match(
