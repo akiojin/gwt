@@ -1360,6 +1360,14 @@ test("Launch wizard separates launch settings from runtime controls", () => {
   }
 });
 
+test("Launch wizard submit button uses Continue before runtime context is resolved", () => {
+  assert.match(
+    appSource,
+    /launchWizard\.runtime_context_resolved === false\s*\?\s*"Continue"\s*:/,
+    "expected unresolved Launch Agent runtime context to use Continue instead of Launch",
+  );
+});
+
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.

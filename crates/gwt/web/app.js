@@ -5312,9 +5312,11 @@
           }`;
         wizardSubmitButton.textContent = launchWizard.is_hydrating
           ? "Loading..."
-          : launchWizard.branch_mode === "create_new"
-            ? "Create and launch"
-            : "Launch";
+          : launchWizard.runtime_context_resolved === false
+            ? "Continue"
+            : launchWizard.branch_mode === "create_new"
+              ? "Create and launch"
+              : "Launch";
         wizardSubmitButton.disabled = Boolean(launchWizard.is_hydrating);
 
         if (launchWizard.error || launchWizard.hydration_error) {

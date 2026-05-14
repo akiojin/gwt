@@ -61,9 +61,9 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
 }
 
 use super::{
-    branch_worktree_path, branch_worktree_path_for, build_shell_process_launch, combined_window_id,
-    detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
-    list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
+    build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
+    knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
+    normalize_branch_name, preferred_issue_launch_branch, resolve_launch_worktree,
     resolve_shell_launch_worktree, synthetic_branch_entry, workspace_projection_for_current_resume,
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
@@ -166,46 +166,35 @@ impl AppRuntime {
     ) -> Result<(), String> {
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
-        // SPEC-2014 FR-PERF-003: reuse the project tab's cached
-        // `main_worktree_root` resolution so the Launch Wizard cold-open path
-        // avoids another `git rev-parse --git-common-dir` spawn on Windows.
-        let main_repo_path = self.tab(tab_id).map(|tab| tab.main_worktree_root());
-        let worktree_path = main_repo_path.as_deref().map_or_else(
-            || branch_worktree_path(project_root, &normalized_branch_name),
-            |main_root| branch_worktree_path_for(main_root, &normalized_branch_name),
-        );
-        let quick_start_root = worktree_path
-            .clone()
-            .unwrap_or_else(|| project_root.to_path_buf());
-        let quick_start_entries = self
-            .launch_wizard_cache
-            .quick_start_entries(&quick_start_root, &normalized_branch_name);
-        let previous_profiles = self
-            .launch_wizard_cache
-            .previous_profiles(&quick_start_root);
+        let worktree_path = None;
+        let quick_start_root = project_root.to_path_buf();
+        let quick_start_entries = Vec::new();
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
-        let (docker_context, docker_service_status) =
-            detect_wizard_docker_context_and_status(&quick_start_root);
+        let docker_context = None;
+        let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(branch_name),
+                normalized_branch_name,
+                worktree_path,
+                quick_start_root,
+                live_sessions,
+                docker_context,
+                docker_service_status,
+                linked_issue_number,
+                linked_issue_kind,
+            },
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+        );
+        wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
-            wizard: LaunchWizardState::open_with_previous_profiles(
-                LaunchWizardContext {
-                    selected_branch: synthetic_branch_entry(branch_name),
-                    normalized_branch_name,
-                    worktree_path,
-                    quick_start_root,
-                    live_sessions,
-                    docker_context,
-                    docker_service_status,
-                    linked_issue_number,
-                    linked_issue_kind,
-                },
-                agent_options,
-                quick_start_entries,
-                previous_profiles,
-            ),
+            wizard,
             workspace_resume_context,
         });
 
@@ -418,38 +407,36 @@ impl AppRuntime {
             gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
                 .map_err(|error| error.to_string())?;
         let quick_start_root = project_root.to_path_buf();
-        let quick_start_entries = self
-            .launch_wizard_cache
-            .quick_start_entries(&quick_start_root, &work_branch);
-        let previous_profiles = self
-            .launch_wizard_cache
-            .previous_profiles(&quick_start_root);
+        let quick_start_entries = Vec::new();
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
-        let (docker_context, docker_service_status) =
-            detect_wizard_docker_context_and_status(&quick_start_root);
+        let docker_context = None;
+        let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(&base_branch),
+                normalized_branch_name: work_branch,
+                worktree_path: None,
+                quick_start_root,
+                live_sessions: Vec::new(),
+                docker_context,
+                docker_service_status,
+                linked_issue_number: workspace_resume_context.as_ref().and_then(|context| {
+                    workspace_resume_owner_issue_number(context.owner.as_deref())
+                }),
+                linked_issue_kind: None,
+            },
+            base_branch,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+        );
+        wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
-            wizard: LaunchWizardState::open_start_work_with_previous_profiles(
-                LaunchWizardContext {
-                    selected_branch: synthetic_branch_entry(&base_branch),
-                    normalized_branch_name: work_branch,
-                    worktree_path: None,
-                    quick_start_root,
-                    live_sessions: Vec::new(),
-                    docker_context,
-                    docker_service_status,
-                    linked_issue_number: workspace_resume_context.as_ref().and_then(|context| {
-                        workspace_resume_owner_issue_number(context.owner.as_deref())
-                    }),
-                    linked_issue_kind: None,
-                },
-                base_branch,
-                agent_options,
-                quick_start_entries,
-                previous_profiles,
-            ),
+            wizard,
             workspace_resume_context,
         });
 
@@ -658,6 +645,26 @@ impl AppRuntime {
                     self.launch_wizard_state_broadcast(None),
                 ]
             }
+            Some(LaunchWizardCompletion::ResolveRuntime(config)) => {
+                match self.resolve_launch_wizard_runtime_context(&mut session, *config) {
+                    Ok(()) => {
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                    Err(error) => {
+                        Self::log_launch_wizard_error(
+                            &session,
+                            "resolve_runtime",
+                            action_label,
+                            requested_agent_id.as_deref(),
+                            &error,
+                        );
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                }
+            }
             Some(LaunchWizardCompletion::Launch(config)) => {
                 let Some(bounds) = bounds else {
                     let error = "Viewport bounds are required to launch a window".to_string();
@@ -726,6 +733,54 @@ impl AppRuntime {
                 vec![self.launch_wizard_state_outbound()]
             }
         }
+    }
+
+    fn resolve_launch_wizard_runtime_context(
+        &mut self,
+        session: &mut LaunchWizardSession,
+        mut config: LaunchWizardLaunchRequest,
+    ) -> Result<(), String> {
+        let project_root = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+            .ok_or_else(|| "Project tab not found".to_string())?;
+
+        let worktree_path = match &mut config {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                resolve_launch_worktree(&project_root, config)?;
+                config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| project_root.clone())
+            }
+            LaunchWizardLaunchRequest::Shell(config) => {
+                resolve_shell_launch_worktree(&project_root, config)?;
+                config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| project_root.clone())
+            }
+        };
+        let branch_name = session.wizard.branch_name.clone();
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&worktree_path, &branch_name);
+        let previous_profiles = self.launch_wizard_cache.previous_profiles(&worktree_path);
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let (docker_context, docker_service_status) =
+            detect_wizard_docker_context_and_status(&worktree_path);
+        session.wizard.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: branch_name,
+            worktree_path: Some(worktree_path.clone()),
+            quick_start_root: worktree_path,
+            docker_context,
+            docker_service_status,
+            agent_options,
+            quick_start_entries,
+            previous_profiles: Some(previous_profiles),
+        });
+        Ok(())
     }
 
     pub(crate) fn spawn_wizard_shell_window(
