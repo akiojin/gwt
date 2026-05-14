@@ -460,6 +460,42 @@
         pendingMessages.push(message);
       }
 
+      // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
+      // the Command Palette. The dry-run entry previews the plan; the apply
+      // entry confirms before mutating projection files on disk.
+      if (window.__operatorShell?.palette) {
+        window.__operatorShell.palette.register({
+          id: "workspace-projection-prune-dry-run",
+          label: "Workspace: Prune Stale Projections (dry-run)",
+          group: "Workspace",
+          handler: () => {
+            send({
+              kind: "workspace_projection_prune",
+              dry_run: true,
+              ids: [],
+            });
+          },
+        });
+        window.__operatorShell.palette.register({
+          id: "workspace-projection-prune-apply",
+          label: "Workspace: Prune Stale Projections (apply)",
+          group: "Workspace",
+          handler: () => {
+            if (
+              window.confirm(
+                "Apply Workspace projection prune now? Archived entries past their grace period will be physically removed.",
+              )
+            ) {
+              send({
+                kind: "workspace_projection_prune",
+                dry_run: false,
+                ids: [],
+              });
+            }
+          },
+        });
+      }
+
       const updateCtaController = createUpdateCtaController({
         document,
         send,
@@ -8321,6 +8357,25 @@
           case "workspace_state":
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            break;
+          case "workspace_projection_prune_result": {
+            // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
+            // A richer Drawer surface lands in a follow-up; for now an alert
+            // keeps the loop closed so users see the count summary.
+            const modeLabel =
+              event.mode === "dry_run" ? "dry-run" : "applied";
+            window.alert(
+              `Workspace Projection Prune (${modeLabel})\n` +
+                `  archived: ${event.archived}\n` +
+                `  deleted: ${event.deleted}\n` +
+                `  skipped: ${event.skipped}`,
+            );
+            break;
+          }
+          case "workspace_projection_prune_error":
+            window.alert(
+              `Workspace Projection Prune error: ${event.message}`,
+            );
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;

@@ -2265,7 +2265,16 @@ impl AppRuntime {
         let scan_root = gwt_projects_dir();
         let now = chrono::Utc::now();
         let config = WorkspaceRetentionConfig::default();
-        let plan = classify_workspace_projections(&scan_root, &config, now, |_| false);
+        let live_session_ids: std::collections::HashSet<String> =
+            self.active_agent_sessions.keys().cloned().collect();
+        let is_active_session =
+            |projection: &gwt_core::workspace_projection::WorkspaceProjection| {
+                projection
+                    .agents
+                    .iter()
+                    .any(|agent| live_session_ids.contains(&agent.session_id))
+            };
+        let plan = classify_workspace_projections(&scan_root, &config, now, is_active_session);
         let filtered: Vec<_> = if ids.is_empty() {
             plan
         } else {
