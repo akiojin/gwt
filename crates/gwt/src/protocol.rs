@@ -377,6 +377,12 @@ pub enum FrontendEvent {
         #[serde(default)]
         ids: Vec<String>,
     },
+    /// Diagnostics > Stop UI Trace: persist the browser-side metadata-only
+    /// trace payload as a project-scoped JSONL artifact. Backend replies with
+    /// [`BackendEvent::UiTraceSaved`] or [`BackendEvent::UiTraceError`].
+    SaveUiTrace {
+        trace: serde_json::Value,
+    },
 }
 
 fn default_board_history_limit() -> usize {
@@ -898,6 +904,16 @@ pub enum BackendEvent {
     /// classify or apply the plan (e.g. unreadable projection file, IO error
     /// during delete).
     WorkspaceProjectionPruneError {
+        message: String,
+    },
+    /// Diagnostics trace artifact was written to the project log directory.
+    UiTraceSaved {
+        path: String,
+        entries: usize,
+    },
+    /// Diagnostics trace artifact could not be written or the payload was
+    /// malformed.
+    UiTraceError {
         message: String,
     },
 }
@@ -1796,5 +1812,48 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "workspace_projection_prune_error");
         assert_eq!(value["message"], "scan failed: permission denied");
+    }
+
+    #[test]
+    fn frontend_event_save_ui_trace_deserializes_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "save_ui_trace",
+            "trace": {
+                "session_id": "trace-1",
+                "entries": [
+                    { "kind": "trace_start", "ts": 1 }
+                ]
+            }
+        }))
+        .expect("deserialize save_ui_trace");
+        match event {
+            FrontendEvent::SaveUiTrace { trace } => {
+                assert_eq!(trace["session_id"], "trace-1");
+                assert_eq!(trace["entries"][0]["kind"], "trace_start");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_ui_trace_saved_serializes() {
+        let event = BackendEvent::UiTraceSaved {
+            path: "/tmp/ui-trace.jsonl".to_string(),
+            entries: 2,
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "ui_trace_saved");
+        assert_eq!(value["path"], "/tmp/ui-trace.jsonl");
+        assert_eq!(value["entries"], 2);
+    }
+
+    #[test]
+    fn backend_event_ui_trace_error_serializes() {
+        let event = BackendEvent::UiTraceError {
+            message: "trace payload missing entries".to_string(),
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "ui_trace_error");
+        assert_eq!(value["message"], "trace payload missing entries");
     }
 }

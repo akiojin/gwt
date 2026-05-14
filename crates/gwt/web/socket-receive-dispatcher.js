@@ -40,6 +40,7 @@ export function createSocketReceiveDispatcher({
   now,
   budgetMs = DEFAULT_BUDGET_MS,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
+  onTrace,
 } = {}) {
   if (typeof receive !== "function") {
     throw new TypeError(
@@ -59,9 +60,21 @@ export function createSocketReceiveDispatcher({
     }
     return Date.now();
   });
+  const traceImpl = typeof onTrace === "function" ? onTrace : null;
 
   const queue = [];
   let scheduled = false;
+
+  function trace(kind, fields = {}) {
+    if (!traceImpl) {
+      return;
+    }
+    try {
+      traceImpl(kind, fields);
+    } catch (_) {
+      // Diagnostics must never affect the interactive event path.
+    }
+  }
 
   function flush() {
     scheduled = false;
@@ -71,19 +84,47 @@ export function createSocketReceiveDispatcher({
     const ready = coalesceEvents(queue, coalesceKinds);
     queue.length = 0;
     const start = nowImpl();
+    trace("ws_flush_start", {
+      ready_count: ready.length,
+    });
     let cursor = 0;
     while (cursor < ready.length) {
-      receive(ready[cursor]);
+      const event = ready[cursor];
+      const receiveStart = nowImpl();
+      try {
+        receive(event);
+        trace("ws_receive", {
+          event_kind: event && event.kind,
+          duration_ms: nowImpl() - receiveStart,
+        });
+      } catch (error) {
+        trace("ws_receive", {
+          event_kind: event && event.kind,
+          duration_ms: nowImpl() - receiveStart,
+          threw: true,
+          error_name: error && error.name,
+        });
+        throw error;
+      }
       cursor += 1;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {
         for (let i = ready.length - 1; i >= cursor; i -= 1) {
           queue.unshift(ready[i]);
         }
+        trace("ws_flush_defer", {
+          processed_count: cursor,
+          remaining_count: ready.length - cursor,
+          duration_ms: nowImpl() - start,
+        });
         scheduled = true;
         scheduleImpl(flush);
         return;
       }
     }
+    trace("ws_flush_end", {
+      processed_count: cursor,
+      duration_ms: nowImpl() - start,
+    });
   }
 
   function enqueue(event) {
@@ -96,6 +137,7 @@ export function createSocketReceiveDispatcher({
 
   function handle(messageEvent) {
     let payload;
+    const parseStart = nowImpl();
     if (messageEvent && typeof messageEvent.data === "string") {
       payload = JSON.parse(messageEvent.data);
     } else if (
@@ -109,6 +151,10 @@ export function createSocketReceiveDispatcher({
         "createSocketReceiveDispatcher.handle expects a WebSocket message event or parsed payload",
       );
     }
+    trace("ws_message", {
+      event_kind: payload && payload.kind,
+      parse_ms: nowImpl() - parseStart,
+    });
     enqueue(payload);
   }
 

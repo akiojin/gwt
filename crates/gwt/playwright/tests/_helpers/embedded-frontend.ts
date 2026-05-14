@@ -37,6 +37,7 @@ const ROOT_MODULES = new Set([
   "terminal-viewport-reflow.js",
   "theme-manager.js",
   "theme-toggle.js",
+  "ui-trace-profiler.js",
   "update-cta.js",
   // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
   "viewport-persist-throttle.js",
