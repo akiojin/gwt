@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.34.0] - 2026-05-14
+
+### Bug Fixes
+
+- **gui:** Prevent terminal bottom clipping
+- **agent:** Preserve docker path separators on Windows
+- **ui:** Defer destructive wizard re-renders during dropdown interaction (#2698)
+- **ui:** Throttle update_viewport WS sends during sustained scroll (#2698)
+- **ui:** Prioritize streamed events over idempotent state in dispatcher (#2698)
+- **ui:** Apply interaction-guard to system settings select (#2698)
+- **test:** Widen wizard-open-error regex window for guard preamble (#2698)
+- **playwright:** Register interaction-guard and viewport-persist-throttle in fixtures (#2698)
+
+### Features
+
+- **workspace:** Add Workspace projection retention pruner (US-41 Phase 8a)
+- **workspace:** Bridge live-window registry to projection-prune for FR-155
+- **workspace:** Add Command Palette entries for projection prune (US-41 FR-156)
+
+### Miscellaneous Tasks
+
+- **gui:** Harden Windows verification lints
+
 ## [9.33.1] - 2026-05-13
 
 ### Bug Fixes
