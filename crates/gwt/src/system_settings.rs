@@ -34,6 +34,12 @@ pub enum SystemSettingsError {
 /// constant so the dispatch validator and (future) tests share it.
 pub const ALLOWED_LANGUAGES: &[&str] = &["auto", "en", "ja"];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSettingsSnapshot {
+    pub language: String,
+    pub codex_trust_managed_hooks: Option<bool>,
+}
+
 /// Validate that `value` is one of [`ALLOWED_LANGUAGES`] (case-insensitive,
 /// trimmed). Returns the canonical lowercase value on success.
 pub fn validate_language(value: &str) -> Result<String, SystemSettingsError> {
@@ -48,23 +54,38 @@ pub fn validate_language(value: &str) -> Result<String, SystemSettingsError> {
 /// Read the current global language from `path`. Returns `auto` when the
 /// config file does not exist (matching [`Settings::default`]).
 pub fn read_language(path: &Path) -> Result<String, SystemSettingsError> {
+    Ok(read_settings(path)?.language)
+}
+
+pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let settings = if path.exists() {
         Settings::load_from_path(path)
             .map_err(|err| SystemSettingsError::Storage(err.to_string()))?
     } else {
         Settings::default()
     };
-    Ok(settings
-        .ai
-        .language
-        .clone()
-        .unwrap_or_else(|| "auto".to_string()))
+    Ok(SystemSettingsSnapshot {
+        language: settings
+            .ai
+            .language
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
+        codex_trust_managed_hooks: settings.agent.codex_trust_managed_hooks,
+    })
 }
 
 /// Persist `language` into `path` under `[ai].language`. Returns the
 /// canonical value that was written so the dispatch layer can echo it
 /// back to the frontend.
 pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSettingsError> {
+    Ok(write_settings(path, language, None)?.language)
+}
+
+pub fn write_settings(
+    path: &Path,
+    language: &str,
+    codex_trust_managed_hooks: Option<bool>,
+) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let canonical = validate_language(language)?;
     let mut settings = if path.exists() {
         Settings::load_from_path(path)
@@ -73,16 +94,25 @@ pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSetti
         Settings::default()
     };
     settings.ai.language = Some(canonical.clone());
+    if let Some(value) = codex_trust_managed_hooks {
+        settings.agent.codex_trust_managed_hooks = Some(value);
+    }
     settings
         .save(path)
         .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
-    Ok(canonical)
+    Ok(SystemSettingsSnapshot {
+        language: canonical,
+        codex_trust_managed_hooks: settings.agent.codex_trust_managed_hooks,
+    })
 }
 
 /// Build the `BackendEvent` reply for `FrontendEvent::GetSystemSettings`.
 pub fn get_event(path: &Path) -> BackendEvent {
-    match read_language(path) {
-        Ok(language) => BackendEvent::SystemSettings { language },
+    match read_settings(path) {
+        Ok(snapshot) => BackendEvent::SystemSettings {
+            language: snapshot.language,
+            codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
+        },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
         },
@@ -90,10 +120,15 @@ pub fn get_event(path: &Path) -> BackendEvent {
 }
 
 /// Build the `BackendEvent` reply for `FrontendEvent::UpdateSystemSettings`.
-pub fn update_event(path: &Path, language: String) -> BackendEvent {
-    match write_language(path, &language) {
-        Ok(canonical) => BackendEvent::SystemSettingsUpdated {
-            language: canonical,
+pub fn update_event(
+    path: &Path,
+    language: String,
+    codex_trust_managed_hooks: Option<bool>,
+) -> BackendEvent {
+    match write_settings(path, &language, codex_trust_managed_hooks) {
+        Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
+            language: snapshot.language,
+            codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -168,12 +203,38 @@ mod tests {
     }
 
     #[test]
+    fn read_and_write_codex_hook_trust_opt_in() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut original = Settings::default();
+        original.agent.codex_trust_managed_hooks = Some(true);
+        original.save(&path).unwrap();
+
+        let snapshot = read_settings(&path).unwrap();
+        assert_eq!(snapshot.codex_trust_managed_hooks, Some(true));
+
+        let snapshot = write_settings(&path, "en", Some(false)).unwrap();
+        assert_eq!(snapshot.language, "en");
+        assert_eq!(snapshot.codex_trust_managed_hooks, Some(false));
+
+        let reloaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(reloaded.agent.codex_trust_managed_hooks, Some(false));
+    }
+
+    #[test]
     fn update_event_returns_updated_on_success() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "ja".to_string());
+        let event = update_event(&path, "ja".to_string(), Some(true));
         match event {
-            BackendEvent::SystemSettingsUpdated { language } => assert_eq!(language, "ja"),
+            BackendEvent::SystemSettingsUpdated {
+                language,
+                codex_trust_managed_hooks,
+            } => {
+                assert_eq!(language, "ja");
+                assert_eq!(codex_trust_managed_hooks, Some(true));
+            }
             other => panic!("expected SystemSettingsUpdated, got {other:?}"),
         }
     }
@@ -182,7 +243,7 @@ mod tests {
     fn update_event_returns_error_for_invalid_language() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "zh".to_string());
+        let event = update_event(&path, "zh".to_string(), None);
         match event {
             BackendEvent::SystemSettingsError { message } => {
                 assert!(message.contains("invalid language"));
@@ -198,7 +259,13 @@ mod tests {
         write_language(&path, "ja").unwrap();
         let event = get_event(&path);
         match event {
-            BackendEvent::SystemSettings { language } => assert_eq!(language, "ja"),
+            BackendEvent::SystemSettings {
+                language,
+                codex_trust_managed_hooks,
+            } => {
+                assert_eq!(language, "ja");
+                assert_eq!(codex_trust_managed_hooks, None);
+            }
             other => panic!("expected SystemSettings, got {other:?}"),
         }
     }
