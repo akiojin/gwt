@@ -72,6 +72,32 @@ test("returns true when document.activeElement is a TEXTAREA", () => {
   );
 });
 
+test("returns false when document.activeElement is xterm helper textarea", () => {
+  const document = makeDoc();
+  const textarea = document.createElement("textarea");
+  textarea.className = "xterm-helper-textarea";
+  document.body.appendChild(textarea);
+  Object.defineProperty(document, "activeElement", { value: textarea, configurable: true });
+  assert.equal(
+    shouldSkipTerminalFocusActivation({ doc: document, modalElements: [] }),
+    false,
+  );
+});
+
+test("modal open still suppresses focus when xterm helper textarea is active", () => {
+  const document = makeDoc();
+  const modal = document.createElement("div");
+  modal.classList.add("open");
+  const textarea = document.createElement("textarea");
+  textarea.className = "xterm-helper-textarea";
+  document.body.append(modal, textarea);
+  Object.defineProperty(document, "activeElement", { value: textarea, configurable: true });
+  assert.equal(
+    shouldSkipTerminalFocusActivation({ doc: document, modalElements: [modal] }),
+    true,
+  );
+});
+
 test("returns true when activeElement is contentEditable", () => {
   const document = makeDoc();
   const editable = document.createElement("div");
