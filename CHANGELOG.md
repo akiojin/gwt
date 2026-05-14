@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.34.1] - 2026-05-14
+
+### Bug Fixes
+
+- **gui:** Preserve modal input focus across workspace_state events (#2704)
+
 ## [9.34.0] - 2026-05-14
 
 ### Bug Fixes
