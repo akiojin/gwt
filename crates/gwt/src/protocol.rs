@@ -364,6 +364,17 @@ pub enum FrontendEvent {
     UpdateSystemSettings {
         language: String,
     },
+    /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
+    /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
+    /// archive→delete transitions. `ids` limits the action to specific
+    /// `WorkspaceProjection::id` values; an empty list means "every classified
+    /// entry". Backend replies with [`BackendEvent::WorkspaceProjectionPruneResult`].
+    WorkspaceProjectionPrune {
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        ids: Vec<String>,
+    },
 }
 
 fn default_board_history_limit() -> usize {
@@ -859,6 +870,22 @@ pub enum BackendEvent {
     /// human-readable; the frontend surfaces it as an inline status row in
     /// the System tab.
     SystemSettingsError {
+        message: String,
+    },
+    /// SPEC-2359 US-41: response to [`FrontendEvent::WorkspaceProjectionPrune`].
+    /// `mode` is `"dry_run"` or `"applied"`; counts reflect the plan executed
+    /// against `~/.gwt/projects/*/workspace/`.
+    WorkspaceProjectionPruneResult {
+        mode: String,
+        archived: usize,
+        deleted: usize,
+        skipped: usize,
+    },
+    /// SPEC-2359 US-41: error reply for
+    /// [`FrontendEvent::WorkspaceProjectionPrune`] when the backend cannot
+    /// classify or apply the plan (e.g. unreadable projection file, IO error
+    /// during delete).
+    WorkspaceProjectionPruneError {
         message: String,
     },
 }
@@ -1704,5 +1731,58 @@ mod tests {
                 && !production_source.contains("navigator.clipboard"),
             "expected frontend behavior details to stay out of protocol.rs",
         );
+    }
+
+    #[test]
+    fn frontend_event_workspace_projection_prune_round_trips() {
+        let payload = r#"{"kind":"workspace_projection_prune","dry_run":true,"ids":["w1","w2"]}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize WorkspaceProjectionPrune");
+        match event {
+            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
+                assert!(dry_run);
+                assert_eq!(ids, vec!["w1".to_string(), "w2".to_string()]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_event_workspace_projection_prune_defaults() {
+        let payload = r#"{"kind":"workspace_projection_prune"}"#;
+        let event: FrontendEvent = serde_json::from_str(payload).expect("deserialize defaults");
+        match event {
+            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
+                assert!(!dry_run);
+                assert!(ids.is_empty());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_workspace_projection_prune_result_serializes() {
+        let event = BackendEvent::WorkspaceProjectionPruneResult {
+            mode: "dry_run".to_string(),
+            archived: 3,
+            deleted: 1,
+            skipped: 5,
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "workspace_projection_prune_result");
+        assert_eq!(value["mode"], "dry_run");
+        assert_eq!(value["archived"], 3);
+        assert_eq!(value["deleted"], 1);
+        assert_eq!(value["skipped"], 5);
+    }
+
+    #[test]
+    fn backend_event_workspace_projection_prune_error_serializes() {
+        let event = BackendEvent::WorkspaceProjectionPruneError {
+            message: "scan failed: permission denied".to_string(),
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "workspace_projection_prune_error");
+        assert_eq!(value["message"], "scan failed: permission denied");
     }
 }

@@ -219,6 +219,13 @@ pub enum WorkspaceCommand {
         topic: Option<String>,
         boundary: Option<String>,
     },
+    /// SPEC-2359 US-41: `gwtd workspace projection-list [--stale] [--all]` —
+    /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
+    /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
+    ProjectionList { stale: bool, all: bool },
+    /// SPEC-2359 US-41: `gwtd workspace projection-prune [--dry-run] [--id <id>]...` —
+    /// archive / delete stale Workspace projections (FR-153, FR-154).
+    ProjectionPrune { dry_run: bool, ids: Vec<String> },
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).

@@ -24,6 +24,8 @@ const ROOT_MODULES = new Set([
   "hotkey.js",
   "index-settings-panel.js",
   "index-status-controller.js",
+  // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders.
+  "interaction-guard.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
@@ -33,6 +35,8 @@ const ROOT_MODULES = new Set([
   "theme-manager.js",
   "theme-toggle.js",
   "update-cta.js",
+  // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
+  "viewport-persist-throttle.js",
   "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",

@@ -2237,6 +2237,72 @@ impl AppRuntime {
             FrontendEvent::UpdateSystemSettings { language } => {
                 self.system_settings_update_events(client_id, language)
             }
+            FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
+                self.workspace_projection_prune_events(client_id, dry_run, ids)
+            }
+        }
+    }
+
+    /// SPEC-2359 US-41 (FR-153, FR-154, FR-155): handle
+    /// [`FrontendEvent::WorkspaceProjectionPrune`] by classifying every
+    /// projection under `~/.gwt/projects/`, applying or previewing the plan,
+    /// and replying with a count summary or an error.
+    ///
+    /// Note: `is_active_session` is `|_| false` here as a first-pass; a
+    /// follow-up commit will bridge the live-window registry so currently
+    /// running Agents block their owning Workspace from prune.
+    fn workspace_projection_prune_events(
+        &self,
+        client_id: ClientId,
+        dry_run: bool,
+        ids: Vec<String>,
+    ) -> Vec<OutboundEvent> {
+        use gwt_core::paths::gwt_projects_dir;
+        use gwt_core::workspace_projection::{
+            apply_prune_plan, classify_workspace_projections, WorkspaceRetentionConfig,
+        };
+
+        let scan_root = gwt_projects_dir();
+        let now = chrono::Utc::now();
+        let config = WorkspaceRetentionConfig::default();
+        let live_session_ids: std::collections::HashSet<String> =
+            self.active_agent_sessions.keys().cloned().collect();
+        let is_active_session =
+            |projection: &gwt_core::workspace_projection::WorkspaceProjection| {
+                projection
+                    .agents
+                    .iter()
+                    .any(|agent| live_session_ids.contains(&agent.session_id))
+            };
+        let plan = classify_workspace_projections(&scan_root, &config, now, is_active_session);
+        let filtered: Vec<_> = if ids.is_empty() {
+            plan
+        } else {
+            plan.into_iter()
+                .filter(|item| ids.iter().any(|id| id == &item.workspace_id))
+                .collect()
+        };
+
+        match apply_prune_plan(&filtered, dry_run) {
+            Ok(summary) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::WorkspaceProjectionPruneResult {
+                    mode: if dry_run {
+                        "dry_run".to_string()
+                    } else {
+                        "applied".to_string()
+                    },
+                    archived: summary.archived,
+                    deleted: summary.deleted,
+                    skipped: summary.skipped,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::WorkspaceProjectionPruneError {
+                    message: error.to_string(),
+                },
+            )],
         }
     }
 

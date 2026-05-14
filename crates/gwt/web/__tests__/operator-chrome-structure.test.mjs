@@ -1216,9 +1216,14 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
     /let\s+launchWizardOpenError\s*=\s*null/,
     "expected frontend to track launch wizard open errors separately from project_open_error",
   );
+  // Issue #2698 PR 1 (B7) — the case body now defers via
+  // `wizardInteractionGuard.defer(...)` before mutating the error
+  // state, so the regex window between the case label and the
+  // assignment must permit the guard preamble. The intent is
+  // unchanged: this case populates `launchWizardOpenError`.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?launchWizardOpenError\s*=/,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,600}?launchWizardOpenError\s*=/,
     "expected launch_wizard_open_error events to populate wizard error state",
   );
   assert.match(
@@ -1874,6 +1879,45 @@ test("terminal surface body stays on the dark Operator canvas across themes (FR-
   assert.ok(
     usesDarkOperatorBackground,
     `.surface-terminal .window-body must use Dark Operator canvas (#0a0d12 or --color-canvas-dark); got "${value}"`,
+  );
+});
+
+test("terminal root spacing stays inside the window body (SPEC-2008 FR-060)", () => {
+  const terminalRootRule = inlineStyle.match(/\.terminal-root\s*\{([^}]*)\}/);
+  assert.ok(terminalRootRule, "expected .terminal-root CSS rule");
+  const body = terminalRootRule[1];
+
+  assert.match(
+    body,
+    /position:\s*absolute/,
+    ".terminal-root must remain absolutely positioned inside .window-body",
+  );
+  assert.match(
+    body,
+    /inset:\s*8px\s+10px\s+10px\s*;/,
+    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body",
+  );
+  assert.match(
+    body,
+    /overflow:\s*hidden/,
+    ".terminal-root must clip xterm internals within the in-bounds terminal host box",
+  );
+});
+
+test("terminal root does not combine full inset with padding overflow (SPEC-2008 SC-039)", () => {
+  const terminalRootRule = inlineStyle.match(/\.terminal-root\s*\{([^}]*)\}/);
+  assert.ok(terminalRootRule, "expected .terminal-root CSS rule");
+  const body = terminalRootRule[1];
+
+  assert.doesNotMatch(
+    body,
+    /inset:\s*0\s*;[\s\S]*padding:\s*(?!0\b)[^;]+;/,
+    ".terminal-root must not use inset:0 plus nonzero padding; content-box padding extends past .window-body and clips the bottom prompt",
+  );
+  assert.match(
+    body,
+    /padding:\s*0\s*;/,
+    ".terminal-root padding must stay zero so FitAddon measures the same box xterm can paint into",
   );
 });
 

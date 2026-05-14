@@ -112,6 +112,21 @@ pub fn socket_receive_dispatcher_js() -> &'static str {
     include_str!("../web/socket-receive-dispatcher.js")
 }
 
+// Issue #2698 PR 1 (B7) — interaction-guard primitive that defers
+// destructive wizard re-renders while the user has a native <select>
+// dropdown open.
+pub fn interaction_guard_js() -> &'static str {
+    include_str!("../web/interaction-guard.js")
+}
+
+// Issue #2698 PR 2 (B1) — viewport-persist throttle that caps the
+// `update_viewport` WebSocket rate during sustained wheel/zoom
+// gestures so the backend feedback loop stops driving a frontend
+// re-render storm.
+pub fn viewport_persist_throttle_js() -> &'static str {
+    include_str!("../web/viewport-persist-throttle.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -207,6 +222,16 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/socket-receive-dispatcher.js",
         source: socket_receive_dispatcher_js,
         marker: "createSocketReceiveDispatcher",
+    },
+    RootJsModuleAsset {
+        path: "/interaction-guard.js",
+        source: interaction_guard_js,
+        marker: "createInteractionGuard",
+    },
+    RootJsModuleAsset {
+        path: "/viewport-persist-throttle.js",
+        source: viewport_persist_throttle_js,
+        marker: "createViewportPersistThrottle",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
@@ -2046,7 +2071,9 @@ mod tests {
 
         assert!(
             css.contains(".op-active-work[hidden]")
-                && css.contains(".op-active-work[hidden] {\n  display: none;"),
+                && regex::Regex::new(r"\.op-active-work\[hidden\]\s*\{\s*display:\s*none;")
+                    .unwrap()
+                    .is_match(css),
             "Active Work must not render when the hidden attribute is present",
         );
     }
@@ -2315,8 +2342,12 @@ mod tests {
             backdrop_cancel.is_match(html),
             "expected backdrop dismissal to share the same wizard close helper",
         );
+        // Issue #2698 PR 1 (B7) — the launch_wizard_state case now
+        // also defers via `wizardInteractionGuard.defer(...)` before
+        // mutating launchWizard, so the regex permits an optional
+        // guard preamble between the case label and the assignment.
         let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
         )
         .expect("valid regex");
         assert!(
@@ -2422,12 +2453,16 @@ mod tests {
             r#"case\s*"profile_snapshot":\s*\{\s*const state = frontendUnits\.profileSurface\.ensureProfileState\(event\.id\);[\s\S]*?frontendUnits\.profileSurface\.renderProfile\(event\.id\);\s*break;\s*\}"#,
         )
         .expect("valid regex");
+        // Issue #2698 PR 1 (B7) — wizard_state / wizard_open_error
+        // now defer through `wizardInteractionGuard.defer(...)` before
+        // mutating module state, so the regex tolerates an optional
+        // guard preamble between the case label and the mutation.
         let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
         let wizard_open_error_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_open_error":\s*launchWizard\s*=\s*null;[\s\S]*?launchWizardOpenError\s*=\s*\{[\s\S]*?frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_open_error":[\s\S]*?launchWizard\s*=\s*null;[\s\S]*?launchWizardOpenError\s*=\s*\{[\s\S]*?frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
 
