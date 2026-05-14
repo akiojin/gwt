@@ -171,6 +171,52 @@ pub struct WorkspaceCleanupCandidate {
     pub remote_delete_available: bool,
 }
 
+/// SPEC-2359 US-41 (FR-151): why a saved Workspace projection is treated as
+/// stale by [`workspace_projection_stale_reason`]. `WorktreeMissing` and
+/// `PrClosed` come from inspecting `git_details` / `linked_prs`;
+/// `TimeThreshold` comes from `updated_at` exceeding
+/// [`WorkspaceRetentionConfig::archive_after_days`]; `Compound` is returned
+/// when two or more of those conditions hold simultaneously, so callers can
+/// surface the strongest evidence without losing information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleReason {
+    WorktreeMissing,
+    PrClosed,
+    TimeThreshold,
+    Compound,
+}
+
+impl StaleReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorktreeMissing => "worktree_missing",
+            Self::PrClosed => "pr_closed",
+            Self::TimeThreshold => "time_threshold",
+            Self::Compound => "compound",
+        }
+    }
+}
+
+/// SPEC-2359 US-41 (FR-152): retention thresholds for the Workspace
+/// projection pruner. `archive_after_days` triggers the `Active → Archived`
+/// transition; `delete_after_archive_days` triggers the
+/// `Archived → physical delete` transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRetentionConfig {
+    pub archive_after_days: u32,
+    pub delete_after_archive_days: u32,
+}
+
+impl Default for WorkspaceRetentionConfig {
+    fn default() -> Self {
+        Self {
+            archive_after_days: 30,
+            delete_after_archive_days: 60,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
@@ -1760,6 +1806,240 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// SPEC-2359 US-41 (FR-151): classify a Workspace projection as stale based
+/// on Git side-effect signals (worktree existence, linked PR state) and a
+/// time threshold (`now - updated_at` > `config.archive_after_days`).
+///
+/// Returns `None` when no stale signal applies; returns the single matching
+/// [`StaleReason`] when exactly one applies; returns [`StaleReason::Compound`]
+/// when more than one applies so callers can prioritize compound evidence.
+///
+/// Network-free: PR state is read from `projection.linked_prs[].state` and
+/// `git_details.pr_state`, which are populated by the existing GitHub Issue
+/// cache via `gh` API (the caller keeps that cache fresh).
+pub fn workspace_projection_stale_reason(
+    projection: &WorkspaceProjection,
+    config: &WorkspaceRetentionConfig,
+    now: DateTime<Utc>,
+) -> Option<StaleReason> {
+    let mut reasons: Vec<StaleReason> = Vec::with_capacity(3);
+
+    if let Some(git) = &projection.git_details {
+        if let Some(worktree_path) = &git.worktree_path {
+            if !worktree_path.exists() {
+                reasons.push(StaleReason::WorktreeMissing);
+            }
+        }
+    }
+
+    let mut pr_closed = projection
+        .git_details
+        .as_ref()
+        .and_then(|git| git.pr_state.as_deref())
+        .map(pr_state_is_closed)
+        .unwrap_or(false);
+    if !pr_closed {
+        pr_closed = projection
+            .linked_prs
+            .iter()
+            .any(|pr| pr.state.as_deref().map(pr_state_is_closed).unwrap_or(false));
+    }
+    if pr_closed {
+        reasons.push(StaleReason::PrClosed);
+    }
+
+    let threshold = chrono::Duration::days(config.archive_after_days as i64);
+    if now.signed_duration_since(projection.updated_at) > threshold {
+        reasons.push(StaleReason::TimeThreshold);
+    }
+
+    match reasons.len() {
+        0 => None,
+        1 => Some(reasons[0]),
+        _ => Some(StaleReason::Compound),
+    }
+}
+
+fn pr_state_is_closed(state: &str) -> bool {
+    matches!(state.to_ascii_lowercase().as_str(), "merged" | "closed")
+}
+
+/// SPEC-2359 US-41 (FR-155): why a Workspace projection is left untouched by
+/// the pruner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneSkipReason {
+    /// `workspace_projection_stale_reason()` returned `None`.
+    NotStale,
+    /// One or more agents on this Workspace are still affiliated or have a
+    /// live window (FR-155).
+    ActiveAgent,
+    /// `lifecycle_stage = Archived` but `delete_after_archive_days` has not
+    /// elapsed yet.
+    ArchivedTooSoon,
+}
+
+/// SPEC-2359 US-41 (FR-154): action the pruner intends to take on a single
+/// Workspace projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PruneAction {
+    /// Leave the projection untouched.
+    Skip { reason: PruneSkipReason },
+    /// Transition `lifecycle_stage` from `Active` (or any non-Archived stage)
+    /// to `Archived` and persist the change. The directory is preserved so
+    /// users can recover it manually.
+    Archive,
+    /// Physically remove `~/.gwt/projects/<repo-hash>/workspace/` after the
+    /// archive grace period.
+    Delete,
+}
+
+/// SPEC-2359 US-41: a single Workspace projection classified by
+/// [`classify_workspace_projections`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassifiedProjection {
+    pub workspace_id: String,
+    pub project_root: PathBuf,
+    pub workspace_dir: PathBuf,
+    pub lifecycle_stage: WorkspaceLifecycleStage,
+    pub updated_at: DateTime<Utc>,
+    pub stale_reason: Option<StaleReason>,
+    pub action: PruneAction,
+}
+
+/// SPEC-2359 US-41 (FR-153): aggregate counts returned by [`apply_prune_plan`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneSummary {
+    pub skipped: usize,
+    pub archived: usize,
+    pub deleted: usize,
+}
+
+/// SPEC-2359 US-41 (FR-153, FR-154, FR-155): walk `scan_root` (typically
+/// `~/.gwt/projects/`), load each Workspace projection, and classify it as
+/// `Skip` / `Archive` / `Delete`.
+///
+/// `is_active_session` lets the caller bridge in the live-window registry or
+/// agent affiliation state held outside this crate, so the pruner stays
+/// network-free and registry-free at the core layer.
+pub fn classify_workspace_projections<F>(
+    scan_root: &Path,
+    config: &WorkspaceRetentionConfig,
+    now: DateTime<Utc>,
+    is_active_session: F,
+) -> Vec<ClassifiedProjection>
+where
+    F: Fn(&WorkspaceProjection) -> bool,
+{
+    let mut results = Vec::new();
+
+    let entries = match fs::read_dir(scan_root) {
+        Ok(entries) => entries,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+        let workspace_dir = project_dir.join("workspace");
+        let current_json = workspace_dir.join("current.json");
+        if !current_json.is_file() {
+            continue;
+        }
+        let projection = match load_workspace_projection_from_path(&current_json) {
+            Ok(Some(p)) => p,
+            _ => continue,
+        };
+
+        let stale_reason = workspace_projection_stale_reason(&projection, config, now);
+
+        let action = if is_active_session(&projection) {
+            PruneAction::Skip {
+                reason: PruneSkipReason::ActiveAgent,
+            }
+        } else {
+            match projection.lifecycle_stage {
+                WorkspaceLifecycleStage::Archived => {
+                    let elapsed = now.signed_duration_since(projection.updated_at);
+                    let threshold = chrono::Duration::days(config.delete_after_archive_days as i64);
+                    if elapsed > threshold {
+                        PruneAction::Delete
+                    } else {
+                        PruneAction::Skip {
+                            reason: PruneSkipReason::ArchivedTooSoon,
+                        }
+                    }
+                }
+                _ => match stale_reason {
+                    Some(_) => PruneAction::Archive,
+                    None => PruneAction::Skip {
+                        reason: PruneSkipReason::NotStale,
+                    },
+                },
+            }
+        };
+
+        results.push(ClassifiedProjection {
+            workspace_id: projection.id.clone(),
+            project_root: projection.project_root.clone(),
+            workspace_dir,
+            lifecycle_stage: projection.lifecycle_stage,
+            updated_at: projection.updated_at,
+            stale_reason,
+            action,
+        });
+    }
+
+    results
+}
+
+/// SPEC-2359 US-41 (FR-153, FR-154): apply a previously-classified plan.
+///
+/// When `dry_run` is `true`, the function counts the actions without touching
+/// the filesystem so callers can preview the outcome. When `dry_run` is
+/// `false`, `Archive` entries are persisted via `save_workspace_projection_to_path`
+/// and `Delete` entries are removed via `fs::remove_dir_all` on the workspace
+/// directory.
+pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<PruneSummary> {
+    let mut summary = PruneSummary::default();
+    for item in plan {
+        match &item.action {
+            PruneAction::Skip { .. } => {
+                summary.skipped += 1;
+            }
+            PruneAction::Archive => {
+                if !dry_run {
+                    let current_json = item.workspace_dir.join("current.json");
+                    if let Ok(Some(mut projection)) =
+                        load_workspace_projection_from_path(&current_json)
+                    {
+                        projection.lifecycle_stage = WorkspaceLifecycleStage::Archived;
+                        projection.updated_at = Utc::now();
+                        save_workspace_projection_to_path(&current_json, &projection)?;
+                    }
+                }
+                summary.archived += 1;
+            }
+            PruneAction::Delete => {
+                if !dry_run {
+                    fs::remove_dir_all(&item.workspace_dir).map_err(|err| {
+                        GwtError::Other(format!(
+                            "failed to remove workspace dir {}: {}",
+                            item.workspace_dir.display(),
+                            err
+                        ))
+                    })?;
+                }
+                summary.deleted += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -3239,6 +3519,359 @@ mod tests {
         assert!(
             !events_path.exists(),
             "no work_events should be written for ineligible current projection",
+        );
+    }
+
+    fn make_stale_projection(updated_at: DateTime<Utc>) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.updated_at = updated_at;
+        projection
+    }
+
+    #[test]
+    fn stale_reason_returns_none_for_fresh_active_workspace() {
+        let now = Utc::now();
+        let projection = make_stale_projection(now);
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            None,
+        );
+    }
+
+    #[test]
+    fn stale_reason_detects_missing_worktree() {
+        let now = Utc::now();
+        let mut projection = make_stale_projection(now);
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/test".to_string()),
+            worktree_path: Some(PathBuf::from(
+                "/nonexistent/path/__stale_reason_should_not_exist_xyz__",
+            )),
+            base_branch: None,
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            Some(StaleReason::WorktreeMissing),
+        );
+    }
+
+    #[test]
+    fn stale_reason_detects_pr_merged_via_git_details() {
+        let now = Utc::now();
+        let mut projection = make_stale_projection(now);
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/test".to_string()),
+            worktree_path: None,
+            base_branch: None,
+            pr_number: Some(123),
+            pr_state: Some("merged".to_string()),
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            Some(StaleReason::PrClosed),
+        );
+    }
+
+    #[test]
+    fn stale_reason_detects_pr_closed_via_linked_prs() {
+        let now = Utc::now();
+        let mut projection = make_stale_projection(now);
+        projection.linked_prs.push(WorkspacePrLink {
+            number: 456,
+            title: None,
+            url: None,
+            state: Some("Closed".to_string()),
+        });
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            Some(StaleReason::PrClosed),
+        );
+    }
+
+    #[test]
+    fn stale_reason_detects_time_threshold() {
+        let now = Utc::now();
+        let projection = make_stale_projection(now - chrono::Duration::days(40));
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            Some(StaleReason::TimeThreshold),
+        );
+    }
+
+    #[test]
+    fn stale_reason_returns_compound_when_multiple_conditions_hold() {
+        let now = Utc::now();
+        let mut projection = make_stale_projection(now - chrono::Duration::days(40));
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/test".to_string()),
+            worktree_path: None,
+            base_branch: None,
+            pr_number: Some(789),
+            pr_state: Some("merged".to_string()),
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: now,
+        });
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(
+            workspace_projection_stale_reason(&projection, &config, now),
+            Some(StaleReason::Compound),
+        );
+    }
+
+    #[test]
+    fn workspace_retention_config_default_uses_30_60_days() {
+        let config = WorkspaceRetentionConfig::default();
+        assert_eq!(config.archive_after_days, 30);
+        assert_eq!(config.delete_after_archive_days, 60);
+    }
+
+    #[test]
+    fn stale_reason_as_str_matches_snake_case_serde() {
+        assert_eq!(StaleReason::WorktreeMissing.as_str(), "worktree_missing");
+        assert_eq!(StaleReason::PrClosed.as_str(), "pr_closed");
+        assert_eq!(StaleReason::TimeThreshold.as_str(), "time_threshold");
+        assert_eq!(StaleReason::Compound.as_str(), "compound");
+    }
+
+    fn write_projection_at(workspace_dir: &Path, projection: &WorkspaceProjection) {
+        std::fs::create_dir_all(workspace_dir).expect("create workspace dir");
+        let current = workspace_dir.join("current.json");
+        save_workspace_projection_to_path(&current, projection).expect("save projection");
+    }
+
+    fn make_classify_projection(
+        id: &str,
+        project_root: &Path,
+        updated_at: DateTime<Utc>,
+        lifecycle: WorkspaceLifecycleStage,
+    ) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project(project_root);
+        projection.id = id.to_string();
+        projection.updated_at = updated_at;
+        projection.lifecycle_stage = lifecycle;
+        projection
+    }
+
+    #[test]
+    fn classify_workspace_projections_returns_empty_for_missing_scan_root() {
+        let scan_root = PathBuf::from("/nonexistent/projects/scan-root-xyz");
+        let now = Utc::now();
+        let result = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn classify_workspace_projections_classifies_stale_active_as_archive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+        let project_dir = scan_root.join("abc123");
+        let workspace_dir = project_dir.join("workspace");
+        let now = Utc::now();
+        let projection = make_classify_projection(
+            "ws-archive-me",
+            &project_dir,
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        write_projection_at(&workspace_dir, &projection);
+
+        let result = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].workspace_id, "ws-archive-me");
+        assert_eq!(result[0].action, PruneAction::Archive);
+        assert_eq!(result[0].stale_reason, Some(StaleReason::TimeThreshold));
+    }
+
+    #[test]
+    fn classify_workspace_projections_classifies_archived_beyond_threshold_as_delete() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+        let project_dir = scan_root.join("def456");
+        let workspace_dir = project_dir.join("workspace");
+        let now = Utc::now();
+        let projection = make_classify_projection(
+            "ws-delete-me",
+            &project_dir,
+            now - chrono::Duration::days(90),
+            WorkspaceLifecycleStage::Archived,
+        );
+        write_projection_at(&workspace_dir, &projection);
+
+        let result = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, PruneAction::Delete);
+    }
+
+    #[test]
+    fn classify_workspace_projections_skips_archived_too_soon() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+        let project_dir = scan_root.join("ghi789");
+        let workspace_dir = project_dir.join("workspace");
+        let now = Utc::now();
+        let projection = make_classify_projection(
+            "ws-keep-archived",
+            &project_dir,
+            now - chrono::Duration::days(10),
+            WorkspaceLifecycleStage::Archived,
+        );
+        write_projection_at(&workspace_dir, &projection);
+
+        let result = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].action,
+            PruneAction::Skip {
+                reason: PruneSkipReason::ArchivedTooSoon,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_workspace_projections_skips_active_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+        let project_dir = scan_root.join("jkl012");
+        let workspace_dir = project_dir.join("workspace");
+        let now = Utc::now();
+        let projection = make_classify_projection(
+            "ws-active",
+            &project_dir,
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        write_projection_at(&workspace_dir, &projection);
+
+        let result = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| true, // every workspace has an active session
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].action,
+            PruneAction::Skip {
+                reason: PruneSkipReason::ActiveAgent,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_prune_plan_dry_run_counts_without_filesystem_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+        let project_dir = scan_root.join("dry-run-test");
+        let workspace_dir = project_dir.join("workspace");
+        let now = Utc::now();
+        let projection = make_classify_projection(
+            "ws-dry",
+            &project_dir,
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        write_projection_at(&workspace_dir, &projection);
+
+        let plan = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        let summary = apply_prune_plan(&plan, true).expect("dry run summary");
+        assert_eq!(summary.archived, 1);
+        assert_eq!(summary.deleted, 0);
+        assert_eq!(summary.skipped, 0);
+
+        let loaded = load_workspace_projection_from_path(&workspace_dir.join("current.json"))
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            loaded.lifecycle_stage,
+            WorkspaceLifecycleStage::Active,
+            "dry-run must not mutate lifecycle_stage",
+        );
+    }
+
+    #[test]
+    fn apply_prune_plan_archives_then_deletes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scan_root = tmp.path().to_path_buf();
+
+        let now = Utc::now();
+        let archive_dir = scan_root.join("archive-target").join("workspace");
+        let archive_projection = make_classify_projection(
+            "ws-arch",
+            &scan_root.join("archive-target"),
+            now - chrono::Duration::days(40),
+            WorkspaceLifecycleStage::Active,
+        );
+        write_projection_at(&archive_dir, &archive_projection);
+
+        let delete_dir = scan_root.join("delete-target").join("workspace");
+        let delete_projection = make_classify_projection(
+            "ws-del",
+            &scan_root.join("delete-target"),
+            now - chrono::Duration::days(90),
+            WorkspaceLifecycleStage::Archived,
+        );
+        write_projection_at(&delete_dir, &delete_projection);
+
+        let plan = classify_workspace_projections(
+            &scan_root,
+            &WorkspaceRetentionConfig::default(),
+            now,
+            |_| false,
+        );
+        let summary = apply_prune_plan(&plan, false).expect("apply prune");
+        assert_eq!(summary.archived, 1);
+        assert_eq!(summary.deleted, 1);
+
+        let loaded = load_workspace_projection_from_path(&archive_dir.join("current.json"))
+            .expect("load")
+            .expect("present");
+        assert_eq!(loaded.lifecycle_stage, WorkspaceLifecycleStage::Archived);
+
+        assert!(
+            !delete_dir.exists(),
+            "delete target workspace dir should have been removed",
         );
     }
 }
