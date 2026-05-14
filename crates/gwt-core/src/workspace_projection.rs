@@ -1231,10 +1231,11 @@ pub fn retroactive_auto_done_scan_paths(
 }
 
 /// SPEC-2359 US-37: Schema version recorded in `work_items.migration.json`.
-/// Bumping this value forces the [`rebuild_work_items_from_events_*`]
-/// migration to re-run on existing data. Version 1 corresponds to the
-/// terminal-Done apply_event fix; prior projections may show stale
-/// non-Done status_category for items whose latest event regressed Done.
+/// Bumping this value forces [`rebuild_work_items_from_events_paths`] and
+/// [`rebuild_work_items_from_events_for_repo`] to re-run on existing data.
+/// Version 1 corresponds to the terminal-Done apply_event fix; prior
+/// projections may show stale non-Done status_category for items whose
+/// latest event regressed Done.
 pub const WORKSPACE_WORK_ITEMS_REBUILD_VERSION: u32 = 1;
 
 /// SPEC-2359 US-37: Outcome of the work_items.json rebuild migration.
