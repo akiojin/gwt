@@ -2046,7 +2046,9 @@ mod tests {
 
         assert!(
             css.contains(".op-active-work[hidden]")
-                && css.contains(".op-active-work[hidden] {\n  display: none;"),
+                && regex::Regex::new(r"\.op-active-work\[hidden\]\s*\{\s*display:\s*none;")
+                    .unwrap()
+                    .is_match(css),
             "Active Work must not render when the hidden attribute is present",
         );
     }

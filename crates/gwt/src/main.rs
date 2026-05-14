@@ -565,6 +565,13 @@ pub(crate) struct DockerBundleMounts {
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "daemon-fed events are constructed by Unix subscribers"
+    )
+)]
 #[derive(Debug, Clone)]
 enum UserEvent {
     Frontend {
