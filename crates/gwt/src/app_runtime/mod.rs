@@ -2257,7 +2257,7 @@ impl AppRuntime {
     fn save_ui_trace_events(
         &self,
         client_id: ClientId,
-        trace: serde_json::Value,
+        trace: UiTracePayload,
     ) -> Vec<OutboundEvent> {
         let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
             Ok(result) => BackendEvent::UiTraceSaved {
@@ -4198,14 +4198,11 @@ struct UiTraceSaveResult {
 
 fn save_ui_trace_to_log_dir(
     log_dir: &Path,
-    trace: serde_json::Value,
+    trace: UiTracePayload,
 ) -> Result<UiTraceSaveResult, String> {
     use std::io::Write as _;
 
-    let entries = trace
-        .get("entries")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "trace payload missing entries array".to_string())?;
+    let entries = trace.entries().map_err(str::to_string)?;
     if entries.len() > 5_000 {
         return Err("trace payload has too many entries".to_string());
     }
@@ -4213,8 +4210,7 @@ fn save_ui_trace_to_log_dir(
         .map_err(|error| format!("failed to create trace log directory: {error}"))?;
 
     let session_id = trace
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
+        .session_id()
         .map(sanitize_ui_trace_session_id)
         .unwrap_or_else(|| "trace".to_string());
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
@@ -4260,7 +4256,7 @@ fn sanitize_ui_trace_session_id(raw: &str) -> String {
     }
 }
 
-fn sanitize_ui_trace_entry(entry: &serde_json::Value) -> serde_json::Value {
+fn sanitize_ui_trace_entry(entry: &UiTraceEntry) -> serde_json::Value {
     const BLOCKED_FIELDS: &[&str] = &[
         "body",
         "chunk",
@@ -4270,7 +4266,7 @@ fn sanitize_ui_trace_entry(entry: &serde_json::Value) -> serde_json::Value {
         "payload",
         "text",
     ];
-    let Some(object) = entry.as_object() else {
+    let Some(object) = entry.fields() else {
         return serde_json::json!({ "kind": "invalid_entry" });
     };
     let mut sanitized = serde_json::Map::new();
@@ -6370,8 +6366,8 @@ mod tests {
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
-        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry,
-        WindowPreset, WindowProcessStatus, WorkspaceState,
+        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, UiTracePayload,
+        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -11111,9 +11107,10 @@ exit 0
         let temp = tempdir().expect("tempdir");
         let result = super::save_ui_trace_to_log_dir(
             temp.path(),
-            serde_json::json!({
+            serde_json::from_value::<UiTracePayload>(serde_json::json!({
                 "session_id": "../trace/slash",
                 "entries": [
+                    "malformed-entry",
                     { "kind": "trace_start", "ts": 1 },
                     {
                         "kind": "pointer_move_ignored",
@@ -11121,11 +11118,12 @@ exit 0
                         "data_base64": "must-not-leak"
                     }
                 ]
-            }),
+            }))
+            .expect("typed ui trace payload"),
         )
         .expect("save ui trace");
 
-        assert_eq!(result.entries, 2);
+        assert_eq!(result.entries, 3);
         assert!(result.path.starts_with(temp.path()));
         let file_name = result
             .path
@@ -11137,11 +11135,13 @@ exit 0
 
         let contents = fs::read_to_string(&result.path).expect("read trace");
         let lines: Vec<_> = contents.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         let first: serde_json::Value = serde_json::from_str(lines[0]).expect("json line");
-        assert_eq!(first["kind"], "trace_start");
+        assert_eq!(first["kind"], "invalid_entry");
         let second: serde_json::Value = serde_json::from_str(lines[1]).expect("json line");
-        assert_eq!(second["reason"], "pointer_id_mismatch");
+        assert_eq!(second["kind"], "trace_start");
+        let third: serde_json::Value = serde_json::from_str(lines[2]).expect("json line");
+        assert_eq!(third["reason"], "pointer_id_mismatch");
         assert!(!contents.contains("must-not-leak"));
     }
 
@@ -11153,12 +11153,13 @@ exit 0
         let events = runtime.handle_frontend_event(
             "client-1".to_string(),
             FrontendEvent::SaveUiTrace {
-                trace: serde_json::json!({
+                trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
                     "session_id": "trace-1",
                     "entries": [
                         { "kind": "trace_start", "ts": 1 }
                     ]
-                }),
+                }))
+                .expect("typed ui trace payload"),
             },
         );
 

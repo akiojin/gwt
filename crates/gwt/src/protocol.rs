@@ -381,8 +381,62 @@ pub enum FrontendEvent {
     /// trace payload as a project-scoped JSONL artifact. Backend replies with
     /// [`BackendEvent::UiTraceSaved`] or [`BackendEvent::UiTraceError`].
     SaveUiTrace {
-        trace: serde_json::Value,
+        trace: UiTracePayload,
     },
+}
+
+/// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
+/// Trace. Top-level fields are typed so backend validation is explicit, while
+/// individual entries remain schema-flexible for low-friction diagnostics.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiTracePayload {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    entries: Option<Vec<UiTraceEntry>>,
+}
+
+impl UiTracePayload {
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn entries(&self) -> Result<&[UiTraceEntry], &'static str> {
+        self.entries
+            .as_deref()
+            .ok_or("trace payload missing entries array")
+    }
+}
+
+/// One trace entry. Non-object entries are preserved as invalid entries so the
+/// artifact can still be written and inspected instead of dropping the session.
+#[derive(Debug, Clone)]
+pub struct UiTraceEntry {
+    fields: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl UiTraceEntry {
+    pub fn field(&self, key: &str) -> Option<&serde_json::Value> {
+        self.fields.as_ref()?.get(key)
+    }
+
+    pub fn fields(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.fields.as_ref()
+    }
+}
+
+impl<'de> Deserialize<'de> for UiTraceEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let fields = match value {
+            serde_json::Value::Object(fields) => Some(fields),
+            _ => None,
+        };
+        Ok(Self { fields })
+    }
 }
 
 fn default_board_history_limit() -> usize {
@@ -969,7 +1023,7 @@ mod tests {
 
     use super::{
         BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView,
+        ProfileSnapshotView, UiTracePayload,
     };
 
     #[test]
@@ -1828,11 +1882,30 @@ mod tests {
         .expect("deserialize save_ui_trace");
         match event {
             FrontendEvent::SaveUiTrace { trace } => {
-                assert_eq!(trace["session_id"], "trace-1");
-                assert_eq!(trace["entries"][0]["kind"], "trace_start");
+                assert_eq!(trace.session_id(), Some("trace-1"));
+                let entries = trace.entries().expect("entries");
+                assert_eq!(
+                    entries[0].field("kind").and_then(serde_json::Value::as_str),
+                    Some("trace_start")
+                );
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn ui_trace_payload_keeps_missing_entries_as_runtime_validation_error() {
+        let trace: UiTracePayload = serde_json::from_value(serde_json::json!({
+            "session_id": "trace-1"
+        }))
+        .expect("deserialize trace payload");
+
+        assert_eq!(
+            trace
+                .entries()
+                .expect_err("missing entries should be validated by runtime"),
+            "trace payload missing entries array"
+        );
     }
 
     #[test]

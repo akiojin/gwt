@@ -103,9 +103,9 @@ pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
     FrontendEvent, GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, WorkspaceExecutionContainerView,
-    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView,
-    WorkspaceWorkEventView, WorkspaceWorkItemView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, UiTraceEntry, UiTracePayload,
+    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;
