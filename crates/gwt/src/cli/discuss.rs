@@ -12,7 +12,9 @@
 use gwt_github::SpecOpsError;
 
 use crate::cli::{CliEnv, DiscussAction};
-use crate::discussion_resume::{clear_proposal_next_question, set_proposal_status_by_label};
+use crate::discussion_resume::{
+    clear_proposal_next_question, proposal_evidence_blocker_by_label, set_proposal_status_by_label,
+};
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
@@ -21,7 +23,21 @@ pub(super) fn run<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let worktree = env.repo_path().to_path_buf();
     match action {
-        DiscussAction::Resolve { proposal } => apply_status(&worktree, &proposal, "chosen", out),
+        DiscussAction::Resolve { proposal } => {
+            match proposal_evidence_blocker_by_label(&worktree, &proposal) {
+                Ok(Some(reason)) => {
+                    out.push_str(&format!(
+                        "discuss: cannot resolve {proposal}; Evidence Gate incomplete: {reason}\n"
+                    ));
+                    Ok(2)
+                }
+                Ok(None) => apply_status(&worktree, &proposal, "chosen", out),
+                Err(err) => {
+                    out.push_str(&format!("discuss: evidence gate check failed: {err}\n"));
+                    Ok(1)
+                }
+            }
+        }
         DiscussAction::Park { proposal } => apply_status(&worktree, &proposal, "parked", out),
         DiscussAction::Reject { proposal } => apply_status(&worktree, &proposal, "rejected", out),
         DiscussAction::ClearNextQuestion { proposal } => {

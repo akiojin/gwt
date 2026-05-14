@@ -52,6 +52,10 @@ Keep these artifacts throughout the discussion:
 questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
 and the next question to ask.
 
+Evidence is part of the discussion state, not a later implementation detail.
+Do not mark a proposal `[chosen]` until its evidence fields prove the outcome
+without relying on speculation, guesses, or vibes.
+
 Mirror structure for `.gwt/discussion.md`:
 
 ```markdown
@@ -65,6 +69,12 @@ Mirror structure for `.gwt/discussion.md`:
 - Coverage Checks:
 - Exit Blockers:
 - Next Question:
+- Implementation Proof:
+- SPEC/Issue Proof:
+- Gap Check Proof:
+- Official Docs Proof:
+- External Research Proof:
+- Evidence Gate:
 - Promotable Changes:
 ```
 
@@ -90,15 +100,16 @@ high-impact unknown behind it has been resolved.
 SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
 which inspects `.gwt/discussion.md` and blocks Stop (with
 `{"decision":"block","reason":"..."}`) while any proposal is still `[active]`
-with a non-empty `Next Question:`. To let Stop succeed, mark each proposal
-explicitly using the exit CLI:
+with a non-empty `Next Question:`, unresolved `Exit Blockers:`, incomplete
+proof fields, or an `Evidence Gate:` that is not `complete`. To let Stop
+succeed, mark each proposal explicitly using the exit CLI:
 
-- `gwtd discuss resolve --proposal "Proposal A"` — active → chosen
+- `gwtd discuss resolve --proposal "Proposal A"` — active → chosen only after
+  `Evidence Gate: complete`
 - `gwtd discuss park --proposal "Proposal A"` — active → parked (resume later)
 - `gwtd discuss reject --proposal "Proposal A"` — active → rejected
-- `gwtd discuss clear-next-question --proposal "Proposal A"` — keep the
-  proposal active but pause Stop-block (exceptional; only when waiting on a
-  user answer the skill truly cannot resolve alone)
+- `gwtd discuss clear-next-question --proposal "Proposal A"` — clear only the
+  question line. It does not bypass incomplete evidence.
 
 When the `Action Bundle` is produced, call the matching exit command for each
 proposal before stopping. Claude Code's built-in `stop_hook_active` flag keeps
@@ -162,6 +173,11 @@ Do not ask the user anything until you have investigated.
 - Read the files or artifacts that would change
 - If possible, run the code or command to observe actual behavior
 - Compare code, SPEC, plan, and issue state when they disagree
+- Check official documentation for external APIs, runtimes, operating systems,
+  CLIs, libraries, hooks, or platform behavior that cannot be proven locally
+- Use web research when repo-local evidence and official documentation are not
+  enough. For fast-moving operational facts, use X search when available, and
+  record the source account, URL, timestamp, and whether it is first-party
 
 For every potential change surface, map:
 
@@ -234,6 +250,33 @@ independent comparison work and do not let it replace the main discussion flow.
 
 Do not end the discussion after a single answer when unresolved high-impact
 unknowns still exist.
+
+## Evidence Gate
+
+Before producing the final Action Delta / Action Bundle, complete the proof
+fields for every `[active]` proposal that will become `[chosen]`.
+
+- `Implementation Proof`: name the implementation files, logs, commands, or
+  tests inspected or run. If no implementation exists, say what proves that.
+- `SPEC/Issue Proof`: name the owner SPEC / plan / tasks / Issue sections read,
+  including any missing or stale items found.
+- `Gap Check Proof`: explicitly cover scope, ownership/integration,
+  failure/edge cases, migration/compatibility, and verification/success signal.
+- `Official Docs Proof`: cite official documentation checked for external API,
+  runtime, OS, CLI, library, or hook behavior. Use `not-applicable: <reason>`
+  only for purely local behavior.
+- `External Research Proof`: cite non-official research, issue trackers, web
+  search, or X search when needed. Use `not-applicable: <reason>` only when
+  official docs and local evidence fully settle the question.
+- `Evidence Gate`: set to `complete` only when the proposal has no unresolved
+  `Exit Blockers:` and all proof fields above are non-empty or explicitly
+  `not-applicable: <reason>`.
+
+Official documentation is the preferred external evidence. X search and
+X API Search Posts official docs are valid discovery paths for fast-moving
+facts, but X posts alone are not sufficient for irreversible conclusions unless
+they are first-party posts with URL and timestamp, or are corroborated by
+official docs or another primary source.
 
 ### Phase 4: Design and artifact updates
 
