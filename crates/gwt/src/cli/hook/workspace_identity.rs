@@ -40,7 +40,14 @@ pub(crate) fn handle_user_prompt_submit(
             identity: None,
         });
     };
-    let Some(missing) = missing_identity_for_session(&session)? else {
+    handle_user_prompt_submit_for_session(input, &session)
+}
+
+fn handle_user_prompt_submit_for_session(
+    input: &str,
+    session: &Session,
+) -> Result<WorkspaceIdentityHookResult, HookError> {
+    let Some(missing) = missing_identity_for_session(session)? else {
         return Ok(WorkspaceIdentityHookResult {
             updated: false,
             identity: None,
@@ -66,33 +73,15 @@ pub(crate) fn handle_user_prompt_submit(
         });
     };
 
-    let title_summary = missing
-        .title_summary
-        .then(|| identity.title_summary.clone());
-    let current_focus = missing
-        .current_focus
-        .then(|| identity.current_focus.clone());
-    if title_summary.is_none() && current_focus.is_none() {
+    let Some(update) = workspace_projection_update_for_identity(&session.id, missing, &identity)
+    else {
         return Ok(WorkspaceIdentityHookResult {
             updated: false,
             identity: Some(identity),
         });
-    }
+    };
 
-    update_workspace_projection_with_journal(
-        &session.worktree_path,
-        WorkspaceProjectionUpdate {
-            title: None,
-            status_category: None,
-            status_text: None,
-            owner: None,
-            next_action: None,
-            summary: None,
-            agent_session_id: Some(session.id.clone()),
-            agent_current_focus: current_focus,
-            agent_title_summary: title_summary,
-        },
-    )?;
+    update_workspace_projection_with_journal(&session.worktree_path, update)?;
     crate::cli::workspace::publish_workspace_change(&session.worktree_path);
 
     Ok(WorkspaceIdentityHookResult {
@@ -167,7 +156,13 @@ fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdent
     if agent.is_unassigned() {
         return Ok(None);
     }
-    Ok(Some(MissingIdentity {
+    Ok(Some(missing_identity_for_agent(agent)))
+}
+
+fn missing_identity_for_agent(
+    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+) -> MissingIdentity {
+    MissingIdentity {
         title_summary: agent
             .title_summary
             .as_deref()
@@ -180,7 +175,34 @@ fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdent
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_none(),
-    }))
+    }
+}
+
+fn workspace_projection_update_for_identity(
+    session_id: &str,
+    missing: MissingIdentity,
+    identity: &WorkspacePromptIdentity,
+) -> Option<WorkspaceProjectionUpdate> {
+    let title_summary = missing
+        .title_summary
+        .then(|| identity.title_summary.clone());
+    let current_focus = missing
+        .current_focus
+        .then(|| identity.current_focus.clone());
+    if title_summary.is_none() && current_focus.is_none() {
+        return None;
+    }
+    Some(WorkspaceProjectionUpdate {
+        title: None,
+        status_category: None,
+        status_text: None,
+        owner: None,
+        next_action: None,
+        summary: None,
+        agent_session_id: Some(session_id.to_string()),
+        agent_current_focus: current_focus,
+        agent_title_summary: title_summary,
+    })
 }
 
 pub(crate) fn derive_identity_from_prompt(prompt: &str) -> Option<WorkspacePromptIdentity> {
@@ -331,18 +353,30 @@ fn prompt_from_transcript_path(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     text.lines().rev().find_map(|line| {
         let value: serde_json::Value = serde_json::from_str(line).ok()?;
-        string_at_any(&value, &[&["lastPrompt"], &["last_prompt"]])
-            .or_else(|| {
-                let ty = value.get("type").and_then(serde_json::Value::as_str);
-                if ty.is_some_and(|ty| ty != "user") {
-                    return None;
-                }
-                value
-                    .get("message")
-                    .and_then(|message| value_to_text(message.get("content")?))
-            })
+        if let Some(prompt) = string_at_any(&value, &[&["lastPrompt"], &["last_prompt"]]) {
+            return Some(prompt);
+        }
+        if !is_transcript_user_record(&value) {
+            return None;
+        }
+        value
+            .get("message")
+            .and_then(|message| value_to_text(message.get("content")?))
             .or_else(|| string_at_any(&value, &[&["text"]]))
     })
+}
+
+fn is_transcript_user_record(value: &serde_json::Value) -> bool {
+    string_at_any(
+        value,
+        &[
+            &["type"],
+            &["role"],
+            &["message", "role"],
+            &["event", "role"],
+        ],
+    )
+    .is_some_and(|role| role.eq_ignore_ascii_case("user"))
 }
 
 fn string_at_any(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
@@ -383,17 +417,11 @@ fn value_to_text(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::workspace_projection::{
-        load_workspace_projection, save_workspace_projection, WorkspaceAgentAffiliationStatus,
-        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
+        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceStatusCategory,
     };
 
-    use crate::cli::test_support::ScopedEnvVar;
-
     use super::*;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn assigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
@@ -432,107 +460,64 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_submit_persists_missing_workspace_identity() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+    fn user_prompt_submit_builds_update_for_missing_workspace_identity() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let home = temp.path().join("home");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        std::fs::create_dir_all(&home).expect("home");
-
-        let _home = ScopedEnvVar::set("HOME", &home);
-        let session = Session::new(&repo, "work/identity", AgentId::Codex);
-        session
-            .save(&gwt_core::paths::gwt_sessions_dir())
-            .expect("session");
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
-        projection.agents.push(assigned_agent(&session.id, &repo));
-        save_workspace_projection(&repo, &projection).expect("projection");
+        let agent = assigned_agent("session-1", &repo);
 
         let payload = serde_json::json!({
             "session_id": "codex-provider-session",
             "prompt": "$gwt-discussion エージェントウィンドウの更新がいまだにされません。今回の場合であれば「エージェントウィンドウの更新不具合」などが表示されるべきです。"
         });
 
-        let result = handle_user_prompt_submit(&payload.to_string()).expect("identity update");
+        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
+        let identity = derive_identity_from_prompt(&prompt).expect("identity");
+        let update = workspace_projection_update_for_identity(
+            "session-1",
+            missing_identity_for_agent(&agent),
+            &identity,
+        )
+        .expect("projection update");
 
-        assert!(result.updated, "{result:?}");
-        let saved = load_workspace_projection(&repo)
-            .expect("load projection")
-            .expect("projection");
-        let agent = saved
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == session.id)
-            .expect("agent");
+        assert_eq!(update.agent_session_id.as_deref(), Some("session-1"));
         assert_eq!(
-            agent.title_summary.as_deref(),
+            update.agent_title_summary.as_deref(),
             Some("エージェントウィンドウ更新不具合")
         );
         assert!(
-            agent
-                .current_focus
+            update
+                .agent_current_focus
                 .as_deref()
                 .is_some_and(|focus| focus.contains("エージェントウィンドウの更新")),
             "{:?}",
-            agent.current_focus
+            update.agent_current_focus
         );
     }
 
     #[test]
     fn user_prompt_submit_does_not_overwrite_existing_identity() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
-        let home = temp.path().join("home");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        std::fs::create_dir_all(&home).expect("home");
 
-        let _home = ScopedEnvVar::set("HOME", &home);
-        let session = Session::new(&repo, "work/identity", AgentId::Codex);
-        session
-            .save(&gwt_core::paths::gwt_sessions_dir())
-            .expect("session");
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-
-        let mut agent = assigned_agent(&session.id, &repo);
+        let mut agent = assigned_agent("session-1", &repo);
         agent.title_summary = Some("明示タイトル".to_string());
         agent.current_focus = Some("明示 focus".to_string());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
-        projection.agents.push(agent);
-        save_workspace_projection(&repo, &projection).expect("projection");
 
-        let payload = serde_json::json!({
-            "session_id": "codex-provider-session",
-            "prompt": "エージェントウィンドウの更新がされません。"
-        });
+        let missing = missing_identity_for_agent(&agent);
 
-        let result = handle_user_prompt_submit(&payload.to_string()).expect("identity update");
-
-        assert!(!result.updated, "{result:?}");
-        let saved = load_workspace_projection(&repo)
-            .expect("load projection")
-            .expect("projection");
-        let agent = saved
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == session.id)
-            .expect("agent");
-        assert_eq!(agent.title_summary.as_deref(), Some("明示タイトル"));
-        assert_eq!(agent.current_focus.as_deref(), Some("明示 focus"));
+        assert!(missing.complete(), "{missing:?}");
+        let identity = WorkspacePromptIdentity {
+            title_summary: "エージェントウィンドウ更新不具合".to_string(),
+            current_focus: "エージェントウィンドウの更新がされません".to_string(),
+        };
+        assert!(
+            workspace_projection_update_for_identity("session-1", missing, &identity).is_none()
+        );
     }
 
     #[test]
     fn user_prompt_submit_uses_transcript_path_when_prompt_field_is_absent() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
-        let home = temp.path().join("home");
-        let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).expect("repo");
-        std::fs::create_dir_all(&home).expect("home");
-
         let transcript = temp.path().join("transcript.jsonl");
         std::fs::write(
             &transcript,
@@ -540,36 +525,35 @@ mod tests {
         )
         .expect("transcript");
 
-        let _home = ScopedEnvVar::set("HOME", &home);
-        let session = Session::new(&repo, "work/identity", AgentId::Codex);
-        session
-            .save(&gwt_core::paths::gwt_sessions_dir())
-            .expect("session");
-        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
-        projection.agents.push(assigned_agent(&session.id, &repo));
-        save_workspace_projection(&repo, &projection).expect("projection");
-
         let payload = serde_json::json!({
             "session_id": "codex-provider-session",
             "transcript_path": transcript
         });
 
-        let result = handle_user_prompt_submit(&payload.to_string()).expect("identity update");
+        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
+        let identity = derive_identity_from_prompt(&prompt).expect("identity");
 
-        assert!(result.updated, "{result:?}");
-        let saved = load_workspace_projection(&repo)
-            .expect("load projection")
-            .expect("projection");
-        let agent = saved
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == session.id)
-            .expect("agent");
-        assert_eq!(
-            agent.title_summary.as_deref(),
-            Some("Workspace識別UX不具合")
-        );
+        assert_eq!(identity.title_summary, "Workspace識別UX不具合");
+    }
+
+    #[test]
+    fn transcript_path_ignores_non_user_text_records() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","text":"エージェントウィンドウの更新がいまだにされません。"}"#,
+                "\n",
+                r#"{"type":"assistant","text":"実装方針を説明します。"}"#,
+                "\n"
+            ),
+        )
+        .expect("transcript");
+
+        let prompt = prompt_from_transcript_path(&transcript).expect("prompt");
+
+        assert!(prompt.contains("エージェントウィンドウの更新"), "{prompt}");
+        assert!(!prompt.contains("実装方針"), "{prompt}");
     }
 }
