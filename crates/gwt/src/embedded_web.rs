@@ -1571,8 +1571,13 @@ mod tests {
     #[test]
     fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
         let html = frontend_bundle_source();
+        // SPEC-2359 US-37: workspace_state case wraps in a block to
+        // populate the Workspace Overview Completed column from
+        // event.workspace.tabs[active].workspace.work_items before
+        // breaking. Tolerate the optional `{` and additional code
+        // between renderAppState and break.
         let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);\s*break;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
 
@@ -2460,8 +2465,13 @@ mod tests {
     #[test]
     fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         let html = frontend_bundle_source();
+        // SPEC-2359 US-37: workspace_state case wraps in a block to
+        // populate the Workspace Overview Completed column from
+        // event.workspace.tabs[active].workspace.work_items. Tolerate
+        // the optional `{` and additional code between renderAppState
+        // and break.
         let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);\s*break;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
         let terminal_event = regex::Regex::new(

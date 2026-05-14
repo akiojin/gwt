@@ -387,6 +387,13 @@ fn default_board_history_limit() -> usize {
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
+    // SPEC-2359 US-37: Workspace Overview Completed カラムは
+    // active_work_projection broadcast に依存していたが、その broadcast
+    // は限定された trigger でしか走らないため起動直後に表示されない
+    // 問題があった。workspace_state は frequently broadcast されるので、
+    // 同 event に work_items を載せて broadcast invariant を 1 本化する。
+    #[serde(default)]
+    pub work_items: Vec<WorkspaceHistoryView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -727,7 +734,6 @@ pub enum BackendEvent {
     },
     CloneProjectDone {
         workspace_home: String,
-        initial_worktree_path: String,
     },
     CloneProjectError {
         message: String,

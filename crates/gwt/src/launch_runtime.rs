@@ -75,9 +75,18 @@ pub fn resolve_launch_worktree_request(
     let has_local_branch = local_branch_exists(&main_repo_path, &branch_name)?;
 
     if !has_local_branch {
-        manager
-            .fetch_origin()
-            .map_err(|err| format!("failed to fetch origin: {err}"))?;
+        if is_start_work_branch_name(&branch_name) {
+            manager
+                .prepare_start_work_remote_develop()
+                .map_err(|err| format!("failed to prepare origin/develop for Start Work: {err}"))?;
+            effective_base_branch = "origin/develop".to_string();
+            remote_base_ref = origin_remote_ref(&effective_base_branch);
+            *base_branch = Some(effective_base_branch.clone());
+        } else {
+            manager
+                .fetch_origin()
+                .map_err(|err| format!("failed to fetch origin: {err}"))?;
+        }
 
         if !manager
             .remote_branch_exists(&remote_base_ref)
@@ -146,6 +155,12 @@ pub fn resolve_launch_worktree_request(
         worktree_path.display().to_string(),
     );
     Ok(())
+}
+
+fn is_start_work_branch_name(branch_name: &str) -> bool {
+    branch_name
+        .strip_prefix("work/")
+        .is_some_and(|name| !name.is_empty())
 }
 
 pub fn resolve_launch_worktree(
