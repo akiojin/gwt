@@ -131,8 +131,6 @@ pub struct GitHubProjectCloneTarget {
 pub struct GitHubProjectCloneOutcome {
     pub workspace_home: PathBuf,
     pub bare_repo_path: PathBuf,
-    pub initial_worktree_path: PathBuf,
-    pub initial_branch: String,
 }
 
 /// Derive the gwt Workspace Home and nested bare repo path from a repository
@@ -199,7 +197,6 @@ fn repository_name_from_url(url: &str) -> Result<String> {
 /// ```text
 /// <parent>/<repo>/
 /// ├── <repo>.git/
-/// ├── <initial-branch>/
 /// └── .gwt/project.toml
 /// ```
 pub fn clone_project_as_nested_bare(
@@ -257,27 +254,15 @@ fn clone_project_as_nested_bare_inner(
         )));
     }
 
-    install_develop_protection(&target.bare_repo_path)?;
+    crate::worktree::WorktreeManager::new(&target.bare_repo_path)
+        .prepare_start_work_remote_develop()
+        .map_err(|error| {
+            GwtError::Git(format!(
+                "failed to prepare origin/develop for Start Work: {error}"
+            ))
+        })?;
 
-    let initial_branch = preferred_initial_branch(&target.bare_repo_path)?;
-    let initial_worktree_path = target.workspace_home.join(&initial_branch);
-    let worktree_path = initial_worktree_path.to_str().ok_or_else(|| {
-        GwtError::Git(format!(
-            "invalid worktree path: {}",
-            initial_worktree_path.display()
-        ))
-    })?;
-    let worktree_output = gwt_core::process::hidden_command("git")
-        .args(["worktree", "add", worktree_path, &initial_branch])
-        .current_dir(&target.bare_repo_path)
-        .output()
-        .map_err(|error| GwtError::Git(format!("git worktree add: {error}")))?;
-    if !worktree_output.status.success() {
-        return Err(GwtError::Git(format!(
-            "failed to create initial worktree for branch '{initial_branch}': {}",
-            git_stderr(&worktree_output)
-        )));
-    }
+    install_develop_protection(&target.bare_repo_path)?;
 
     BareProjectConfig {
         bare_repo_name: format!("{}.git", target.repo_name),
@@ -290,39 +275,7 @@ fn clone_project_as_nested_bare_inner(
     Ok(GitHubProjectCloneOutcome {
         workspace_home: target.workspace_home.clone(),
         bare_repo_path: target.bare_repo_path.clone(),
-        initial_worktree_path,
-        initial_branch,
     })
-}
-
-fn preferred_initial_branch(bare_repo_path: &Path) -> Result<String> {
-    let develop = gwt_core::process::hidden_command("git")
-        .args(["show-ref", "--verify", "--quiet", "refs/heads/develop"])
-        .current_dir(bare_repo_path)
-        .status()
-        .map_err(|error| GwtError::Git(format!("git show-ref develop: {error}")))?;
-    if develop.success() {
-        return Ok("develop".to_string());
-    }
-
-    let output = gwt_core::process::hidden_command("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(bare_repo_path)
-        .output()
-        .map_err(|error| GwtError::Git(format!("git symbolic-ref HEAD: {error}")))?;
-    if !output.status.success() {
-        return Err(GwtError::Git(format!(
-            "failed to determine remote default branch: {}",
-            git_stderr(&output)
-        )));
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        return Err(GwtError::Git(
-            "failed to determine remote default branch".to_string(),
-        ));
-    }
-    Ok(branch)
 }
 
 fn git_stderr(output: &std::process::Output) -> String {
