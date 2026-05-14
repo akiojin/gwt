@@ -31,6 +31,7 @@ const ROOT_MODULES = new Set([
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
+  "project-tabs-renderer.js",
   "socket-receive-dispatcher.js",
   "terminal-context-menu.js",
   "terminal-viewport-reflow.js",
@@ -39,6 +40,7 @@ const ROOT_MODULES = new Set([
   "update-cta.js",
   // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
   "viewport-persist-throttle.js",
+  "viewport-sync.js",
   "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",
