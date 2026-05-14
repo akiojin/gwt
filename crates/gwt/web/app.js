@@ -8464,10 +8464,42 @@
 
       function receive(event) {
         switch (event.kind) {
-          case "workspace_state":
+          case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            // SPEC-2359 US-37: populate the Workspace Overview Completed
+            // column directly from workspace_state because the
+            // active_work_projection broadcast only fires on tab switch,
+            // user event, title sync, and window ops. Without this, the
+            // Completed column stays empty on startup until the user
+            // happens to switch tabs.
+            const activeTabId = event.workspace && event.workspace.active_tab_id;
+            const activeTab = Array.isArray(event.workspace && event.workspace.tabs)
+              ? event.workspace.tabs.find((tab) => tab.id === activeTabId)
+              : null;
+            const tabWorkItems = activeTab && activeTab.workspace && Array.isArray(activeTab.workspace.work_items)
+              ? activeTab.workspace.work_items
+              : [];
+            if (tabWorkItems.length > 0) {
+              if (!activeWorkProjection) {
+                activeWorkProjection = {
+                  id: activeTabId || "active-tab",
+                  title: (activeTab && activeTab.title) || "Workspace",
+                  workspaces: tabWorkItems,
+                };
+              } else if (
+                !Array.isArray(activeWorkProjection.workspaces) ||
+                activeWorkProjection.workspaces.length === 0
+              ) {
+                activeWorkProjection = {
+                  ...activeWorkProjection,
+                  workspaces: tabWorkItems,
+                };
+              }
+              workspaceKanbanSurface.renderWindows();
+            }
             break;
+          }
           case "workspace_projection_prune_result": {
             // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
             // A richer Drawer surface lands in a follow-up; for now an alert

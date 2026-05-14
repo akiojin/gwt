@@ -778,7 +778,7 @@ fn workspace_journal_entry_view_from_entry(
     }
 }
 
-fn workspace_work_item_view_from_item(
+pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkspaceWorkItem,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
@@ -1921,6 +1921,15 @@ impl AppRuntime {
             // Errors are silently dropped (`let _ = ...`) so a corrupt or
             // unreadable Workspace cannot block daemon startup.
             let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
+                &tab.project_root,
+            );
+            // SPEC-2359 US-37: One-shot rebuild of work_items.json from the
+            // event log. Recovers legacy installations whose work_items.json
+            // shows status=active/idle for items that already have a Done
+            // event in work_events.jsonl (caused by the old apply_event
+            // semantics that regressed Done on subsequent update events).
+            // Idempotent via `work_items.migration.json` marker.
+            let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
                 &tab.project_root,
             );
         }
@@ -13555,5 +13564,71 @@ exit 0
         let missing = logs_root.path().join("does-not-exist.log");
         let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
         assert!(resolved.is_none(), "missing files must be rejected");
+    }
+
+    #[test]
+    fn workspace_view_for_tab_includes_done_work_items_from_disk() {
+        // SPEC-2359 US-37: workspace_state broadcast must carry work_items so
+        // the Workspace Overview Completed column renders without depending on
+        // the limited-trigger active_work_projection broadcast.
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        use chrono::TimeZone as _;
+        let completed_at = chrono::Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let work_item = gwt_core::workspace_projection::WorkspaceWorkItem {
+            id: "work-item-done".to_string(),
+            title: "Test Done Item".to_string(),
+            intent: None,
+            summary: None,
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            owner: None,
+            created_at: completed_at,
+            updated_at: completed_at,
+            completed_at: Some(completed_at),
+            agents: Vec::new(),
+            execution_containers: Vec::new(),
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+        };
+        let projection = gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
+            updated_at: completed_at,
+            work_items: vec![work_item],
+        };
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        fs::create_dir_all(work_items_path.parent().expect("parent dir"))
+            .expect("create workspace dir");
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &projection,
+        )
+        .expect("save work items projection");
+
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(empty_workspace_state()),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+
+        let view = crate::runtime_support::workspace_view_for_tab(&tab);
+        assert!(
+            view.work_items
+                .iter()
+                .any(|item| item.id == "work-item-done" && item.status_category == "done"),
+            "WorkspaceView.work_items must include the Done work item persisted on disk so workspace_state broadcast renders the Completed column on startup; got {:?}",
+            view.work_items
+                .iter()
+                .map(|i| (i.id.clone(), i.status_category.clone()))
+                .collect::<Vec<_>>()
+        );
     }
 }
