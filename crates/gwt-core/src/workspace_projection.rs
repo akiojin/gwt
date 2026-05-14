@@ -856,9 +856,21 @@ impl WorkspaceWorkItemsProjection {
         if let Some(owner) = non_empty_clone(event.owner.as_deref()) {
             item.owner = Some(owner);
         }
-        item.status_category = workspace_work_event_status(&event);
+        // SPEC-2359 US-37: Done is a terminal state. Heartbeat update events
+        // (kind=Update with status_category=None) emitted after a Done event
+        // must not regress the WorkItem to Active/Idle. Only events that
+        // carry an explicit `status_category` may transition out of Done.
+        let new_status = workspace_work_event_status(&event);
+        let preserve_done = item.status_category == WorkspaceStatusCategory::Done
+            && event.status_category.is_none();
+        if !preserve_done {
+            item.status_category = new_status;
+        }
         if item.status_category == WorkspaceStatusCategory::Done {
-            item.completed_at = Some(event.updated_at);
+            // Preserve the first Done timestamp so idempotent Done re-applies
+            // (e.g. retroactive_auto_done_scan rerun) keep the original
+            // completion time.
+            item.completed_at = item.completed_at.or(Some(event.updated_at));
         } else {
             item.completed_at = None;
         }
@@ -1216,6 +1228,113 @@ pub fn retroactive_auto_done_scan_paths(
     }
 
     Ok(emitted)
+}
+
+/// SPEC-2359 US-37: Schema version recorded in `work_items.migration.json`.
+/// Bumping this value forces [`rebuild_work_items_from_events_paths`] and
+/// [`rebuild_work_items_from_events_for_repo`] to re-run on existing data.
+/// Version 1 corresponds to the terminal-Done apply_event fix; prior
+/// projections may show stale non-Done status_category for items whose
+/// latest event regressed Done.
+pub const WORKSPACE_WORK_ITEMS_REBUILD_VERSION: u32 = 1;
+
+/// SPEC-2359 US-37: Outcome of the work_items.json rebuild migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceWorkItemsRebuildOutcome {
+    /// `work_events.jsonl` does not exist. Nothing to rebuild.
+    Missing,
+    /// Marker already records the current rebuild version. Skip silently.
+    AlreadyMigrated,
+    /// Rebuilt `work_items.json` from the event log and wrote the marker.
+    Applied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkspaceWorkItemsRebuildMarker {
+    version: u32,
+    #[serde(default)]
+    migrated_at: Option<DateTime<Utc>>,
+}
+
+/// SPEC-2359 US-37: Rebuild `work_items.json` by replaying every event in
+/// `work_events.jsonl` through the (fixed) apply_event semantics. This
+/// recovers historical Done state that the legacy apply_event regressed
+/// when subsequent heartbeat update events arrived after the Done event.
+/// The rebuild is idempotent across daemon restarts: a marker file records
+/// the current schema version.
+pub fn rebuild_work_items_from_events_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    marker_path: &Path,
+) -> Result<WorkspaceWorkItemsRebuildOutcome> {
+    if rebuild_marker_at_or_above(marker_path, WORKSPACE_WORK_ITEMS_REBUILD_VERSION)? {
+        return Ok(WorkspaceWorkItemsRebuildOutcome::AlreadyMigrated);
+    }
+    if !events_path.exists() {
+        return Ok(WorkspaceWorkItemsRebuildOutcome::Missing);
+    }
+    let content = fs::read_to_string(events_path)?;
+    let mut events: Vec<WorkspaceWorkEvent> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<WorkspaceWorkEvent>(line)
+                .map_err(|err| GwtError::Other(format!("workspace work event json: {err}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    events.sort_by_key(|event| event.updated_at);
+    let initial_updated_at = events
+        .first()
+        .map(|event| event.updated_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let mut projection = WorkspaceWorkItemsProjection::empty(initial_updated_at);
+    for event in events {
+        projection.apply_event(event);
+    }
+    projection.updated_at = chrono::Utc::now();
+    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    write_rebuild_marker(marker_path)?;
+    Ok(WorkspaceWorkItemsRebuildOutcome::Applied)
+}
+
+/// SPEC-2359 US-37: Convenience wrapper for the daemon bootstrap hook.
+/// Resolves the project-scoped paths and invokes
+/// [`rebuild_work_items_from_events_paths`].
+pub fn rebuild_work_items_from_events_for_repo(
+    repo_path: &Path,
+) -> Result<WorkspaceWorkItemsRebuildOutcome> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
+    let marker_path = work_items_path
+        .parent()
+        .map(|dir| dir.join("work_items.migration.json"))
+        .unwrap_or_else(|| PathBuf::from("work_items.migration.json"));
+    rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
+}
+
+fn rebuild_marker_at_or_above(path: &Path, required: u32) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let body = fs::read_to_string(path)?;
+    Ok(
+        serde_json::from_str::<WorkspaceWorkItemsRebuildMarker>(&body)
+            .map(|marker| marker.version >= required)
+            .unwrap_or(false),
+    )
+}
+
+fn write_rebuild_marker(path: &Path) -> Result<()> {
+    let marker = WorkspaceWorkItemsRebuildMarker {
+        version: WORKSPACE_WORK_ITEMS_REBUILD_VERSION,
+        migrated_at: Some(chrono::Utc::now()),
+    };
+    let body = serde_json::to_vec_pretty(&marker)
+        .map_err(|error| GwtError::Other(format!("work items migration marker: {error}")))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_atomic(path, &body)
 }
 
 /// SPEC-2359 US-37 / FR-119: Convenience wrapper resolving the project-scoped
@@ -3873,5 +3992,136 @@ mod tests {
             !delete_dir.exists(),
             "delete target workspace dir should have been removed",
         );
+    }
+
+    #[test]
+    fn apply_event_preserves_done_against_subsequent_heartbeat() {
+        let work_item_id = "test-item-preserve";
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 11, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+
+        let mut done_event =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        done_event.status_category = Some(WorkspaceStatusCategory::Done);
+        done_event.title = Some("Test work item".to_string());
+        projection.apply_event(done_event);
+
+        let item_after_done = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("done event must create work item");
+        assert_eq!(
+            item_after_done.status_category,
+            WorkspaceStatusCategory::Done
+        );
+        assert_eq!(item_after_done.completed_at, Some(t1));
+
+        let update_event =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        assert!(
+            update_event.status_category.is_none(),
+            "heartbeat update event has no explicit status_category"
+        );
+        projection.apply_event(update_event);
+
+        let item_after_update = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item still exists");
+        assert_eq!(
+            item_after_update.status_category,
+            WorkspaceStatusCategory::Done,
+            "SPEC-2359 US-37: Done is a terminal state; heartbeat update with status_category=None must not regress it"
+        );
+        assert_eq!(
+            item_after_update.completed_at,
+            Some(t1),
+            "initial Done timestamp must be preserved across subsequent update events"
+        );
+    }
+
+    #[test]
+    fn rebuild_work_items_from_events_recovers_done_after_subsequent_update() {
+        // SPEC-2359 US-37: Existing work_items.json files written with the
+        // legacy apply_event semantics may show status=active even though
+        // work_events.jsonl contains a Done event. Replaying events through
+        // the fixed apply_event must restore the Done terminal state.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let events_path = temp.path().join("work_events.jsonl");
+        let work_items_path = temp.path().join("work_items.json");
+        let marker_path = temp.path().join("work_items.migration.json");
+
+        let work_item_id = "wi-recovered";
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 10, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 5, 10, 11, 0, 0).unwrap();
+        let mut done_event =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        done_event.status_category = Some(WorkspaceStatusCategory::Done);
+        done_event.title = Some("Recovered work".to_string());
+        append_workspace_work_event_to_path(&events_path, &done_event).expect("append done");
+        let update_event =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        append_workspace_work_event_to_path(&events_path, &update_event).expect("append update");
+
+        let outcome =
+            rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
+                .expect("rebuild");
+        assert_eq!(outcome, WorkspaceWorkItemsRebuildOutcome::Applied);
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load")
+            .expect("present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("recovered item exists");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, Some(t1));
+
+        // Re-running is idempotent (marker prevents rebuild).
+        let outcome_again =
+            rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
+                .expect("rebuild idempotent");
+        assert_eq!(
+            outcome_again,
+            WorkspaceWorkItemsRebuildOutcome::AlreadyMigrated
+        );
+    }
+
+    #[test]
+    fn apply_event_idempotent_done_keeps_first_timestamp() {
+        let work_item_id = "test-item-idempotent";
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+
+        let mut first_done =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        first_done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(first_done);
+
+        let mut second_done =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t2);
+        second_done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(second_done);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists after idempotent done");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(
+            item.completed_at,
+            Some(t1),
+            "first Done timestamp must be preserved on idempotent Done re-apply"
+        );
+        assert_eq!(item.updated_at, t2, "updated_at should still advance");
     }
 }
