@@ -47,6 +47,7 @@
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
+      import { createInteractionGuard } from "/interaction-guard.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -314,6 +315,32 @@
       let wizardWasOpen = false;
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
+      // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders
+      // while the user has a native <select> dropdown open. The OS
+      // dropdown overlay is anchored to the original DOM node; if
+      // renderLaunchWizard() swaps `wizardBody` mid-interaction, the
+      // user's selection commit lands on a destroyed element and is
+      // silently lost. `wizardInteractionGuard` coalesces inbound
+      // `launch_wizard_state` / `launch_wizard_open_error` messages
+      // while active and replays the latest pending event on release.
+      const wizardInteractionGuard = createInteractionGuard({
+        onFlush: (deferred) => {
+          if (!deferred || typeof deferred !== "object") {
+            return;
+          }
+          if (deferred.kind === "launch_wizard_state") {
+            launchWizard = deferred.wizard;
+            launchWizardOpenError = null;
+          } else if (deferred.kind === "launch_wizard_open_error") {
+            launchWizard = null;
+            launchWizardOpenError = {
+              title: deferred.title || "Launch Agent",
+              message: deferred.message || "Unable to open Launch Wizard",
+            };
+          }
+          frontendUnits.launchWizardSurface.render();
+        },
+      });
       let branchCleanupWindowId = null;
       const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
       let windowListOpen = false;
@@ -5086,6 +5113,10 @@
       function closeLaunchWizardLocal() {
         launchWizard = null;
         launchWizardOpenError = null;
+        // Issue #2698 PR 1 (B7) — local close wins over any pending
+        // backend state. Discard (do not replay) the deferred event
+        // so we don't undo the user-initiated close.
+        wizardInteractionGuard.discard();
         renderLaunchWizard();
       }
 
@@ -8869,6 +8900,16 @@
             renderProjectCloneModal();
             break;
           case "launch_wizard_open_error":
+            // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.
+            if (
+              wizardInteractionGuard.defer({
+                kind: "launch_wizard_open_error",
+                title: event.title,
+                message: event.message,
+              })
+            ) {
+              break;
+            }
             launchWizard = null;
             launchWizardOpenError = {
               title: event.title || "Launch Agent",
@@ -8877,6 +8918,15 @@
             frontendUnits.launchWizardSurface.render();
             break;
           case "launch_wizard_state":
+            // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.
+            if (
+              wizardInteractionGuard.defer({
+                kind: "launch_wizard_state",
+                wizard: event.wizard,
+              })
+            ) {
+              break;
+            }
             launchWizard = event.wizard;
             launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
@@ -9407,6 +9457,36 @@
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
           closeLaunchWizardFromChrome();
+        }
+      });
+      // Issue #2698 PR 1 (B7) — interaction-guard wiring for native
+      // <select> dropdowns inside the wizard body. We register
+      // delegated listeners on `wizardBody` so they survive the
+      // destructive re-render of its children. Activation on
+      // pointerdown matches when the OS overlay opens; release on
+      // `change` (commit), `focusout` (cancel), and `Escape` covers
+      // every common termination path.
+      wizardBody.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (target && target.tagName === "SELECT") {
+          wizardInteractionGuard.activate();
+        }
+      });
+      wizardBody.addEventListener("change", (event) => {
+        const target = event.target;
+        if (target && target.tagName === "SELECT") {
+          wizardInteractionGuard.release();
+        }
+      });
+      wizardBody.addEventListener("focusout", (event) => {
+        const target = event.target;
+        if (target && target.tagName === "SELECT") {
+          wizardInteractionGuard.release();
+        }
+      });
+      wizardModal.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && wizardInteractionGuard.isActive()) {
+          wizardInteractionGuard.release();
         }
       });
       cloneProjectModal.addEventListener("click", (event) => {
