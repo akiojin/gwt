@@ -4531,7 +4531,7 @@ impl AppRuntime {
         }
         let _ = self.persist();
 
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = Vec::new();
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -4606,7 +4606,6 @@ impl AppRuntime {
             return events;
         }
         let _ = self.persist();
-        events.push(self.workspace_state_broadcast());
         if matches!(
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -7789,7 +7788,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_runtime_status_broadcasts_workspace_before_terminal_status() {
+    fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -7806,21 +7805,22 @@ exit 0
             Some("boom".to_string()),
         );
 
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "non-structural runtime status changes must not force a full workspace_state"
+        );
         assert!(matches!(events[0].target, DispatchTarget::Broadcast));
         assert!(matches!(
-            events[0].event,
-            BackendEvent::WorkspaceState { .. }
+            &events[0].event,
+            BackendEvent::WindowState { window_id: id, state }
+                if id == &window_id && *state == WindowProcessStatus::Error
         ));
         assert!(matches!(events[1].target, DispatchTarget::Broadcast));
         assert!(matches!(
             &events[1].event,
-            BackendEvent::WindowState { window_id: id, state }
-                if id == &window_id && *state == WindowProcessStatus::Error
-        ));
-        assert!(matches!(events[2].target, DispatchTarget::Broadcast));
-        assert!(matches!(
-            &events[2].event,
             BackendEvent::TerminalStatus { id, status, detail }
                 if id == &window_id
                     && *status == WindowProcessStatus::Error
@@ -12846,6 +12846,15 @@ exit 0
 
         let events = runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
 
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "non-structural runtime hook state changes must not force a full workspace_state"
+        );
         assert!(events
             .iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));

@@ -28,6 +28,10 @@
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
+      import {
+        renderProjectTabs as renderProjectTabsView,
+        updateProjectTabDot as updateProjectTabDotView,
+      } from "/project-tabs-renderer.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -49,6 +53,7 @@
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
+      import { createViewportSyncState } from "/viewport-sync.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
@@ -309,6 +314,9 @@
       let resizeState = null;
       const geometrySyncState = createGeometrySyncState();
       let viewport = { x: 0, y: 0, zoom: 1 };
+      const viewportSyncState = createViewportSyncState({
+        initialViewport: viewport,
+      });
       let viewportRasterTimer = null;
       let launchWizard = null;
       let launchWizardOpenError = null;
@@ -1135,66 +1143,21 @@
       }
 
       function renderProjectTabs() {
-        projectTabs.innerHTML = "";
-        for (const tab of appState.tabs || []) {
-          const button = document.createElement("div");
-          button.className = "project-tab";
-          button.title = tab.project_root;
-          button.dataset.projectRoot = tab.project_root || "";
-          button.setAttribute("role", "button");
-          button.tabIndex = 0;
-          // SPEC-2356 — aria-current="page" announces the active tab to
-          // screen readers without changing the role semantics. Inactive
-          // tabs explicitly clear the attribute so the previously-active
-          // tab doesn't keep the marker after a switch.
-          if (tab.id === appState.active_tab_id) {
-            button.classList.add("active");
-            button.setAttribute("aria-current", "page");
-          } else {
-            button.removeAttribute("aria-current");
-          }
-          // SPEC-1939 T-IDX-107 — aggregated worktree health dot precedes
-          // the tab label.
-          const dot = document.createElement("span");
-          dot.className = "project-tab-dot";
-          dot.dataset.role = "project-tab-dot";
-          dot.dataset.state = "";
-          dot.setAttribute("aria-hidden", "true");
-          button.appendChild(dot);
-          const labelEl = document.createElement("span");
-          labelEl.className = "project-tab-label";
-          labelEl.textContent = tab.title;
-          button.appendChild(labelEl);
-          const closeEl = document.createElement("button");
-          closeEl.className = "project-tab-close";
-          closeEl.type = "button";
-          closeEl.setAttribute("aria-label", `Close ${tab.title}`);
-          closeEl.textContent = "×";
-          button.appendChild(closeEl);
-          updateProjectTabDot(button, tab.project_root);
-          button.addEventListener("click", () => {
-            send({ kind: "select_project_tab", tab_id: tab.id });
-          });
-          button.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              send({ kind: "select_project_tab", tab_id: tab.id });
-            }
-          });
-          closeEl.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "close_project_tab", tab_id: tab.id });
-          });
-          projectTabs.appendChild(button);
-        }
+        renderProjectTabsView({
+          projectTabs,
+          tabs: appState.tabs || [],
+          activeTabId: appState.active_tab_id,
+          indexStatusByProjectRoot,
+          aggregateProjectTabDotState,
+          send,
+        });
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
-        const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
-        if (!dot) return;
-        const status = (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
-        const dotState = aggregateProjectTabDotState(status);
-        dot.dataset.state = dotState;
+        updateProjectTabDotView(buttonEl, projectRoot, {
+          indexStatusByProjectRoot,
+          aggregateProjectTabDotState,
+        });
       }
 
       function refreshProjectTabDots() {
@@ -1696,6 +1659,16 @@
         persistViewportThrottle.flushNow();
       }
 
+      function activeViewportScopeKey() {
+        return appState?.active_tab_id || "";
+      }
+
+      function recordLocalViewportEdit() {
+        viewport = viewportSyncState.applyLocalViewport(viewport, {
+          scopeKey: activeViewportScopeKey(),
+        });
+      }
+
       function canvasCenterAnchor() {
         const rect = canvas.getBoundingClientRect();
         return {
@@ -1711,6 +1684,7 @@
         viewport.x = anchorX - worldX * clampedZoom;
         viewport.y = anchorY - worldY * clampedZoom;
         viewport.zoom = clampedZoom;
+        recordLocalViewportEdit();
         applyViewport();
         persistViewport();
       }
@@ -8251,11 +8225,9 @@
       }
 
       function renderWorkspace(workspace) {
-        viewport = {
-          x: workspace.viewport.x,
-          y: workspace.viewport.y,
-          zoom: workspace.viewport.zoom,
-        };
+        viewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+          scopeKey: activeViewportScopeKey(),
+        });
         applyViewport();
 
         const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
@@ -9295,6 +9267,7 @@
         if (panState && panState.pointerId === event.pointerId) {
           viewport.x = panState.x + event.clientX - panState.startX;
           viewport.y = panState.y + event.clientY - panState.startY;
+          recordLocalViewportEdit();
           applyViewport();
           return;
         }
@@ -9511,6 +9484,7 @@
           event.stopPropagation();
           viewport.x -= event.deltaX;
           viewport.y -= event.deltaY;
+          recordLocalViewportEdit();
           applyViewport();
           persistViewport();
         }
