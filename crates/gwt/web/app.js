@@ -342,6 +342,43 @@
           frontendUnits.launchWizardSurface.render();
         },
       });
+      // Issue #2698 PR 4 — same guard applied to the System Settings
+      // Output Language `<select>`. Backend echoes `system_settings`
+      // and `system_settings_updated` events; if either arrives while
+      // the user has the dropdown open, `renderSystemPanel()` does a
+      // `while (panel.firstChild) panel.removeChild(panel.firstChild)`
+      // pass that destroys the live `<select>` and breaks the user's
+      // commit. Delegated listeners scope to `select.settings-select`
+      // so the guard covers every Settings window without per-window
+      // wiring.
+      const systemSettingsInteractionGuard = createInteractionGuard({
+        onFlush: (deferred) => {
+          if (!deferred || typeof deferred !== "object") {
+            return;
+          }
+          if (deferred.kind === "system_settings") {
+            systemSettingsState.language = deferred.language || "auto";
+            systemSettingsState.loaded = true;
+            if (
+              !systemSettingsState.statusMessage
+              || systemSettingsState.statusKind === "info"
+            ) {
+              systemSettingsState.statusMessage = "";
+              systemSettingsState.statusKind = "";
+            }
+          } else if (deferred.kind === "system_settings_updated") {
+            systemSettingsState.language = deferred.language
+              || systemSettingsState.language;
+            systemSettingsState.statusMessage = `Saved language: ${deferred.language}.`;
+            systemSettingsState.statusKind = "success";
+          } else if (deferred.kind === "system_settings_error") {
+            systemSettingsState.statusMessage = deferred.message
+              || "Failed to update system settings.";
+            systemSettingsState.statusKind = "error";
+          }
+          renderSystemPanelInAllSettingsWindows();
+        },
+      });
       let branchCleanupWindowId = null;
       const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
       let windowListOpen = false;
@@ -9023,6 +9060,15 @@
             break;
           case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.
+            // Issue #2698 PR 4 — defer when user is mid-dropdown.
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "system_settings",
+                language: event.language,
+              })
+            ) {
+              break;
+            }
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
@@ -9034,12 +9080,30 @@
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_updated":
+            // Issue #2698 PR 4 — defer when user is mid-dropdown.
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "system_settings_updated",
+                language: event.language,
+              })
+            ) {
+              break;
+            }
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.statusMessage = `Saved language: ${event.language}.`;
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_error":
+            // Issue #2698 PR 4 — defer when user is mid-dropdown.
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "system_settings_error",
+                message: event.message,
+              })
+            ) {
+              break;
+            }
             systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
             renderSystemPanelInAllSettingsWindows();
@@ -9512,6 +9576,50 @@
       wizardModal.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && wizardInteractionGuard.isActive()) {
           wizardInteractionGuard.release();
+        }
+      });
+      // Issue #2698 PR 4 — apply the same interaction-guard pattern
+      // to the System Settings Output Language `<select>`. Settings
+      // windows can stack and reflow, so we delegate from the
+      // document root and filter by the unique `settings-select`
+      // class. Listeners use the bubble phase to stay consistent
+      // with the wizard wiring above.
+      document.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (
+          target
+          && target.tagName === "SELECT"
+          && target.classList.contains("settings-select")
+        ) {
+          systemSettingsInteractionGuard.activate();
+        }
+      });
+      document.addEventListener("change", (event) => {
+        const target = event.target;
+        if (
+          target
+          && target.tagName === "SELECT"
+          && target.classList.contains("settings-select")
+        ) {
+          systemSettingsInteractionGuard.release();
+        }
+      });
+      document.addEventListener("focusout", (event) => {
+        const target = event.target;
+        if (
+          target
+          && target.tagName === "SELECT"
+          && target.classList.contains("settings-select")
+        ) {
+          systemSettingsInteractionGuard.release();
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (
+          event.key === "Escape"
+          && systemSettingsInteractionGuard.isActive()
+        ) {
+          systemSettingsInteractionGuard.release();
         }
       });
       cloneProjectModal.addEventListener("click", (event) => {
