@@ -359,6 +359,8 @@
           }
           if (deferred.kind === "system_settings") {
             systemSettingsState.language = deferred.language || "auto";
+            systemSettingsState.codexTrustManagedHooks =
+              deferred.codex_trust_managed_hooks === true;
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -370,7 +372,9 @@
           } else if (deferred.kind === "system_settings_updated") {
             systemSettingsState.language = deferred.language
               || systemSettingsState.language;
-            systemSettingsState.statusMessage = `Saved language: ${deferred.language}.`;
+            systemSettingsState.codexTrustManagedHooks =
+              deferred.codex_trust_managed_hooks === true;
+            systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
             systemSettingsState.statusMessage = deferred.message
@@ -7598,6 +7602,7 @@
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
         language: "auto",
+        codexTrustManagedHooks: false,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -7826,12 +7831,48 @@
           "Settings UI text and gwtd subcommands stay English.";
         section.appendChild(help);
 
+        const trustSection = createDiv("settings-section");
+        const trustLabel = document.createElement("label");
+        trustLabel.className = "settings-checkbox-label";
+        trustLabel.setAttribute("for", "settings-system-codex-hooks");
+
+        const trustCheckbox = document.createElement("input");
+        trustCheckbox.type = "checkbox";
+        trustCheckbox.className = "settings-checkbox";
+        trustCheckbox.id = "settings-system-codex-hooks";
+        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks === true;
+        trustCheckbox.addEventListener("change", (e) => {
+          const next = e.target.checked === true;
+          systemSettingsState.codexTrustManagedHooks = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({
+            kind: "update_system_settings",
+            language: systemSettingsState.language || "auto",
+            codex_trust_managed_hooks: next,
+          });
+        });
+
+        const trustText = document.createElement("span");
+        trustText.textContent = "Trust gwt-managed Codex hooks";
+        trustLabel.appendChild(trustCheckbox);
+        trustLabel.appendChild(trustText);
+        trustSection.appendChild(trustLabel);
+
+        const trustHelp = document.createElement("p");
+        trustHelp.className = "settings-help";
+        trustHelp.textContent =
+          "Registers only generated gwt hook commands in Codex hook trust state.";
+        trustSection.appendChild(trustHelp);
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
         section.appendChild(status);
 
         panel.appendChild(section);
+        panel.appendChild(trustSection);
         renderSystemPanelStatus(panel);
       }
 
@@ -9142,6 +9183,8 @@
               break;
             }
             systemSettingsState.language = event.language || "auto";
+            systemSettingsState.codexTrustManagedHooks =
+              event.codex_trust_managed_hooks === true;
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -9162,7 +9205,9 @@
               break;
             }
             systemSettingsState.language = event.language || systemSettingsState.language;
-            systemSettingsState.statusMessage = `Saved language: ${event.language}.`;
+            systemSettingsState.codexTrustManagedHooks =
+              event.codex_trust_managed_hooks === true;
+            systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
             break;

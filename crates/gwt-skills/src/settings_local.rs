@@ -698,9 +698,13 @@ mod tests {
         let value: Value = serde_json::from_str(&content).unwrap();
         let stop_commands = commands_for_event(&value, "Stop");
         assert_eq!(
-            stop_commands,
-            vec!["'gwtd' hook event Stop"],
-            "Stop chain must collapse to the event dispatcher; got: {stop_commands:?}"
+            stop_commands.len(),
+            1,
+            "Stop chain must collapse to one event dispatcher; got: {stop_commands:?}"
+        );
+        assert!(
+            stop_commands[0].ends_with(" hook event Stop") && stop_commands[0].contains("gwtd"),
+            "Stop dispatcher must target gwtd via absolute or literal path; got: {stop_commands:?}"
         );
     }
 

@@ -2234,9 +2234,10 @@ impl AppRuntime {
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
-            FrontendEvent::UpdateSystemSettings { language } => {
-                self.system_settings_update_events(client_id, language)
-            }
+            FrontendEvent::UpdateSystemSettings {
+                language,
+                codex_trust_managed_hooks,
+            } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
@@ -2329,6 +2330,7 @@ impl AppRuntime {
         &self,
         client_id: ClientId,
         language: String,
+        codex_trust_managed_hooks: Option<bool>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -2344,7 +2346,7 @@ impl AppRuntime {
         };
         vec![OutboundEvent::reply(
             client_id,
-            gwt::system_settings::update_event(&path, language),
+            gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
         )]
     }
 
@@ -5035,6 +5037,22 @@ impl AppRuntime {
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
             refresh_managed_gwt_assets_for_agent(&worktree_path, &config.agent_id)
                 .map_err(|error| error.to_string())?;
+            if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
+                &profile_config_path,
+                &worktree_path,
+                &config.agent_id,
+                config.runtime_target,
+            )? {
+                if !report.trusted_entries.is_empty() {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: format!(
+                            "Trusted {} gwt-managed Codex hooks.",
+                            report.trusted_entries.len()
+                        ),
+                    });
+                }
+            }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
@@ -6172,6 +6190,48 @@ fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEven
 
 #[cfg(not(unix))]
 fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
+
+fn maybe_register_codex_managed_hook_trust_for_launch(
+    profile_config_path: &Path,
+    worktree_path: &Path,
+    agent_id: &gwt_agent::AgentId,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
+    if agent_id != &gwt_agent::AgentId::Codex
+        || runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+
+    let settings = if profile_config_path.exists() {
+        gwt_config::Settings::load_from_path(profile_config_path)
+            .map_err(|error| error.to_string())?
+    } else {
+        gwt_config::Settings::default()
+    };
+    if settings.agent.codex_trust_managed_hooks != Some(true) {
+        return Ok(None);
+    }
+
+    let codex_config_path =
+        codex_config_path_for_profile_config(profile_config_path).ok_or_else(|| {
+            format!(
+                "cannot derive Codex config path from gwt config path {}",
+                profile_config_path.display()
+            )
+        })?;
+    gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
+    let gwt_config_dir = profile_config_path.parent()?;
+    if gwt_config_dir.file_name().and_then(|name| name.to_str()) != Some(".gwt") {
+        return None;
+    }
+    Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -13555,5 +13615,89 @@ exit 0
         let missing = logs_root.path().join("does-not-exist.log");
         let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
         assert!(resolved.is_none(), "missing files must be rejected");
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let mut settings = Settings::default();
+        settings.agent.codex_trust_managed_hooks = Some(true);
+        settings.save(&profile_config_path).unwrap();
+
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap()
+        .expect("enabled host Codex launch should register trust");
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        let codex_config_path = home.path().join(".codex/config.toml");
+        let config = fs::read_to_string(&codex_config_path).unwrap();
+        assert!(
+            config.contains("trusted_hash"),
+            "Codex config should contain trusted hashes, got: {config}"
+        );
+        assert_eq!(report.config_path, codex_config_path);
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_skips_without_explicit_host_codex_opt_in() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let unset = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(unset.is_none());
+
+        let mut settings = Settings::default();
+        settings.agent.codex_trust_managed_hooks = Some(false);
+        settings.save(&profile_config_path).unwrap();
+        let disabled = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(disabled.is_none());
+
+        settings.agent.codex_trust_managed_hooks = Some(true);
+        settings.save(&profile_config_path).unwrap();
+        let docker = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+        )
+        .unwrap();
+        assert!(docker.is_none());
+
+        let claude = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::ClaudeCode,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(claude.is_none());
+
+        assert!(
+            !home.path().join(".codex/config.toml").exists(),
+            "skip paths must not create Codex config"
+        );
     }
 }

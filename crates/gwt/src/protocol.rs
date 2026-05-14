@@ -363,6 +363,8 @@ pub enum FrontendEvent {
     /// [`BackendEvent::SystemSettingsError`] on failure.
     UpdateSystemSettings {
         language: String,
+        #[serde(default)]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
@@ -857,6 +859,8 @@ pub enum BackendEvent {
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -864,6 +868,8 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is

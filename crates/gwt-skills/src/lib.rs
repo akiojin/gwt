@@ -1,6 +1,7 @@
 //! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
 pub mod assets;
+pub mod codex_hook_trust;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
@@ -10,6 +11,10 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
+pub use codex_hook_trust::{
+    collect_codex_managed_hook_trust_entries, register_codex_managed_hook_trust,
+    CodexHookTrustEntry, CodexHookTrustReport,
+};
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
     generate_coordination_guidance_for_codex,
