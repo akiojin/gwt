@@ -135,6 +135,16 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
   assert.match(
     appSource,
+    /codexTrustManagedHooks:\s*true/,
+    "expected Codex hook trust UI state to default on",
+  );
+  assert.match(
+    appSource,
+    /trustCheckbox\.checked\s*=\s*systemSettingsState\.codexTrustManagedHooks\s*!==\s*false/,
+    "expected unchecked only when config explicitly disables Codex hook trust",
+  );
+  assert.match(
+    appSource,
     /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*codex_trust_managed_hooks:\s*next,\s*\}\)/,
     "expected checkbox onChange to send codex_trust_managed_hooks",
   );

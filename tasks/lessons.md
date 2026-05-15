@@ -1,5 +1,58 @@
 # Lessons Learned
 
+## 2026-05-15 — Codex hook trust hashing must mirror event matcher semantics
+
+### 事象
+
+gwt-managed Codex hooks を自動 trust 登録する修正後も、Codex の `/hooks`
+では `UserPromptSubmit` と `Stop` が `Modified since last trusted` として
+残り、起動時に `hooks need review` warning が表示された。
+
+### 原因
+
+Codex 本体は `UserPromptSubmit` / `Stop` の matcher を dispatch でも trust
+identity hash でも無視する。一方、gwt 側の trust hash は全 event で
+`.codex/hooks.json` の `matcher="*"` を含めて計算していたため、2 event だけ
+Codex の `current_hash` と一致しなかった。
+
+### 再発防止策
+
+1. 外部ツールの trust / fingerprint / signature を再実装する場合は、設定
+   JSON の見た目ではなく公式実装の正規化後 identity を読む。
+2. hook trust の修正では、`codex --no-alt-screen` の起動 warning だけでなく
+   `/hooks` の event 別 `Active` / `Review` 表示で全 managed events を確認する。
+3. event ごとに matcher semantics が異なる場合は、全 event 同一処理にせず
+   `UserPromptSubmit` / `Stop` のような matcher 非対応 event の fixture test を
+   必ず追加する。
+
+## 2026-05-15 — Git config emulation must preserve include insertion order
+
+### 事象
+
+PR #2727 の review thread で、`repo_hash` が `url.*.insteadOf` を top-level
+Git config からしか読まず、`[include]` / `[includeIf]` 先の rewrite 設定を
+無視する問題を指摘された。追修正の初期実装では include 先を親 config の
+末尾へ単純追加していたため、include 先が `remote.origin.url` も定義する
+場合に、include 行より後ろのローカル設定が勝つという Git の順序とずれた。
+
+### 原因
+
+Git config の include は「親ファイルを読み終えた後に追加する」処理ではなく、
+`path = ...` 行の位置に include 先の内容を挿入する処理である。プロセス起動
+を避けるために Git config を自前解決する場合、ファイル単位の `Vec<String>`
+へ単純 append すると、同じ key が親子 config の両方にあるケースで上書き順序
+が変わる。
+
+### 再発防止策
+
+1. `git config` / `git remote get-url` 相当の処理を自前実装する場合は、
+   include / includeIf / user config / local config の順序をテストで固定して
+   から実装する。
+2. `[include]` は include 行の位置で展開し、loop guard と最大深さを持たせる。
+   「親を全部読んでから include を末尾追加する」形にしない。
+3. review 指摘への follow-up では、指摘された直接ケースだけでなく、隣接する
+   Git config precedence の回帰テストを 1 件追加してから GREEN にする。
+
 ## 2026-05-12 — Workspace coordination must not become a global tool lock
 
 ### 事象

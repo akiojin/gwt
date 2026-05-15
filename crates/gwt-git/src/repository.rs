@@ -30,11 +30,18 @@ pub enum RepoType {
 /// Checks the path itself and walks parent directories to find a git repo.
 /// Distinguishes between normal repos, bare repos, and non-repo directories.
 pub fn detect_repo_type(path: &Path) -> RepoType {
-    // Check if path itself has .git (normal repo or worktree)
-    if path.join(".git").exists() {
+    // Check if path itself has `.git/` (Normal repo) or a `.git` marker file
+    // (linked worktree).
+    let dot_git = path.join(".git");
+    if dot_git.is_dir() {
         return RepoType::Normal {
             path: path.to_path_buf(),
             needs_migration: true,
+        };
+    }
+    if dot_git.is_file() {
+        return RepoType::Bare {
+            develop_worktree: Some(path.to_path_buf()),
         };
     }
     // Check if path itself is a bare repo (has HEAD + objects + refs)
@@ -81,10 +88,16 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
         if parent == current {
             break;
         }
-        if parent.join(".git").exists() {
+        let dot_git = parent.join(".git");
+        if dot_git.is_dir() {
             return RepoType::Normal {
                 path: parent.to_path_buf(),
                 needs_migration: true,
+            };
+        }
+        if dot_git.is_file() {
+            return RepoType::Bare {
+                develop_worktree: Some(parent.to_path_buf()),
             };
         }
         if parent.join("HEAD").exists()
@@ -587,6 +600,28 @@ mod tests {
     }
 
     #[test]
+    fn detect_repo_type_treats_git_file_marker_as_worktree_not_normal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_dir = tmp.path().join("repo.git");
+        let worktree = tmp.path().join("feature");
+        std::fs::create_dir_all(bare_dir.join("worktrees").join("feature")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: ../repo.git/worktrees/feature\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_repo_type(&worktree),
+            RepoType::Bare {
+                develop_worktree: Some(worktree)
+            },
+            "linked worktree markers are already gwt-compatible worktrees and must not request Normal migration"
+        );
+    }
+
+    #[test]
     fn detect_repo_type_returns_bare_for_bare_repo() {
         let tmp = tempfile::tempdir().unwrap();
         gwt_core::process::hidden_command("git")
@@ -609,6 +644,29 @@ mod tests {
         let subdir = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&subdir).unwrap();
         assert!(matches!(detect_repo_type(&subdir), RepoType::Normal { .. }));
+    }
+
+    #[test]
+    fn detect_repo_type_walks_parents_to_find_worktree_marker_without_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_dir = tmp.path().join("repo.git");
+        let worktree = tmp.path().join("feature");
+        let nested = worktree.join("src").join("bin");
+        std::fs::create_dir_all(bare_dir.join("worktrees").join("feature")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: ../repo.git/worktrees/feature\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_repo_type(&nested),
+            RepoType::Bare {
+                develop_worktree: Some(worktree)
+            },
+            "opening a subdirectory inside a linked worktree must resolve the worktree without migration"
+        );
     }
 
     #[test]
