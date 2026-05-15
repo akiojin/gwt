@@ -1,8 +1,11 @@
 use std::{fs, path::Path};
 
+use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::workspace_projection::{
-    load_workspace_projection, update_workspace_projection_with_journal, WorkspaceProjectionUpdate,
+    load_or_default_workspace_projection, load_workspace_projection, save_workspace_projection,
+    update_workspace_projection_with_journal, WorkspaceAgentAffiliationStatus,
+    WorkspaceAgentSummary, WorkspaceProjection, WorkspaceProjectionUpdate, WorkspaceStatusCategory,
 };
 
 use super::{HookError, HookOutput, IntentBoundaryEvent};
@@ -28,6 +31,75 @@ struct MissingIdentity {
 impl MissingIdentity {
     fn complete(self) -> bool {
         !self.title_summary && !self.current_focus
+    }
+}
+
+/// SessionStart hook: ensure the running agent session is present in the
+/// Workspace projection's `agents[]` before any further coordination CLI
+/// runs. Without this, `gwtd workspace update --agent-session ... --title-summary ...`
+/// silently no-ops because `apply_update`'s session matcher finds nothing
+/// to update (only a journal entry is written, and no `WorkspaceState`
+/// broadcast fires).
+///
+/// Registration is idempotent: if the launch flow has already registered
+/// the session (with `Assigned` affiliation, a workspace_id, etc.) we
+/// leave that record untouched so the richer launch-time state survives.
+pub(crate) fn handle_session_start() -> Result<(), HookError> {
+    let Some(session) = current_session_from_env()? else {
+        return Ok(());
+    };
+    let mut projection = load_or_default_workspace_projection(&session.worktree_path)?;
+    projection.project_root = session.worktree_path.clone();
+    let registered = register_session_in_projection(&mut projection, &session, Utc::now());
+    if registered {
+        save_workspace_projection(&session.worktree_path, &projection)?;
+        crate::cli::workspace::publish_workspace_change(&session.worktree_path);
+    }
+    Ok(())
+}
+
+/// Insert a stub `WorkspaceAgentSummary` for `session` if no agent with
+/// the same `session_id` is present. Returns `true` when a new record
+/// was inserted. Existing records are preserved as-is.
+pub(crate) fn register_session_in_projection(
+    projection: &mut WorkspaceProjection,
+    session: &Session,
+    now: DateTime<Utc>,
+) -> bool {
+    if projection
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == session.id)
+    {
+        return false;
+    }
+    projection
+        .agents
+        .push(workspace_agent_summary_from_session(session, now));
+    projection.updated_at = now;
+    true
+}
+
+fn workspace_agent_summary_from_session(
+    session: &Session,
+    now: DateTime<Utc>,
+) -> WorkspaceAgentSummary {
+    WorkspaceAgentSummary {
+        session_id: session.id.clone(),
+        window_id: None,
+        agent_id: session.agent_id.command().to_string(),
+        display_name: session.display_name.clone(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(session.worktree_path.clone()),
+        branch: Some(session.branch.clone()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: now,
     }
 }
 
@@ -417,11 +489,110 @@ fn value_to_text(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use gwt_agent::{AgentId, Session};
     use gwt_core::workspace_projection::{
-        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceStatusCategory,
+        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+        WorkspaceStatusCategory,
     };
 
     use super::*;
+
+    fn projection_for(repo: &std::path::Path) -> WorkspaceProjection {
+        let now = Utc::now();
+        WorkspaceProjection {
+            id: "ws-test".to_string(),
+            project_root: repo.to_path_buf(),
+            title: String::new(),
+            status_category: WorkspaceStatusCategory::Unknown,
+            status_text: String::new(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            agents: Vec::new(),
+            git_details: None,
+            board_refs: Vec::new(),
+            updated_at: now,
+            created_at: now,
+            creator: None,
+            lifecycle_stage: Default::default(),
+            blocked_reason: None,
+            linked_issues: Vec::new(),
+            linked_prs: Vec::new(),
+            tags: Vec::new(),
+            progress_pct: None,
+        }
+    }
+
+    fn fresh_session(repo: &std::path::Path) -> Session {
+        Session::new(repo.to_path_buf(), "work/test-session", AgentId::Codex)
+    }
+
+    #[test]
+    fn register_session_inserts_unassigned_agent_when_absent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let mut projection = projection_for(&repo);
+        let session = fresh_session(&repo);
+        let now = Utc::now();
+
+        let inserted = register_session_in_projection(&mut projection, &session, now);
+
+        assert!(inserted, "first registration should insert");
+        assert_eq!(projection.agents.len(), 1);
+        let agent = &projection.agents[0];
+        assert_eq!(agent.session_id, session.id);
+        assert_eq!(agent.agent_id, "codex");
+        assert!(agent.is_unassigned());
+        assert_eq!(agent.worktree_path.as_deref(), Some(repo.as_path()));
+        assert_eq!(agent.branch.as_deref(), Some("work/test-session"));
+        assert_eq!(agent.title_summary, None);
+        assert_eq!(agent.window_id, None);
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn register_session_is_idempotent_for_same_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let mut projection = projection_for(&repo);
+        let session = fresh_session(&repo);
+
+        assert!(register_session_in_projection(
+            &mut projection,
+            &session,
+            Utc::now()
+        ));
+        let second = register_session_in_projection(&mut projection, &session, Utc::now());
+
+        assert!(!second, "second registration should not re-insert");
+        assert_eq!(projection.agents.len(), 1);
+    }
+
+    #[test]
+    fn register_session_preserves_existing_agent_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let mut projection = projection_for(&repo);
+        let session = fresh_session(&repo);
+
+        let mut existing = assigned_agent(&session.id, &repo);
+        existing.title_summary = Some("preserved title".to_string());
+        existing.current_focus = Some("preserved focus".to_string());
+        existing.workspace_id = Some("ws-1".to_string());
+        existing.window_id = Some("win-7".to_string());
+        projection.agents.push(existing);
+
+        let inserted = register_session_in_projection(&mut projection, &session, Utc::now());
+
+        assert!(!inserted);
+        assert_eq!(projection.agents.len(), 1);
+        let agent = &projection.agents[0];
+        assert_eq!(agent.title_summary.as_deref(), Some("preserved title"));
+        assert_eq!(agent.current_focus.as_deref(), Some("preserved focus"));
+        assert_eq!(agent.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(agent.window_id.as_deref(), Some("win-7"));
+        assert!(agent.is_assigned());
+    }
 
     fn assigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
