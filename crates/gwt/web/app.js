@@ -3905,6 +3905,19 @@
         return node;
       }
 
+      function setLaunchWizardPendingDisabled(root, disabled) {
+        if (!disabled) return;
+        const selector =
+          "input, textarea, select, button, [role='button'], [contenteditable='true']";
+        for (const element of root.querySelectorAll(selector)) {
+          if ("disabled" in element) {
+            element.disabled = true;
+          }
+          element.setAttribute("aria-disabled", "true");
+          element.setAttribute("tabindex", "-1");
+        }
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -5303,9 +5316,6 @@
           closeLaunchWizardLocal();
           return;
         }
-        if (launchWizard?.runtime_resolution_pending) {
-          return;
-        }
         frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
       }
 
@@ -5407,7 +5417,7 @@
             || launchWizard.runtime_resolution_pending
             || launchWizard.primary_action_enabled === false,
         );
-        wizardCancelButton.disabled = Boolean(launchWizard.runtime_resolution_pending);
+        wizardCancelButton.disabled = false;
 
         if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
@@ -5424,6 +5434,8 @@
         wizardMain.appendChild(renderWizardProgressRail());
         const wizardContentPane = createNode("div", "wizard-content-pane");
         const panel = createNode("div", "launch-panel");
+        const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
+        panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
         const showManualSetup = launchWizard.show_manual_setup !== false;
         if (launchWizard.is_hydrating) {
           panel.appendChild(
@@ -5917,6 +5929,7 @@
           panel.appendChild(section);
         }
 
+        setLaunchWizardPendingDisabled(panel, isRuntimeResolutionPending);
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);
         wizardBody.appendChild(wizardMain);
@@ -10129,10 +10142,6 @@
         if (wizardModal.classList.contains("open")) {
           // Wizard cancel is the explicit cancellation path; map Esc to
           // the same action so the modal isn't a keyboard trap.
-          if (launchWizard?.runtime_resolution_pending) {
-            event.preventDefault();
-            return;
-          }
           if (launchWizardOpenError) {
             closeLaunchWizardLocal();
           } else {

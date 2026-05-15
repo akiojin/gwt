@@ -3068,6 +3068,11 @@ body {
   gap: 12px;
 }
 
+.launch-panel.wizard-disabled {
+  opacity: 0.66;
+  pointer-events: none;
+}
+
 .launch-section {
   display: grid;
   gap: 12px;
@@ -3232,8 +3237,8 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
 }
 
-.quick-start-card:hover,
-.live-session-button:hover {
+.quick-start-card:hover:not(.selected),
+.live-session-button:hover:not(.selected) {
   border-color: var(--color-focus-ring);
   background: var(--color-surface-elevated);
 }
@@ -3281,7 +3286,7 @@ body {
   cursor: pointer;
   text-align: left;
 }
-.live-session-button:hover {
+.live-session-button:hover:not(.selected) {
   border-color: var(--color-focus-ring);
   background: var(--color-surface-elevated);
 }

@@ -982,6 +982,10 @@ impl LaunchWizardState {
 
     pub fn apply_hydration(&mut self, hydration: LaunchWizardHydration) {
         let was_hydrating = self.is_hydrating;
+        let preserve_runtime_selection = (!was_hydrating && self.runtime_context_resolved)
+            || (self.runtime_resolution_pending
+                && self.launch_path == LaunchWizardLaunchPath::QuickStart
+                && self.selected_quick_start_index.is_some());
         let LaunchWizardHydration {
             selected_branch,
             normalized_branch_name,
@@ -1023,11 +1027,16 @@ impl LaunchWizardState {
         if let Some(previous_profiles) = previous_profiles {
             self.previous_profiles = previous_profiles;
         }
-        let (resolved_target, resolved_service, resolved_lifecycle) =
-            resolve_initial_runtime_selection(&self.context, self.previous_profiles.repo_local());
-        self.runtime_target = resolved_target;
-        self.docker_service = resolved_service;
-        self.docker_lifecycle_intent = resolved_lifecycle;
+        if !preserve_runtime_selection {
+            let (resolved_target, resolved_service, resolved_lifecycle) =
+                resolve_initial_runtime_selection(
+                    &self.context,
+                    self.previous_profiles.repo_local(),
+                );
+            self.runtime_target = resolved_target;
+            self.docker_service = resolved_service;
+            self.docker_lifecycle_intent = resolved_lifecycle;
+        }
         self.sync_selected_agent_options();
         // Agent preference の再適用は previous_profiles が refresh されたときのみ。
         // 現 wizard 内で user が編集した draft (model / reasoning など) を上書きしない。
@@ -1511,7 +1520,7 @@ impl LaunchWizardState {
                 }
             })
             .unwrap_or(QuickStartLaunchMode::StartNew);
-        if self.prepare_quick_start_launch(index, mode) {
+        if self.prepare_quick_start_launch(index, mode, self.runtime_context_resolved) {
             self.finish_launch_request();
         }
     }
@@ -1519,12 +1528,17 @@ impl LaunchWizardState {
     fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
         self.selected_quick_start_index = Some(index);
-        if self.prepare_quick_start_launch(index, mode) {
+        if self.prepare_quick_start_launch(index, mode, false) {
             self.finish_launch_request();
         }
     }
 
-    fn prepare_quick_start_launch(&mut self, index: usize, mode: QuickStartLaunchMode) -> bool {
+    fn prepare_quick_start_launch(
+        &mut self,
+        index: usize,
+        mode: QuickStartLaunchMode,
+        preserve_runtime_selection: bool,
+    ) -> bool {
         let Some(entry) = self.quick_start_entries.get(index).cloned() else {
             self.error = Some("Quick start entry is unavailable".to_string());
             return false;
@@ -1533,6 +1547,9 @@ impl LaunchWizardState {
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
+        if !preserve_runtime_selection {
+            self.apply_quick_start_runtime_selection(&entry);
+        }
         self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
@@ -1542,10 +1559,6 @@ impl LaunchWizardState {
         }
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
-        self.runtime_target = entry.runtime_target;
-        self.docker_service = entry.docker_service.clone();
-        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
-        self.sync_docker_lifecycle_default();
         match mode {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
@@ -1566,6 +1579,13 @@ impl LaunchWizardState {
                 true
             }
         }
+    }
+
+    fn apply_quick_start_runtime_selection(&mut self, entry: &QuickStartEntry) {
+        self.runtime_target = entry.runtime_target;
+        self.docker_service = entry.docker_service.clone();
+        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
+        self.sync_docker_lifecycle_default();
     }
 
     fn apply_preferred_agent_profile(&mut self) -> bool {
@@ -2542,6 +2562,7 @@ impl LaunchWizardState {
         }
         self.sync_selected_agent_options();
 
+        self.apply_quick_start_runtime_selection(&entry);
         self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
@@ -2551,10 +2572,6 @@ impl LaunchWizardState {
         }
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
-        self.runtime_target = entry.runtime_target;
-        self.docker_service = entry.docker_service.clone();
-        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
-        self.sync_docker_lifecycle_default();
 
         match selected_action {
             QuickStartAction::ReuseEntry { .. } => {
@@ -6238,6 +6255,69 @@ mod tests {
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.primary_action_label, "Launch");
+    }
+
+    #[test]
+    fn quick_start_runtime_confirmation_edit_is_preserved_on_launch() {
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let entry = quick_start_entry(
+            "session-1",
+            "codex",
+            Some("resume-1"),
+            None,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Some("app"),
+        );
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            ctx,
+            sample_agent_options(),
+            vec![entry.clone()],
+            Default::default(),
+        );
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+        state.completion = None;
+
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature-current")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature-current"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: vec![entry],
+            previous_profiles: Some(Default::default()),
+        });
+        state.apply(LaunchWizardAction::SetRuntimeTarget {
+            target: gwt_agent::LaunchRuntimeTarget::Host,
+        });
+        state.apply(LaunchWizardAction::Submit);
+
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(config))
+                if matches!(
+                    config.as_ref(),
+                    LaunchWizardLaunchRequest::Agent(config)
+                        if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+                            && config.docker_service.is_none()
+                            && config.resume_session_id.as_deref() == Some("resume-1")
+                )
+        ));
     }
 
     #[test]

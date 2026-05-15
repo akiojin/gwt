@@ -1243,7 +1243,7 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
   );
 });
 
-test("Launch wizard uses one visible dismiss control in the footer", () => {
+test("Launch wizard removes duplicate header close button", () => {
   assert.equal(
     document.getElementById("wizard-close-button"),
     null,
@@ -1412,6 +1412,50 @@ test("Launch wizard submit button uses Continue before runtime context is resolv
   );
 });
 
+test("Launch wizard keeps cancel available during runtime resolution", () => {
+  const closeHelper = appSource.match(
+    /function closeLaunchWizardFromChrome\(\) \{([\s\S]*?)\n      \}/,
+  );
+  assert.ok(closeHelper, "expected launch wizard close helper");
+  assert.equal(
+    closeHelper[1].includes("runtime_resolution_pending"),
+    false,
+    "runtime resolution pending must not block the footer Cancel button",
+  );
+  assert.match(
+    appSource,
+    /wizardCancelButton\.disabled\s*=\s*false/,
+    "Cancel button must stay enabled while runtime resolution is pending",
+  );
+  const escapeHandler = appSource.match(
+    /if \(wizardModal\.classList\.contains\("open"\)\) \{([\s\S]*?)event\.preventDefault\(\);\n          return;/,
+  );
+  assert.ok(escapeHandler, "expected launch wizard Escape handler");
+  assert.equal(
+    escapeHandler[1].includes("runtime_resolution_pending"),
+    false,
+    "Escape must keep using the cancel path while runtime resolution is pending",
+  );
+});
+
+test("Launch wizard disables panel controls while runtime resolution is pending", () => {
+  assert.match(
+    appSource,
+    /const selector =\n\s+"input, textarea, select, button, \[role='button'\], \[contenteditable='true'\]";[\s\S]*?querySelectorAll\(selector\)/,
+    "expected a pending-state helper to disable wizard panel controls",
+  );
+  assert.match(
+    appSource,
+    /panel\.classList\.toggle\("wizard-disabled",\s*isRuntimeResolutionPending\)/,
+    "expected the launch panel to expose a disabled visual state while pending",
+  );
+  assert.match(
+    inlineStyle,
+    /\.launch-panel\.wizard-disabled[\s\S]*?pointer-events:\s*none;/,
+    "expected pending wizard controls to ignore pointer events",
+  );
+});
+
 test("Launch wizard renders centered split flow without backdrop dismissal", () => {
   assert.equal(
     appSource.includes("isStartWorkMode"),
@@ -1433,6 +1477,14 @@ test("Launch wizard renders centered split flow without backdrop dismissal", () 
     /if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}/.test(appSource),
     false,
     "wizard backdrop clicks must not dismiss the wizard",
+  );
+});
+
+test("Launch wizard selected quick start hover preserves selected styling", () => {
+  assert.match(
+    inlineStyle,
+    /\.quick-start-card:hover:not\(\.selected\),\n\.live-session-button:hover:not\(\.selected\)/,
+    "selected quick start and live session rows must not use the unselected hover background",
   );
 });
 
