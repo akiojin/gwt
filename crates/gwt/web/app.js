@@ -139,7 +139,6 @@
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
       const wizardError = document.getElementById("wizard-error");
-      const wizardCloseButton = document.getElementById("wizard-close-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const cloneProjectModal = document.getElementById("clone-project-modal");
@@ -9930,7 +9929,6 @@
           closeModal();
         }
       });
-      wizardCloseButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardSubmitButton.addEventListener("click", () => {
         if (launchWizardOpenError) {
