@@ -2472,6 +2472,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("const isRuntimeConfirmation = Boolean(")
+                && html.contains("launchWizard.runtime_context_resolved")
+                && html.contains("launchWizard.show_runtime_confirmation"),
+            "expected Launch Wizard to derive a dedicated Runtime confirmation state",
+        );
+        assert!(
+            html.contains("const showSetupForms = showManualSetup && !isRuntimeConfirmation;"),
+            "expected setup form rendering to be disabled during Runtime confirmation",
+        );
+        assert!(
+            html.contains("renderWizardSummary();")
+                && html.contains("if (!isRuntimeConfirmation"),
+            "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
+        );
+        assert!(
+            html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
+                && html.contains("showSetupForms && launchWizard.show_agent_settings"),
+            "expected branch and linked issue controls to be gated to setup forms",
+        );
+    }
+
+    #[test]
     fn embedded_web_shared_bundle_keeps_user_facing_copy_english_only() {
         let html = frontend_bundle_source();
         let japanese_scripts = regex::Regex::new(r"[ぁ-んァ-ン一-龯]").expect("valid regex");
