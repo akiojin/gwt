@@ -5429,6 +5429,7 @@
         }
 
         renderWizardSummary();
+        const showManualSetup = launchWizard.show_manual_setup !== false;
         const isRuntimeConfirmation = Boolean(
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
@@ -5441,7 +5442,6 @@
         const panel = createNode("div", "launch-panel");
         const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
         panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
-        const showManualSetup = launchWizard.show_manual_setup !== false;
         if (launchWizard.is_hydrating) {
           panel.appendChild(
             createNode(
