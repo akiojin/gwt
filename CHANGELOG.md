@@ -1,6 +1,62 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.36.0] - 2026-05-15
+
+### Bug Fixes
+
+- **launch:** Remove duplicate wizard close button
+- **launch:** Preserve wizard runtime edits
+- **gui:** Remove git spawns from active work hot path
+- **workspace:** SessionStart hook で projection.agents に session を登録する
+- **workspace:** Worktree fallback in resolve_title_sync_window_id
+- **git:** Preserve repo hash url rewrites
+- **git:** Include git config rewrites in repo hash
+- **gui:** Watch current.json for workspace projection changes
+- **workspace:** Upsert in apply_update when session is not yet registered
+- **workspace:** Drop project_root match in title sync fast path
+- **gui:** Hide setup forms during runtime confirmation
+- **gui:** Restore Start Work agent selection
+- **migration:** Ignore linked worktree markers
+- Trust gwt-managed Codex hooks by default
+- Align Codex hook trust matcher hashing
+- **gui:** Keep Runtime active during confirmation
+- Harden Codex hook trust registration
+- **index:** Retry full status refresh after bootstrap
+- Align Codex hook trust command matching
+- **index:** Keep full status retry until bootstrap completes
+- **gui:** Align resize final size with pointerup
+
+### Documentation
+
+- Document GUI verification handoff
+
+### Features
+
+- **launch:** Redesign launch wizard flow
+
+### Miscellaneous Tasks
+
+- **merge:** Sync develop
+- **merge:** Sync develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+
+### Performance
+
+- **index:** Reduce startup index work
+
+### Styling
+
+- Cargo fmt --all
+
+### Ci
+
+- Avoid macos rust proxy cache failure
+
 ## [9.35.4] - 2026-05-15
 
 ### Bug Fixes
