@@ -1085,7 +1085,10 @@ mod tests {
         let stopped = Arc::new(Mutex::new(false));
         let stopped_in_thread = stopped.clone();
         let join_handle = std::thread::spawn(move || {
-            if matches!(rx.recv(), Ok(super::WorkspaceProjectionWatcherMessage::Stop)) {
+            if matches!(
+                rx.recv(),
+                Ok(super::WorkspaceProjectionWatcherMessage::Stop)
+            ) {
                 *stopped_in_thread.lock().expect("stopped flag") = true;
             }
         });

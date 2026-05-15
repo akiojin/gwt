@@ -13292,8 +13292,8 @@ exit 1
             None,
         );
 
-        let changed = runtime
-            .sync_agent_window_titles_from_workspace_projection(&unrelated, &projection);
+        let changed =
+            runtime.sync_agent_window_titles_from_workspace_projection(&unrelated, &projection);
 
         assert!(
             changed,
@@ -13397,12 +13397,8 @@ exit 1
                 tab_id: "tab-1".to_string(),
             },
         );
-        let mut projection = apply_title_sync_sample_projection(
-            &repo,
-            &window_id,
-            Some("Ambiguity guard"),
-            None,
-        );
+        let mut projection =
+            apply_title_sync_sample_projection(&repo, &window_id, Some("Ambiguity guard"), None);
         projection.agents[0].session_id = "out-of-band-session".to_string();
         projection.agents[0].window_id = None;
 

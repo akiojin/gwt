@@ -3016,7 +3016,10 @@ mod tests {
         assert_eq!(agent.agent_id, "codex");
         assert_eq!(agent.display_name, "Codex");
         assert_eq!(agent.current_focus.as_deref(), Some("old focus"));
-        assert_eq!(agent.worktree_path.as_deref(), Some(std::path::Path::new("/repo")));
+        assert_eq!(
+            agent.worktree_path.as_deref(),
+            Some(std::path::Path::new("/repo"))
+        );
         assert_eq!(agent.branch.as_deref(), Some("work/x"));
         assert_eq!(agent.workspace_id.as_deref(), Some("ws-1"));
         assert!(agent.is_assigned());
