@@ -14,7 +14,8 @@ pub struct AgentConfig {
     pub agent_paths: HashMap<String, PathBuf>,
     /// Auto-install agent dependencies before launch.
     pub auto_install_deps: bool,
-    /// Explicit opt-in for pre-registering trust of gwt-generated Codex hooks.
+    /// Optional override for pre-registering trust of gwt-generated Codex hooks.
+    /// `None` and `Some(true)` enable trust; `Some(false)` is the opt-out.
     pub codex_trust_managed_hooks: Option<bool>,
 }
 
@@ -52,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_trust_managed_hooks_is_explicit_opt_in() {
+    fn codex_trust_managed_hooks_is_false_only_opt_out() {
         let default_config = AgentConfig::default();
         assert_eq!(default_config.codex_trust_managed_hooks, None);
 

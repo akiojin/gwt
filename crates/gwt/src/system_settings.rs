@@ -70,7 +70,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
             .language
             .clone()
             .unwrap_or_else(|| "auto".to_string()),
-        codex_trust_managed_hooks: settings.agent.codex_trust_managed_hooks,
+        codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
     })
 }
 
@@ -102,8 +102,12 @@ pub fn write_settings(
         .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
     Ok(SystemSettingsSnapshot {
         language: canonical,
-        codex_trust_managed_hooks: settings.agent.codex_trust_managed_hooks,
+        codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
     })
+}
+
+fn codex_trust_managed_hooks_enabled(settings: &Settings) -> bool {
+    settings.agent.codex_trust_managed_hooks != Some(false)
 }
 
 /// Build the `BackendEvent` reply for `FrontendEvent::GetSystemSettings`.
@@ -203,16 +207,16 @@ mod tests {
     }
 
     #[test]
-    fn read_and_write_codex_hook_trust_opt_in() {
+    fn read_and_write_codex_hook_trust_false_only_opt_out() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
 
-        let mut original = Settings::default();
-        original.agent.codex_trust_managed_hooks = Some(true);
-        original.save(&path).unwrap();
-
         let snapshot = read_settings(&path).unwrap();
-        assert_eq!(snapshot.codex_trust_managed_hooks, Some(true));
+        assert_eq!(
+            snapshot.codex_trust_managed_hooks,
+            Some(true),
+            "missing config should render System Settings as enabled by default"
+        );
 
         let snapshot = write_settings(&path, "en", Some(false)).unwrap();
         assert_eq!(snapshot.language, "en");
@@ -264,7 +268,7 @@ mod tests {
                 codex_trust_managed_hooks,
             } => {
                 assert_eq!(language, "ja");
-                assert_eq!(codex_trust_managed_hooks, None);
+                assert_eq!(codex_trust_managed_hooks, Some(true));
             }
             other => panic!("expected SystemSettings, got {other:?}"),
         }
