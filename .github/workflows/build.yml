@@ -32,3 +32,24 @@ jobs:
         continue-on-error: true
       - name: Check Windows compilation
         run: cargo check -p gwt-core -p gwt
+
+  check-macos:
+    name: Check (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reset broken pre-installed Rust on macOS runners
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-macos
+        continue-on-error: true
+      - name: Check macOS compilation
+        run: cargo check -p gwt-core -p gwt
