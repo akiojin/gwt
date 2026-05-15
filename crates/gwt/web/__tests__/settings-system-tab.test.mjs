@@ -29,6 +29,8 @@ test("components.css declares the settings tab and panel surfaces under :root[da
     ".settings-panel",
     ".settings-section",
     ".settings-select",
+    ".settings-checkbox-label",
+    ".settings-checkbox",
     ".settings-help",
     ".settings-status",
   ]) {
@@ -122,6 +124,19 @@ test("renderSystemPanel sends update_system_settings on select change", () => {
     appSource,
     /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*next\s*\}\)/,
     "expected select onChange to send update_system_settings",
+  );
+});
+
+test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
+  assert.match(
+    appSource,
+    /trustText\.textContent\s*=\s*"Trust gwt-managed Codex hooks"/,
+    "expected System tab Codex hook trust checkbox label",
+  );
+  assert.match(
+    appSource,
+    /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*codex_trust_managed_hooks:\s*next,\s*\}\)/,
+    "expected checkbox onChange to send codex_trust_managed_hooks",
   );
 });
 

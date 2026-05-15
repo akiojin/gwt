@@ -80,6 +80,102 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Prepare `origin/develop` as the canonical Start Work base.
+    ///
+    /// Fresh bare clones can lack both `remote.origin.fetch` and
+    /// `refs/remotes/origin/*`. Normalize the refspec first, prune stale
+    /// tracking refs, and create remote `develop` from the remote default
+    /// branch when it is missing.
+    pub fn prepare_start_work_remote_develop(&self) -> Result<()> {
+        crate::migration::normalize_fetch_refspec(&self.repo_path)?;
+        self.fetch_origin()?;
+        if self.remote_branch_exists("origin/develop")? {
+            return Ok(());
+        }
+
+        let default_branch = self.remote_default_branch()?;
+        let default_remote_ref = format!("origin/{default_branch}");
+        self.fetch_remote_branch_tracking_ref(&default_branch)?;
+        if !self.remote_branch_exists(&default_remote_ref)? {
+            return Err(GwtError::Git(format!(
+                "remote default branch is not available locally after fetch: {default_remote_ref}"
+            )));
+        }
+
+        self.create_remote_branch_from_base(&default_remote_ref, "develop")?;
+        if !self.remote_branch_exists("origin/develop")? {
+            return Err(GwtError::Git(
+                "failed to create and fetch origin/develop".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn remote_default_branch(&self) -> Result<String> {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["ls-remote", "--symref", "origin", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("ls-remote origin HEAD: {e}")))?;
+
+        if output.status.success() {
+            if let Some(branch) = parse_ls_remote_head_symref(&output.stdout) {
+                return Ok(branch);
+            }
+        }
+
+        let local_head = gwt_core::process::hidden_command("git")
+            .args([
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("symbolic-ref origin/HEAD: {e}")))?;
+        if local_head.status.success() {
+            let branch = String::from_utf8_lossy(&local_head.stdout)
+                .trim()
+                .strip_prefix("origin/")
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    String::from_utf8_lossy(&local_head.stdout)
+                        .trim()
+                        .to_string()
+                });
+            if !branch.is_empty() {
+                return Ok(branch);
+            }
+        }
+
+        Err(GwtError::Git(format!(
+            "failed to resolve remote default branch: {}",
+            command_stderr(&output)
+        )))
+    }
+
+    fn fetch_remote_branch_tracking_ref(&self, branch: &str) -> Result<()> {
+        if branch.trim().is_empty() {
+            return Err(GwtError::Git("remote branch name is empty".to_string()));
+        }
+        let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
+        let output = gwt_core::process::hidden_command("git")
+            .args(["fetch", "origin", "--prune", &refspec])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("fetch origin {refspec}: {e}")))?;
+
+        if !output.status.success() {
+            return Err(GwtError::Git(format!(
+                "fetch origin {refspec}: {}",
+                command_stderr(&output)
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Return whether a remote-tracking branch exists.
     ///
     /// Accepts `origin/<name>` or `refs/remotes/origin/<name>`.
@@ -152,6 +248,9 @@ impl WorktreeManager {
     /// Create `origin/<new_branch>` from a remote base reference.
     ///
     /// `base_remote_ref` must be `origin/<name>` or `refs/remotes/origin/<name>`.
+    /// After a successful push, the corresponding remote-tracking ref is
+    /// fetched explicitly so single-branch or freshly-normalized clones can
+    /// materialize the branch immediately.
     pub fn create_remote_branch_from_base(
         &self,
         base_remote_ref: &str,
@@ -170,6 +269,7 @@ impl WorktreeManager {
             return Err(GwtError::Git(stderr));
         }
 
+        self.fetch_remote_branch_tracking_ref(new_branch)?;
         Ok(())
     }
 
@@ -463,6 +563,28 @@ fn join_pipe_reader(
 fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
     if let Some(reader) = reader {
         let _ = reader.join();
+    }
+}
+
+fn parse_ls_remote_head_symref(stdout: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stdout).lines().find_map(|line| {
+        let (symref, target) = line.split_once('\t')?;
+        if target != "HEAD" {
+            return None;
+        }
+        symref
+            .strip_prefix("ref: refs/heads/")
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn command_stderr(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "git command failed without stderr".to_string()
+    } else {
+        stderr
     }
 }
 

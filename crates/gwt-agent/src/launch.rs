@@ -1146,6 +1146,18 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--disable" && pair[1] == "hooks"));
+        assert!(
+            !config
+                .args
+                .iter()
+                .any(|arg| arg.contains("bypass_hook_trust")),
+            "Codex launch must not bypass hook review globally: {:?}",
+            config.args
+        );
     }
 
     #[test]

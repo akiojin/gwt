@@ -146,10 +146,12 @@ mod migration;
 pub(crate) mod persist_dispatcher;
 mod profile;
 mod title_sync;
+mod ui_trace;
 mod window;
 mod wizard;
 pub use board::BoardPostRequest;
 use profile::ProfileSaveRequest;
+use ui_trace::save_ui_trace_to_log_dir;
 
 fn dispatch_agent_launch_success<F>(
     proxy: AppEventProxy,
@@ -406,6 +408,10 @@ impl LaunchWizardMemoryCache {
             branch_name,
             &self.sessions,
         )
+    }
+
+    fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
+        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
     }
 
     fn previous_profiles(&self, repo_path: &Path) -> gwt::LaunchWizardPreviousProfiles {
@@ -778,7 +784,7 @@ fn workspace_journal_entry_view_from_entry(
     }
 }
 
-fn workspace_work_item_view_from_item(
+pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkspaceWorkItem,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
@@ -1923,6 +1929,15 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
                 &tab.project_root,
             );
+            // SPEC-2359 US-37: One-shot rebuild of work_items.json from the
+            // event log. Recovers legacy installations whose work_items.json
+            // shows status=active/idle for items that already have a Done
+            // event in work_events.jsonl (caused by the old apply_event
+            // semantics that regressed Done on subsequent update events).
+            // Idempotent via `work_items.migration.json` marker.
+            let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
+                &tab.project_root,
+            );
         }
 
         let windows = self
@@ -2234,13 +2249,30 @@ impl AppRuntime {
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
-            FrontendEvent::UpdateSystemSettings { language } => {
-                self.system_settings_update_events(client_id, language)
-            }
+            FrontendEvent::UpdateSystemSettings {
+                language,
+                codex_trust_managed_hooks,
+            } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
+            FrontendEvent::SaveUiTrace { trace } => self.save_ui_trace_events(client_id, trace),
         }
+    }
+
+    fn save_ui_trace_events(
+        &self,
+        client_id: ClientId,
+        trace: UiTracePayload,
+    ) -> Vec<OutboundEvent> {
+        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+            Ok(result) => BackendEvent::UiTraceSaved {
+                path: result.path.display().to_string(),
+                entries: result.entries,
+            },
+            Err(message) => BackendEvent::UiTraceError { message },
+        };
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     /// SPEC-2359 US-41 (FR-153, FR-154, FR-155): handle
@@ -2329,6 +2361,7 @@ impl AppRuntime {
         &self,
         client_id: ClientId,
         language: String,
+        codex_trust_managed_hooks: Option<bool>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -2344,7 +2377,7 @@ impl AppRuntime {
         };
         vec![OutboundEvent::reply(
             client_id,
-            gwt::system_settings::update_event(&path, language),
+            gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
         )]
     }
 
@@ -2835,7 +2868,6 @@ impl AppRuntime {
             match gwt_git::clone_project_as_nested_bare(&url, &parent) {
                 Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
                     workspace_home: outcome.workspace_home,
-                    initial_worktree_path: outcome.initial_worktree_path,
                 }),
                 Err(error) => proxy.send(UserEvent::CloneProjectError {
                     message: error.to_string(),
@@ -2877,17 +2909,15 @@ impl AppRuntime {
     pub(crate) fn handle_clone_project_done(
         &mut self,
         workspace_home: &Path,
-        initial_worktree_path: &Path,
     ) -> Vec<OutboundEvent> {
-        match self.open_project_path(initial_worktree_path.to_path_buf()) {
+        match self.open_project_path(workspace_home.to_path_buf()) {
             Ok(wizard_closed) => {
-                self.remember_recent_clone_workspace_home(workspace_home, initial_worktree_path);
+                self.remember_recent_clone_workspace_home(workspace_home);
                 let _ = self.persist();
                 let mut events = vec![
                     self.workspace_state_broadcast(),
                     OutboundEvent::broadcast(BackendEvent::CloneProjectDone {
                         workspace_home: workspace_home.display().to_string(),
-                        initial_worktree_path: initial_worktree_path.display().to_string(),
                     }),
                 ];
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
@@ -2904,17 +2934,11 @@ impl AppRuntime {
         }
     }
 
-    fn remember_recent_clone_workspace_home(
-        &mut self,
-        workspace_home: &Path,
-        initial_worktree_path: &Path,
-    ) {
+    fn remember_recent_clone_workspace_home(&mut self, workspace_home: &Path) {
         let canonical_home =
             dunce::canonicalize(workspace_home).unwrap_or_else(|_| workspace_home.to_path_buf());
-        self.recent_projects.retain(|entry| {
-            !same_worktree_path(&entry.path, &canonical_home)
-                && !same_worktree_path(&entry.path, initial_worktree_path)
-        });
+        self.recent_projects
+            .retain(|entry| !same_worktree_path(&entry.path, &canonical_home));
         self.recent_projects.insert(
             0,
             gwt::RecentProjectEntry {
@@ -4531,7 +4555,7 @@ impl AppRuntime {
         }
         let _ = self.persist();
 
-        let mut events = vec![self.workspace_state_broadcast()];
+        let mut events = Vec::new();
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -4606,7 +4630,6 @@ impl AppRuntime {
             return events;
         }
         let _ = self.persist();
-        events.push(self.workspace_state_broadcast());
         if matches!(
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -5035,6 +5058,22 @@ impl AppRuntime {
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
             refresh_managed_gwt_assets_for_agent(&worktree_path, &config.agent_id)
                 .map_err(|error| error.to_string())?;
+            if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
+                &profile_config_path,
+                &worktree_path,
+                &config.agent_id,
+                config.runtime_target,
+            )? {
+                if !report.trusted_entries.is_empty() {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: format!(
+                            "Trusted {} gwt-managed Codex hooks.",
+                            report.trusted_entries.len()
+                        ),
+                    });
+                }
+            }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
@@ -6173,6 +6212,48 @@ fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEven
 #[cfg(not(unix))]
 fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
 
+fn maybe_register_codex_managed_hook_trust_for_launch(
+    profile_config_path: &Path,
+    worktree_path: &Path,
+    agent_id: &gwt_agent::AgentId,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
+    if agent_id != &gwt_agent::AgentId::Codex
+        || runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+
+    let settings = if profile_config_path.exists() {
+        gwt_config::Settings::load_from_path(profile_config_path)
+            .map_err(|error| error.to_string())?
+    } else {
+        gwt_config::Settings::default()
+    };
+    if settings.agent.codex_trust_managed_hooks != Some(true) {
+        return Ok(None);
+    }
+
+    let codex_config_path =
+        codex_config_path_for_profile_config(profile_config_path).ok_or_else(|| {
+            format!(
+                "cannot derive Codex config path from gwt config path {}",
+                profile_config_path.display()
+            )
+        })?;
+    gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
+    let gwt_config_dir = profile_config_path.parent()?;
+    if gwt_config_dir.file_name().and_then(|name| name.to_str()) != Some(".gwt") {
+        return None;
+    }
+    Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -6191,8 +6272,8 @@ mod tests {
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
-        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry,
-        WindowPreset, WindowProcessStatus, WorkspaceState,
+        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, UiTracePayload,
+        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -7789,7 +7870,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_runtime_status_broadcasts_workspace_before_terminal_status() {
+    fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -7806,21 +7887,22 @@ exit 0
             Some("boom".to_string()),
         );
 
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "non-structural runtime status changes must not force a full workspace_state"
+        );
         assert!(matches!(events[0].target, DispatchTarget::Broadcast));
         assert!(matches!(
-            events[0].event,
-            BackendEvent::WorkspaceState { .. }
+            &events[0].event,
+            BackendEvent::WindowState { window_id: id, state }
+                if id == &window_id && *state == WindowProcessStatus::Error
         ));
         assert!(matches!(events[1].target, DispatchTarget::Broadcast));
         assert!(matches!(
             &events[1].event,
-            BackendEvent::WindowState { window_id: id, state }
-                if id == &window_id && *state == WindowProcessStatus::Error
-        ));
-        assert!(matches!(events[2].target, DispatchTarget::Broadcast));
-        assert!(matches!(
-            &events[2].event,
             BackendEvent::TerminalStatus { id, status, detail }
                 if id == &window_id
                     && *status == WindowProcessStatus::Error
@@ -7875,7 +7957,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_open_launch_wizard_uses_branch_worktree_for_docker_context() {
+    fn app_runtime_open_launch_wizard_does_not_probe_branch_worktree_for_docker_context() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -7919,19 +8001,127 @@ exit 0
             .expect("open launch wizard");
 
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(wizard.context.worktree_path.is_none());
+        assert!(same_worktree_path(&wizard.context.quick_start_root, &repo));
+        let view = wizard.view();
+        assert!(!view.runtime_context_resolved);
+        assert!(!view.show_runtime_target);
+        assert!(view.selected_docker_service.is_none());
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        fs::write(
+            repo.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+        run_git(&repo, &["add", "README.md", "docker-compose.yml"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
+            .expect("open launch wizard");
+        assert!(
+            !runtime
+                .launch_wizard
+                .as_ref()
+                .expect("wizard")
+                .wizard
+                .view()
+                .runtime_context_resolved
+        );
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        ));
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
         assert!(wizard
             .context
             .worktree_path
             .as_ref()
-            .is_some_and(|path| same_worktree_path(path, &branch_worktree)));
-        assert!(same_worktree_path(
-            &wizard.context.quick_start_root,
-            &branch_worktree
-        ));
+            .is_some_and(|path| same_worktree_path(path, &repo)));
         let view = wizard.view();
+        assert!(view.runtime_context_resolved);
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker_context() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let mut session = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("app".to_string());
+        session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        session.save(&sessions_dir).expect("save session");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
+            .expect("open launch wizard");
+        let phase_one = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(!phase_one.runtime_context_resolved);
+        assert_eq!(phase_one.selected_runtime_target, "host");
+        assert!(!phase_one.show_runtime_target);
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(view.runtime_context_resolved);
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(!view.show_runtime_target);
+        assert!(view.selected_docker_service.is_none());
     }
 
     #[test]
@@ -8024,20 +8214,19 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_open_start_work_uses_active_project_without_creating_git_environment() {
+    fn app_runtime_open_start_work_ensures_remote_develop_without_creating_work_branch() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        run_git(&repo, &["init", "-q", "-b", "main"]);
-        run_git(&repo, &["config", "user.name", "Codex"]);
-        run_git(&repo, &["config", "user.email", "codex@example.com"]);
-        fs::write(repo.join("README.md"), "repo\n").expect("readme");
-        run_git(&repo, &["add", "README.md"]);
-        run_git(&repo, &["commit", "-qm", "init"]);
-        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let origin = init_git_clone_with_origin(&repo);
+        run_git(&repo, &["checkout", "-qb", "main"]);
+        run_git(&repo, &["push", "origin", "main"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&repo, &["checkout", "develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        run_git(&origin, &["branch", "-D", "develop"]);
 
         let tab = sample_project_tab(
             "tab-1",
@@ -8064,8 +8253,23 @@ exit 0
         assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
         assert_eq!(view.title, "Start Work");
         assert!(!view.show_branch_controls);
-        assert_eq!(view.selected_branch_name, "origin/main");
+        assert_eq!(view.selected_branch_name, "origin/develop");
         assert!(view.branch_name.starts_with("work/"));
+
+        let develop = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check origin/develop");
+        assert!(
+            develop.success(),
+            "opening Start Work should restore origin/develop from the remote default branch"
+        );
 
         let refs = gwt_core::process::hidden_command("git")
             .args([
@@ -10913,6 +11117,33 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_save_ui_trace_replies_with_artifact_path() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), vec![], None);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SaveUiTrace {
+                trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
+                    "session_id": "trace-1",
+                    "entries": [
+                        { "kind": "trace_start", "ts": 1 }
+                    ]
+                }))
+                .expect("typed ui trace payload"),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::UiTraceSaved { path, entries },
+            }] if client_id == "client-1" && *entries == 1 && Path::new(path).exists()
+        ));
+    }
+
+    #[test]
     fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
         let _env_lock = env_test_lock()
             .lock()
@@ -12834,6 +13065,15 @@ exit 0
 
         assert!(events
             .iter()
+            .any(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "non-structural runtime hook state changes must not force a full workspace_state"
+        );
+        assert!(events
+            .iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
         let tab = runtime.tab("tab-1").expect("tab");
         assert_eq!(
@@ -13292,20 +13532,28 @@ exit 0
     }
 
     #[test]
-    fn clone_project_done_opens_initial_worktree_and_broadcasts_done() {
+    fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         let temp = tempdir().expect("tempdir");
         let workspace_home = temp.path().join("sample");
-        let worktree = workspace_home.join("develop");
-        fs::create_dir_all(&worktree).expect("worktree dir");
-        init_repo(&worktree);
+        let bare_repo = workspace_home.join("sample.git");
+        fs::create_dir_all(&workspace_home).expect("workspace home");
+        let output = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().expect("bare path")])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
 
-        let events = runtime.handle_clone_project_done(&workspace_home, &worktree);
+        let events = runtime.handle_clone_project_done(&workspace_home);
 
         assert_eq!(runtime.tabs.len(), 1);
         assert_eq!(
             runtime.tabs[0].project_root,
-            dunce::canonicalize(&worktree).unwrap()
+            dunce::canonicalize(&workspace_home).unwrap()
         );
         assert_eq!(runtime.recent_projects.len(), 1);
         assert_eq!(
@@ -13318,10 +13566,8 @@ exit 0
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::CloneProjectDone {
                     workspace_home: emitted_workspace_home,
-                    initial_worktree_path,
                 },
             } if emitted_workspace_home == &workspace_home.display().to_string()
-                && initial_worktree_path == &worktree.display().to_string()
         )));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -13555,5 +13801,155 @@ exit 0
         let missing = logs_root.path().join("does-not-exist.log");
         let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
         assert!(resolved.is_none(), "missing files must be rejected");
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let mut settings = Settings::default();
+        settings.agent.codex_trust_managed_hooks = Some(true);
+        settings.save(&profile_config_path).unwrap();
+
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap()
+        .expect("enabled host Codex launch should register trust");
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        let codex_config_path = home.path().join(".codex/config.toml");
+        let config = fs::read_to_string(&codex_config_path).unwrap();
+        assert!(
+            config.contains("trusted_hash"),
+            "Codex config should contain trusted hashes, got: {config}"
+        );
+        assert_eq!(report.config_path, codex_config_path);
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_skips_without_explicit_host_codex_opt_in() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let unset = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(unset.is_none());
+
+        let mut settings = Settings::default();
+        settings.agent.codex_trust_managed_hooks = Some(false);
+        settings.save(&profile_config_path).unwrap();
+        let disabled = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(disabled.is_none());
+
+        settings.agent.codex_trust_managed_hooks = Some(true);
+        settings.save(&profile_config_path).unwrap();
+        let docker = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+        )
+        .unwrap();
+        assert!(docker.is_none());
+
+        let claude = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::ClaudeCode,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        )
+        .unwrap();
+        assert!(claude.is_none());
+
+        assert!(
+            !home.path().join(".codex/config.toml").exists(),
+            "skip paths must not create Codex config"
+        );
+    }
+
+    #[test]
+    fn workspace_view_for_tab_includes_done_work_items_from_disk() {
+        // SPEC-2359 US-37: workspace_state broadcast must carry work_items so
+        // the Workspace Overview Completed column renders without depending on
+        // the limited-trigger active_work_projection broadcast.
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        use chrono::TimeZone as _;
+        let completed_at = chrono::Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let work_item = gwt_core::workspace_projection::WorkspaceWorkItem {
+            id: "work-item-done".to_string(),
+            title: "Test Done Item".to_string(),
+            intent: None,
+            summary: None,
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            owner: None,
+            created_at: completed_at,
+            updated_at: completed_at,
+            completed_at: Some(completed_at),
+            agents: Vec::new(),
+            execution_containers: Vec::new(),
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+        };
+        let projection = gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
+            updated_at: completed_at,
+            work_items: vec![work_item],
+        };
+        let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+        fs::create_dir_all(work_items_path.parent().expect("parent dir"))
+            .expect("create workspace dir");
+        gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+            &work_items_path,
+            &projection,
+        )
+        .expect("save work items projection");
+
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(empty_workspace_state()),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+
+        let view = crate::runtime_support::workspace_view_for_tab(&tab);
+        assert!(
+            view.work_items
+                .iter()
+                .any(|item| item.id == "work-item-done" && item.status_category == "done"),
+            "WorkspaceView.work_items must include the Done work item persisted on disk so workspace_state broadcast renders the Completed column on startup; got {:?}",
+            view.work_items
+                .iter()
+                .map(|i| (i.id.clone(), i.status_category.clone()))
+                .collect::<Vec<_>>()
+        );
     }
 }

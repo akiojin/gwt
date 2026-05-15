@@ -190,6 +190,7 @@ pub struct ParsedProposal {
     pub(crate) title: String,
     pub(crate) status: ProposalStatus,
     pub(crate) next_question: Option<String>,
+    pub(crate) fields: Vec<(String, Option<String>)>,
 }
 
 pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
@@ -201,6 +202,9 @@ pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
             if let Some(current) = proposals.last_mut() {
                 if let Some(question) = parse_field_value(trimmed, "Next Question") {
                     current.next_question = question;
+                }
+                if let Some((field, value)) = parse_any_field_value(trimmed) {
+                    current.fields.push((field, value));
                 }
             }
             continue;
@@ -223,6 +227,7 @@ pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
             title: title.trim().to_string(),
             status: parse_status(status),
             next_question: None,
+            fields: Vec::new(),
         });
     }
 
@@ -250,6 +255,51 @@ fn parse_field_value(line: &str, field: &str) -> Option<Option<String>> {
     }
 }
 
+fn parse_any_field_value(line: &str) -> Option<(String, Option<String>)> {
+    let remainder = line.strip_prefix("- ")?;
+    let (field, value) = remainder.split_once(':')?;
+    let field = field.trim();
+    if field.is_empty() {
+        return None;
+    }
+    let value = value.trim();
+    Some((
+        field.to_string(),
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        },
+    ))
+}
+
+pub fn proposal_evidence_blocker_by_label(
+    worktree: &Path,
+    label: &str,
+) -> io::Result<Option<String>> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&discussion_path)?;
+    let proposals = parse_proposals(&content);
+    Ok(proposals
+        .iter()
+        .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+        .and_then(evidence_gate_blocker))
+}
+
+pub fn discussion_stop_blocker(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(discussion_path)?;
+    let proposals = parse_proposals(&content);
+    Ok(select_pending_discussion_blocker(&proposals))
+}
+
 fn select_pending_resume(proposals: &[ParsedProposal]) -> Option<PendingDiscussionResume> {
     proposals
         .iter()
@@ -266,6 +316,100 @@ fn select_pending_resume(proposals: &[ParsedProposal]) -> Option<PendingDiscussi
             proposal_title: proposal.title.clone(),
             next_question: proposal.next_question.clone(),
         })
+}
+
+fn select_pending_discussion_blocker(
+    proposals: &[ParsedProposal],
+) -> Option<PendingDiscussionResume> {
+    proposals
+        .iter()
+        .find(|proposal| {
+            proposal.status == ProposalStatus::Active && proposal.next_question.is_some()
+        })
+        .map(|proposal| PendingDiscussionResume {
+            proposal_label: proposal.label.clone(),
+            proposal_title: proposal.title.clone(),
+            next_question: proposal.next_question.clone(),
+        })
+        .or_else(|| {
+            proposals
+                .iter()
+                .filter(|proposal| proposal.status == ProposalStatus::Active)
+                .find_map(|proposal| {
+                    evidence_gate_blocker(proposal).map(|reason| PendingDiscussionResume {
+                        proposal_label: proposal.label.clone(),
+                        proposal_title: proposal.title.clone(),
+                        next_question: Some(reason),
+                    })
+                })
+        })
+}
+
+fn evidence_gate_blocker(proposal: &ParsedProposal) -> Option<String> {
+    let exit_blockers = field_value(proposal, "Exit Blockers");
+    if is_blocking_value(exit_blockers.as_deref()) {
+        return Some(format!(
+            "Exit Blockers remain unresolved: {}",
+            exit_blockers.unwrap_or_default()
+        ));
+    }
+
+    let required_fields = [
+        "Implementation Proof",
+        "SPEC/Issue Proof",
+        "Gap Check Proof",
+        "Official Docs Proof",
+        "External Research Proof",
+    ];
+    for field in required_fields {
+        let value = field_value(proposal, field);
+        if !is_acceptable_proof(value.as_deref()) {
+            return Some(format!("{field} is missing or incomplete"));
+        }
+    }
+
+    match field_value(proposal, "Evidence Gate") {
+        Some(value) if value.eq_ignore_ascii_case("complete") => None,
+        Some(value) => Some(format!("Evidence Gate is not complete: {value}")),
+        None => Some("Evidence Gate is missing".to_string()),
+    }
+}
+
+fn field_value(proposal: &ParsedProposal, field: &str) -> Option<String> {
+    proposal
+        .fields
+        .iter()
+        .rev()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(field))
+        .and_then(|(_, value)| value.clone())
+}
+
+fn is_acceptable_proof(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let lower = value.to_ascii_lowercase();
+    if let Some(reason) = lower.strip_prefix("not-applicable:") {
+        return !reason.trim().is_empty();
+    }
+    !is_placeholder_value(value)
+}
+
+fn is_blocking_value(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "none" | "resolved" | "complete" | "closed" | "n/a" | "not-applicable"
+    )
+}
+
+fn is_placeholder_value(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "tbd" | "todo" | "unknown" | "unverified" | "none" | "n/a" | "not-applicable"
+    )
 }
 
 #[cfg(test)]
@@ -487,6 +631,10 @@ mod tests {
             parse_field_value("- Next Question:", "Next Question"),
             Some(None)
         );
+        assert_eq!(
+            parse_any_field_value("- Evidence Gate: complete"),
+            Some(("Evidence Gate".to_string(), Some("complete".to_string())))
+        );
 
         let pending = select_pending_resume(&proposals).expect("pending proposal");
         assert_eq!(pending.proposal_label, "Proposal C");
@@ -494,5 +642,114 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn discussion_stop_blocker_reports_exit_blockers_without_next_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Evidence gap [active]\n\
+             - Summary: Root cause is still hypothetical.\n\
+             - Implementation Proof: crates/gwt/src/foo.rs inspected\n\
+             - SPEC/Issue Proof: SPEC-1935 checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: not-applicable: local-only behavior\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: root cause has no reproducer yet\n\
+             - Next Question:\n\
+             - Evidence Gate: open\n",
+        )
+        .unwrap();
+
+        let pending = discussion_stop_blocker(dir.path())
+            .unwrap()
+            .expect("exit blocker should keep discussion active");
+        assert_eq!(pending.proposal_label, "Proposal A");
+        assert!(pending
+            .next_question
+            .as_deref()
+            .unwrap_or("")
+            .contains("Exit Blockers remain unresolved"));
+    }
+
+    #[test]
+    fn discussion_stop_blocker_is_silent_when_evidence_gate_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Evidence complete [active]\n\
+             - Summary: Evidence is complete.\n\
+             - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected and focused tests run\n\
+             - SPEC/Issue Proof: SPEC-1935 spec/plan/tasks checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: Claude Code hooks docs checked\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: none\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+        assert_eq!(
+            proposal_evidence_blocker_by_label(dir.path(), "Proposal A").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn proposal_evidence_blocker_reports_missing_proofs() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Missing proof [active]\n\
+             - Summary: Missing proof.\n\
+             - Exit Blockers: none\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        let blocker = proposal_evidence_blocker_by_label(dir.path(), "Proposal A")
+            .unwrap()
+            .expect("missing proof should block resolve");
+        assert!(blocker.contains("Implementation Proof"));
+    }
+
+    #[test]
+    fn proposal_evidence_blocker_rejects_not_applicable_without_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Empty not applicable [active]\n\
+             - Summary: Missing proof reason.\n\
+             - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected\n\
+             - SPEC/Issue Proof: SPEC-1935 checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: not-applicable:\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: none\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        let blocker = proposal_evidence_blocker_by_label(dir.path(), "Proposal A")
+            .unwrap()
+            .expect("empty not-applicable reason should block resolve");
+        assert!(blocker.contains("Official Docs Proof"));
     }
 }

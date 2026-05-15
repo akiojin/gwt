@@ -91,6 +91,12 @@ pub fn index_status_controller_js() -> &'static str {
     include_str!("../web/index-status-controller.js")
 }
 
+// Issue #2698 — stable project tab renderer. Keeps tab DOM keyed by project
+// tab id so status-only workspace refreshes do not rebuild the whole tab strip.
+pub fn project_tabs_renderer_js() -> &'static str {
+    include_str!("../web/project-tabs-renderer.js")
+}
+
 // SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
 pub fn index_settings_panel_js() -> &'static str {
     include_str!("../web/index-settings-panel.js")
@@ -133,6 +139,22 @@ pub fn clone_modal_focus_guard_js() -> &'static str {
 // re-render storm.
 pub fn viewport_persist_throttle_js() -> &'static str {
     include_str!("../web/viewport-persist-throttle.js")
+}
+
+// Issue #2698 — viewport sync guard. Protects in-flight local pan/zoom from
+// stale workspace_state echoes while still allowing project-tab scope changes.
+pub fn viewport_sync_js() -> &'static str {
+    include_str!("../web/viewport-sync.js")
+}
+
+// Issue #2698 follow-up — browser-side metadata trace profiler for diagnosing
+// pointer delivery, rAF delay, and render hotspots without terminal contents.
+pub fn ui_trace_profiler_js() -> &'static str {
+    include_str!("../web/ui-trace-profiler.js")
+}
+
+pub fn ui_trace_wiring_js() -> &'static str {
+    include_str!("../web/ui-trace-wiring.js")
 }
 
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
@@ -212,6 +234,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         marker: "aggregateProjectTabDotState",
     },
     RootJsModuleAsset {
+        path: "/project-tabs-renderer.js",
+        source: project_tabs_renderer_js,
+        marker: "renderProjectTabs",
+    },
+    RootJsModuleAsset {
         path: "/index-settings-panel.js",
         source: index_settings_panel_js,
         marker: "renderIndexSettingsPanel",
@@ -245,6 +272,21 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/viewport-persist-throttle.js",
         source: viewport_persist_throttle_js,
         marker: "createViewportPersistThrottle",
+    },
+    RootJsModuleAsset {
+        path: "/viewport-sync.js",
+        source: viewport_sync_js,
+        marker: "createViewportSyncState",
+    },
+    RootJsModuleAsset {
+        path: "/ui-trace-profiler.js",
+        source: ui_trace_profiler_js,
+        marker: "createUiTraceProfiler",
+    },
+    RootJsModuleAsset {
+        path: "/ui-trace-wiring.js",
+        source: ui_trace_wiring_js,
+        marker: "createUiTraceWiring",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
@@ -416,8 +458,8 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_js, index_html, styles_components_css, terminal_context_menu_js, xterm_css,
-        xterm_fit_js, xterm_js,
+        app_js, index_html, project_tabs_renderer_js, styles_components_css,
+        terminal_context_menu_js, xterm_css, xterm_fit_js, xterm_js,
     };
     use super::{
         app_js_handler, index_handler, styles_components_css_handler, styles_tokens_css_handler,
@@ -1155,7 +1197,7 @@ mod tests {
     fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
         let js = app_js();
         let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
+            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);[\s\S]*?\}"#,
         )
         .expect("valid regex");
 
@@ -1219,6 +1261,7 @@ mod tests {
     fn embedded_web_project_bar_omits_index_status_badge() {
         let html = frontend_styles_bundle();
         let js = app_js();
+        let project_tabs_js = project_tabs_renderer_js();
 
         // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
         // surface and its supporting controller / progress-toast wiring must
@@ -1256,7 +1299,8 @@ mod tests {
             "SPEC-1939 T-IDX-106: Settings window must keep the Index tab + panel",
         );
         assert!(
-            html.contains(".project-tab-dot") && js.contains("aggregateProjectTabDotState(status)"),
+            html.contains(".project-tab-dot")
+                && project_tabs_js.contains("aggregateProjectTabDotState(status)"),
             "SPEC-1939 T-IDX-107: project tab must keep its aggregated worktree health dot",
         );
     }
@@ -1571,8 +1615,13 @@ mod tests {
     #[test]
     fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
         let html = frontend_bundle_source();
+        // SPEC-2359 US-37: workspace_state case wraps in a block to
+        // populate the Workspace Overview Completed column from
+        // event.workspace.tabs[active].workspace.work_items before
+        // breaking. Tolerate the optional `{` and additional code
+        // between renderAppState and break.
         let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);\s*break;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
 
@@ -2460,8 +2509,13 @@ mod tests {
     #[test]
     fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         let html = frontend_bundle_source();
+        // SPEC-2359 US-37: workspace_state case wraps in a block to
+        // populate the Workspace Overview Completed column from
+        // event.workspace.tabs[active].workspace.work_items. Tolerate
+        // the optional `{` and additional code between renderAppState
+        // and break.
         let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);\s*break;"#,
+            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
         )
         .expect("valid regex");
         let terminal_event = regex::Regex::new(

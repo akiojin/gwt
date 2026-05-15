@@ -28,6 +28,10 @@
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
+      import {
+        renderProjectTabs as renderProjectTabsView,
+        updateProjectTabDot as updateProjectTabDotView,
+      } from "/project-tabs-renderer.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -49,7 +53,10 @@
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
+      import { createViewportSyncState } from "/viewport-sync.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
+      import { createUiTraceProfiler } from "/ui-trace-profiler.js";
+      import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -73,6 +80,8 @@
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
       };
+
+      const uiTraceProfiler = createUiTraceProfiler();
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -309,6 +318,9 @@
       let resizeState = null;
       const geometrySyncState = createGeometrySyncState();
       let viewport = { x: 0, y: 0, zoom: 1 };
+      const viewportSyncState = createViewportSyncState({
+        initialViewport: viewport,
+      });
       let viewportRasterTimer = null;
       let launchWizard = null;
       let launchWizardOpenError = null;
@@ -359,6 +371,8 @@
           }
           if (deferred.kind === "system_settings") {
             systemSettingsState.language = deferred.language || "auto";
+            systemSettingsState.codexTrustManagedHooks =
+              deferred.codex_trust_managed_hooks === true;
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -370,7 +384,9 @@
           } else if (deferred.kind === "system_settings_updated") {
             systemSettingsState.language = deferred.language
               || systemSettingsState.language;
-            systemSettingsState.statusMessage = `Saved language: ${deferred.language}.`;
+            systemSettingsState.codexTrustManagedHooks =
+              deferred.codex_trust_managed_hooks === true;
+            systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
             systemSettingsState.statusMessage = deferred.message
@@ -526,10 +542,21 @@
         pendingMessages.push(message);
       }
 
+      const uiTraceWiring = createUiTraceWiring({
+        profiler: uiTraceProfiler,
+        send,
+        alert: (message) => window.alert(message),
+        log: (message) => console.info(message),
+      });
+      const traceUi = uiTraceWiring.traceUi;
+      const tracePointer = uiTraceWiring.tracePointer;
+      const traceMeasure = uiTraceWiring.traceMeasure;
+
       // SPEC-2359 US-41 Phase 8b: surface Workspace projection prune through
       // the Command Palette. The dry-run entry previews the plan; the apply
       // entry confirms before mutating projection files on disk.
       if (window.__operatorShell?.palette) {
+        uiTraceWiring.registerPalette(window.__operatorShell.palette);
         window.__operatorShell.palette.register({
           id: "workspace-projection-prune-dry-run",
           label: "Workspace: Prune Stale Projections (dry-run)",
@@ -612,6 +639,9 @@
               return;
             }
             receive(event);
+          },
+          onTrace: (kind, fields) => {
+            traceUi(kind, fields);
           },
         });
         setConnectionState(true);
@@ -1135,66 +1165,21 @@
       }
 
       function renderProjectTabs() {
-        projectTabs.innerHTML = "";
-        for (const tab of appState.tabs || []) {
-          const button = document.createElement("div");
-          button.className = "project-tab";
-          button.title = tab.project_root;
-          button.dataset.projectRoot = tab.project_root || "";
-          button.setAttribute("role", "button");
-          button.tabIndex = 0;
-          // SPEC-2356 — aria-current="page" announces the active tab to
-          // screen readers without changing the role semantics. Inactive
-          // tabs explicitly clear the attribute so the previously-active
-          // tab doesn't keep the marker after a switch.
-          if (tab.id === appState.active_tab_id) {
-            button.classList.add("active");
-            button.setAttribute("aria-current", "page");
-          } else {
-            button.removeAttribute("aria-current");
-          }
-          // SPEC-1939 T-IDX-107 — aggregated worktree health dot precedes
-          // the tab label.
-          const dot = document.createElement("span");
-          dot.className = "project-tab-dot";
-          dot.dataset.role = "project-tab-dot";
-          dot.dataset.state = "";
-          dot.setAttribute("aria-hidden", "true");
-          button.appendChild(dot);
-          const labelEl = document.createElement("span");
-          labelEl.className = "project-tab-label";
-          labelEl.textContent = tab.title;
-          button.appendChild(labelEl);
-          const closeEl = document.createElement("button");
-          closeEl.className = "project-tab-close";
-          closeEl.type = "button";
-          closeEl.setAttribute("aria-label", `Close ${tab.title}`);
-          closeEl.textContent = "×";
-          button.appendChild(closeEl);
-          updateProjectTabDot(button, tab.project_root);
-          button.addEventListener("click", () => {
-            send({ kind: "select_project_tab", tab_id: tab.id });
-          });
-          button.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              send({ kind: "select_project_tab", tab_id: tab.id });
-            }
-          });
-          closeEl.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "close_project_tab", tab_id: tab.id });
-          });
-          projectTabs.appendChild(button);
-        }
+        renderProjectTabsView({
+          projectTabs,
+          tabs: appState.tabs || [],
+          activeTabId: appState.active_tab_id,
+          indexStatusByProjectRoot,
+          aggregateProjectTabDotState,
+          send,
+        });
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
-        const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
-        if (!dot) return;
-        const status = (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
-        const dotState = aggregateProjectTabDotState(status);
-        dot.dataset.state = dotState;
+        updateProjectTabDotView(buttonEl, projectRoot, {
+          indexStatusByProjectRoot,
+          aggregateProjectTabDotState,
+        });
       }
 
       function refreshProjectTabDots() {
@@ -1394,26 +1379,32 @@
 
       function renderAppState(nextState) {
         dismissOperatorBriefing();
-        appState = nextState || {
-          app_version: "",
-          tabs: [],
-          active_tab_id: null,
-          recent_projects: [],
-        };
-        setVersionState(appState.app_version, versionState.latest);
-        renderProjectTabs();
-        renderProjectPicker();
-        updateActionAvailability();
-        const tab = activeProjectTab();
-        renderProjectOnboarding(tab);
-        renderWorkspace(tab?.workspace || emptyWorkspace());
-        const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
-        if (nextWorkspaceId !== currentProjectWorkspaceId) {
-          currentProjectWorkspaceId = nextWorkspaceId;
-          refreshBoardCurrentWorkspaceId();
-        }
-        renderWindowList();
-        renderActiveWorkOverview();
+        return traceMeasure(
+          UI_TRACE_EVENT.renderAppState,
+          { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
+          () => {
+            appState = nextState || {
+              app_version: "",
+              tabs: [],
+              active_tab_id: null,
+              recent_projects: [],
+            };
+            setVersionState(appState.app_version, versionState.latest);
+            renderProjectTabs();
+            renderProjectPicker();
+            updateActionAvailability();
+            const tab = activeProjectTab();
+            renderProjectOnboarding(tab);
+            renderWorkspace(tab?.workspace || emptyWorkspace());
+            const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
+            if (nextWorkspaceId !== currentProjectWorkspaceId) {
+              currentProjectWorkspaceId = nextWorkspaceId;
+              refreshBoardCurrentWorkspaceId();
+            }
+            renderWindowList();
+            renderActiveWorkOverview();
+          },
+        );
       }
 
       let presetModalFocusReturn = null;
@@ -1663,6 +1654,11 @@
           stage.style.willChange = "auto";
           viewportRasterTimer = null;
         }, 300);
+        traceUi(UI_TRACE_EVENT.applyViewport, {
+          x: viewport.x,
+          y: viewport.y,
+          zoom: viewport.zoom,
+        });
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -1696,6 +1692,16 @@
         persistViewportThrottle.flushNow();
       }
 
+      function activeViewportScopeKey() {
+        return appState?.active_tab_id || "";
+      }
+
+      function recordLocalViewportEdit() {
+        viewport = viewportSyncState.applyLocalViewport(viewport, {
+          scopeKey: activeViewportScopeKey(),
+        });
+      }
+
       function canvasCenterAnchor() {
         const rect = canvas.getBoundingClientRect();
         return {
@@ -1711,6 +1717,7 @@
         viewport.x = anchorX - worldX * clampedZoom;
         viewport.y = anchorY - worldY * clampedZoom;
         viewport.zoom = clampedZoom;
+        recordLocalViewportEdit();
         applyViewport();
         persistViewport();
       }
@@ -1798,22 +1805,28 @@
       }
 
       function fitTerminal(windowId, persist = false) {
-        const runtime = terminalMap.get(windowId);
-        const element = windowMap.get(windowId);
-        if (!runtime || !element) {
-          return;
-        }
-        if (!canRefreshTerminalViewport(windowId)) {
-          if (persist) {
+        return traceMeasure(
+          UI_TRACE_EVENT.fitTerminal,
+          { window_id: windowId, persist },
+          () => {
+            const runtime = terminalMap.get(windowId);
+            const element = windowMap.get(windowId);
+            if (!runtime || !element) {
+              return;
+            }
+            if (!canRefreshTerminalViewport(windowId)) {
+              if (persist) {
+                sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+              }
+              return;
+            }
+            runtime.fitAddon.fit();
+            if (!persist) {
+              return;
+            }
             sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
           }
-          return;
-        }
-        runtime.fitAddon.fit();
-        if (!persist) {
-          return;
-        }
-        sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+        );
       }
 
       function scheduleTerminalResizeFit(windowId) {
@@ -1881,11 +1894,22 @@
           return;
         }
         const pointerId = resizeState.pointerId;
+        const windowId = resizeState.id;
+        const scheduledAt = performance.now();
+        traceUi(UI_TRACE_EVENT.resizePointermoveFrameScheduled, {
+          window_id: windowId,
+          pointer_id: pointerId,
+        });
         resizeState.applyFrame = requestAnimationFrame(() => {
           if (!resizeState || resizeState.pointerId !== pointerId) {
             return;
           }
           resizeState.applyFrame = null;
+          traceUi(UI_TRACE_EVENT.resizePointermoveFrame, {
+            window_id: windowId,
+            pointer_id: pointerId,
+            delay_ms: performance.now() - scheduledAt,
+          });
           applyResizePointermove(resizeState);
           scheduleTerminalResizeFit(resizeState.id);
         });
@@ -1908,14 +1932,24 @@
         }
         const x = state.latestClientX ?? state.startX;
         const y = state.latestClientY ?? state.startY;
-        element.style.width = `${clamp(
+        const width = clamp(
           state.width + (x - state.startX) / viewport.zoom,
           420,
-        )}px`;
-        element.style.height = `${clamp(
+        );
+        const height = clamp(
           state.height + (y - state.startY) / viewport.zoom,
           260,
-        )}px`;
+        );
+        element.style.width = `${width}px`;
+        element.style.height = `${height}px`;
+        traceUi(UI_TRACE_EVENT.resizePointermoveApply, {
+          window_id: state.id,
+          pointer_id: state.pointerId,
+          client_x: x,
+          client_y: y,
+          width,
+          height,
+        });
       }
 
       // SPEC-2014 Phase C1: maximum wall time (in ms) a single resize gesture
@@ -2484,61 +2518,67 @@
       }
 
       function applyStatus(windowId, status, detail) {
-        const windowData = workspaceWindowById(windowId);
-        const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
-        windowRuntimeStateMap.set(windowId, runtimeState);
-        if (detail) {
-          detailMap.set(windowId, detail);
-        } else if (runtimeState === "running" || runtimeState === "waiting") {
-          detailMap.delete(windowId);
-        }
-        const element = windowMap.get(windowId);
-        if (!element) {
-          renderWindowList();
-          return;
-        }
-        const chip = element.querySelector(".status-chip");
-        const label = element.querySelector(".status-label");
-        const overlay = element.querySelector(".terminal-overlay");
-        const runtimeChip = chip;
-        runtimeChip.hidden = !shouldShowRuntimeStatus(windowData);
-        chip.classList.remove(
-          "starting",
-          "running",
-          "ready",
-          "waiting",
-          "stopped",
-          "exited",
-          "error",
+        return traceMeasure(
+          UI_TRACE_EVENT.applyStatus,
+          { window_id: windowId, status },
+          () => {
+            const windowData = workspaceWindowById(windowId);
+            const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+            windowRuntimeStateMap.set(windowId, runtimeState);
+            if (detail) {
+              detailMap.set(windowId, detail);
+            } else if (runtimeState === "running" || runtimeState === "waiting") {
+              detailMap.delete(windowId);
+            }
+            const element = windowMap.get(windowId);
+            if (!element) {
+              renderWindowList();
+              return;
+            }
+            const chip = element.querySelector(".status-chip");
+            const label = element.querySelector(".status-label");
+            const overlay = element.querySelector(".terminal-overlay");
+            const runtimeChip = chip;
+            runtimeChip.hidden = !shouldShowRuntimeStatus(windowData);
+            chip.classList.remove(
+              "starting",
+              "running",
+              "ready",
+              "waiting",
+              "stopped",
+              "exited",
+              "error",
+            );
+            chip.classList.add(runtimeState);
+            // SPEC-2356 — Living Telemetry: project the runtime state onto a stable
+            // `data-agent-state` attribute the components.css layer animates.
+            element.dataset.agentState = mapAgentTelemetryState(runtimeState);
+            recomputeOperatorTelemetry();
+            label.textContent = windowRuntimeLabel(runtimeState);
+            const effectiveDetail = detailMap.get(windowId);
+            if (overlay) {
+              const messageEl = overlay.querySelector(".overlay-message");
+              if (messageEl) {
+                messageEl.textContent = effectiveDetail || "";
+              } else {
+                overlay.textContent = effectiveDetail || "";
+              }
+              updateTerminalOverlayCopyState(overlay);
+              overlay.classList.toggle(
+                "visible",
+                runtimeState === "error" ||
+                  runtimeState === "stopped" ||
+                  (runtimeState === "running" && Boolean(effectiveDetail)),
+              );
+              if (runtimeState === "running" && Boolean(effectiveDetail)) {
+                startSpinnerAnimation(overlay);
+              } else {
+                stopSpinnerAnimation(overlay);
+              }
+            }
+            renderWindowList();
+          },
         );
-        chip.classList.add(runtimeState);
-        // SPEC-2356 — Living Telemetry: project the runtime state onto a stable
-        // `data-agent-state` attribute the components.css layer animates.
-        element.dataset.agentState = mapAgentTelemetryState(runtimeState);
-        recomputeOperatorTelemetry();
-        label.textContent = windowRuntimeLabel(runtimeState);
-        const effectiveDetail = detailMap.get(windowId);
-        if (overlay) {
-          const messageEl = overlay.querySelector(".overlay-message");
-          if (messageEl) {
-            messageEl.textContent = effectiveDetail || "";
-          } else {
-            overlay.textContent = effectiveDetail || "";
-          }
-          updateTerminalOverlayCopyState(overlay);
-          overlay.classList.toggle(
-            "visible",
-            runtimeState === "error" ||
-              runtimeState === "stopped" ||
-              (runtimeState === "running" && Boolean(effectiveDetail)),
-          );
-          if (runtimeState === "running" && Boolean(effectiveDetail)) {
-            startSpinnerAnimation(overlay);
-          } else {
-            stopSpinnerAnimation(overlay);
-          }
-        }
-        renderWindowList();
       }
 
       function stopSpinnerAnimation(overlay) {
@@ -3179,26 +3219,32 @@
       }
 
       function writeOutput(windowId, base64) {
-        const runtime = terminalMap.get(windowId);
-        if (!runtime) {
-          const queue = pendingOutputMap.get(windowId) || [];
-          queue.push(base64);
-          pendingOutputMap.set(windowId, queue);
-          return;
-        }
-        // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
-        // completed its initial fit, hold the chunk in the runtime's
-        // deferred queue. The createTerminalRuntime rAF flushes this
-        // queue after the activation sequence so writes land at the
-        // real cols/rows instead of xterm's default 80×24 grid.
-        if (runtime.isReady === false) {
-          runtime.deferredWrites.push(base64);
-          return;
-        }
-        const decoder = decoderMap.get(windowId);
-        runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
-          scheduleTerminalViewportRefresh(windowId);
-        });
+        return traceMeasure(
+          UI_TRACE_EVENT.writeOutput,
+          { window_id: windowId, bytes_base64: base64 ? base64.length : 0 },
+          () => {
+            const runtime = terminalMap.get(windowId);
+            if (!runtime) {
+              const queue = pendingOutputMap.get(windowId) || [];
+              queue.push(base64);
+              pendingOutputMap.set(windowId, queue);
+              return;
+            }
+            // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
+            // completed its initial fit, hold the chunk in the runtime's
+            // deferred queue. The createTerminalRuntime rAF flushes this
+            // queue after the activation sequence so writes land at the
+            // real cols/rows instead of xterm's default 80×24 grid.
+            if (runtime.isReady === false) {
+              runtime.deferredWrites.push(base64);
+              return;
+            }
+            const decoder = decoderMap.get(windowId);
+            runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
+              scheduleTerminalViewportRefresh(windowId);
+            });
+          },
+        );
       }
 
       function replaceTerminalSnapshot(windowId, base64) {
@@ -5334,9 +5380,11 @@
           }`;
         wizardSubmitButton.textContent = launchWizard.is_hydrating
           ? "Loading..."
-          : launchWizard.branch_mode === "create_new"
-            ? "Create and launch"
-            : "Launch";
+          : launchWizard.runtime_context_resolved === false
+            ? "Continue"
+            : launchWizard.branch_mode === "create_new"
+              ? "Create and launch"
+              : "Launch";
         wizardSubmitButton.disabled = Boolean(launchWizard.is_hydrating);
 
         if (launchWizard.error || launchWizard.hydration_error) {
@@ -7598,6 +7646,7 @@
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
         language: "auto",
+        codexTrustManagedHooks: false,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -7826,12 +7875,48 @@
           "Settings UI text and gwtd subcommands stay English.";
         section.appendChild(help);
 
+        const trustSection = createDiv("settings-section");
+        const trustLabel = document.createElement("label");
+        trustLabel.className = "settings-checkbox-label";
+        trustLabel.setAttribute("for", "settings-system-codex-hooks");
+
+        const trustCheckbox = document.createElement("input");
+        trustCheckbox.type = "checkbox";
+        trustCheckbox.className = "settings-checkbox";
+        trustCheckbox.id = "settings-system-codex-hooks";
+        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks === true;
+        trustCheckbox.addEventListener("change", (e) => {
+          const next = e.target.checked === true;
+          systemSettingsState.codexTrustManagedHooks = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({
+            kind: "update_system_settings",
+            language: systemSettingsState.language || "auto",
+            codex_trust_managed_hooks: next,
+          });
+        });
+
+        const trustText = document.createElement("span");
+        trustText.textContent = "Trust gwt-managed Codex hooks";
+        trustLabel.appendChild(trustCheckbox);
+        trustLabel.appendChild(trustText);
+        trustSection.appendChild(trustLabel);
+
+        const trustHelp = document.createElement("p");
+        trustHelp.className = "settings-help";
+        trustHelp.textContent =
+          "Registers only generated gwt hook commands in Codex hook trust state.";
+        trustSection.appendChild(trustHelp);
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
         section.appendChild(status);
 
         panel.appendChild(section);
+        panel.appendChild(trustSection);
         renderSystemPanelStatus(panel);
       }
 
@@ -8173,12 +8258,23 @@
               startedAt: performance.now(),
               stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),
             };
+            tracePointer(UI_TRACE_EVENT.pointerResizeStart, event, {
+              gesture: "resize",
+              accepted: true,
+              window_id: windowData.id,
+              base_geometry_revision: baseGeometryRevision,
+            });
             // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
             // hits while resize is active so pointer movements that cross
             // the screen edge do not steal focus mid-resize.
             document.documentElement.dataset.opResizeActive = "true";
             try {
               resizeHandle.setPointerCapture(event.pointerId);
+              tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
+                gesture: "resize",
+                accepted: true,
+                window_id: windowData.id,
+              });
             } catch (error) {
               // SPEC-2014 Phase C1: setPointerCapture is best-effort; on
               // Windows WebView2 it can throw when the pointer has already
@@ -8190,9 +8286,21 @@
                 "[resize] setPointerCapture failed, falling back to window-bound pointer events",
                 error,
               );
+              tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
+                gesture: "resize",
+                accepted: false,
+                reason: "set_pointer_capture_failed",
+                window_id: windowData.id,
+                error_name: error && error.name,
+              });
             }
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
+            tracePointer(UI_TRACE_EVENT.pointerLostCapture, event, {
+              gesture: "resize",
+              accepted: true,
+              window_id: windowData.id,
+            });
             finishWindowResize(event.pointerId);
           });
         }
@@ -8251,96 +8359,100 @@
       }
 
       function renderWorkspace(workspace) {
-        viewport = {
-          x: workspace.viewport.x,
-          y: workspace.viewport.y,
-          zoom: workspace.viewport.zoom,
-        };
-        applyViewport();
+        return traceMeasure(
+          UI_TRACE_EVENT.renderWorkspace,
+          { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
+          () => {
+            viewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+              scopeKey: activeViewportScopeKey(),
+            });
+            applyViewport();
 
-        const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
-        const ids = new Set(activeWindowIds);
-        const visibility = classifyProjectWindowVisibility({
-          activeWindowIds,
-          allProjectWindowIds: allProjectWindowIds(),
-          mountedWindowIds: windowMap.keys(),
-        });
-        for (const windowId of visibility.hidden) {
-          const element = windowMap.get(windowId);
-          applyVisibilityTransition({
-            element,
-            shouldHide: true,
-            hasTerminal: terminalMap.has(windowId),
-            onReveal: () => scheduleTerminalFocusActivation(windowId),
-          });
-        }
-        for (const windowId of visibility.removed) {
-          const element = windowMap.get(windowId);
-          if (!element) continue;
-          const runtime = terminalMap.get(windowId);
-          if (runtime && runtime.viewportRefreshFrame !== null) {
-            cancelAnimationFrame(runtime.viewportRefreshFrame);
-          }
-          if (runtime && runtime.activationFrame !== null) {
-            cancelAnimationFrame(runtime.activationFrame);
-          }
-          runtime?.cleanup?.();
-          runtime?.terminal.dispose();
-          terminalMap.delete(windowId);
-          decoderMap.delete(windowId);
-          detailMap.delete(windowId);
-          windowRuntimeStateMap.delete(windowId);
-          pendingOutputMap.delete(windowId);
-          pendingSnapshotMap.delete(windowId);
-          const profileState = profileStateMap.get(windowId);
-          if (profileState) {
-            clearProfileSaveTimer(profileState);
-          }
-          fileTreeStateMap.delete(windowId);
-          branchListStateMap.delete(windowId);
-          profileStateMap.delete(windowId);
-          boardStateMap.delete(windowId);
-          logStateMap.delete(windowId);
-          clearKnowledgeBridgeState(windowId);
-          workspaceKanbanSurface.deleteState(windowId);
-          if (branchCleanupWindowId === windowId) {
-            branchCleanupWindowId = null;
-            renderBranchCleanupModal();
-          }
-          clearLocalGeometryEdit(geometrySyncState, windowId);
-          element.remove();
-          windowMap.delete(windowId);
-        }
+            const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
+            const ids = new Set(activeWindowIds);
+            const visibility = classifyProjectWindowVisibility({
+              activeWindowIds,
+              allProjectWindowIds: allProjectWindowIds(),
+              mountedWindowIds: windowMap.keys(),
+            });
+            for (const windowId of visibility.hidden) {
+              const element = windowMap.get(windowId);
+              applyVisibilityTransition({
+                element,
+                shouldHide: true,
+                hasTerminal: terminalMap.has(windowId),
+                onReveal: () => scheduleTerminalFocusActivation(windowId),
+              });
+            }
+            for (const windowId of visibility.removed) {
+              const element = windowMap.get(windowId);
+              if (!element) continue;
+              const runtime = terminalMap.get(windowId);
+              if (runtime && runtime.viewportRefreshFrame !== null) {
+                cancelAnimationFrame(runtime.viewportRefreshFrame);
+              }
+              if (runtime && runtime.activationFrame !== null) {
+                cancelAnimationFrame(runtime.activationFrame);
+              }
+              runtime?.cleanup?.();
+              runtime?.terminal.dispose();
+              terminalMap.delete(windowId);
+              decoderMap.delete(windowId);
+              detailMap.delete(windowId);
+              windowRuntimeStateMap.delete(windowId);
+              pendingOutputMap.delete(windowId);
+              pendingSnapshotMap.delete(windowId);
+              const profileState = profileStateMap.get(windowId);
+              if (profileState) {
+                clearProfileSaveTimer(profileState);
+              }
+              fileTreeStateMap.delete(windowId);
+              branchListStateMap.delete(windowId);
+              profileStateMap.delete(windowId);
+              boardStateMap.delete(windowId);
+              logStateMap.delete(windowId);
+              clearKnowledgeBridgeState(windowId);
+              workspaceKanbanSurface.deleteState(windowId);
+              if (branchCleanupWindowId === windowId) {
+                branchCleanupWindowId = null;
+                renderBranchCleanupModal();
+              }
+              clearLocalGeometryEdit(geometrySyncState, windowId);
+              element.remove();
+              windowMap.delete(windowId);
+            }
 
-        // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-        // for tab-grouped terminal windows so the newly visible terminal
-        // gets fit + viewport refresh + focus on the same animation frame
-        // cycle. Without this, scrollback wheel input requires a manual
-        // OS-level resize before xterm picks up the new measurement. The
-        // transition logic lives in `terminal-viewport-reflow.js` so a
-        // behavior test (linkedom + element stub) can exercise the
-        // hidden-to-visible activation path directly.
-        for (const windowData of workspace.windows) {
-          ensureWindow(windowData);
-          const element = windowMap.get(windowData.id);
-          if (!element) continue;
-          applyVisibilityTransition({
-            element,
-            shouldHide: !visibleWindowData(windowData),
-            hasTerminal: terminalMap.has(windowData.id),
-            onReveal: () => scheduleTerminalFocusActivation(windowData.id),
-          });
-        }
+            // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+            // for tab-grouped terminal windows so the newly visible terminal
+            // gets fit + viewport refresh + focus on the same animation frame
+            // cycle. Without this, scrollback wheel input requires a manual
+            // OS-level resize before xterm picks up the new measurement. The
+            // transition logic lives in `terminal-viewport-reflow.js` so a
+            // behavior test (linkedom + element stub) can exercise the
+            // hidden-to-visible activation path directly.
+            for (const windowData of workspace.windows) {
+              ensureWindow(windowData);
+              const element = windowMap.get(windowData.id);
+              if (!element) continue;
+              applyVisibilityTransition({
+                element,
+                shouldHide: !visibleWindowData(windowData),
+                hasTerminal: terminalMap.has(windowData.id),
+                onReveal: () => scheduleTerminalFocusActivation(windowData.id),
+              });
+            }
 
-        requestAnimationFrame(syncMaximizedWindowsToViewport);
+            requestAnimationFrame(syncMaximizedWindowsToViewport);
 
-        const topmostId = topmostWindowId(workspace);
-        if (topmostId && ids.has(topmostId)) {
-          focusWindowLocally(topmostId);
-          scheduleTerminalFocusActivation(topmostId);
-        } else {
-          focusedId = null;
-        }
+            const topmostId = topmostWindowId(workspace);
+            if (topmostId && ids.has(topmostId)) {
+              focusWindowLocally(topmostId);
+              scheduleTerminalFocusActivation(topmostId);
+            } else {
+              focusedId = null;
+            }
+          },
+        );
       }
 
       const socketTransport = Object.freeze({
@@ -8464,10 +8576,42 @@
 
       function receive(event) {
         switch (event.kind) {
-          case "workspace_state":
+          case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            // SPEC-2359 US-37: populate the Workspace Overview Completed
+            // column directly from workspace_state because the
+            // active_work_projection broadcast only fires on tab switch,
+            // user event, title sync, and window ops. Without this, the
+            // Completed column stays empty on startup until the user
+            // happens to switch tabs.
+            const activeTabId = event.workspace && event.workspace.active_tab_id;
+            const activeTab = Array.isArray(event.workspace && event.workspace.tabs)
+              ? event.workspace.tabs.find((tab) => tab.id === activeTabId)
+              : null;
+            const tabWorkItems = activeTab && activeTab.workspace && Array.isArray(activeTab.workspace.work_items)
+              ? activeTab.workspace.work_items
+              : [];
+            if (tabWorkItems.length > 0) {
+              if (!activeWorkProjection) {
+                activeWorkProjection = {
+                  id: activeTabId || "active-tab",
+                  title: (activeTab && activeTab.title) || "Workspace",
+                  workspaces: tabWorkItems,
+                };
+              } else if (
+                !Array.isArray(activeWorkProjection.workspaces) ||
+                activeWorkProjection.workspaces.length === 0
+              ) {
+                activeWorkProjection = {
+                  ...activeWorkProjection,
+                  workspaces: tabWorkItems,
+                };
+              }
+              workspaceKanbanSurface.renderWindows();
+            }
             break;
+          }
           case "workspace_projection_prune_result": {
             // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
             // A richer Drawer surface lands in a follow-up; for now an alert
@@ -8486,6 +8630,14 @@
             window.alert(
               `Workspace Projection Prune error: ${event.message}`,
             );
+            break;
+          case "ui_trace_saved":
+            window.alert(
+              `UI trace saved\n${event.path}\nentries: ${event.entries}`,
+            );
+            break;
+          case "ui_trace_error":
+            window.alert(`UI trace error: ${event.message}`);
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
@@ -9142,6 +9294,8 @@
               break;
             }
             systemSettingsState.language = event.language || "auto";
+            systemSettingsState.codexTrustManagedHooks =
+              event.codex_trust_managed_hooks === true;
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -9162,7 +9316,9 @@
               break;
             }
             systemSettingsState.language = event.language || systemSettingsState.language;
-            systemSettingsState.statusMessage = `Saved language: ${event.language}.`;
+            systemSettingsState.codexTrustManagedHooks =
+              event.codex_trust_managed_hooks === true;
+            systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
             break;
@@ -9260,18 +9416,45 @@
       }
 
       window.addEventListener("pointermove", (event) => {
+        if (panState && panState.pointerId !== event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
+            gesture: "pan",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: panState.pointerId,
+          });
+        }
         if (panState && panState.pointerId === event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerPanMove, event, {
+            gesture: "pan",
+            accepted: true,
+          });
           viewport.x = panState.x + event.clientX - panState.startX;
           viewport.y = panState.y + event.clientY - panState.startY;
+          recordLocalViewportEdit();
           applyViewport();
           return;
         }
 
+        if (dragState && dragState.pointerId !== event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
+            gesture: "drag",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: dragState.pointerId,
+            window_id: dragState.id,
+          });
+        }
         if (dragState && dragState.pointerId === event.pointerId) {
           const element = windowMap.get(dragState.id);
           if (!element) {
             return;
           }
+          tracePointer(UI_TRACE_EVENT.pointerDragMove, event, {
+            gesture: "drag",
+            accepted: true,
+            window_id: dragState.id,
+          });
           const deltaX = (event.clientX - dragState.startX) / viewport.zoom;
           const deltaY = (event.clientY - dragState.startY) / viewport.zoom;
           if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
@@ -9286,6 +9469,15 @@
           return;
         }
 
+        if (resizeState && resizeState.pointerId !== event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerMoveIgnored, event, {
+            gesture: "resize",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: resizeState.pointerId,
+            window_id: resizeState.id,
+          });
+        }
         if (resizeState && resizeState.pointerId === event.pointerId) {
           // SPEC-2014 Phase C4: store the latest pointer coordinates and
           // batch the actual DOM mutation via requestAnimationFrame. The
@@ -9296,6 +9488,11 @@
           // surface as the resize freeze users reported requiring an app
           // restart. By coalescing to one apply per frame we keep the visual
           // responsiveness while letting WebView2 paint between updates.
+          tracePointer(UI_TRACE_EVENT.pointerResizeMove, event, {
+            gesture: "resize",
+            accepted: true,
+            window_id: resizeState.id,
+          });
           resizeState.latestClientX = event.clientX;
           resizeState.latestClientY = event.clientY;
           scheduleResizePointermoveApply();
@@ -9306,15 +9503,31 @@
 
       window.addEventListener("pointerup", (event) => {
         if (panState && panState.pointerId === event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerPanEnd, event, {
+            gesture: "pan",
+            accepted: true,
+          });
           canvas.classList.remove("panning");
           // Issue #2698 PR 2 (B1) — pan-end is a definitive commit
           // point. Flush the throttle so backend receives the final
           // viewport without a tail-debounce delay.
           flushPersistViewport();
           panState = null;
+        } else if (panState) {
+          tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
+            gesture: "pan",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: panState.pointerId,
+          });
         }
 
         if (dragState && dragState.pointerId === event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerDragEnd, event, {
+            gesture: "drag",
+            accepted: true,
+            window_id: dragState.id,
+          });
           if (dragState.moved) {
             dragState.dockTargetId = dragState.allowMove
               ? titlebarDockTargetAt(event, dragState.id)
@@ -9339,10 +9552,23 @@
             handleTitlebarClick(dragState.id);
           }
           dragState = null;
+        } else if (dragState) {
+          tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
+            gesture: "drag",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: dragState.pointerId,
+            window_id: dragState.id,
+          });
         }
 
         if (resizeState) {
           if (resizeState.pointerId === event.pointerId) {
+            tracePointer(UI_TRACE_EVENT.pointerResizeEnd, event, {
+              gesture: "resize",
+              accepted: true,
+              window_id: resizeState.id,
+            });
             finishWindowResize(event.pointerId);
           } else {
             // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
@@ -9358,15 +9584,51 @@
             console.warn(
               `[resize] window pointerup pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
             );
+            tracePointer(UI_TRACE_EVENT.pointerUpIgnored, event, {
+              gesture: "resize",
+              accepted: false,
+              reason: "pointer_id_mismatch_force_reset",
+              expected_pointer_id: resizeState.pointerId,
+              window_id: resizeState.id,
+            });
             forceResetResizeState("window pointerup pointerId mismatch");
           }
         }
       });
 
       window.addEventListener("pointercancel", (event) => {
+        if (panState) {
+          tracePointer(
+            panState.pointerId === event.pointerId
+              ? UI_TRACE_EVENT.pointerPanCancel
+              : UI_TRACE_EVENT.pointerCancelIgnored,
+            event,
+            {
+              gesture: "pan",
+              accepted: panState.pointerId === event.pointerId,
+              reason: panState.pointerId === event.pointerId
+                ? "pointer_cancel"
+                : "pointer_id_mismatch",
+              expected_pointer_id: panState.pointerId,
+            },
+          );
+        }
         if (dragState && dragState.pointerId === event.pointerId) {
+          tracePointer(UI_TRACE_EVENT.pointerDragCancel, event, {
+            gesture: "drag",
+            accepted: true,
+            window_id: dragState.id,
+          });
           clearTitlebarDockPreview();
           dragState = null;
+        } else if (dragState) {
+          tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {
+            gesture: "drag",
+            accepted: false,
+            reason: "pointer_id_mismatch",
+            expected_pointer_id: dragState.pointerId,
+            window_id: dragState.id,
+          });
         }
         if (resizeState && resizeState.pointerId !== event.pointerId) {
           // SPEC-2008 Phase 26.C / FR-059 — same pointerId-mismatch
@@ -9376,8 +9638,22 @@
           console.warn(
             `[resize] window pointercancel pointerId mismatch (resizeState.pointerId=${resizeState.pointerId}, event.pointerId=${event.pointerId}); forcing cleanup`,
           );
+          tracePointer(UI_TRACE_EVENT.pointerCancelIgnored, event, {
+            gesture: "resize",
+            accepted: false,
+            reason: "pointer_id_mismatch_force_reset",
+            expected_pointer_id: resizeState.pointerId,
+            window_id: resizeState.id,
+          });
           forceResetResizeState("window pointercancel pointerId mismatch");
           return;
+        }
+        if (resizeState) {
+          tracePointer(UI_TRACE_EVENT.pointerResizeCancel, event, {
+            gesture: "resize",
+            accepted: true,
+            window_id: resizeState.id,
+          });
         }
         finishWindowResize(event.pointerId);
       });
@@ -9405,8 +9681,29 @@
             x: viewport.x,
             y: viewport.y,
           };
+          tracePointer(UI_TRACE_EVENT.pointerPanStart, event, {
+            gesture: "pan",
+            accepted: true,
+            button_mode: "middle",
+          });
           canvas.classList.add("panning");
-          canvas.setPointerCapture(event.pointerId);
+          try {
+            canvas.setPointerCapture(event.pointerId);
+            tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
+              gesture: "pan",
+              accepted: true,
+              button_mode: "middle",
+            });
+          } catch (error) {
+            tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
+              gesture: "pan",
+              accepted: false,
+              reason: "set_pointer_capture_failed",
+              button_mode: "middle",
+              error_name: error && error.name,
+            });
+            throw error;
+          }
         },
         { capture: true },
       );
@@ -9417,6 +9714,11 @@
           return;
         }
         if (event.target !== canvas && event.target !== stage) {
+          tracePointer(UI_TRACE_EVENT.pointerDownIgnored, event, {
+            gesture: "pan",
+            accepted: false,
+            reason: "target_not_canvas",
+          });
           return;
         }
         panState = {
@@ -9426,8 +9728,29 @@
           x: viewport.x,
           y: viewport.y,
         };
+        tracePointer(UI_TRACE_EVENT.pointerPanStart, event, {
+          gesture: "pan",
+          accepted: true,
+          button_mode: "left",
+        });
         canvas.classList.add("panning");
-        canvas.setPointerCapture(event.pointerId);
+        try {
+          canvas.setPointerCapture(event.pointerId);
+          tracePointer(UI_TRACE_EVENT.pointerCaptureSet, event, {
+            gesture: "pan",
+            accepted: true,
+            button_mode: "left",
+          });
+        } catch (error) {
+          tracePointer(UI_TRACE_EVENT.pointerCaptureFailed, event, {
+            gesture: "pan",
+            accepted: false,
+            reason: "set_pointer_capture_failed",
+            button_mode: "left",
+            error_name: error && error.name,
+          });
+          throw error;
+        }
       });
 
       function eventTargetElement(target) {
@@ -9479,6 +9802,7 @@
           event.stopPropagation();
           viewport.x -= event.deltaX;
           viewport.y -= event.deltaY;
+          recordLocalViewportEdit();
           applyViewport();
           persistViewport();
         }

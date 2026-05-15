@@ -6,12 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 4] = [
-    "origin/develop",
-    START_WORK_REMOTE_HEAD_REF,
-    "origin/main",
-    "origin/master",
-];
+pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 1] = ["origin/develop"];
 pub const START_WORK_REMOTE_HEAD_REF: &str = "origin/HEAD";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartWorkError {
@@ -23,9 +18,7 @@ pub enum StartWorkError {
 impl std::fmt::Display for StartWorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingBaseBranch => f.write_str(
-                "No default base branch found (origin/develop, origin/HEAD, origin/main, origin/master)",
-            ),
+            Self::MissingBaseBranch => f.write_str("No default base branch found (origin/develop)"),
             Self::ReservationIo(error) => {
                 write!(f, "Failed to reserve Start Work branch name: {error}")
             }
@@ -104,6 +97,9 @@ pub fn resolve_start_work_base_branch(repo_path: &Path) -> Result<String, StartW
 /// from [`gwt_git::worktree::main_worktree_root`] or a tab-level cache
 /// (FR-PERF-003).
 pub fn resolve_start_work_base_branch_in(git_root: &Path) -> Result<String, StartWorkError> {
+    gwt_git::WorktreeManager::new(git_root)
+        .prepare_start_work_remote_develop()
+        .map_err(|error| StartWorkError::Lookup(error.to_string()))?;
     resolve_start_work_base_branch_with(|candidates| lookup_short_refs(git_root, candidates))
 }
 
@@ -252,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn start_work_base_branch_prefers_develop_before_remote_head() {
+    fn start_work_base_branch_uses_develop() {
         let existing = HashSet::from([
             "origin/HEAD".to_string(),
             "origin/develop".to_string(),
@@ -265,26 +261,25 @@ mod tests {
     }
 
     #[test]
-    fn start_work_base_branch_uses_remote_head_when_develop_is_missing() {
+    fn start_work_base_branch_reports_missing_when_develop_is_missing() {
         let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
-        let resolved = resolve_start_work_base_branch_with(|_| Ok(ok_existing(&existing)))
-            .expect("resolve base branch");
+        let error = resolve_start_work_base_branch_with(|_| Ok(ok_existing(&existing)))
+            .expect_err("missing base");
 
-        assert_eq!(resolved, "origin/HEAD");
+        assert_eq!(error, StartWorkError::MissingBaseBranch);
     }
 
     #[test]
-    fn start_work_base_branch_refalls_back_after_selected_develop_is_pruned() {
+    fn start_work_base_branch_does_not_refallback_after_selected_develop_is_pruned() {
         let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
         let resolved = refallback_start_work_base_branch_with(
             "work/20260507-0734",
             "origin/develop",
             |candidate| Ok::<_, std::convert::Infallible>(existing.contains(candidate)),
         )
-        .expect("refallback")
-        .expect("fallback base");
+        .expect("refallback");
 
-        assert_eq!(resolved, "origin/HEAD");
+        assert!(resolved.is_none());
     }
 
     #[test]
@@ -300,12 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn start_work_base_branch_falls_back_to_develop_main_master_order() {
+    fn start_work_base_branch_ignores_main_and_master() {
         let existing = HashSet::from(["origin/main".to_string(), "origin/master".to_string()]);
-        let resolved = resolve_start_work_base_branch_with(|_| Ok(ok_existing(&existing)))
-            .expect("resolve base branch");
+        let error = resolve_start_work_base_branch_with(|_| Ok(ok_existing(&existing)))
+            .expect_err("missing base");
 
-        assert_eq!(resolved, "origin/main");
+        assert_eq!(error, StartWorkError::MissingBaseBranch);
     }
 
     #[test]
@@ -356,10 +351,6 @@ mod tests {
 
     #[test]
     fn start_work_remote_tracking_ref_does_not_double_origin_prefix() {
-        assert_eq!(
-            remote_tracking_ref("origin/HEAD"),
-            "refs/remotes/origin/HEAD"
-        );
         assert_eq!(
             remote_tracking_ref("origin/develop"),
             "refs/remotes/origin/develop"

@@ -18,8 +18,8 @@ use gwt::{
     load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_agent,
     resolve_launch_spec, workspace_state_path, BackendEvent, BranchEntriesPhase, BranchListEntry,
     DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState,
-    LiveSessionEntry, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    LiveSessionEntry, ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -86,15 +86,14 @@ pub(crate) use launch_runtime::{
     resolve_launch_worktree_request,
 };
 pub(crate) use runtime_support::{
-    app_state_view_from_parts, attach_parent_console_for_cli, branch_worktree_path,
-    branch_worktree_path_for, close_window_from_workspace, combined_window_id, current_git_branch,
-    dedupe_recent_projects, fallback_project_target, first_available_worktree_path,
-    front_door_route, geometry_to_pty_size, knowledge_kind_for_preset, local_branch_exists,
-    normalize_active_tab_id, normalize_branch_name, origin_remote_ref,
-    prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
-    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
-    synthetic_branch_entry, usable_worktree_path_for_branch, workspace_view_for_tab,
-    worktrees_have_stale_branch_entry,
+    app_state_view_from_parts, attach_parent_console_for_cli, close_window_from_workspace,
+    combined_window_id, current_git_branch, dedupe_recent_projects, fallback_project_target,
+    first_available_worktree_path, front_door_route, geometry_to_pty_size,
+    knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
+    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
+    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
+    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
+    workspace_view_for_tab, worktrees_have_stale_branch_entry,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -679,7 +678,6 @@ enum UserEvent {
     },
     CloneProjectDone {
         workspace_home: PathBuf,
-        initial_worktree_path: PathBuf,
     },
     CloneProjectError {
         message: String,
@@ -2363,7 +2361,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 4);
+        assert_eq!(error_events.len(), 3);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -2373,17 +2371,17 @@ mod tests {
             Some("boom")
         );
         assert!(matches!(
-            error_events[1].event,
+            error_events[0].event,
             BackendEvent::ActiveWorkProjection { ref projection }
                 if projection.active_agents == 1 && projection.agents.len() == 1
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[1].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[3].event,
+            error_events[2].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
@@ -3211,15 +3209,15 @@ mod tests {
 
         let status_events =
             runtime.handle_runtime_status(shell_id.clone(), WindowProcessStatus::Error, None);
-        assert_eq!(status_events.len(), 3);
+        assert_eq!(status_events.len(), 2);
         assert!(!runtime.window_details.contains_key(&shell_id));
         assert!(matches!(
-            status_events[1].event,
+            status_events[0].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &shell_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            status_events[2].event,
+            status_events[1].event,
             BackendEvent::TerminalStatus { ref detail, .. } if detail.is_none()
         ));
 
@@ -4541,7 +4539,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_launch_worktree_refalls_back_when_start_work_develop_ref_is_stale() {
+    fn resolve_launch_worktree_recreates_remote_develop_when_start_work_ref_is_stale() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         let origin = init_git_clone_with_origin(&repo);
@@ -4593,11 +4591,25 @@ mod tests {
             &mut working_dir,
             &mut env_vars,
         )
-        .expect("stale Start Work base should refallback after fetch");
+        .expect("stale Start Work base should recreate origin/develop after fetch");
 
         let worktree = working_dir.expect("materialized worktree");
-        assert_eq!(base_branch.as_deref(), Some("origin/HEAD"));
+        assert_eq!(base_branch.as_deref(), Some("origin/develop"));
         assert!(worktree.exists());
+        let restored_develop = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check restored origin/develop");
+        assert!(
+            restored_develop.success(),
+            "origin/develop tracking ref must be restored"
+        );
         assert!(env_vars
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &worktree)));
@@ -5667,11 +5679,8 @@ fn main() -> wry::Result<()> {
                     BackendEvent::CloneProjectProgress { message },
                 )]);
             }
-            Event::UserEvent(UserEvent::CloneProjectDone {
-                workspace_home,
-                initial_worktree_path,
-            }) => {
-                let events = app.handle_clone_project_done(&workspace_home, &initial_worktree_path);
+            Event::UserEvent(UserEvent::CloneProjectDone { workspace_home }) => {
+                let events = app.handle_clone_project_done(&workspace_home);
                 board_projection_watchers.sync(&app, proxy.clone());
                 #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());

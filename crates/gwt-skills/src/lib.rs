@@ -1,6 +1,7 @@
 //! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
 pub mod assets;
+pub mod codex_hook_trust;
 pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
@@ -10,6 +11,10 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
+pub use codex_hook_trust::{
+    collect_codex_managed_hook_trust_entries, register_codex_managed_hook_trust,
+    CodexHookTrustEntry, CodexHookTrustReport,
+};
 pub use coordination_guidance::{
     generate_coordination_guidance, generate_coordination_guidance_for_claude,
     generate_coordination_guidance_for_codex,
@@ -809,6 +814,22 @@ mod tests {
                     && discussion_skill.contains("Coverage Checks")
                     && discussion_skill.contains("Exit Blockers"),
                 "expected discussion skill to define a depth gate with coverage and exit blocker tracking in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("## Evidence Gate")
+                    && discussion_skill.contains("Implementation Proof")
+                    && discussion_skill.contains("SPEC/Issue Proof")
+                    && discussion_skill.contains("Gap Check Proof")
+                    && discussion_skill.contains("Official Docs Proof")
+                    && discussion_skill.contains("External Research Proof")
+                    && discussion_skill.contains("Evidence Gate: complete"),
+                "expected discussion skill to require evidence proof fields in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("official documentation")
+                    && discussion_skill.contains("X search")
+                    && discussion_skill.contains("X API Search Posts"),
+                "expected discussion skill to require official docs and X research policy in {relative}"
             );
             assert!(
                 discussion_skill.contains("scope boundary")

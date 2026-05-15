@@ -363,6 +363,8 @@ pub enum FrontendEvent {
     /// [`BackendEvent::SystemSettingsError`] on failure.
     UpdateSystemSettings {
         language: String,
+        #[serde(default)]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
@@ -375,6 +377,66 @@ pub enum FrontendEvent {
         #[serde(default)]
         ids: Vec<String>,
     },
+    /// Diagnostics > Stop UI Trace: persist the browser-side metadata-only
+    /// trace payload as a project-scoped JSONL artifact. Backend replies with
+    /// [`BackendEvent::UiTraceSaved`] or [`BackendEvent::UiTraceError`].
+    SaveUiTrace {
+        trace: UiTracePayload,
+    },
+}
+
+/// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
+/// Trace. Top-level fields are typed so backend validation is explicit, while
+/// individual entries remain schema-flexible for low-friction diagnostics.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiTracePayload {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    entries: Option<Vec<UiTraceEntry>>,
+}
+
+impl UiTracePayload {
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn entries(&self) -> Result<&[UiTraceEntry], &'static str> {
+        self.entries
+            .as_deref()
+            .ok_or("trace payload missing entries array")
+    }
+}
+
+/// One trace entry. Non-object entries are preserved as invalid entries so the
+/// artifact can still be written and inspected instead of dropping the session.
+#[derive(Debug, Clone)]
+pub struct UiTraceEntry {
+    fields: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl UiTraceEntry {
+    pub fn field(&self, key: &str) -> Option<&serde_json::Value> {
+        self.fields.as_ref()?.get(key)
+    }
+
+    pub fn fields(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.fields.as_ref()
+    }
+}
+
+impl<'de> Deserialize<'de> for UiTraceEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let fields = match value {
+            serde_json::Value::Object(fields) => Some(fields),
+            _ => None,
+        };
+        Ok(Self { fields })
+    }
 }
 
 fn default_board_history_limit() -> usize {
@@ -385,6 +447,13 @@ fn default_board_history_limit() -> usize {
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
+    // SPEC-2359 US-37: Workspace Overview Completed カラムは
+    // active_work_projection broadcast に依存していたが、その broadcast
+    // は限定された trigger でしか走らないため起動直後に表示されない
+    // 問題があった。workspace_state は frequently broadcast されるので、
+    // 同 event に work_items を載せて broadcast invariant を 1 本化する。
+    #[serde(default)]
+    pub work_items: Vec<WorkspaceHistoryView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -725,7 +794,6 @@ pub enum BackendEvent {
     },
     CloneProjectDone {
         workspace_home: String,
-        initial_worktree_path: String,
     },
     CloneProjectError {
         message: String,
@@ -857,6 +925,8 @@ pub enum BackendEvent {
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -864,6 +934,8 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codex_trust_managed_hooks: Option<bool>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -886,6 +958,16 @@ pub enum BackendEvent {
     /// classify or apply the plan (e.g. unreadable projection file, IO error
     /// during delete).
     WorkspaceProjectionPruneError {
+        message: String,
+    },
+    /// Diagnostics trace artifact was written to the project log directory.
+    UiTraceSaved {
+        path: String,
+        entries: usize,
+    },
+    /// Diagnostics trace artifact could not be written or the payload was
+    /// malformed.
+    UiTraceError {
         message: String,
     },
 }
@@ -941,7 +1023,7 @@ mod tests {
 
     use super::{
         BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView,
+        ProfileSnapshotView, UiTracePayload,
     };
 
     #[test]
@@ -1784,5 +1866,67 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "workspace_projection_prune_error");
         assert_eq!(value["message"], "scan failed: permission denied");
+    }
+
+    #[test]
+    fn frontend_event_save_ui_trace_deserializes_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "save_ui_trace",
+            "trace": {
+                "session_id": "trace-1",
+                "entries": [
+                    { "kind": "trace_start", "ts": 1 }
+                ]
+            }
+        }))
+        .expect("deserialize save_ui_trace");
+        match event {
+            FrontendEvent::SaveUiTrace { trace } => {
+                assert_eq!(trace.session_id(), Some("trace-1"));
+                let entries = trace.entries().expect("entries");
+                assert_eq!(
+                    entries[0].field("kind").and_then(serde_json::Value::as_str),
+                    Some("trace_start")
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ui_trace_payload_keeps_missing_entries_as_runtime_validation_error() {
+        let trace: UiTracePayload = serde_json::from_value(serde_json::json!({
+            "session_id": "trace-1"
+        }))
+        .expect("deserialize trace payload");
+
+        assert_eq!(
+            trace
+                .entries()
+                .expect_err("missing entries should be validated by runtime"),
+            "trace payload missing entries array"
+        );
+    }
+
+    #[test]
+    fn backend_event_ui_trace_saved_serializes() {
+        let event = BackendEvent::UiTraceSaved {
+            path: "/tmp/ui-trace.jsonl".to_string(),
+            entries: 2,
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "ui_trace_saved");
+        assert_eq!(value["path"], "/tmp/ui-trace.jsonl");
+        assert_eq!(value["entries"], 2);
+    }
+
+    #[test]
+    fn backend_event_ui_trace_error_serializes() {
+        let event = BackendEvent::UiTraceError {
+            message: "trace payload missing entries".to_string(),
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "ui_trace_error");
+        assert_eq!(value["message"], "trace payload missing entries");
     }
 }

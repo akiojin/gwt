@@ -112,7 +112,7 @@ pub fn evaluate_with_context(
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     let context = resolve_workflow_context(worktree_root)
-        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?);
+        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?);
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -181,7 +181,7 @@ fn load_session_from_env() -> Option<Session> {
     Session::load_and_migrate(&session_path).ok()
 }
 
-fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, HookError> {
+fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool, HookError> {
     let Some(session) = load_session_from_env() else {
         return Ok(false);
     };
@@ -203,12 +203,19 @@ fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, Hoo
     if agent.is_unassigned() {
         return Ok(false);
     }
-    Ok(agent
+    let title_summary_missing = agent
         .title_summary
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .is_none())
+        .is_none();
+    let current_focus_missing = agent
+        .current_focus
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none();
+    Ok(title_summary_missing || current_focus_missing)
 }
 
 fn evaluate_title_summary_guard(
@@ -219,14 +226,14 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
-    if is_title_summary_update_event(event) || is_read_only_exploration_event(event) {
+    if is_workspace_identity_update_event(event) {
         return Ok(HookOutput::Silent);
     }
 
-    if is_title_sensitive_tool(event) {
+    if is_title_sensitive_tool(event) || is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
-            "Agent title-summary is required before work starts",
-            "Set a short work name before implementation or verification commands. The title-summary must describe what the work is, not a status/result.\n\n\
+            "Agent Workspace identity is required before work starts",
+            "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
 Required command shape:\n\
   gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work title>'\n\n\
 Good example: --title-summary 'Agent title improvement'\n\
@@ -246,7 +253,7 @@ fn is_title_sensitive_tool(event: &HookEvent) -> bool {
     }
 }
 
-fn is_title_summary_update_event(event: &HookEvent) -> bool {
+fn is_workspace_identity_update_event(event: &HookEvent) -> bool {
     if event.tool_name.as_deref() != Some("Bash") {
         return false;
     }
@@ -257,10 +264,10 @@ fn is_title_summary_update_event(event: &HookEvent) -> bool {
     !segments.is_empty()
         && segments
             .iter()
-            .all(|segment| is_title_summary_update_segment(segment))
+            .all(|segment| is_workspace_identity_update_segment(segment))
 }
 
-fn is_title_summary_update_segment(segment: &str) -> bool {
+fn is_workspace_identity_update_segment(segment: &str) -> bool {
     let tokens = segment_tokens(segment);
     let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
         return false;
@@ -270,12 +277,15 @@ fn is_title_summary_update_segment(segment: &str) -> bool {
     }
     match tokens.as_slice() {
         [_, "workspace", "update", rest @ ..] => {
-            rest.contains(&"--agent-session") && rest.contains(&"--title-summary")
+            rest.contains(&"--agent-session")
+                && rest.contains(&"--title-summary")
+                && rest.contains(&"--current-focus")
         }
         [_, "workspace", "ensure", rest @ ..] => {
-            rest.contains(&"--agent-session") && rest.contains(&"--title-summary")
+            rest.contains(&"--agent-session")
+                && rest.contains(&"--title-summary")
+                && rest.contains(&"--current-focus")
         }
-        [_, "board", "post", rest @ ..] => rest.contains(&"--title-summary"),
         _ => false,
     }
 }
@@ -748,7 +758,7 @@ Coverage requirements.
         assert!(detail.contains("--title-summary"));
         assert!(detail.contains("--agent-session"));
         assert!(detail.contains("work name"), "{detail}");
-        assert!(detail.contains("not a status"), "{detail}");
+        assert!(detail.contains("which window is doing what"), "{detail}");
     }
 
     #[test]
@@ -822,7 +832,7 @@ Coverage requirements.
     }
 
     #[test]
-    fn title_summary_guard_allows_read_only_exploration() {
+    fn title_summary_guard_blocks_read_only_exploration_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -832,14 +842,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert_eq!(
+        assert!(matches!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::Silent
-        );
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
-    fn title_summary_guard_allows_read_only_git_config() {
+    fn title_summary_guard_blocks_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -849,14 +859,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert_eq!(
+        assert!(matches!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::Silent
-        );
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
-    fn title_summary_guard_allows_read_only_git_remote() {
+    fn title_summary_guard_blocks_read_only_git_remote_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -866,14 +876,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert_eq!(
+        assert!(matches!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::Silent
-        );
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
-    fn title_summary_guard_allows_read_only_git_branch_queries() {
+    fn title_summary_guard_blocks_read_only_git_branch_queries_before_identity_is_set() {
         for command in [
             "git branch --contains HEAD",
             "git branch --points-at HEAD",
@@ -900,9 +910,11 @@ Coverage requirements.
                 cwd: None,
             };
 
-            assert_eq!(
-                evaluate_title_summary_guard(&event, true).expect("guard output"),
-                HookOutput::Silent,
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&event, true).expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
                 "{command}"
             );
         }
