@@ -1038,10 +1038,13 @@ impl LaunchWizardState {
             self.docker_lifecycle_intent = resolved_lifecycle;
         }
         self.sync_selected_agent_options();
-        // Agent preference の再適用は previous_profiles が refresh されたときのみ。
-        // 現 wizard 内で user が編集した draft (model / reasoning など) を上書きしない。
+        // SPEC-2014 FR-054 / FR-056 (2026-05-15 Wizard Hydration Preserves User-Selected Agent):
+        // hydration では preferred_agent_id で agent identity を上書きせず、
+        // 現在選択 agent の per-agent draft / previous profile だけ refresh する。
+        // preferred agent identity の適用は constructor (apply_preferred_agent_profile)
+        // と set_agent_id 経由の明示的 agent 切替に限定する。
         if refreshed_previous_profiles && self.launch_path != LaunchWizardLaunchPath::QuickStart {
-            self.apply_preferred_agent_profile();
+            self.restore_agent_draft_or_defaults();
         }
         self.sync_docker_lifecycle_default();
         self.selected = self
@@ -1588,6 +1591,12 @@ impl LaunchWizardState {
         self.sync_docker_lifecycle_default();
     }
 
+    /// Apply the locally-preferred agent identity (and matching per-agent
+    /// draft) to the wizard. Constructor-only entry point for SPEC-2014
+    /// FR-024 / FR-026 (Local User Agent Preferences). MUST NOT be called from
+    /// `apply_hydration` or other mid-wizard refresh paths because it
+    /// overwrites `self.agent_id`, which would discard the user's explicit
+    /// Settings-step selection (SPEC-2014 FR-054).
     fn apply_preferred_agent_profile(&mut self) -> bool {
         if let Some(agent_id) = self
             .previous_profiles
@@ -5172,6 +5181,101 @@ mod tests {
         assert_eq!(view.selected_execution_mode, "continue");
         assert!(view.skip_permissions);
         assert!(view.codex_fast_mode);
+    }
+
+    #[test]
+    fn apply_runtime_context_preserves_user_selected_agent_after_settings_step() {
+        // SPEC-2014 FR-054 / FR-056 (2026-05-15 Wizard Hydration Preserves
+        // User-Selected Agent): Settings step で user が agent を切り替えた後、
+        // Runtime confirmation 経路 (apply_runtime_context) が previous_profiles を
+        // refresh しても user 選択 agent_id を上書きしてはならない。
+        let codex_session = sample_session_record(
+            "feature/old",
+            Path::new("/tmp/old-repo"),
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            None,
+        );
+        let previous_profiles =
+            previous_launch_profiles_from_sessions(std::slice::from_ref(&codex_session));
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles.clone(),
+        );
+        assert_eq!(state.view().selected_agent_id, "codex");
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert_eq!(state.view().selected_agent_id, "claude");
+
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: Some(branch("feature/current")),
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/current-repo")),
+            quick_start_root: PathBuf::from("/tmp/current-repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::Unknown,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(previous_profiles),
+        });
+
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "claude");
+        let config = state
+            .build_launch_config()
+            .expect("launch config builds for user-selected agent");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+    }
+
+    #[test]
+    fn custom_agent_cache_refresh_preserves_user_selected_agent() {
+        // SPEC-2014 FR-054 / FR-056 (2026-05-15 Wizard Hydration Preserves
+        // User-Selected Agent): mid-wizard custom agent cache refresh (FR-018) でも
+        // user 選択 agent_id は preferred_agent_id で上書きされてはならない。
+        let codex_session = sample_session_record(
+            "feature/old",
+            Path::new("/tmp/old-repo"),
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            None,
+        );
+        let previous_profiles =
+            previous_launch_profiles_from_sessions(std::slice::from_ref(&codex_session));
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles.clone(),
+        );
+        assert_eq!(state.view().selected_agent_id, "codex");
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert_eq!(state.view().selected_agent_id, "claude");
+
+        state.apply_hydration(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/current-repo")),
+            quick_start_root: PathBuf::from("/tmp/current-repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::Unknown,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(previous_profiles),
+        });
+
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "claude");
+        let config = state
+            .build_launch_config()
+            .expect("launch config builds for user-selected agent");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
     }
 
     #[test]
