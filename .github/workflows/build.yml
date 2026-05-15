@@ -43,7 +43,8 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

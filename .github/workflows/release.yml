@@ -120,12 +120,15 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
-          # PATH when it has to install rustup itself. The macos-14 image ships
-          # an extra rustup binary outside ~/.cargo/bin so the action skips the
-          # PATH update, leaving the freshly created rustc/cargo proxies
-          # invisible after the wipe. Re-add the path here to bridge that gap.
-          mkdir -p "$HOME/.cargo/bin"
+          # The macos-14 image ships a stray rustup binary outside
+          # ~/.cargo/bin, so dtolnay's `command -v rustup` keeps finding it
+          # and skips both its install and the $CARGO_HOME/bin PATH update.
+          # That leaves no rustc/cargo proxy under ~/.cargo/bin and aborts
+          # later steps with "rustc: command not found". Run rustup-init
+          # ourselves so the proxies live under ~/.cargo/bin, then prepend
+          # that directory so dtolnay picks our rustup over the stray one.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -271,12 +274,15 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
-          # PATH when it has to install rustup itself. The macos-14 image ships
-          # an extra rustup binary outside ~/.cargo/bin so the action skips the
-          # PATH update, leaving the freshly created rustc/cargo proxies
-          # invisible after the wipe. Re-add the path here to bridge that gap.
-          mkdir -p "$HOME/.cargo/bin"
+          # The macos-14 image ships a stray rustup binary outside
+          # ~/.cargo/bin, so dtolnay's `command -v rustup` keeps finding it
+          # and skips both its install and the $CARGO_HOME/bin PATH update.
+          # That leaves no rustc/cargo proxy under ~/.cargo/bin and aborts
+          # later steps with "rustc: command not found". Run rustup-init
+          # ourselves so the proxies live under ~/.cargo/bin, then prepend
+          # that directory so dtolnay picks our rustup over the stray one.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
