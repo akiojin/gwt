@@ -5545,3 +5545,7 @@ repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視
    inactive worktree の repair は Settings.Index の明示操作に任せる。
 3. 性能修正では `sample` と子プロセス監視で、起動 smoke 中に `index-files` や全 worktree
    `--action status` が勝手に並ばないことを確認する。
+4. 起動時 probe とオンデマンド full refresh を分離する場合、in-flight coalescing は
+   「要求を捨てる」のではなく「必要な重い可視性を後続で流す」契約にする。Settings.Index
+   のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
+   後続 retry で最後に full status を配信する。
