@@ -25,6 +25,34 @@ Codex の `current_hash` と一致しなかった。
    `UserPromptSubmit` / `Stop` のような matcher 非対応 event の fixture test を
    必ず追加する。
 
+## 2026-05-15 — Git config emulation must preserve include insertion order
+
+### 事象
+
+PR #2727 の review thread で、`repo_hash` が `url.*.insteadOf` を top-level
+Git config からしか読まず、`[include]` / `[includeIf]` 先の rewrite 設定を
+無視する問題を指摘された。追修正の初期実装では include 先を親 config の
+末尾へ単純追加していたため、include 先が `remote.origin.url` も定義する
+場合に、include 行より後ろのローカル設定が勝つという Git の順序とずれた。
+
+### 原因
+
+Git config の include は「親ファイルを読み終えた後に追加する」処理ではなく、
+`path = ...` 行の位置に include 先の内容を挿入する処理である。プロセス起動
+を避けるために Git config を自前解決する場合、ファイル単位の `Vec<String>`
+へ単純 append すると、同じ key が親子 config の両方にあるケースで上書き順序
+が変わる。
+
+### 再発防止策
+
+1. `git config` / `git remote get-url` 相当の処理を自前実装する場合は、
+   include / includeIf / user config / local config の順序をテストで固定して
+   から実装する。
+2. `[include]` は include 行の位置で展開し、loop guard と最大深さを持たせる。
+   「親を全部読んでから include を末尾追加する」形にしない。
+3. review 指摘への follow-up では、指摘された直接ケースだけでなく、隣接する
+   Git config precedence の回帰テストを 1 件追加してから GREEN にする。
+
 ## 2026-05-12 — Workspace coordination must not become a global tool lock
 
 ### 事象
@@ -5410,3 +5438,30 @@ race も存在した。
 - PR #2693 (Phase 26.B / 26.A / 26.C-1 一括)
 - SPEC-2008 (Phase 26 spec/plan/tasks に FR-056〜FR-059、T-199〜T-220、SC-035〜SC-038)
 - closed regressions: #2096 / #2091 / #2513 / #2668 / SPEC-2014 Phase C1
+
+## GUI hot path の同期プロセス起動は CPU% だけでは見落とす
+
+### 事象
+
+macOS/Windows GUI が全体的に重く、キー入力・ウィンドウ操作・Launch Agent 起動が遅い。
+CPU 使用率は高く見えない一方、macOS `sample` では GUI main thread が `poll` / `posix_spawnp`
+配下で時間を使っていた。
+
+### 原因
+
+UI の Active Work / Workspace 投影 hot path で、repo hash 解決のたびに `git remote get-url origin`
+を同期起動し、さらに Workspace cleanup candidate の remote delete 可否判定で branch inventory
+hydration を同期実行していた。Board/Workspace daemon update や frontend ready で繰り返されるため、
+CPU% ではなく main-thread blocking として体感遅延になった。
+
+### 再発防止策
+
+1. GUI hot path では `git` / `gh` / `docker` などの外部プロセスを同期起動しない。必要なら
+   config/file cache を読むか、blocking task に逃がす。
+2. 性能回帰テストは fake executable を `PATH` 先頭に置いて呼び出しログを検査し、対象処理が
+   外部プロセスを起動していないことを pin する。
+3. CPU% が低い重さは `sample` / profiler で main-thread blocking と process spawn を確認する。
+
+### 関連 PR / Issue
+
+- Issue #2725

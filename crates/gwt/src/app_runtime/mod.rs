@@ -1325,26 +1325,12 @@ fn workspace_projection_for_current_resume(
 }
 
 fn workspace_cleanup_candidate_for_projection(
-    project_root: &Path,
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
 ) -> Option<gwt::ActiveWorkCleanupCandidateView> {
     let branch = projection.git_details.as_ref()?.branch.as_deref()?;
     let branch_has_live_agent = sessions.iter().any(|session| session.branch_name == branch);
-    let mut candidate = projection.cleanup_candidate(branch_has_live_agent)?;
-    if let Ok(entries) = list_branch_entries_with_active_sessions(
-        project_root,
-        &sessions
-            .iter()
-            .map(|session| session.branch_name.clone())
-            .collect::<std::collections::HashSet<_>>(),
-    ) {
-        candidate.remote_delete_available = entries
-            .iter()
-            .find(|entry| entry.name == candidate.branch)
-            .and_then(|entry| entry.cleanup.upstream.as_ref())
-            .is_some();
-    }
+    let candidate = projection.cleanup_candidate(branch_has_live_agent)?;
     Some(active_work_cleanup_candidate_view_from_candidate(candidate))
 }
 
@@ -2696,11 +2682,8 @@ impl AppRuntime {
         {
             let mut projection = projection;
             let had_saved_agents = !projection.agents.is_empty();
-            let cleanup_candidate = workspace_cleanup_candidate_for_projection(
-                &tab.project_root,
-                &projection,
-                &sessions,
-            );
+            let cleanup_candidate =
+                workspace_cleanup_candidate_for_projection(&projection, &sessions);
             merge_active_sessions_into_projection(
                 &mut projection,
                 sessions.iter().copied(),
@@ -6646,14 +6629,51 @@ exit 0
         }
     }
 
-    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
-        let parent = fake_gh.parent().expect("fake gh parent");
+    fn write_fake_git_recorder(temp_root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let fake_git = temp_root.join("git.cmd");
+            fs::write(
+                &fake_git,
+                "@echo off\r\n\
+if not \"%GWT_FAKE_GIT_LOG%\"==\"\" echo %*>>\"%GWT_FAKE_GIT_LOG%\"\r\n\
+exit /b 1\r\n",
+            )
+            .expect("write fake git");
+            fake_git
+        }
+        #[cfg(not(windows))]
+        {
+            let fake_git = temp_root.join("git");
+            fs::write(
+                &fake_git,
+                r#"#!/bin/sh
+if [ -n "$GWT_FAKE_GIT_LOG" ]; then
+  printf '%s\n' "$*" >> "$GWT_FAKE_GIT_LOG"
+fi
+exit 1
+"#,
+            )
+            .expect("write fake git");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake git");
+            fake_git
+        }
+    }
+
+    fn prepend_tool_parent_to_path(tool: &Path) -> ScopedEnvVar {
+        let parent = tool.parent().expect("tool parent");
         let mut paths = vec![parent.to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
         let joined = std::env::join_paths(paths).expect("join PATH");
         ScopedEnvVar::set("PATH", joined)
+    }
+
+    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
+        prepend_tool_parent_to_path(fake_gh)
     }
 
     fn canvas_bounds() -> WindowGeometry {
@@ -9595,6 +9615,53 @@ exit 0
         assert_eq!(candidate.branch, "work/20260507-0200");
         assert_eq!(candidate.reason, "workspace_done");
         assert!(!candidate.default_delete_remote);
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_does_not_spawn_git_for_cleanup_candidate() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_bin = temp.path().join("fake-bin");
+        fs::create_dir_all(&fake_bin).expect("create fake bin");
+        let fake_git = write_fake_git_recorder(&fake_bin);
+        let git_log = temp.path().join("git-invocations.log");
+        let _path = prepend_tool_parent_to_path(&fake_git);
+        let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260507-0200".to_string()),
+            worktree_path: Some(repo.join("work/20260507-0200")),
+            base_branch: Some("origin/main".to_string()),
+            pr_number: Some(2525),
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert!(view.cleanup_candidate.is_some());
+        let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+        assert!(
+            invocations.trim().is_empty(),
+            "active-work projection must not spawn git on the GUI hot path; invocations:\n{invocations}"
+        );
     }
 
     #[test]
