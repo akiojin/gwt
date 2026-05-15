@@ -147,6 +147,16 @@ pub fn viewport_sync_js() -> &'static str {
     include_str!("../web/viewport-sync.js")
 }
 
+// Issue #2698 follow-up — browser-side metadata trace profiler for diagnosing
+// pointer delivery, rAF delay, and render hotspots without terminal contents.
+pub fn ui_trace_profiler_js() -> &'static str {
+    include_str!("../web/ui-trace-profiler.js")
+}
+
+pub fn ui_trace_wiring_js() -> &'static str {
+    include_str!("../web/ui-trace-wiring.js")
+}
+
 // SPEC-1921 T231 — Settings.Custom Agents env editor.
 pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
@@ -267,6 +277,16 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/viewport-sync.js",
         source: viewport_sync_js,
         marker: "createViewportSyncState",
+    },
+    RootJsModuleAsset {
+        path: "/ui-trace-profiler.js",
+        source: ui_trace_profiler_js,
+        marker: "createUiTraceProfiler",
+    },
+    RootJsModuleAsset {
+        path: "/ui-trace-wiring.js",
+        source: ui_trace_wiring_js,
+        marker: "createUiTraceWiring",
     },
     RootJsModuleAsset {
         path: "/custom-agent-env-editor.js",
@@ -1177,7 +1197,7 @@ mod tests {
     fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
         let js = app_js();
         let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
+            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);[\s\S]*?\}"#,
         )
         .expect("valid regex");
 

@@ -146,10 +146,12 @@ mod migration;
 pub(crate) mod persist_dispatcher;
 mod profile;
 mod title_sync;
+mod ui_trace;
 mod window;
 mod wizard;
 pub use board::BoardPostRequest;
 use profile::ProfileSaveRequest;
+use ui_trace::save_ui_trace_to_log_dir;
 
 fn dispatch_agent_launch_success<F>(
     proxy: AppEventProxy,
@@ -2254,7 +2256,23 @@ impl AppRuntime {
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
+            FrontendEvent::SaveUiTrace { trace } => self.save_ui_trace_events(client_id, trace),
         }
+    }
+
+    fn save_ui_trace_events(
+        &self,
+        client_id: ClientId,
+        trace: UiTracePayload,
+    ) -> Vec<OutboundEvent> {
+        let event = match save_ui_trace_to_log_dir(&self.log_dir, trace) {
+            Ok(result) => BackendEvent::UiTraceSaved {
+                path: result.path.display().to_string(),
+                entries: result.entries,
+            },
+            Err(message) => BackendEvent::UiTraceError { message },
+        };
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     /// SPEC-2359 US-41 (FR-153, FR-154, FR-155): handle
@@ -6254,8 +6272,8 @@ mod tests {
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
-        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry,
-        WindowPreset, WindowProcessStatus, WorkspaceState,
+        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, UiTracePayload,
+        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -11095,6 +11113,33 @@ exit 0
                 && entries.len() == 1
                 && entries[0].message == "runtime stalled"
                 && matches!(entries[0].severity, LogLevel::Warn)
+        ));
+    }
+
+    #[test]
+    fn app_runtime_save_ui_trace_replies_with_artifact_path() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), vec![], None);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SaveUiTrace {
+                trace: serde_json::from_value::<UiTracePayload>(serde_json::json!({
+                    "session_id": "trace-1",
+                    "entries": [
+                        { "kind": "trace_start", "ts": 1 }
+                    ]
+                }))
+                .expect("typed ui trace payload"),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::UiTraceSaved { path, entries },
+            }] if client_id == "client-1" && *entries == 1 && Path::new(path).exists()
         ));
     }
 

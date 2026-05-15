@@ -222,3 +222,32 @@ test("dispatcher delivers terminal_output ahead of pending workspace_state in th
   assert.equal(received[0].kind, "terminal_output", "echo lands first");
   assert.equal(received[1].kind, "workspace_state", "state update follows");
 });
+
+test("dispatcher emits sanitized trace metadata for parse and receive timing", () => {
+  const traces = [];
+  const scheduler = manualScheduler();
+  let virtualClock = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => {
+      assert.equal(event.data, "must-not-leak");
+      virtualClock += 4;
+    },
+    schedule: scheduler.schedule,
+    now: () => virtualClock,
+    onTrace: (kind, fields) => traces.push({ kind, ...fields }),
+  });
+
+  dispatcher.handle({
+    data: JSON.stringify({ kind: "terminal_output", data: "must-not-leak" }),
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    traces.map((trace) => trace.kind),
+    ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
+  );
+  assert.equal(traces[0].event_kind, "terminal_output");
+  assert.equal(traces[2].event_kind, "terminal_output");
+  assert.equal(traces[2].duration_ms, 4);
+  assert.equal(JSON.stringify(traces).includes("must-not-leak"), false);
+});
