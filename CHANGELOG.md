@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.35.3] - 2026-05-15
+
+### Bug Fixes
+
+- **ci:** Wipe broken pre-installed rust on macos runners before toolchain install
+
 ## [9.35.2] - 2026-05-15
 
 ### Bug Fixes
