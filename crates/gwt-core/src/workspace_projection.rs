@@ -527,27 +527,52 @@ impl WorkspaceProjection {
             self.next_action = (!next_action.trim().is_empty()).then_some(next_action.clone());
         }
         if let Some(session_id) = update.agent_session_id.as_deref() {
+            let focus = update
+                .agent_current_focus
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .cloned();
+            let title_summary = update
+                .agent_title_summary
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .cloned();
             if let Some(agent) = self
                 .agents
                 .iter_mut()
                 .find(|agent| agent.session_id == session_id)
             {
-                if let Some(focus) = update
-                    .agent_current_focus
-                    .as_ref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    agent.current_focus = Some(focus.clone());
+                if let Some(focus) = focus {
+                    agent.current_focus = Some(focus);
                     agent.updated_at = updated_at;
                 }
-                if let Some(title_summary) = update
-                    .agent_title_summary
-                    .as_ref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    agent.title_summary = Some(title_summary.clone());
+                if let Some(title_summary) = title_summary {
+                    agent.title_summary = Some(title_summary);
                     agent.updated_at = updated_at;
                 }
+            } else if focus.is_some() || title_summary.is_some() {
+                // SPEC-2359 Phase U-6: upsert a minimal stub for sessions
+                // that the launch flow / SessionStart hook has not yet
+                // registered. Without this, `gwtd workspace update
+                // --title-summary X` would silently drop the update — see
+                // the regression tests in this module for the contract.
+                self.agents.push(WorkspaceAgentSummary {
+                    session_id: session_id.to_string(),
+                    window_id: None,
+                    agent_id: String::new(),
+                    display_name: String::new(),
+                    status_category: WorkspaceStatusCategory::Active,
+                    current_focus: focus,
+                    title_summary,
+                    worktree_path: None,
+                    branch: None,
+                    last_board_entry_id: None,
+                    last_board_entry_kind: None,
+                    coordination_scope: None,
+                    affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+                    workspace_id: None,
+                    updated_at,
+                });
             }
         }
         self.updated_at = updated_at;
@@ -2896,6 +2921,136 @@ mod tests {
             journal.agent_title_summary.as_deref(),
             Some("Title summary support")
         );
+    }
+
+    #[test]
+    fn apply_update_upserts_minimal_agent_when_session_id_not_present() {
+        // SPEC-2359 Phase U-6 (real root cause fix): `gwtd workspace update
+        // --agent-session ... --title-summary X` must not silently drop the
+        // update when the session is not yet in `projection.agents[]`. The
+        // OLD installed gwtd lacks the SessionStart hook registration path
+        // (Phase U-3) so `apply_update` is the only point where this CLI
+        // path can guarantee the agent is registered.
+        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        assert!(projection.agents.is_empty());
+
+        let journal = projection.apply_update(
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                agent_session_id: Some("session-new".to_string()),
+                agent_current_focus: Some("focus".to_string()),
+                agent_title_summary: Some("title from upsert".to_string()),
+            },
+            updated_at,
+        );
+
+        assert_eq!(projection.agents.len(), 1, "upsert must add the agent");
+        let agent = &projection.agents[0];
+        assert_eq!(agent.session_id, "session-new");
+        assert_eq!(agent.title_summary.as_deref(), Some("title from upsert"));
+        assert_eq!(agent.current_focus.as_deref(), Some("focus"));
+        assert!(agent.is_unassigned());
+        assert_eq!(agent.updated_at, updated_at);
+        // Journal entry should still carry the requested fields.
+        assert_eq!(journal.agent_session_id.as_deref(), Some("session-new"));
+        assert_eq!(
+            journal.agent_title_summary.as_deref(),
+            Some("title from upsert"),
+        );
+        assert_eq!(journal.agent_current_focus.as_deref(), Some("focus"));
+    }
+
+    #[test]
+    fn apply_update_preserves_existing_agent_when_session_id_matches() {
+        // Upsert MUST NOT clobber pre-existing agent fields when the
+        // session already exists in projection.agents (launch flow already
+        // registered it with richer state). Only title_summary /
+        // current_focus from the update should change.
+        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-launched".to_string(),
+            window_id: Some("tab-1::agent-1".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("old focus".to_string()),
+            title_summary: Some("old title".to_string()),
+            worktree_path: Some(std::path::PathBuf::from("/repo")),
+            branch: Some("work/x".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some("ws-1".to_string()),
+            updated_at,
+        });
+
+        projection.apply_update(
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                agent_session_id: Some("session-launched".to_string()),
+                agent_current_focus: None,
+                agent_title_summary: Some("new title".to_string()),
+            },
+            updated_at,
+        );
+
+        assert_eq!(projection.agents.len(), 1, "must not duplicate");
+        let agent = &projection.agents[0];
+        // title_summary updated
+        assert_eq!(agent.title_summary.as_deref(), Some("new title"));
+        // everything else preserved
+        assert_eq!(agent.window_id.as_deref(), Some("tab-1::agent-1"));
+        assert_eq!(agent.agent_id, "codex");
+        assert_eq!(agent.display_name, "Codex");
+        assert_eq!(agent.current_focus.as_deref(), Some("old focus"));
+        assert_eq!(agent.worktree_path.as_deref(), Some(std::path::Path::new("/repo")));
+        assert_eq!(agent.branch.as_deref(), Some("work/x"));
+        assert_eq!(agent.workspace_id.as_deref(), Some("ws-1"));
+        assert!(agent.is_assigned());
+    }
+
+    #[test]
+    fn apply_update_upsert_records_journal_entry_with_same_shape() {
+        // Journal entries from the upsert path must have the same shape as
+        // entries from the pre-existing-agent path so downstream consumers
+        // (UI, broadcasts) cannot tell them apart.
+        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+
+        let journal = projection.apply_update(
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                agent_session_id: Some("session-stub".to_string()),
+                agent_current_focus: None,
+                agent_title_summary: Some("stub title".to_string()),
+            },
+            updated_at,
+        );
+
+        assert!(!journal.id.is_empty());
+        assert_eq!(journal.project_root, projection.project_root);
+        assert_eq!(journal.agent_session_id.as_deref(), Some("session-stub"));
+        assert_eq!(journal.agent_title_summary.as_deref(), Some("stub title"));
+        assert_eq!(journal.agent_current_focus, None);
+        assert_eq!(journal.updated_at, updated_at);
     }
 
     #[test]
