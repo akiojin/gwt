@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.35.4] - 2026-05-15
+
+### Bug Fixes
+
+- **ci:** Wipe broken pre-installed rust on macos runners before toolchain install by @akiojin
+- **launch:** Remove duplicate wizard close button by @akiojin
+- **ci:** Expose rebuilt cargo bin dir on macOS PATH after wipe
+
+### Ci
+
+- Add pre-merge cargo check on macOS
+
+## [9.35.3] - 2026-05-15
+
+### Bug Fixes
+
+- **ci:** Wipe broken pre-installed rust on macos runners before toolchain install
+
 ## [9.35.2] - 2026-05-15
 
 ### Bug Fixes

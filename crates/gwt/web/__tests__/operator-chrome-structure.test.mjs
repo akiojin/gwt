@@ -1265,6 +1265,28 @@ test("Launch wizard uses one visible dismiss control in the footer", () => {
   );
 });
 
+test("Launch wizard uses one visible dismiss control in the footer", () => {
+  assert.equal(
+    document.getElementById("wizard-close-button"),
+    null,
+    "Launch wizard header must not render a second Close button",
+  );
+  assert.ok(
+    document.getElementById("wizard-cancel-button"),
+    "Launch wizard footer dismiss button must remain available",
+  );
+  assert.equal(
+    appSource.includes("wizardCloseButton"),
+    false,
+    "Launch wizard should not keep dead wiring for a removed header close button",
+  );
+  assert.match(
+    appSource,
+    /wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\)/,
+    "expected the footer dismiss button to own the close helper",
+  );
+});
+
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
   // <div>-based rows can't be Tab'd to or activated with the keyboard
   // unless explicitly opted in. Add tabindex, role="button", and a
