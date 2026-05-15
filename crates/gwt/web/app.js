@@ -371,7 +371,7 @@
           if (deferred.kind === "system_settings") {
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -384,7 +384,7 @@
             systemSettingsState.language = deferred.language
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -7735,7 +7735,7 @@
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
         language: "auto",
-        codexTrustManagedHooks: false,
+        codexTrustManagedHooks: true,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -7973,7 +7973,7 @@
         trustCheckbox.type = "checkbox";
         trustCheckbox.className = "settings-checkbox";
         trustCheckbox.id = "settings-system-codex-hooks";
-        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks === true;
+        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks !== false;
         trustCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.codexTrustManagedHooks = next;
@@ -7996,7 +7996,7 @@
         const trustHelp = document.createElement("p");
         trustHelp.className = "settings-help";
         trustHelp.textContent =
-          "Registers only generated gwt hook commands in Codex hook trust state.";
+          "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
         const status = document.createElement("p");
@@ -9378,13 +9378,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -9400,13 +9401,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings_updated",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();

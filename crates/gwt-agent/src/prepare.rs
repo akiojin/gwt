@@ -16,6 +16,7 @@ use crate::{
 };
 
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
+const DOCKER_CODEX_CONFIG_PATH: &str = "/root/.codex/config.toml";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 const DOCKER_GWT_OVERRIDE_HEADER: &str =
@@ -599,6 +600,50 @@ fn apply_docker_runtime_to_launch_config(
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
     Ok(())
+}
+
+pub fn register_codex_managed_hook_trust_in_docker(
+    worktree: &Path,
+    docker_service: Option<&str>,
+) -> Result<(), String> {
+    let launch = resolve_docker_launch_plan(worktree, docker_service)?;
+    let args = docker_codex_hook_trust_registration_args(&launch.container_cwd);
+    let output = gwt_docker::compose_service_exec_capture_with_files(
+        &launch.compose_files,
+        &launch.service,
+        Some(&launch.container_cwd),
+        &args,
+    )
+    .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+    Err(format!(
+        "container-local Codex hook trust registration failed for service '{}': {detail}",
+        launch.service
+    ))
+}
+
+fn docker_codex_hook_trust_registration_args(container_cwd: &str) -> Vec<String> {
+    vec![
+        DOCKER_GWTD_BIN_PATH.to_string(),
+        "hook".to_string(),
+        "register-codex-managed-hook-trust".to_string(),
+        "--project-root".to_string(),
+        container_cwd.to_string(),
+        "--codex-config".to_string(),
+        DOCKER_CODEX_CONFIG_PATH.to_string(),
+    ]
 }
 
 fn finalize_docker_agent_launch_config(
@@ -1848,6 +1893,24 @@ mod tests {
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+    }
+
+    #[test]
+    fn docker_codex_hook_trust_registration_invokes_container_local_gwtd() {
+        let args = docker_codex_hook_trust_registration_args("/workspace/app");
+
+        assert_eq!(
+            args,
+            vec![
+                DOCKER_GWTD_BIN_PATH.to_string(),
+                "hook".to_string(),
+                "register-codex-managed-hook-trust".to_string(),
+                "--project-root".to_string(),
+                "/workspace/app".to_string(),
+                "--codex-config".to_string(),
+                "/root/.codex/config.toml".to_string(),
+            ]
+        );
     }
 
     #[test]

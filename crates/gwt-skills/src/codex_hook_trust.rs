@@ -8,7 +8,7 @@ use std::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::settings_local::{gwt_hook_bin_path, posix_shell_quote, write_text_atomically};
+use crate::settings_local::{codex_event_hook_command, write_text_atomically};
 
 const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
 const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
@@ -205,13 +205,30 @@ fn command_hook_trusted_hash(event_name_snake: &str, matcher: &str, command: &st
                 "timeout": CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 "type": "command"
             }
-        ],
-        "matcher": matcher
+        ]
     });
+    if codex_trust_identity_uses_matcher(event_name_snake) {
+        identity
+            .as_object_mut()
+            .expect("Codex hook trust identity must be an object")
+            .insert("matcher".to_string(), Value::String(matcher.to_string()));
+    }
     sort_json_objects(&mut identity);
     let bytes = serde_json::to_vec(&identity).expect("serialize Codex hook trust identity");
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
+}
+
+fn codex_trust_identity_uses_matcher(event_name_snake: &str) -> bool {
+    matches!(
+        event_name_snake,
+        "pre_tool_use"
+            | "permission_request"
+            | "post_tool_use"
+            | "pre_compact"
+            | "post_compact"
+            | "session_start"
+    )
 }
 
 fn sort_json_objects(value: &mut Value) {
@@ -235,23 +252,55 @@ fn sort_json_objects(value: &mut Value) {
 
 fn is_generated_gwt_event_command(command: &str, event_json_name: &str) -> bool {
     command == expected_generated_gwt_event_command(event_json_name)
+        || is_portable_gwt_bin_path_event_command(command, event_json_name)
 }
 
 fn expected_generated_gwt_event_command(event_json_name: &str) -> String {
-    let bin = gwt_hook_bin_path();
-    if cfg!(windows) {
-        let quoted = powershell_quote(&bin);
-        format!(
-            "powershell -NoProfile -Command \"& {{ & {quoted} hook event {event_json_name} }}\""
-        )
-    } else {
-        let quoted = posix_shell_quote(&bin);
-        format!("{quoted} hook event {event_json_name}")
-    }
+    codex_event_hook_command(event_json_name)
 }
 
-fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn is_portable_gwt_bin_path_event_command(command: &str, event_json_name: &str) -> bool {
+    is_posix_portable_gwt_bin_path_event_command(command, event_json_name)
+        || is_powershell_portable_gwt_bin_path_event_command(command, event_json_name)
+}
+
+fn is_posix_portable_gwt_bin_path_event_command(command: &str, event_json_name: &str) -> bool {
+    let prefix = "gwt_bin=\"${GWT_BIN_PATH:-";
+    let suffix = format!("}}\"; \"$gwt_bin\" hook event {event_json_name}");
+    let Some(fallback) = command
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(&suffix))
+    else {
+        return false;
+    };
+    fallback_path_looks_like_gwtd(fallback)
+}
+
+fn is_powershell_portable_gwt_bin_path_event_command(command: &str, event_json_name: &str) -> bool {
+    let prefix = "powershell -NoProfile -Command \"& { $gwtBin = if ($env:GWT_BIN_PATH) { $env:GWT_BIN_PATH } else { ";
+    let suffix = format!(" }}; & $gwtBin hook event {event_json_name} }}\"");
+    let Some(fallback) = command
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(&suffix))
+    else {
+        return false;
+    };
+    let Some(unquoted) = fallback
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    else {
+        return false;
+    };
+    fallback_path_looks_like_gwtd(unquoted)
+}
+
+fn fallback_path_looks_like_gwtd(fallback: &str) -> bool {
+    let normalized = fallback.replace("\\\"", "\"").replace("\\\\", "\\");
+    normalized == "gwtd"
+        || normalized == "gwtd.exe"
+        || normalized.ends_with("/gwtd")
+        || normalized.ends_with("\\gwtd")
+        || normalized.ends_with("\\gwtd.exe")
 }
 
 #[cfg(test)]
@@ -261,7 +310,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::generate_codex_hooks;
+    use crate::{generate_codex_hooks, settings_local::codex_event_hook_command_with_bin};
 
     #[test]
     fn command_hook_hash_matches_codex_for_known_post_tool_use_fixture() {
@@ -272,6 +321,23 @@ mod tests {
         assert_eq!(
             trusted_hash,
             "sha256:9c3ce103f03f0b27a28bc4a30883f7e98a80b5df566b4572fcbb2955ebf5ba62"
+        );
+    }
+
+    #[test]
+    fn command_hook_hash_omits_codex_ignored_matchers_for_prompt_and_stop() {
+        let user_prompt_command =
+            "gwt_bin=\"${GWT_BIN_PATH:-/Applications/GWT.app/Contents/MacOS/gwtd}\"; \"$gwt_bin\" hook event UserPromptSubmit";
+        let stop_command =
+            "gwt_bin=\"${GWT_BIN_PATH:-/Applications/GWT.app/Contents/MacOS/gwtd}\"; \"$gwt_bin\" hook event Stop";
+
+        assert_eq!(
+            command_hook_trusted_hash_for_test("user_prompt_submit", "*", user_prompt_command),
+            "sha256:1a86ba6796c5b5bf1601fd1af1d6094846287ec85e9f1ad4d39335c6b306e2fa"
+        );
+        assert_eq!(
+            command_hook_trusted_hash_for_test("stop", "*", stop_command),
+            "sha256:984e12cd30ef54cf4c63af8aabce1849705e5de09c70d039367ba68de9760389"
         );
     }
 
@@ -305,6 +371,49 @@ mod tests {
                 "trusted hash must use Codex sha256 prefix"
             );
         }
+    }
+
+    #[test]
+    fn portable_generated_hooks_are_trusted_across_host_and_container_fallback_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let mut hooks = serde_json::Map::new();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": codex_event_hook_command_with_bin("/host/gwt/bin/gwtd", event),
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ]),
+            );
+        }
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries(dir.path()).unwrap();
+
+        assert_eq!(
+            entries.len(),
+            5,
+            "container-local registration must accept host-generated GWT_BIN_PATH-first commands"
+        );
     }
 
     #[test]

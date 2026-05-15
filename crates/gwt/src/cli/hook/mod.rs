@@ -56,6 +56,7 @@ pub enum HookKind {
     BlockBashPolicy,
     WorkflowPolicy,
     Forward,
+    RegisterCodexManagedHookTrust,
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
@@ -76,6 +77,7 @@ impl HookKind {
             "block-bash-policy" => Some(Self::BlockBashPolicy),
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
+            "register-codex-managed-hook-trust" => Some(Self::RegisterCodexManagedHookTrust),
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
@@ -358,6 +360,32 @@ pub fn run_daemon_hook<E: CliEnv>(
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
+        HookKind::RegisterCodexManagedHookTrust => {
+            let project_root = option_value(rest, "--project-root")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let Some(codex_config_path) = option_value(rest, "--codex-config")
+                .map(std::path::PathBuf::from)
+                .or_else(default_codex_config_path)
+            else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook register-codex-managed-hook-trust: missing --codex-config and home directory is unavailable"
+                );
+                return Ok(2);
+            };
+            match gwt_skills::register_codex_managed_hook_trust(&project_root, &codex_config_path) {
+                Ok(report) => {
+                    let _ = writeln!(
+                        env.stdout(),
+                        "trusted {} gwt-managed Codex hooks",
+                        report.trusted_entries.len()
+                    );
+                    Ok(0)
+                }
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
         HookKind::SkillDiscussionStopCheck => {
             let cwd = env.repo_path().to_path_buf();
             let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
@@ -384,6 +412,18 @@ pub fn run_daemon_hook<E: CliEnv>(
             Ok(emit_hook_output(env, &output))
         }
     }
+}
+
+fn option_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
+}
+
+fn default_codex_config_path() -> Option<std::path::PathBuf> {
+    gwt_core::paths::gwt_home()
+        .parent()
+        .map(|home| home.join(".codex/config.toml"))
 }
 
 #[cfg(test)]

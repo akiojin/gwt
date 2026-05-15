@@ -98,6 +98,7 @@ fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Resul
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
             managed_hook_shell(),
+            target,
         )),
     );
 
@@ -193,8 +194,9 @@ pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
     shell: HookShell,
+    target: ManagedHookTarget,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(shell);
+    let managed_hooks = managed_hooks(shell, target);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -297,23 +299,23 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(shell: HookShell) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell, target: ManagedHookTarget) -> Map<String, Value> {
     let mut hooks = Map::new();
     for event in MANAGED_EVENT_ORDER {
         hooks.insert(
             event.to_string(),
-            Value::Array(vec![event_hook(event, shell)]),
+            Value::Array(vec![event_hook(event, shell, target)]),
         );
     }
     hooks
 }
 
-fn event_hook(event: &str, shell: HookShell) -> Value {
+fn event_hook(event: &str, shell: HookShell, target: ManagedHookTarget) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": event_hook_command(event, shell),
+                "command": event_hook_command(event, shell, target),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -432,15 +434,34 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
-fn event_hook_command(event: &str, shell: HookShell) -> String {
-    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
+fn event_hook_command(event: &str, shell: HookShell, target: ManagedHookTarget) -> String {
+    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell, target)
 }
 
-fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
+fn event_hook_command_with_bin(
+    bin: &str,
+    event: &str,
+    shell: HookShell,
+    target: ManagedHookTarget,
+) -> String {
     match shell {
-        HookShell::Posix => posix_event_hook_command_with_bin(bin, event),
-        HookShell::PowerShell => powershell_event_hook_command_with_bin(bin, event),
+        HookShell::Posix => match target {
+            ManagedHookTarget::Claude => posix_event_hook_command_with_bin(bin, event),
+            ManagedHookTarget::Codex => posix_codex_event_hook_command_with_bin(bin, event),
+        },
+        HookShell::PowerShell => match target {
+            ManagedHookTarget::Claude => powershell_event_hook_command_with_bin(bin, event),
+            ManagedHookTarget::Codex => powershell_codex_event_hook_command_with_bin(bin, event),
+        },
     }
+}
+
+pub(crate) fn codex_event_hook_command(event: &str) -> String {
+    codex_event_hook_command_with_bin(&gwt_hook_bin_path(), event)
+}
+
+pub(crate) fn codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
+    event_hook_command_with_bin(bin, event, managed_hook_shell(), ManagedHookTarget::Codex)
 }
 
 #[cfg(test)]
@@ -488,6 +509,19 @@ fn posix_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     format!("{bin} hook event {event}")
 }
 
+fn posix_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
+    let fallback = posix_double_quoted_parameter_default(bin);
+    format!("gwt_bin=\"${{GWT_BIN_PATH:-{fallback}}}\"; \"$gwt_bin\" hook event {event}")
+}
+
+fn posix_double_quoted_parameter_default(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+}
+
 #[cfg(test)]
 fn posix_runtime_hook_command(event: &str) -> String {
     let bin = posix_shell_quote(&gwt_hook_bin_path());
@@ -519,6 +553,13 @@ fn posix_coordination_hook_command(event: &str) -> String {
 fn powershell_event_hook_command_with_bin(bin: &str, event: &str) -> String {
     let bin = powershell_quote(bin);
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook event {event} }}\"")
+}
+
+fn powershell_codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
+    let bin = powershell_quote(bin);
+    format!(
+        "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ {bin} }}; & $gwtBin hook event {event} }}\""
+    )
 }
 
 #[cfg(test)]
@@ -588,6 +629,34 @@ mod tests {
             assert!(
                 commands[0].contains(&format!(" hook event {event}")),
                 "managed {event} command must dispatch through `hook event {event}`, got: {}",
+                commands[0]
+            );
+        }
+    }
+
+    #[test]
+    fn managed_codex_event_commands_are_gwt_bin_path_first() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".codex/hooks.json")).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        for event in MANAGED_EVENT_ORDER {
+            let commands = commands_for_event(&value, event);
+            assert_eq!(commands.len(), 1, "{event} must use one dispatcher");
+            assert!(
+                commands[0].contains("GWT_BIN_PATH"),
+                "managed Codex command must resolve GWT_BIN_PATH first; got: {}",
+                commands[0]
+            );
+            assert!(
+                commands[0].contains(" hook event "),
+                "managed Codex command must still dispatch through the event front door; got: {}",
+                commands[0]
+            );
+            assert!(
+                commands[0].contains("gwtd"),
+                "managed Codex command must retain a host gwtd fallback; got: {}",
                 commands[0]
             );
         }
@@ -1543,7 +1612,11 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = event_hook_command("SessionStart", managed_hook_shell());
+        let expected = event_hook_command(
+            "SessionStart",
+            managed_hook_shell(),
+            ManagedHookTarget::Codex,
+        );
         assert_eq!(session_start_command, expected);
     }
 
