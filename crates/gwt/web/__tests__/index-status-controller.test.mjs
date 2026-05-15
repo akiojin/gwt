@@ -146,3 +146,19 @@ test("app.js still wires the per-tab dot aggregator", () => {
     "app.js must not retain references to the removed badge element",
   );
 });
+
+test("Settings.Index requests full index status only when the Index tab opens", () => {
+  assert.ok(
+    appSource.includes("function requestFullIndexStatusRefresh()"),
+    "expected a dedicated Settings.Index full refresh request helper",
+  );
+  assert.ok(
+    appSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
+    "Settings.Index must request the expensive all-worktree status on demand",
+  );
+  assert.ok(
+    appSource.includes('if (target === "index")') &&
+      appSource.includes("requestFullIndexStatusRefresh();"),
+    "switching to the Index tab must trigger the full status refresh",
+  );
+});

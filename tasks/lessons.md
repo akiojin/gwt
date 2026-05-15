@@ -1,5 +1,114 @@
 # Lessons Learned
 
+## 2026-05-15 — Exact hook trust must include generator resolution and shell format
+
+### 事象
+
+PR #2735 の follow-up review で、Docker trust registration が `GWT_HOOK_BIN`
+fallback を独自解決しており、hook 生成時の binary path resolution とずれる
+可能性を指摘された。また exact command match を現在 runtime の shell 形式
+だけに絞ったため、PowerShell 形式で生成済みの Codex hooks を Linux Docker
+内の registration が trust できない互換性リスクも残っていた。
+
+### 原因
+
+「suffix ではなく exact command を trust する」という安全側の修正で、
+exact command の入力元を current runtime だけに寄せすぎた。hook trust は
+実行環境の shell 形式ではなく、既に生成済みの `.codex/hooks.json` に書かれた
+正規 command と一致するかを見る必要がある。
+
+### 再発防止策
+
+1. hook trust の exact match を変更する場合は、binary fallback resolution と
+   shell command format の両方を generator とそろえる。
+2. Docker / container registration は、host-generated command を検証するための
+   fallback path と、container 内で実行する `gwtd` path を別々にテストする。
+3. POSIX / PowerShell のように生成 shell が複数ある managed command では、
+   「現在 OS の command」だけでなく「生成器が出し得る exact command 群」を
+   trust 判定の対象にする。
+
+## 2026-05-15 — Hook trust recognizers must not accept shape-only gwtd paths
+
+### 事象
+
+PR #2733 の Codex review で、Codex hook trust 登録が Docker 内では
+`/root/.codex/config.toml` 固定になっており、非 root devcontainer の Codex
+設定を更新できないことを指摘された。同時に portable hook command の fallback
+判定が `.../gwtd` で終わる任意パスを trust 対象にしていたため、
+`/tmp/attacker/gwtd` のようなパスでも review signal を消せる状態だった。
+
+### 原因
+
+Docker registration と hook trust recognizer の責務が混ざり、container 内で
+実行する `gwtd` と、host で生成された hook command の fallback path を同一視
+していた。さらに recognizer が「gwt が生成した正確な command」ではなく
+「gwtd らしい suffix」を見ていたため、攻撃者が制御できる fallback path まで
+許容していた。
+
+### 再発防止策
+
+1. trust / approval / allowlist 系の matcher は、suffix や shape ではなく
+   生成器が出す exact command か、明示的に渡された exact fallback のみを
+   許可する。
+2. Docker 内で host-generated hook を登録する場合は、実行バイナリ
+   (`/usr/local/bin/gwtd`) と trust 対象 fallback (`GWT_HOOK_BIN`) を分離する。
+3. container 内の user config path は `/root` 固定にせず、
+   `${CODEX_HOME:-${HOME:-/root}/.codex}/config.toml` のように active user から
+   導出する。
+
+## 2026-05-15 — Codex hook trust hashing must mirror event matcher semantics
+
+### 事象
+
+gwt-managed Codex hooks を自動 trust 登録する修正後も、Codex の `/hooks`
+では `UserPromptSubmit` と `Stop` が `Modified since last trusted` として
+残り、起動時に `hooks need review` warning が表示された。
+
+### 原因
+
+Codex 本体は `UserPromptSubmit` / `Stop` の matcher を dispatch でも trust
+identity hash でも無視する。一方、gwt 側の trust hash は全 event で
+`.codex/hooks.json` の `matcher="*"` を含めて計算していたため、2 event だけ
+Codex の `current_hash` と一致しなかった。
+
+### 再発防止策
+
+1. 外部ツールの trust / fingerprint / signature を再実装する場合は、設定
+   JSON の見た目ではなく公式実装の正規化後 identity を読む。
+2. hook trust の修正では、`codex --no-alt-screen` の起動 warning だけでなく
+   `/hooks` の event 別 `Active` / `Review` 表示で全 managed events を確認する。
+3. event ごとに matcher semantics が異なる場合は、全 event 同一処理にせず
+   `UserPromptSubmit` / `Stop` のような matcher 非対応 event の fixture test を
+   必ず追加する。
+
+## 2026-05-15 — Git config emulation must preserve include insertion order
+
+### 事象
+
+PR #2727 の review thread で、`repo_hash` が `url.*.insteadOf` を top-level
+Git config からしか読まず、`[include]` / `[includeIf]` 先の rewrite 設定を
+無視する問題を指摘された。追修正の初期実装では include 先を親 config の
+末尾へ単純追加していたため、include 先が `remote.origin.url` も定義する
+場合に、include 行より後ろのローカル設定が勝つという Git の順序とずれた。
+
+### 原因
+
+Git config の include は「親ファイルを読み終えた後に追加する」処理ではなく、
+`path = ...` 行の位置に include 先の内容を挿入する処理である。プロセス起動
+を避けるために Git config を自前解決する場合、ファイル単位の `Vec<String>`
+へ単純 append すると、同じ key が親子 config の両方にあるケースで上書き順序
+が変わる。
+
+### 再発防止策
+
+1. `git config` / `git remote get-url` 相当の処理を自前実装する場合は、
+   include / includeIf / user config / local config の順序をテストで固定して
+   から実装する。
+2. `[include]` は include 行の位置で展開し、loop guard と最大深さを持たせる。
+   「親を全部読んでから include を末尾追加する」形にしない。
+3. review 指摘への follow-up では、指摘された直接ケースだけでなく、隣接する
+   Git config precedence の回帰テストを 1 件追加してから GREEN にする。
+
 ## 2026-05-12 — Workspace coordination must not become a global tool lock
 
 ### 事象
@@ -5385,3 +5494,86 @@ race も存在した。
 - PR #2693 (Phase 26.B / 26.A / 26.C-1 一括)
 - SPEC-2008 (Phase 26 spec/plan/tasks に FR-056〜FR-059、T-199〜T-220、SC-035〜SC-038)
 - closed regressions: #2096 / #2091 / #2513 / #2668 / SPEC-2014 Phase C1
+
+## GUI hot path の同期プロセス起動は CPU% だけでは見落とす
+
+### 事象
+
+macOS/Windows GUI が全体的に重く、キー入力・ウィンドウ操作・Launch Agent 起動が遅い。
+CPU 使用率は高く見えない一方、macOS `sample` では GUI main thread が `poll` / `posix_spawnp`
+配下で時間を使っていた。
+
+### 原因
+
+UI の Active Work / Workspace 投影 hot path で、repo hash 解決のたびに `git remote get-url origin`
+を同期起動し、さらに Workspace cleanup candidate の remote delete 可否判定で branch inventory
+hydration を同期実行していた。Board/Workspace daemon update や frontend ready で繰り返されるため、
+CPU% ではなく main-thread blocking として体感遅延になった。
+
+### 再発防止策
+
+1. GUI hot path では `git` / `gh` / `docker` などの外部プロセスを同期起動しない。必要なら
+   config/file cache を読むか、blocking task に逃がす。
+2. 性能回帰テストは fake executable を `PATH` 先頭に置いて呼び出しログを検査し、対象処理が
+   外部プロセスを起動していないことを pin する。
+3. CPU% が低い重さは `sample` / profiler で main-thread blocking と process spawn を確認する。
+
+### 関連 PR / Issue
+
+- Issue #2725
+
+## Frontend gating を追加するときは変数初期化順序を実行時に pin する
+
+### 事象
+
+Launch Wizard の Runtime confirmation 分離で `showSetupForms` を追加した後、Start Work 直後の画面で
+Agent select が操作できなくなった。静的 contract test は通っていたが、実 UI では wizard body
+rendering が壊れていた。
+
+### 原因
+
+`renderLaunchWizard()` 内で `showSetupForms = showManualSetup && !isRuntimeConfirmation` を
+`showManualSetup` の `const` 宣言より前に評価していた。JavaScript の temporal dead zone により
+render 時に例外が発生し、フォームが正常に描画されなかった。既存テストは「文字列が存在すること」
+を主に見ており、依存する local const の初期化順序を pin していなかった。
+
+### 再発防止策
+
+1. frontend render helper に新しい gating 変数を追加するときは、その変数が依存する local const の
+   宣言後に評価されることを contract test に含める。
+2. 可能なら static string assertion だけでなく、`node --check` / frontend unit / live smoke の
+   どれかで runtime parse/execution に近い確認も併用する。
+3. Launch Wizard の Settings/Runtime 分離では、Start Work / Launch Agent / Quick Start の入口ごとに
+   初期 phase と Runtime confirmation phase の両方を確認する。
+
+### 関連 PR / Issue
+
+- PR #2731
+- SPEC-2014
+
+## Project Index は起動時 visibility と repair scheduling を分離する
+
+### 事象
+
+GUI 起動直後に Project Index が全 active worktree の status probe と auto-repair を走らせ、
+worktree が多いリポジトリでは 15 秒以上 Python/Chroma プロセスが連続起動して UI がカクついた。
+
+### 原因
+
+Project tab の dot 表示、Settings.Index の全 worktree health 表示、startup auto-repair の
+3 つが同じ aggregated status 経路を共有していた。起動時に必要なのは現在の worktree と
+repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視性まで毎回読んでいた。
+
+### 再発防止策
+
+1. 起動時 status probe は current worktree 限定にする。全 worktree の health table は
+   Settings.Index を開いた時だけオンデマンドで取得する。
+2. Startup auto-repair は repo-shared scopes と current worktree の file scopes だけを対象にし、
+   inactive worktree の repair は Settings.Index の明示操作に任せる。
+3. 性能修正では `sample` と子プロセス監視で、起動 smoke 中に `index-files` や全 worktree
+   `--action status` が勝手に並ばないことを確認する。
+4. 起動時 probe とオンデマンド full refresh を分離する場合、in-flight coalescing は
+   「要求を捨てる」のではなく「必要な重い可視性を後続で流す」契約にする。Settings.Index
+   のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
+   後続 retry で最後に full status を配信する。この retry は固定短時間 timeout で捨てず、
+   bootstrap が長引く初回 runtime 準備や大規模 repo でも要求を保持する。

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import * as geometrySync from "../window-geometry-sync.js";
 import {
   beginLocalGeometryEdit,
   clearLocalGeometryEdit,
@@ -95,4 +96,38 @@ test("clearLocalGeometryEdit removes the stale workspace geometry guard", () => 
     shouldApplyWorkspaceGeometry(state, { id: "w-1", geometryRevision: 2 }),
     true,
   );
+});
+
+test("resize release geometry uses the pointer-end event coordinates", () => {
+  assert.equal(typeof geometrySync.syncResizeStatePointerEvent, "function");
+  assert.equal(typeof geometrySync.resizeGeometryFromPointerState, "function");
+
+  const resizeState = {
+    startX: 100,
+    startY: 50,
+    latestClientX: 126,
+    latestClientY: 66,
+    width: 500,
+    height: 300,
+  };
+
+  const synced = geometrySync.syncResizeStatePointerEvent(resizeState, {
+    clientX: 190,
+    clientY: 130,
+  });
+  const geometry = geometrySync.resizeGeometryFromPointerState(resizeState, {
+    zoom: 2,
+    minWidth: 420,
+    minHeight: 260,
+  });
+
+  assert.equal(synced, true);
+  assert.equal(resizeState.latestClientX, 190);
+  assert.equal(resizeState.latestClientY, 130);
+  assert.deepEqual(geometry, {
+    clientX: 190,
+    clientY: 130,
+    width: 545,
+    height: 340,
+  });
 });

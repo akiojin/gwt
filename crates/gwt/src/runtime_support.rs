@@ -753,6 +753,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_project_target_does_not_request_migration_for_worktree_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        let worktree = tmp.path().join("feature");
+        std::fs::create_dir_all(bare.join("worktrees").join("feature")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: ../repo.git/worktrees/feature\n",
+        )
+        .unwrap();
+
+        let target = super::resolve_project_target(&worktree).expect("worktree target");
+
+        assert_eq!(target.kind, gwt::ProjectKind::Git);
+        assert_eq!(target.project_root, dunce::canonicalize(&worktree).unwrap());
+        assert!(
+            !target.needs_migration,
+            "linked worktree markers must not be treated as Normal Git migration targets"
+        );
+    }
+
+    #[test]
     fn fallback_project_target_does_not_set_needs_migration() {
         let target =
             super::fallback_project_target(std::path::PathBuf::from("/tmp/_does_not_exist"));

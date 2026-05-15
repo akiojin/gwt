@@ -835,11 +835,11 @@ mod tests {
         // up resizeState immediately via forceResetResizeState.
         let html = frontend_bundle_source();
         let pointerup_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
+            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
         )
         .expect("valid regex");
         let pointercancel_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId\);"#,
+            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);"#,
         )
         .expect("valid regex");
 
@@ -861,7 +861,7 @@ mod tests {
         )
         .expect("valid regex");
         let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 
@@ -885,22 +885,22 @@ mod tests {
         let html = frontend_bundle_source();
 
         assert!(
-            html.contains("function finishWindowResize(pointerId)"),
+            html.contains("function finishWindowResize(pointerId, event = null)"),
             "expected all floating window resize completion paths to share one finalizer",
         );
         assert!(
-            html.contains("finishWindowResize(event.pointerId);"),
-            "expected pointerup resize path to use the shared finalizer",
+            html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected pointerup resize path to use the shared finalizer with release coordinates",
         );
         assert!(
             html.contains("window.addEventListener(\"pointercancel\", (event) => {")
-                && html.contains("finishWindowResize(event.pointerId);"),
-            "expected pointercancel to finalize resize state",
+                && html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected pointercancel to finalize resize state with release coordinates",
         );
         assert!(
             html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
-                && html.contains("finishWindowResize(event.pointerId);"),
-            "expected lost pointer capture to finalize resize state",
+                && html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected lost pointer capture to finalize resize state with release coordinates",
         );
         assert!(
             html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
@@ -2406,13 +2406,10 @@ mod tests {
             submit_button.is_match(html),
             "expected submit control to ignore error-only state and flush branch draft before dispatching submit",
         );
-        let backdrop_cancel = regex::Regex::new(
-            r#"if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}"#,
-        )
-        .expect("valid regex");
         assert!(
-            backdrop_cancel.is_match(html),
-            "expected backdrop dismissal to share the same wizard close helper",
+            !html.contains("event.target === wizardModal")
+                || !html.contains("closeLaunchWizardFromChrome();"),
+            "expected wizard backdrop clicks to stop dismissing the wizard",
         );
         // Issue #2698 PR 1 (B7) — the launch_wizard_state case now
         // also defers via `wizardInteractionGuard.defer(...)` before
@@ -2442,14 +2439,61 @@ mod tests {
             "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
         );
         assert!(
-            html.contains("isStartWorkMode")
-                && html.contains("is-drawer")
-                && html.contains("is-drawer-shell"),
-            "expected Start Work wizard mode to opt into the SPEC-2356 drawer bridge",
+            !html.contains("isStartWorkMode")
+                && !html.contains(r#"wizardModal.classList.toggle("is-drawer""#),
+            "expected Start Work wizard mode to share the centered Launch Wizard modal",
         );
         assert!(
             html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
             "expected Start Work to keep the existing Agent settings renderer available",
+        );
+    }
+
+    #[test]
+    fn embedded_web_launch_wizard_flow_redesign_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("wizard-progress-rail")
+                && html.contains("wizard-main")
+                && html.contains("wizard-content-pane"),
+            "expected Launch Wizard to render a split progress/content layout",
+        );
+        assert!(
+            html.contains("selected_launch_path")
+                && html.contains("selected_quick_start_index")
+                && html.contains("primary_action_label"),
+            "expected Launch Wizard renderer to follow backend-selected path and footer label",
+        );
+        assert!(
+            html.contains(r#"kind: "select_quick_start""#) && !html.contains("quick-start-actions"),
+            "expected Quick Start to be a selectable path submitted by the footer primary button",
+        );
+    }
+
+    #[test]
+    fn embedded_web_launch_wizard_runtime_confirmation_summary_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("const isRuntimeConfirmation = Boolean(")
+                && html.contains("launchWizard.runtime_context_resolved")
+                && html.contains("launchWizard.show_runtime_confirmation"),
+            "expected Launch Wizard to derive a dedicated Runtime confirmation state",
+        );
+        assert!(
+            html.contains("const showSetupForms = showManualSetup && !isRuntimeConfirmation;"),
+            "expected setup form rendering to be disabled during Runtime confirmation",
+        );
+        assert!(
+            html.contains("renderWizardSummary();")
+                && html.contains("if (!isRuntimeConfirmation"),
+            "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
+        );
+        assert!(
+            html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
+                && html.contains("showSetupForms && launchWizard.show_agent_settings"),
+            "expected branch and linked issue controls to be gated to setup forms",
         );
     }
 

@@ -201,6 +201,25 @@ fn t026_validate_aggregates_all_checks_for_clean_normal_repo() {
 }
 
 #[test]
+fn t026_validate_rejects_git_file_worktree_marker_before_backup() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join(".git"),
+        "gitdir: ../repo.git/worktrees/feature\n",
+    )
+    .unwrap();
+
+    let err = validator::validate(tmp.path())
+        .expect_err("linked worktree markers must not be valid Normal Git migration roots");
+
+    assert!(
+        err.to_string()
+            .contains("not a normal Git repository with a .git directory"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
 fn t030_backup_create_copies_tree_into_backup_dir() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();

@@ -559,6 +559,18 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe.to_path_buf()
 }
 
+fn resolve_generated_hook_gwt_bin_with_lookup(
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> PathBuf {
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
+            return candidate;
+        }
+    }
+    resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+}
+
 fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
     if !is_named_gwt_binary(path) {
         return None;
@@ -599,6 +611,62 @@ fn apply_docker_runtime_to_launch_config(
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     config.docker_service = Some(launch.service);
     Ok(())
+}
+
+pub fn register_codex_managed_hook_trust_in_docker(
+    worktree: &Path,
+    docker_service: Option<&str>,
+) -> Result<(), String> {
+    let launch = resolve_docker_launch_plan(worktree, docker_service)?;
+    let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
+    let host_gwt_bin = resolve_generated_hook_gwt_bin_with_lookup(&current_exe, |command| {
+        which::which(command).ok()
+    })
+    .into_os_string()
+    .into_string()
+    .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
+    let args = docker_codex_hook_trust_registration_args(&launch.container_cwd, &host_gwt_bin);
+    let output = gwt_docker::compose_service_exec_capture_with_files(
+        &launch.compose_files,
+        &launch.service,
+        Some(&launch.container_cwd),
+        &args,
+    )
+    .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+    Err(format!(
+        "container-local Codex hook trust registration failed for service '{}': {detail}",
+        launch.service
+    ))
+}
+
+fn docker_codex_hook_trust_registration_args(
+    container_cwd: &str,
+    host_gwt_bin_fallback: &str,
+) -> Vec<String> {
+    let script = format!(
+        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\nGWT_HOOK_BIN={} exec {} hook register-codex-managed-hook-trust --project-root {} --codex-config \"$codex_home/config.toml\"",
+        shell_single_quote(host_gwt_bin_fallback),
+        shell_single_quote(DOCKER_GWTD_BIN_PATH),
+        shell_single_quote(container_cwd),
+    );
+    vec!["sh".to_string(), "-lc".to_string(), script]
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn finalize_docker_agent_launch_config(
@@ -1848,6 +1916,46 @@ mod tests {
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+    }
+
+    #[test]
+    fn docker_codex_hook_trust_registration_uses_container_home_and_host_fallback() {
+        let args =
+            docker_codex_hook_trust_registration_args("/workspace/app", "/host/gwt/bin/gwtd");
+
+        assert_eq!(args[0], "sh");
+        assert_eq!(args[1], "-lc");
+        let script = &args[2];
+        assert!(
+            script.contains(r#"codex_home="${CODEX_HOME:-${HOME:-/root}/.codex}""#),
+            "script must derive Codex home from the active container user, got: {script}"
+        );
+        assert!(
+            script.contains(r#"--codex-config "$codex_home/config.toml""#),
+            "script must pass the derived Codex config path, got: {script}"
+        );
+        assert!(
+            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd'"),
+            "script must invoke container-local gwtd while matching host-generated hooks, got: {script}"
+        );
+        assert!(
+            !script.contains("/root/.codex/config.toml"),
+            "script must not hard-code root's Codex config path, got: {script}"
+        );
+    }
+
+    #[test]
+    fn docker_codex_hook_trust_fallback_matches_gui_hook_generator_sibling() {
+        let fallback = resolve_generated_hook_gwt_bin_with_lookup(
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            |_| Some(PathBuf::from("/usr/local/bin/gwtd")),
+        );
+
+        assert_eq!(
+            fallback,
+            PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
+            "Docker trust fallback must match settings_local::gwt_hook_bin_path for GUI launches"
+        );
     }
 
     #[test]

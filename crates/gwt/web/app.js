@@ -47,7 +47,9 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
+        resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
+        syncResizeStatePointerEvent,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
@@ -371,7 +373,7 @@
           if (deferred.kind === "system_settings") {
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -384,7 +386,7 @@
             systemSettingsState.language = deferred.language
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -1852,16 +1854,17 @@
         resizeState.fitFrame = null;
       }
 
-      function finishWindowResize(pointerId) {
+      function finishWindowResize(pointerId, event = null) {
         if (!resizeState || resizeState.pointerId !== pointerId) {
           return;
         }
         const runtime = terminalMap.get(resizeState.id);
+        syncResizeStatePointerEvent(resizeState, event);
         cancelTerminalResizeFit();
         cancelResizePointermoveApply();
         cancelResizeStalenessGuard();
         // Flush the last pointer coordinates to the DOM so the final geometry
-        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // matches the latest pointer event. fitTerminal + sendGeometry below
         // observe the up-to-date `element.style.width/height`.
         applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
@@ -1929,23 +1932,16 @@
         if (!element) {
           return;
         }
-        const x = state.latestClientX ?? state.startX;
-        const y = state.latestClientY ?? state.startY;
-        const width = clamp(
-          state.width + (x - state.startX) / viewport.zoom,
-          420,
-        );
-        const height = clamp(
-          state.height + (y - state.startY) / viewport.zoom,
-          260,
-        );
+        const { clientX, clientY, width, height } = resizeGeometryFromPointerState(state, {
+          zoom: viewport.zoom,
+        });
         element.style.width = `${width}px`;
         element.style.height = `${height}px`;
         traceUi(UI_TRACE_EVENT.resizePointermoveApply, {
           window_id: state.id,
           pointer_id: state.pointerId,
-          client_x: x,
-          client_y: y,
+          client_x: clientX,
+          client_y: clientY,
           width,
           height,
         });
@@ -3905,6 +3901,19 @@
         return node;
       }
 
+      function setLaunchWizardPendingDisabled(root, disabled) {
+        if (!disabled) return;
+        const selector =
+          "input, textarea, select, button, [role='button'], [contenteditable='true']";
+        for (const element of root.querySelectorAll(selector)) {
+          if ("disabled" in element) {
+            element.disabled = true;
+          }
+          element.setAttribute("aria-disabled", "true");
+          element.setAttribute("tabindex", "-1");
+        }
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -5267,6 +5276,24 @@
         }
       }
 
+      function renderWizardProgressRail() {
+        const rail = createNode("aside", "wizard-progress-rail");
+        rail.setAttribute("aria-label", "Launch progress");
+        for (const step of launchWizard.progress_steps || []) {
+          const item = createNode("div", "wizard-progress-step");
+          item.dataset.state = step.state || "pending";
+          item.appendChild(createNode("span", "wizard-progress-marker"));
+          const copy = createNode("span", "wizard-progress-copy");
+          copy.appendChild(createNode("span", "wizard-progress-label", step.label));
+          if (step.detail) {
+            copy.appendChild(createNode("span", "wizard-progress-detail", step.detail));
+          }
+          item.appendChild(copy);
+          rail.appendChild(item);
+        }
+        return rail;
+      }
+
       let wizardFocusReturn = null;
       let wizardFocusTrapRelease = null;
 
@@ -5308,8 +5335,6 @@
             catch { wizardFocusReturn.focus(); }
             wizardFocusReturn = null;
           }
-          wizardModal.classList.remove("is-drawer");
-          wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
           wizardBody.innerHTML = "";
           wizardError.hidden = true;
@@ -5319,17 +5344,13 @@
           wizardSubmitButton.disabled = false;
           wizardSubmitButton.hidden = false;
           wizardCancelButton.textContent = "Cancel";
+          wizardCancelButton.disabled = false;
           syncWizardDraftState();
           return;
         }
 
         syncWizardDraftState();
         closeModal();
-        const isStartWorkMode =
-          launchWizard?.show_branch_controls === false ||
-          launchWizardOpenError?.title === "Start Work";
-        wizardModal.classList.toggle("is-drawer", isStartWorkMode);
-        wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
           // Capture trigger BEFORE flipping .open so render-driven focus
@@ -5361,6 +5382,7 @@
           wizardSubmitButton.hidden = true;
           wizardSubmitButton.disabled = true;
           wizardCancelButton.textContent = "Close";
+          wizardCancelButton.disabled = false;
           wizardError.hidden = false;
           wizardError.textContent =
             launchWizardOpenError.message || "Unable to open Launch Wizard";
@@ -5377,14 +5399,21 @@
           : `Selected branch · ${
             launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
           }`;
-        wizardSubmitButton.textContent = launchWizard.is_hydrating
-          ? "Loading..."
-          : launchWizard.runtime_context_resolved === false
-            ? "Continue"
-            : launchWizard.branch_mode === "create_new"
-              ? "Create and launch"
-              : "Launch";
-        wizardSubmitButton.disabled = Boolean(launchWizard.is_hydrating);
+        wizardSubmitButton.textContent = launchWizard.primary_action_label || (
+          launchWizard.is_hydrating
+            ? "Loading..."
+            : launchWizard.runtime_context_resolved === false
+              ? "Continue"
+              : launchWizard.branch_mode === "create_new"
+                ? "Create and launch"
+                : "Launch"
+        );
+        wizardSubmitButton.disabled = Boolean(
+          launchWizard.is_hydrating
+            || launchWizard.runtime_resolution_pending
+            || launchWizard.primary_action_enabled === false,
+        );
+        wizardCancelButton.disabled = false;
 
         if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
@@ -5396,8 +5425,19 @@
         }
 
         renderWizardSummary();
+        const showManualSetup = launchWizard.show_manual_setup !== false;
+        const isRuntimeConfirmation = Boolean(
+          launchWizard.runtime_context_resolved
+          && launchWizard.show_runtime_confirmation
+        );
+        const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
+        const wizardMain = createNode("div", "wizard-main");
+        wizardMain.appendChild(renderWizardProgressRail());
+        const wizardContentPane = createNode("div", "wizard-content-pane");
         const panel = createNode("div", "launch-panel");
+        const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
+        panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
         if (launchWizard.is_hydrating) {
           panel.appendChild(
             createNode(
@@ -5407,11 +5447,20 @@
             ),
           );
         }
+        if (launchWizard.runtime_resolution_pending) {
+          panel.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              launchWizard.runtime_resolution_message || "Preparing runtime...",
+            ),
+          );
+        }
 
-        if (
+        if (!isRuntimeConfirmation && (
           (launchWizard.quick_start_entries || []).length > 0 ||
           (launchWizard.live_sessions || []).length > 0
-        ) {
+        )) {
           const section = createLaunchSection(
             "Quick start",
             "Reuse a recent launch profile or jump to a running window.",
@@ -5420,7 +5469,15 @@
           if ((launchWizard.quick_start_entries || []).length > 0) {
             const quickStartGrid = createNode("div", "quick-start-grid");
             for (const entry of launchWizard.quick_start_entries) {
-              const card = createNode("div", "quick-start-card");
+              const card = createNode("button", "quick-start-card");
+              card.type = "button";
+              const selected =
+                launchWizard.selected_launch_path === "quick_start"
+                && launchWizard.selected_quick_start_index === entry.index;
+              card.setAttribute("aria-pressed", selected ? "true" : "false");
+              if (selected) {
+                card.classList.add("selected");
+              }
               const head = createNode("div", "quick-start-head");
               head.appendChild(
                 createNode("div", "quick-start-title", entry.tool_label),
@@ -5438,41 +5495,12 @@
                 );
               }
               card.appendChild(head);
-
-              const actions = createNode("div", "quick-start-actions");
-              if (entry.reuse_action_label) {
-                const reuseButton = createNode(
-                  "button",
-                  "wizard-button",
-                  entry.reuse_action_label,
-                );
-                reuseButton.type = "button";
-                reuseButton.addEventListener("click", () => {
-                  sendWizardAction({
-                    kind: "apply_quick_start",
-                    index: entry.index,
-                    mode: "resume",
-                  });
-                });
-                actions.appendChild(reuseButton);
-              }
-
-              const startNewButton = createNode(
-                "button",
-                "wizard-button primary",
-                "Start new",
-              );
-              startNewButton.type = "button";
-              startNewButton.addEventListener("click", () => {
+              card.addEventListener("click", () => {
                 sendWizardAction({
-                  kind: "apply_quick_start",
+                  kind: "select_quick_start",
                   index: entry.index,
-                  mode: "start_new",
                 });
               });
-              actions.appendChild(startNewButton);
-
-              card.appendChild(actions);
               quickStartGrid.appendChild(card);
             }
             section.appendChild(quickStartGrid);
@@ -5483,6 +5511,13 @@
             for (const session of launchWizard.live_sessions) {
               const button = createNode("button", "live-session-button");
               button.type = "button";
+              const selected =
+                launchWizard.selected_launch_path === "focus_session"
+                && launchWizard.selected_live_session_index === session.index;
+              button.setAttribute("aria-pressed", selected ? "true" : "false");
+              if (selected) {
+                button.classList.add("selected");
+              }
               button.appendChild(
                 createNode("div", "live-session-name", session.name),
               );
@@ -5500,7 +5535,7 @@
               }
               button.addEventListener("click", () => {
                 sendWizardAction({
-                  kind: "focus_existing_session",
+                  kind: "select_live_session",
                   index: session.index,
                 });
               });
@@ -5509,10 +5544,35 @@
             section.appendChild(liveSection);
           }
 
+          const manualButton = createNode("button", "quick-start-card manual");
+          manualButton.type = "button";
+          const manualSelected = launchWizard.selected_launch_path === "manual_setup";
+          manualButton.setAttribute("aria-pressed", manualSelected ? "true" : "false");
+          if (manualSelected) {
+            manualButton.classList.add("selected");
+          }
+          const manualHead = createNode("div", "quick-start-head");
+          manualHead.appendChild(createNode("div", "quick-start-title", "Configure launch"));
+          manualHead.appendChild(
+            createNode(
+              "div",
+              "quick-start-meta",
+              "Choose branch, agent, model, and runtime.",
+            ),
+          );
+          manualButton.appendChild(manualHead);
+          manualButton.addEventListener("click", () => {
+            sendWizardAction({
+              kind: "set_launch_path",
+              path: "manual_setup",
+            });
+          });
+          section.appendChild(manualButton);
+
           panel.appendChild(section);
         }
 
-        if (launchWizard.show_branch_controls !== false) {
+        if (showSetupForms && launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -5602,7 +5662,7 @@
           panel.appendChild(section);
         }
 
-        {
+        if (showSetupForms) {
           const section = createLaunchSection(
             "Launch",
             "Choose what to launch on the selected branch.",
@@ -5699,9 +5759,12 @@
         }
 
         if (
-          launchWizard.show_version ||
-          launchWizard.show_skip_permissions ||
-          launchWizard.show_codex_fast_mode
+          showSetupForms &&
+          (
+            launchWizard.show_version ||
+            launchWizard.show_skip_permissions ||
+            launchWizard.show_codex_fast_mode
+          )
         ) {
           const section = createLaunchSection(
             "Launch settings",
@@ -5751,7 +5814,7 @@
           panel.appendChild(section);
         }
 
-        if (launchWizard.show_agent_settings) {
+        if (showSetupForms && launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
             "Optional: Link an issue to this launch session.",
@@ -5785,18 +5848,22 @@
           panel.appendChild(section);
         }
 
-        if (
+        const hasRuntimeControls =
           launchWizard.show_runtime_target ||
           (launchWizard.show_docker_service &&
             (launchWizard.docker_service_options || []).length > 0) ||
           (launchWizard.show_docker_lifecycle &&
-            (launchWizard.docker_lifecycle_options || []).length > 0)
+            (launchWizard.docker_lifecycle_options || []).length > 0);
+        if (
+          launchWizard.show_runtime_confirmation &&
+          (hasRuntimeControls || isRuntimeConfirmation || !showManualSetup)
         ) {
           const section = createLaunchSection(
             "Runtime",
             "Choose where the session runs and how Docker services are used.",
           );
           const grid = createNode("div", "launch-form-grid");
+          let appendedRuntimeControl = false;
           if (launchWizard.show_runtime_target) {
             appendSelectField(
               grid,
@@ -5809,6 +5876,7 @@
                   target: runtimeTargetPayload(value),
                 }),
             );
+            appendedRuntimeControl = true;
           }
           if (
             launchWizard.show_docker_service &&
@@ -5825,6 +5893,7 @@
                   service: value,
                 }),
             );
+            appendedRuntimeControl = true;
           }
           if (
             launchWizard.show_docker_lifecycle &&
@@ -5841,13 +5910,30 @@
                   intent: dockerLifecyclePayload(value),
                 }),
             );
+            appendedRuntimeControl = true;
+          }
+          if (!appendedRuntimeControl) {
+            const note = createLaunchField("Runtime target", true);
+            note.appendChild(
+              createNode(
+                "div",
+                "launch-note",
+                launchWizard.selected_runtime_target === "docker"
+                  ? "Docker"
+                  : "Host",
+              ),
+            );
+            grid.appendChild(note);
           }
           section.appendChild(grid);
 
           panel.appendChild(section);
         }
 
-        wizardBody.appendChild(panel);
+        setLaunchWizardPendingDisabled(panel, isRuntimeResolutionPending);
+        wizardContentPane.appendChild(panel);
+        wizardMain.appendChild(wizardContentPane);
+        wizardBody.appendChild(wizardMain);
       }
 
       function renderFileTree(windowId) {
@@ -7645,7 +7731,7 @@
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
         language: "auto",
-        codexTrustManagedHooks: false,
+        codexTrustManagedHooks: true,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -7792,6 +7878,12 @@
         }
       }
 
+      function requestFullIndexStatusRefresh() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        if (!activeProjectRoot) return;
+        send({ kind: "refresh_index_status", project_root: activeProjectRoot });
+      }
+
       document.addEventListener("settings:open", (event) => {
         const target = event?.detail?.target || "system";
         const existingBody = Array.from(settingsWindowBodies).find(
@@ -7830,6 +7922,9 @@
             panel.dataset.settingsPanel !== target,
           );
         });
+        if (target === "index") {
+          requestFullIndexStatusRefresh();
+        }
       }
 
       function renderSystemPanel(panel) {
@@ -7883,7 +7978,7 @@
         trustCheckbox.type = "checkbox";
         trustCheckbox.className = "settings-checkbox";
         trustCheckbox.id = "settings-system-codex-hooks";
-        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks === true;
+        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks !== false;
         trustCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.codexTrustManagedHooks = next;
@@ -7906,7 +8001,7 @@
         const trustHelp = document.createElement("p");
         trustHelp.className = "settings-help";
         trustHelp.textContent =
-          "Registers only generated gwt hook commands in Codex hook trust state.";
+          "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
         const status = document.createElement("p");
@@ -8300,7 +8395,7 @@
               accepted: true,
               window_id: windowData.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           });
         }
 
@@ -9288,13 +9383,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -9310,13 +9406,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings_updated",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
@@ -9568,7 +9665,7 @@
               accepted: true,
               window_id: resizeState.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           } else {
             // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
             // emits a `pointerup` whose pointerId does not match the one
@@ -9654,7 +9751,7 @@
             window_id: resizeState.id,
           });
         }
-        finishWindowResize(event.pointerId);
+        finishWindowResize(event.pointerId, event);
       });
 
       canvas.addEventListener("contextmenu", (event) => {
@@ -9936,11 +10033,6 @@
         }
         frontendUnits.launchWizardSurface.flushBranchDraft();
         frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
-      });
-      wizardModal.addEventListener("click", (event) => {
-        if (event.target === wizardModal) {
-          closeLaunchWizardFromChrome();
-        }
       });
       // Issue #2698 PR 1 (B7) — interaction-guard wiring for native
       // <select> dropdowns inside the wizard body. We register

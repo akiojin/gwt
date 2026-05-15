@@ -1325,26 +1325,12 @@ fn workspace_projection_for_current_resume(
 }
 
 fn workspace_cleanup_candidate_for_projection(
-    project_root: &Path,
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
 ) -> Option<gwt::ActiveWorkCleanupCandidateView> {
     let branch = projection.git_details.as_ref()?.branch.as_deref()?;
     let branch_has_live_agent = sessions.iter().any(|session| session.branch_name == branch);
-    let mut candidate = projection.cleanup_candidate(branch_has_live_agent)?;
-    if let Ok(entries) = list_branch_entries_with_active_sessions(
-        project_root,
-        &sessions
-            .iter()
-            .map(|session| session.branch_name.clone())
-            .collect::<std::collections::HashSet<_>>(),
-    ) {
-        candidate.remote_delete_available = entries
-            .iter()
-            .find(|entry| entry.name == candidate.branch)
-            .and_then(|entry| entry.cleanup.upstream.as_ref())
-            .is_some();
-    }
+    let candidate = projection.cleanup_candidate(branch_has_live_agent)?;
     Some(active_work_cleanup_candidate_view_from_candidate(candidate))
 }
 
@@ -2131,6 +2117,9 @@ impl AppRuntime {
                 scope,
                 worktree_hash,
             } => self.rebuild_index_cell_events(project_root, scope, worktree_hash),
+            FrontendEvent::RefreshIndexStatus { project_root } => {
+                self.refresh_index_status_events(project_root)
+            }
             FrontendEvent::PostBoardEntry {
                 id,
                 entry_kind,
@@ -2696,11 +2685,8 @@ impl AppRuntime {
         {
             let mut projection = projection;
             let had_saved_agents = !projection.agents.is_empty();
-            let cleanup_candidate = workspace_cleanup_candidate_for_projection(
-                &tab.project_root,
-                &projection,
-                &sessions,
-            );
+            let cleanup_candidate =
+                workspace_cleanup_candidate_for_projection(&projection, &sessions);
             merge_active_sessions_into_projection(
                 &mut projection,
                 sessions.iter().copied(),
@@ -3736,29 +3722,55 @@ impl AppRuntime {
     /// fallback intentionally does **not** mutate `active_agent_sessions`
     /// (that lifecycle stays in the launch flow, see US-24). It only
     /// resolves the lookup needed for title sync.
+    ///
+    /// Phase U-4 fallback: when the projection record only carries
+    /// `worktree_path` (e.g. SessionStart hook registered the agent
+    /// before any GUI launch picked it up so `window_id` is `None`),
+    /// try to match against `active_agent_sessions` by worktree alone.
+    /// Only resolves when there is exactly one matching session in the
+    /// worktree with the same `agent_id`, to avoid mis-targeting when
+    /// the worktree has multiple panes.
+    ///
+    /// Phase U-7 (SPEC-2359): the fast path used to require
+    /// `same_worktree_path(session.worktree_path, project_root)` so that
+    /// only the watcher firing for the *agent's own* tab would resolve
+    /// the window. In practice this filter prevented title updates
+    /// whenever the watcher event came from a different tab (e.g. the
+    /// startup tab's watcher firing for a change in another tab's
+    /// agent, since both tabs share `current.json`). `session_id` is
+    /// globally unique to one launched window — finding it in
+    /// `active_agent_sessions` is sufficient to identify the target.
     fn resolve_title_sync_window_id(
         &self,
         agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
         project_root: &Path,
     ) -> Option<String> {
-        if let Some((window_id, session)) = self
+        if let Some((window_id, _session)) = self
             .active_agent_sessions
             .iter()
             .find(|(_, session)| session.session_id == agent.session_id)
         {
-            if same_worktree_path(&session.worktree_path, project_root) {
-                return Some(window_id.clone());
+            return Some(window_id.clone());
+        }
+        if let Some(worktree) = agent.worktree_path.as_deref() {
+            if same_worktree_path(worktree, project_root) {
+                if let Some(projected_window_id) = agent.window_id.as_deref() {
+                    if self.window_lookup.contains_key(projected_window_id) {
+                        return Some(projected_window_id.to_string());
+                    }
+                }
+                let mut matches = self.active_agent_sessions.iter().filter(|(_, session)| {
+                    same_worktree_path(&session.worktree_path, worktree)
+                        && session.agent_id == agent.agent_id
+                });
+                if let Some((window_id, _)) = matches.next() {
+                    if matches.next().is_none() {
+                        return Some(window_id.clone());
+                    }
+                }
             }
         }
-        let projected_window_id = agent.window_id.as_deref()?;
-        let projected_worktree = agent.worktree_path.as_deref()?;
-        if !same_worktree_path(projected_worktree, project_root) {
-            return None;
-        }
-        if !self.window_lookup.contains_key(projected_window_id) {
-            return None;
-        }
-        Some(projected_window_id.to_string())
+        None
     }
 
     pub(crate) fn load_knowledge_bridge_events(
@@ -4192,6 +4204,17 @@ impl AppRuntime {
             scope,
             worktree_hash,
         );
+        Vec::new()
+    }
+
+    /// Settings.Index requests the full all-worktree health table on demand.
+    /// The startup path stays current-worktree only to avoid UI-visible CPU
+    /// spikes on repositories with many active worktrees.
+    pub(crate) fn refresh_index_status_events(&self, project_root: String) -> Vec<OutboundEvent> {
+        let project_root = std::path::PathBuf::from(project_root);
+        let service =
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let _request = service.spawn_full_status_refresh(self.proxy.clone(), project_root);
         Vec::new()
     }
 }
@@ -5063,6 +5086,7 @@ impl AppRuntime {
                 &worktree_path,
                 &config.agent_id,
                 config.runtime_target,
+                config.docker_service.as_deref(),
             )? {
                 if !report.trusted_entries.is_empty() {
                     proxy.send(UserEvent::LaunchProgress {
@@ -5703,6 +5727,9 @@ impl AppRuntime {
         match action {
             gwt::LaunchWizardAction::Submit => "wizard_submit",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "quick_start",
+            gwt::LaunchWizardAction::SetLaunchPath { .. }
+            | gwt::LaunchWizardAction::SelectQuickStart { .. }
+            | gwt::LaunchWizardAction::SelectLiveSession { .. } => "launch_path_select",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
@@ -5718,6 +5745,9 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Cancel => "cancel",
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+            gwt::LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
+            gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
+            gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
             gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
@@ -6217,33 +6247,68 @@ fn maybe_register_codex_managed_hook_trust_for_launch(
     worktree_path: &Path,
     agent_id: &gwt_agent::AgentId,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
+    docker_service: Option<&str>,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
-    if agent_id != &gwt_agent::AgentId::Codex
-        || runtime_target != gwt_agent::LaunchRuntimeTarget::Host
-    {
+    if agent_id != &gwt_agent::AgentId::Codex {
         return Ok(None);
     }
 
     let settings = if profile_config_path.exists() {
-        gwt_config::Settings::load_from_path(profile_config_path)
-            .map_err(|error| error.to_string())?
+        match gwt_config::Settings::load_from_path(profile_config_path) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(
+                    profile_config = %profile_config_path.display(),
+                    error = %error,
+                    "failed to read gwt config while preparing Codex hook trust; continuing launch"
+                );
+                gwt_config::Settings::default()
+            }
+        }
     } else {
         gwt_config::Settings::default()
     };
-    if settings.agent.codex_trust_managed_hooks != Some(true) {
+    if settings.agent.codex_trust_managed_hooks == Some(false) {
         return Ok(None);
     }
 
-    let codex_config_path =
-        codex_config_path_for_profile_config(profile_config_path).ok_or_else(|| {
-            format!(
-                "cannot derive Codex config path from gwt config path {}",
-                profile_config_path.display()
-            )
-        })?;
-    gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            let Some(codex_config_path) = codex_config_path_for_profile_config(profile_config_path)
+            else {
+                tracing::warn!(
+                    profile_config = %profile_config_path.display(),
+                    "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                );
+                return Ok(None);
+            };
+            match gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path) {
+                Ok(report) => Ok(Some(report)),
+                Err(error) => {
+                    tracing::warn!(
+                        worktree = %worktree_path.display(),
+                        codex_config = %codex_config_path.display(),
+                        error = %error,
+                        "failed to register gwt-managed Codex hook trust; continuing launch"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
+                worktree_path,
+                docker_service,
+            ) {
+                tracing::warn!(
+                    worktree = %worktree_path.display(),
+                    error = %error,
+                    "failed to register gwt-managed Codex hook trust in Docker; continuing launch"
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
@@ -6604,14 +6669,51 @@ exit 0
         }
     }
 
-    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
-        let parent = fake_gh.parent().expect("fake gh parent");
+    fn write_fake_git_recorder(temp_root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let fake_git = temp_root.join("git.cmd");
+            fs::write(
+                &fake_git,
+                "@echo off\r\n\
+if not \"%GWT_FAKE_GIT_LOG%\"==\"\" echo %*>>\"%GWT_FAKE_GIT_LOG%\"\r\n\
+exit /b 1\r\n",
+            )
+            .expect("write fake git");
+            fake_git
+        }
+        #[cfg(not(windows))]
+        {
+            let fake_git = temp_root.join("git");
+            fs::write(
+                &fake_git,
+                r#"#!/bin/sh
+if [ -n "$GWT_FAKE_GIT_LOG" ]; then
+  printf '%s\n' "$*" >> "$GWT_FAKE_GIT_LOG"
+fi
+exit 1
+"#,
+            )
+            .expect("write fake git");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake git");
+            fake_git
+        }
+    }
+
+    fn prepend_tool_parent_to_path(tool: &Path) -> ScopedEnvVar {
+        let parent = tool.parent().expect("tool parent");
         let mut paths = vec![parent.to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
         let joined = std::env::join_paths(paths).expect("join PATH");
         ScopedEnvVar::set("PATH", joined)
+    }
+
+    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
+        prepend_tool_parent_to_path(fake_gh)
     }
 
     fn canvas_bounds() -> WindowGeometry {
@@ -8033,7 +8135,8 @@ exit 0
             ProjectKind::Git,
             &[WindowPreset::Branches],
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
             .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
@@ -8054,6 +8157,39 @@ exit 0
             events[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert!(!pending_view.runtime_context_resolved);
+        assert_eq!(pending_view.primary_action_label, "Preparing...");
+
+        wait_for_recorded_event(
+            "launch wizard runtime resolution",
+            &recorded_events,
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            },
+        );
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
+
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
         assert!(wizard
             .context
@@ -8061,6 +8197,7 @@ exit 0
             .as_ref()
             .is_some_and(|path| same_worktree_path(path, &repo)));
         let view = wizard.view();
+        assert!(!view.runtime_resolution_pending);
         assert!(view.runtime_context_resolved);
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
@@ -8094,7 +8231,8 @@ exit 0
             ProjectKind::Git,
             &[WindowPreset::Branches],
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
             .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
@@ -8111,6 +8249,33 @@ exit 0
 
         let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
         assert_eq!(events.len(), 1);
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert!(!pending_view.runtime_context_resolved);
+
+        wait_for_recorded_event("launch wizard host fallback", &recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        });
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
 
         let view = runtime
             .launch_wizard
@@ -8118,6 +8283,7 @@ exit 0
             .expect("wizard")
             .wizard
             .view();
+        assert!(!view.runtime_resolution_pending);
         assert!(view.runtime_context_resolved);
         assert_eq!(view.selected_runtime_target, "host");
         assert!(!view.show_runtime_target);
@@ -9489,6 +9655,53 @@ exit 0
         assert_eq!(candidate.branch, "work/20260507-0200");
         assert_eq!(candidate.reason, "workspace_done");
         assert!(!candidate.default_delete_remote);
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_does_not_spawn_git_for_cleanup_candidate() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_bin = temp.path().join("fake-bin");
+        fs::create_dir_all(&fake_bin).expect("create fake bin");
+        let fake_git = write_fake_git_recorder(&fake_bin);
+        let git_log = temp.path().join("git-invocations.log");
+        let _path = prepend_tool_parent_to_path(&fake_git);
+        let _git_log = ScopedEnvVar::set("GWT_FAKE_GIT_LOG", &git_log);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260507-0200".to_string()),
+            worktree_path: Some(repo.join("work/20260507-0200")),
+            base_branch: Some("origin/main".to_string()),
+            pr_number: Some(2525),
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert!(view.cleanup_candidate.is_some());
+        let invocations = fs::read_to_string(&git_log).unwrap_or_default();
+        assert!(
+            invocations.trim().is_empty(),
+            "active-work projection must not spawn git on the GUI hot path; invocations:\n{invocations}"
+        );
     }
 
     #[test]
@@ -13043,6 +13256,161 @@ exit 0
         );
     }
 
+    // ---------------------------------------------------------------------
+    // SPEC-2359 Phase U-4: worktree-only fallback for SessionStart hook
+    // registered records (window_id is None, session_id does not match any
+    // active_agent_session). Resolves to the unique active session in the
+    // same worktree with the same agent_id when one exists.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
+        // SPEC-2359 Phase U-7: when the watcher event project_root is for
+        // tab A but a session lives in tab B (both share current.json
+        // because they're worktrees of the same repo), the fast path must
+        // still resolve B's window via session_id alone. Previously the
+        // additional `same_worktree_path(session.worktree_path,
+        // project_root)` filter prevented this and caused the user-visible
+        // pane heading to stay on the agent_id fallback even after
+        // `gwtd workspace update --title-summary` succeeded at the data
+        // layer.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let unrelated = temp.path().join("unrelated");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&unrelated).expect("create unrelated");
+        let (mut runtime, _window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+
+        // Projection identifies the agent by session-1 with a worktree
+        // that *does not* match the unrelated project_root we will pass
+        // in. The fast path should still resolve.
+        let projection = apply_title_sync_sample_projection(
+            &repo,
+            "tab-1::agent-1",
+            Some("Phase U-7 cross-tab fast path"),
+            None,
+        );
+
+        let changed =
+            runtime.sync_agent_window_titles_from_workspace_projection(&unrelated, &projection);
+
+        assert!(
+            changed,
+            "fast path must resolve by session_id alone, independent of project_root"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Phase U-7 cross-tab fast path"),
+        );
+    }
+
+    #[test]
+    fn sync_agent_window_titles_falls_back_to_worktree_when_session_id_not_active() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let (mut runtime, _window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+        let mut projection = apply_title_sync_sample_projection(
+            &repo,
+            "tab-1::agent-1",
+            Some("Phase U-4 worktree fallback"),
+            Some("SessionStart-hook registered records have no window_id"),
+        );
+        // Simulate a SessionStart-hook registration: same worktree, same
+        // agent_id (codex), but a *different* session_id and no window_id.
+        // The fast path won't match by session_id, but the worktree-only
+        // fallback should resolve to the in-memory Codex window.
+        projection.agents[0].session_id = "out-of-band-session".to_string();
+        projection.agents[0].window_id = None;
+
+        let changed =
+            runtime.sync_agent_window_titles_from_workspace_projection(&repo, &projection);
+
+        assert!(
+            changed,
+            "worktree fallback should resolve to the unique active session"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Phase U-4 worktree fallback"),
+        );
+    }
+
+    #[test]
+    fn sync_agent_window_titles_worktree_fallback_refuses_when_agent_id_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let (mut runtime, _window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+        // Active session is `codex`, but the projection record (SessionStart
+        // registered) claims `claude`. The fallback must refuse rather than
+        // assigning a Claude title to the Codex pane.
+        let mut projection = apply_title_sync_sample_projection(
+            &repo,
+            "tab-1::agent-1",
+            Some("Wrong-agent title leak guard"),
+            None,
+        );
+        projection.agents[0].session_id = "out-of-band-claude".to_string();
+        projection.agents[0].window_id = None;
+        projection.agents[0].agent_id = "claude".to_string();
+
+        let changed =
+            runtime.sync_agent_window_titles_from_workspace_projection(&repo, &projection);
+
+        assert!(
+            !changed,
+            "worktree fallback must require matching agent_id to disambiguate"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert!(agent_window.dynamic_title.is_none());
+    }
+
+    #[test]
+    fn sync_agent_window_titles_worktree_fallback_refuses_when_multiple_sessions_match() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let (mut runtime, window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+        // Add a second Codex session in the same worktree. The fallback
+        // must refuse to pick one because the mapping would be ambiguous.
+        runtime.active_agent_sessions.insert(
+            "tab-1::agent-2".to_string(),
+            ActiveAgentSession {
+                window_id: "tab-1::agent-2".to_string(),
+                session_id: "session-2".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260510-0900".to_string(),
+                display_name: "Codex 2".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: String::new(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+        let mut projection =
+            apply_title_sync_sample_projection(&repo, &window_id, Some("Ambiguity guard"), None);
+        projection.agents[0].session_id = "out-of-band-session".to_string();
+        projection.agents[0].window_id = None;
+
+        let changed =
+            runtime.sync_agent_window_titles_from_workspace_projection(&repo, &projection);
+
+        assert!(
+            !changed,
+            "worktree fallback must refuse when multiple sessions share the same worktree + agent_id"
+        );
+    }
+
     #[test]
     fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
         let temp = tempdir().expect("tempdir");
@@ -13819,6 +14187,7 @@ exit 0
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap()
         .expect("enabled host Codex launch should register trust");
@@ -13834,7 +14203,7 @@ exit 0
     }
 
     #[test]
-    fn codex_hook_trust_launch_skips_without_explicit_host_codex_opt_in() {
+    fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_out() {
         let home = tempdir().expect("home tempdir");
         let profile_config_path = home.path().join(".gwt/config.toml");
         let worktree = tempdir().expect("worktree tempdir");
@@ -13845,9 +14214,17 @@ exit 0
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
-        assert!(unset.is_none());
+        assert_eq!(
+            unset
+                .expect("unset config should default to trusting managed Codex hooks")
+                .trusted_entries
+                .len(),
+            5
+        );
+        fs::remove_file(home.path().join(".codex/config.toml")).unwrap();
 
         let mut settings = Settings::default();
         settings.agent.codex_trust_managed_hooks = Some(false);
@@ -13857,32 +14234,74 @@ exit 0
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
         assert!(disabled.is_none());
 
+        assert!(
+            !home.path().join(".codex/config.toml").exists(),
+            "false opt-out must not recreate Codex config"
+        );
+
         settings.agent.codex_trust_managed_hooks = Some(true);
         settings.save(&profile_config_path).unwrap();
-        let docker = super::maybe_register_codex_managed_hook_trust_for_launch(
+        let enabled = super::maybe_register_codex_managed_hook_trust_for_launch(
             &profile_config_path,
             worktree.path(),
             &gwt_agent::AgentId::Codex,
-            gwt_agent::LaunchRuntimeTarget::Docker,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
-        assert!(docker.is_none());
+        assert_eq!(
+            enabled
+                .expect("true config should register managed Codex hooks")
+                .trusted_entries
+                .len(),
+            5
+        );
 
         let claude = super::maybe_register_codex_managed_hook_trust_for_launch(
             &profile_config_path,
             worktree.path(),
             &gwt_agent::AgentId::ClaudeCode,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
         assert!(claude.is_none());
 
         assert!(
-            !home.path().join(".codex/config.toml").exists(),
+            home.path().join(".codex/config.toml").exists(),
+            "host default/true paths must create Codex config"
+        );
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let codex_config_parent = home.path().join(".codex");
+        fs::write(&codex_config_parent, "not a directory").unwrap();
+
+        let result = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "optional trust registration must not abort launch: {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
             "skip paths must not create Codex config"
         );
     }

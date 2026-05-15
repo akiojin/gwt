@@ -53,12 +53,14 @@ pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKi
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::{
-    aggregate_project_index_status_for_path, auto_repair_unhealthy_scopes,
-    build_aggregated_status_view, collect_unhealthy_rebuild_targets, default_rebuild_runner,
-    global_aggregated_status_cache, list_worktree_probe_inputs, parse_scope_health,
-    AggregatedStatusCache, IndexRebuildRunnerFn, IndexRebuildScope, IndexRebuildSpawner,
-    ProjectIndexScopes, ProjectIndexStatusState, ProjectIndexStatusView, RebuildProgress,
-    RebuildTarget, ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
+    aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
+    auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
+    collect_unhealthy_rebuild_targets, collect_unhealthy_rebuild_targets_for_project_root,
+    default_rebuild_runner, global_aggregated_status_cache, list_worktree_probe_inputs,
+    parse_scope_health, AggregatedStatusCache, IndexRebuildRunnerFn, IndexRebuildScope,
+    IndexRebuildSpawner, ProjectIndexScopes, ProjectIndexStatusState, ProjectIndexStatusView,
+    RebuildProgress, RebuildTarget, ScopeHealthView, WorktreeMeta, WorktreeProbeInput,
+    WorktreeProbeOutcome,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
@@ -68,11 +70,12 @@ pub use knowledge_bridge::{
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
-    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
-    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardQuickStartView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath,
+    LaunchWizardLaunchRequest, LaunchWizardLiveSessionView, LaunchWizardMode,
+    LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
+    LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
+    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
+    QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
