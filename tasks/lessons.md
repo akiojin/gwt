@@ -5385,3 +5385,30 @@ race も存在した。
 - PR #2693 (Phase 26.B / 26.A / 26.C-1 一括)
 - SPEC-2008 (Phase 26 spec/plan/tasks に FR-056〜FR-059、T-199〜T-220、SC-035〜SC-038)
 - closed regressions: #2096 / #2091 / #2513 / #2668 / SPEC-2014 Phase C1
+
+## GUI hot path の同期プロセス起動は CPU% だけでは見落とす
+
+### 事象
+
+macOS/Windows GUI が全体的に重く、キー入力・ウィンドウ操作・Launch Agent 起動が遅い。
+CPU 使用率は高く見えない一方、macOS `sample` では GUI main thread が `poll` / `posix_spawnp`
+配下で時間を使っていた。
+
+### 原因
+
+UI の Active Work / Workspace 投影 hot path で、repo hash 解決のたびに `git remote get-url origin`
+を同期起動し、さらに Workspace cleanup candidate の remote delete 可否判定で branch inventory
+hydration を同期実行していた。Board/Workspace daemon update や frontend ready で繰り返されるため、
+CPU% ではなく main-thread blocking として体感遅延になった。
+
+### 再発防止策
+
+1. GUI hot path では `git` / `gh` / `docker` などの外部プロセスを同期起動しない。必要なら
+   config/file cache を読むか、blocking task に逃がす。
+2. 性能回帰テストは fake executable を `PATH` 先頭に置いて呼び出しログを検査し、対象処理が
+   外部プロセスを起動していないことを pin する。
+3. CPU% が低い重さは `sample` / profiler で main-thread blocking と process spawn を確認する。
+
+### 関連 PR / Issue
+
+- Issue #2725
