@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-05-15 — Codex hook trust hashing must mirror event matcher semantics
+
+### 事象
+
+gwt-managed Codex hooks を自動 trust 登録する修正後も、Codex の `/hooks`
+では `UserPromptSubmit` と `Stop` が `Modified since last trusted` として
+残り、起動時に `hooks need review` warning が表示された。
+
+### 原因
+
+Codex 本体は `UserPromptSubmit` / `Stop` の matcher を dispatch でも trust
+identity hash でも無視する。一方、gwt 側の trust hash は全 event で
+`.codex/hooks.json` の `matcher="*"` を含めて計算していたため、2 event だけ
+Codex の `current_hash` と一致しなかった。
+
+### 再発防止策
+
+1. 外部ツールの trust / fingerprint / signature を再実装する場合は、設定
+   JSON の見た目ではなく公式実装の正規化後 identity を読む。
+2. hook trust の修正では、`codex --no-alt-screen` の起動 warning だけでなく
+   `/hooks` の event 別 `Active` / `Review` 表示で全 managed events を確認する。
+3. event ごとに matcher semantics が異なる場合は、全 event 同一処理にせず
+   `UserPromptSubmit` / `Stop` のような matcher 非対応 event の fixture test を
+   必ず追加する。
+
 ## 2026-05-12 — Workspace coordination must not become a global tool lock
 
 ### 事象

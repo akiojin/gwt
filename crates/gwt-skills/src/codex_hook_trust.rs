@@ -205,13 +205,30 @@ fn command_hook_trusted_hash(event_name_snake: &str, matcher: &str, command: &st
                 "timeout": CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS,
                 "type": "command"
             }
-        ],
-        "matcher": matcher
+        ]
     });
+    if codex_trust_identity_uses_matcher(event_name_snake) {
+        identity
+            .as_object_mut()
+            .expect("Codex hook trust identity must be an object")
+            .insert("matcher".to_string(), Value::String(matcher.to_string()));
+    }
     sort_json_objects(&mut identity);
     let bytes = serde_json::to_vec(&identity).expect("serialize Codex hook trust identity");
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
+}
+
+fn codex_trust_identity_uses_matcher(event_name_snake: &str) -> bool {
+    matches!(
+        event_name_snake,
+        "pre_tool_use"
+            | "permission_request"
+            | "post_tool_use"
+            | "pre_compact"
+            | "post_compact"
+            | "session_start"
+    )
 }
 
 fn sort_json_objects(value: &mut Value) {
@@ -304,6 +321,23 @@ mod tests {
         assert_eq!(
             trusted_hash,
             "sha256:9c3ce103f03f0b27a28bc4a30883f7e98a80b5df566b4572fcbb2955ebf5ba62"
+        );
+    }
+
+    #[test]
+    fn command_hook_hash_omits_codex_ignored_matchers_for_prompt_and_stop() {
+        let user_prompt_command =
+            "gwt_bin=\"${GWT_BIN_PATH:-/Applications/GWT.app/Contents/MacOS/gwtd}\"; \"$gwt_bin\" hook event UserPromptSubmit";
+        let stop_command =
+            "gwt_bin=\"${GWT_BIN_PATH:-/Applications/GWT.app/Contents/MacOS/gwtd}\"; \"$gwt_bin\" hook event Stop";
+
+        assert_eq!(
+            command_hook_trusted_hash_for_test("user_prompt_submit", "*", user_prompt_command),
+            "sha256:1a86ba6796c5b5bf1601fd1af1d6094846287ec85e9f1ad4d39335c6b306e2fa"
+        );
+        assert_eq!(
+            command_hook_trusted_hash_for_test("stop", "*", stop_command),
+            "sha256:984e12cd30ef54cf4c63af8aabce1849705e5de09c70d039367ba68de9760389"
         );
     }
 
