@@ -3727,19 +3727,27 @@ impl AppRuntime {
     /// Only resolves when there is exactly one matching session in the
     /// worktree with the same `agent_id`, to avoid mis-targeting when
     /// the worktree has multiple panes.
+    ///
+    /// Phase U-7 (SPEC-2359): the fast path used to require
+    /// `same_worktree_path(session.worktree_path, project_root)` so that
+    /// only the watcher firing for the *agent's own* tab would resolve
+    /// the window. In practice this filter prevented title updates
+    /// whenever the watcher event came from a different tab (e.g. the
+    /// startup tab's watcher firing for a change in another tab's
+    /// agent, since both tabs share `current.json`). `session_id` is
+    /// globally unique to one launched window — finding it in
+    /// `active_agent_sessions` is sufficient to identify the target.
     fn resolve_title_sync_window_id(
         &self,
         agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
         project_root: &Path,
     ) -> Option<String> {
-        if let Some((window_id, session)) = self
+        if let Some((window_id, _session)) = self
             .active_agent_sessions
             .iter()
             .find(|(_, session)| session.session_id == agent.session_id)
         {
-            if same_worktree_path(&session.worktree_path, project_root) {
-                return Some(window_id.clone());
-            }
+            return Some(window_id.clone());
         }
         if let Some(worktree) = agent.worktree_path.as_deref() {
             if same_worktree_path(worktree, project_root) {
@@ -13204,6 +13212,50 @@ exit 1
     // active_agent_session). Resolves to the unique active session in the
     // same worktree with the same agent_id when one exists.
     // ---------------------------------------------------------------------
+
+    #[test]
+    fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
+        // SPEC-2359 Phase U-7: when the watcher event project_root is for
+        // tab A but a session lives in tab B (both share current.json
+        // because they're worktrees of the same repo), the fast path must
+        // still resolve B's window via session_id alone. Previously the
+        // additional `same_worktree_path(session.worktree_path,
+        // project_root)` filter prevented this and caused the user-visible
+        // pane heading to stay on the agent_id fallback even after
+        // `gwtd workspace update --title-summary` succeeded at the data
+        // layer.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let unrelated = temp.path().join("unrelated");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&unrelated).expect("create unrelated");
+        let (mut runtime, _window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+
+        // Projection identifies the agent by session-1 with a worktree
+        // that *does not* match the unrelated project_root we will pass
+        // in. The fast path should still resolve.
+        let projection = apply_title_sync_sample_projection(
+            &repo,
+            "tab-1::agent-1",
+            Some("Phase U-7 cross-tab fast path"),
+            None,
+        );
+
+        let changed = runtime
+            .sync_agent_window_titles_from_workspace_projection(&unrelated, &projection);
+
+        assert!(
+            changed,
+            "fast path must resolve by session_id alone, independent of project_root"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Phase U-7 cross-tab fast path"),
+        );
+    }
 
     #[test]
     fn sync_agent_window_titles_falls_back_to_worktree_when_session_id_not_active() {
