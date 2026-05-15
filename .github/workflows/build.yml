@@ -43,11 +43,13 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # The macos-14 image can expose rustup outside ~/.cargo/bin. After
-          # wiping ~/.cargo, rustc/cargo proxy binaries may be absent, so this
-          # job uses `rustup run stable ...` instead of proxy commands.
-          mkdir -p "$HOME/.cargo/bin"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-macos
+        continue-on-error: true
       - name: Check macOS compilation
-        run: rustup run stable cargo check -p gwt-core -p gwt
+        run: cargo check -p gwt-core -p gwt
