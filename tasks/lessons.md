@@ -1,5 +1,34 @@
 # Lessons Learned
 
+## 2026-05-15 — Hook trust recognizers must not accept shape-only gwtd paths
+
+### 事象
+
+PR #2733 の Codex review で、Codex hook trust 登録が Docker 内では
+`/root/.codex/config.toml` 固定になっており、非 root devcontainer の Codex
+設定を更新できないことを指摘された。同時に portable hook command の fallback
+判定が `.../gwtd` で終わる任意パスを trust 対象にしていたため、
+`/tmp/attacker/gwtd` のようなパスでも review signal を消せる状態だった。
+
+### 原因
+
+Docker registration と hook trust recognizer の責務が混ざり、container 内で
+実行する `gwtd` と、host で生成された hook command の fallback path を同一視
+していた。さらに recognizer が「gwt が生成した正確な command」ではなく
+「gwtd らしい suffix」を見ていたため、攻撃者が制御できる fallback path まで
+許容していた。
+
+### 再発防止策
+
+1. trust / approval / allowlist 系の matcher は、suffix や shape ではなく
+   生成器が出す exact command か、明示的に渡された exact fallback のみを
+   許可する。
+2. Docker 内で host-generated hook を登録する場合は、実行バイナリ
+   (`/usr/local/bin/gwtd`) と trust 対象 fallback (`GWT_HOOK_BIN`) を分離する。
+3. container 内の user config path は `/root` 固定にせず、
+   `${CODEX_HOME:-${HOME:-/root}/.codex}/config.toml` のように active user から
+   導出する。
+
 ## 2026-05-15 — Codex hook trust hashing must mirror event matcher semantics
 
 ### 事象

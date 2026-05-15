@@ -16,7 +16,6 @@ use crate::{
 };
 
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
-const DOCKER_CODEX_CONFIG_PATH: &str = "/root/.codex/config.toml";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 const DOCKER_GWT_OVERRIDE_HEADER: &str =
@@ -607,7 +606,13 @@ pub fn register_codex_managed_hook_trust_in_docker(
     docker_service: Option<&str>,
 ) -> Result<(), String> {
     let launch = resolve_docker_launch_plan(worktree, docker_service)?;
-    let args = docker_codex_hook_trust_registration_args(&launch.container_cwd);
+    let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
+    let host_gwt_bin =
+        resolve_public_gwt_bin_with_lookup(&current_exe, |command| which::which(command).ok())
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
+    let args = docker_codex_hook_trust_registration_args(&launch.container_cwd, &host_gwt_bin);
     let output = gwt_docker::compose_service_exec_capture_with_files(
         &launch.compose_files,
         &launch.service,
@@ -634,16 +639,21 @@ pub fn register_codex_managed_hook_trust_in_docker(
     ))
 }
 
-fn docker_codex_hook_trust_registration_args(container_cwd: &str) -> Vec<String> {
-    vec![
-        DOCKER_GWTD_BIN_PATH.to_string(),
-        "hook".to_string(),
-        "register-codex-managed-hook-trust".to_string(),
-        "--project-root".to_string(),
-        container_cwd.to_string(),
-        "--codex-config".to_string(),
-        DOCKER_CODEX_CONFIG_PATH.to_string(),
-    ]
+fn docker_codex_hook_trust_registration_args(
+    container_cwd: &str,
+    host_gwt_bin_fallback: &str,
+) -> Vec<String> {
+    let script = format!(
+        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\nGWT_HOOK_BIN={} exec {} hook register-codex-managed-hook-trust --project-root {} --codex-config \"$codex_home/config.toml\"",
+        shell_single_quote(host_gwt_bin_fallback),
+        shell_single_quote(DOCKER_GWTD_BIN_PATH),
+        shell_single_quote(container_cwd),
+    );
+    vec!["sh".to_string(), "-lc".to_string(), script]
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn finalize_docker_agent_launch_config(
@@ -1896,20 +1906,28 @@ mod tests {
     }
 
     #[test]
-    fn docker_codex_hook_trust_registration_invokes_container_local_gwtd() {
-        let args = docker_codex_hook_trust_registration_args("/workspace/app");
+    fn docker_codex_hook_trust_registration_uses_container_home_and_host_fallback() {
+        let args =
+            docker_codex_hook_trust_registration_args("/workspace/app", "/host/gwt/bin/gwtd");
 
-        assert_eq!(
-            args,
-            vec![
-                DOCKER_GWTD_BIN_PATH.to_string(),
-                "hook".to_string(),
-                "register-codex-managed-hook-trust".to_string(),
-                "--project-root".to_string(),
-                "/workspace/app".to_string(),
-                "--codex-config".to_string(),
-                "/root/.codex/config.toml".to_string(),
-            ]
+        assert_eq!(args[0], "sh");
+        assert_eq!(args[1], "-lc");
+        let script = &args[2];
+        assert!(
+            script.contains(r#"codex_home="${CODEX_HOME:-${HOME:-/root}/.codex}""#),
+            "script must derive Codex home from the active container user, got: {script}"
+        );
+        assert!(
+            script.contains(r#"--codex-config "$codex_home/config.toml""#),
+            "script must pass the derived Codex config path, got: {script}"
+        );
+        assert!(
+            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd'"),
+            "script must invoke container-local gwtd while matching host-generated hooks, got: {script}"
+        );
+        assert!(
+            !script.contains("/root/.codex/config.toml"),
+            "script must not hard-code root's Codex config path, got: {script}"
         );
     }
 
