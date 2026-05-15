@@ -120,6 +120,13 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
+          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
+          # PATH when it has to install rustup itself. The macos-14 image ships
+          # an extra rustup binary outside ~/.cargo/bin so the action skips the
+          # PATH update, leaving the freshly created rustc/cargo proxies
+          # invisible after the wipe. Re-add the path here to bridge that gap.
+          mkdir -p "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -264,6 +271,13 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
+          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
+          # PATH when it has to install rustup itself. The macos-14 image ships
+          # an extra rustup binary outside ~/.cargo/bin so the action skips the
+          # PATH update, leaving the freshly created rustc/cargo proxies
+          # invisible after the wipe. Re-add the path here to bridge that gap.
+          mkdir -p "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
