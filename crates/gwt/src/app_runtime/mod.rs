@@ -5703,6 +5703,9 @@ impl AppRuntime {
         match action {
             gwt::LaunchWizardAction::Submit => "wizard_submit",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "quick_start",
+            gwt::LaunchWizardAction::SetLaunchPath { .. }
+            | gwt::LaunchWizardAction::SelectQuickStart { .. }
+            | gwt::LaunchWizardAction::SelectLiveSession { .. } => "launch_path_select",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
@@ -5718,6 +5721,9 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Cancel => "cancel",
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+            gwt::LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
+            gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
+            gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
             gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
@@ -8033,7 +8039,8 @@ exit 0
             ProjectKind::Git,
             &[WindowPreset::Branches],
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
             .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
@@ -8054,6 +8061,39 @@ exit 0
             events[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert!(!pending_view.runtime_context_resolved);
+        assert_eq!(pending_view.primary_action_label, "Preparing...");
+
+        wait_for_recorded_event(
+            "launch wizard runtime resolution",
+            &recorded_events,
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            },
+        );
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
+
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
         assert!(wizard
             .context
@@ -8061,6 +8101,7 @@ exit 0
             .as_ref()
             .is_some_and(|path| same_worktree_path(path, &repo)));
         let view = wizard.view();
+        assert!(!view.runtime_resolution_pending);
         assert!(view.runtime_context_resolved);
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
@@ -8094,7 +8135,8 @@ exit 0
             ProjectKind::Git,
             &[WindowPreset::Branches],
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
             .open_launch_wizard_for_branch("tab-1", &repo, "develop", None, None)
@@ -8111,6 +8153,33 @@ exit 0
 
         let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
         assert_eq!(events.len(), 1);
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert!(!pending_view.runtime_context_resolved);
+
+        wait_for_recorded_event("launch wizard host fallback", &recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        });
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
 
         let view = runtime
             .launch_wizard
@@ -8118,6 +8187,7 @@ exit 0
             .expect("wizard")
             .wizard
             .view();
+        assert!(!view.runtime_resolution_pending);
         assert!(view.runtime_context_resolved);
         assert_eq!(view.selected_runtime_target, "host");
         assert!(!view.show_runtime_target);

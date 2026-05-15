@@ -3905,6 +3905,19 @@
         return node;
       }
 
+      function setLaunchWizardPendingDisabled(root, disabled) {
+        if (!disabled) return;
+        const selector =
+          "input, textarea, select, button, [role='button'], [contenteditable='true']";
+        for (const element of root.querySelectorAll(selector)) {
+          if ("disabled" in element) {
+            element.disabled = true;
+          }
+          element.setAttribute("aria-disabled", "true");
+          element.setAttribute("tabindex", "-1");
+        }
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -5267,6 +5280,24 @@
         }
       }
 
+      function renderWizardProgressRail() {
+        const rail = createNode("aside", "wizard-progress-rail");
+        rail.setAttribute("aria-label", "Launch progress");
+        for (const step of launchWizard.progress_steps || []) {
+          const item = createNode("div", "wizard-progress-step");
+          item.dataset.state = step.state || "pending";
+          item.appendChild(createNode("span", "wizard-progress-marker"));
+          const copy = createNode("span", "wizard-progress-copy");
+          copy.appendChild(createNode("span", "wizard-progress-label", step.label));
+          if (step.detail) {
+            copy.appendChild(createNode("span", "wizard-progress-detail", step.detail));
+          }
+          item.appendChild(copy);
+          rail.appendChild(item);
+        }
+        return rail;
+      }
+
       let wizardFocusReturn = null;
       let wizardFocusTrapRelease = null;
 
@@ -5308,8 +5339,6 @@
             catch { wizardFocusReturn.focus(); }
             wizardFocusReturn = null;
           }
-          wizardModal.classList.remove("is-drawer");
-          wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
           wizardBody.innerHTML = "";
           wizardError.hidden = true;
@@ -5319,17 +5348,13 @@
           wizardSubmitButton.disabled = false;
           wizardSubmitButton.hidden = false;
           wizardCancelButton.textContent = "Cancel";
+          wizardCancelButton.disabled = false;
           syncWizardDraftState();
           return;
         }
 
         syncWizardDraftState();
         closeModal();
-        const isStartWorkMode =
-          launchWizard?.show_branch_controls === false ||
-          launchWizardOpenError?.title === "Start Work";
-        wizardModal.classList.toggle("is-drawer", isStartWorkMode);
-        wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
           // Capture trigger BEFORE flipping .open so render-driven focus
@@ -5361,6 +5386,7 @@
           wizardSubmitButton.hidden = true;
           wizardSubmitButton.disabled = true;
           wizardCancelButton.textContent = "Close";
+          wizardCancelButton.disabled = false;
           wizardError.hidden = false;
           wizardError.textContent =
             launchWizardOpenError.message || "Unable to open Launch Wizard";
@@ -5377,14 +5403,21 @@
           : `Selected branch · ${
             launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
           }`;
-        wizardSubmitButton.textContent = launchWizard.is_hydrating
-          ? "Loading..."
-          : launchWizard.runtime_context_resolved === false
-            ? "Continue"
-            : launchWizard.branch_mode === "create_new"
-              ? "Create and launch"
-              : "Launch";
-        wizardSubmitButton.disabled = Boolean(launchWizard.is_hydrating);
+        wizardSubmitButton.textContent = launchWizard.primary_action_label || (
+          launchWizard.is_hydrating
+            ? "Loading..."
+            : launchWizard.runtime_context_resolved === false
+              ? "Continue"
+              : launchWizard.branch_mode === "create_new"
+                ? "Create and launch"
+                : "Launch"
+        );
+        wizardSubmitButton.disabled = Boolean(
+          launchWizard.is_hydrating
+            || launchWizard.runtime_resolution_pending
+            || launchWizard.primary_action_enabled === false,
+        );
+        wizardCancelButton.disabled = false;
 
         if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
@@ -5397,13 +5430,28 @@
 
         renderWizardSummary();
         wizardBody.innerHTML = "";
+        const wizardMain = createNode("div", "wizard-main");
+        wizardMain.appendChild(renderWizardProgressRail());
+        const wizardContentPane = createNode("div", "wizard-content-pane");
         const panel = createNode("div", "launch-panel");
+        const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
+        panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
+        const showManualSetup = launchWizard.show_manual_setup !== false;
         if (launchWizard.is_hydrating) {
           panel.appendChild(
             createNode(
               "div",
               "launch-note",
               "Loading branch workspace, recent sessions, and Docker options...",
+            ),
+          );
+        }
+        if (launchWizard.runtime_resolution_pending) {
+          panel.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              launchWizard.runtime_resolution_message || "Preparing runtime...",
             ),
           );
         }
@@ -5420,7 +5468,15 @@
           if ((launchWizard.quick_start_entries || []).length > 0) {
             const quickStartGrid = createNode("div", "quick-start-grid");
             for (const entry of launchWizard.quick_start_entries) {
-              const card = createNode("div", "quick-start-card");
+              const card = createNode("button", "quick-start-card");
+              card.type = "button";
+              const selected =
+                launchWizard.selected_launch_path === "quick_start"
+                && launchWizard.selected_quick_start_index === entry.index;
+              card.setAttribute("aria-pressed", selected ? "true" : "false");
+              if (selected) {
+                card.classList.add("selected");
+              }
               const head = createNode("div", "quick-start-head");
               head.appendChild(
                 createNode("div", "quick-start-title", entry.tool_label),
@@ -5438,41 +5494,12 @@
                 );
               }
               card.appendChild(head);
-
-              const actions = createNode("div", "quick-start-actions");
-              if (entry.reuse_action_label) {
-                const reuseButton = createNode(
-                  "button",
-                  "wizard-button",
-                  entry.reuse_action_label,
-                );
-                reuseButton.type = "button";
-                reuseButton.addEventListener("click", () => {
-                  sendWizardAction({
-                    kind: "apply_quick_start",
-                    index: entry.index,
-                    mode: "resume",
-                  });
-                });
-                actions.appendChild(reuseButton);
-              }
-
-              const startNewButton = createNode(
-                "button",
-                "wizard-button primary",
-                "Start new",
-              );
-              startNewButton.type = "button";
-              startNewButton.addEventListener("click", () => {
+              card.addEventListener("click", () => {
                 sendWizardAction({
-                  kind: "apply_quick_start",
+                  kind: "select_quick_start",
                   index: entry.index,
-                  mode: "start_new",
                 });
               });
-              actions.appendChild(startNewButton);
-
-              card.appendChild(actions);
               quickStartGrid.appendChild(card);
             }
             section.appendChild(quickStartGrid);
@@ -5483,6 +5510,13 @@
             for (const session of launchWizard.live_sessions) {
               const button = createNode("button", "live-session-button");
               button.type = "button";
+              const selected =
+                launchWizard.selected_launch_path === "focus_session"
+                && launchWizard.selected_live_session_index === session.index;
+              button.setAttribute("aria-pressed", selected ? "true" : "false");
+              if (selected) {
+                button.classList.add("selected");
+              }
               button.appendChild(
                 createNode("div", "live-session-name", session.name),
               );
@@ -5500,7 +5534,7 @@
               }
               button.addEventListener("click", () => {
                 sendWizardAction({
-                  kind: "focus_existing_session",
+                  kind: "select_live_session",
                   index: session.index,
                 });
               });
@@ -5508,6 +5542,31 @@
             }
             section.appendChild(liveSection);
           }
+
+          const manualButton = createNode("button", "quick-start-card manual");
+          manualButton.type = "button";
+          const manualSelected = launchWizard.selected_launch_path === "manual_setup";
+          manualButton.setAttribute("aria-pressed", manualSelected ? "true" : "false");
+          if (manualSelected) {
+            manualButton.classList.add("selected");
+          }
+          const manualHead = createNode("div", "quick-start-head");
+          manualHead.appendChild(createNode("div", "quick-start-title", "Configure launch"));
+          manualHead.appendChild(
+            createNode(
+              "div",
+              "quick-start-meta",
+              "Choose branch, agent, model, and runtime.",
+            ),
+          );
+          manualButton.appendChild(manualHead);
+          manualButton.addEventListener("click", () => {
+            sendWizardAction({
+              kind: "set_launch_path",
+              path: "manual_setup",
+            });
+          });
+          section.appendChild(manualButton);
 
           panel.appendChild(section);
         }
@@ -5602,7 +5661,7 @@
           panel.appendChild(section);
         }
 
-        {
+        if (showManualSetup) {
           const section = createLaunchSection(
             "Launch",
             "Choose what to launch on the selected branch.",
@@ -5699,9 +5758,12 @@
         }
 
         if (
-          launchWizard.show_version ||
-          launchWizard.show_skip_permissions ||
-          launchWizard.show_codex_fast_mode
+          showManualSetup &&
+          (
+            launchWizard.show_version ||
+            launchWizard.show_skip_permissions ||
+            launchWizard.show_codex_fast_mode
+          )
         ) {
           const section = createLaunchSection(
             "Launch settings",
@@ -5751,7 +5813,7 @@
           panel.appendChild(section);
         }
 
-        if (launchWizard.show_agent_settings) {
+        if (showManualSetup && launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
             "Optional: Link an issue to this launch session.",
@@ -5785,18 +5847,22 @@
           panel.appendChild(section);
         }
 
-        if (
+        const hasRuntimeControls =
           launchWizard.show_runtime_target ||
           (launchWizard.show_docker_service &&
             (launchWizard.docker_service_options || []).length > 0) ||
           (launchWizard.show_docker_lifecycle &&
-            (launchWizard.docker_lifecycle_options || []).length > 0)
+            (launchWizard.docker_lifecycle_options || []).length > 0);
+        if (
+          launchWizard.show_runtime_confirmation &&
+          (hasRuntimeControls || !showManualSetup)
         ) {
           const section = createLaunchSection(
             "Runtime",
             "Choose where the session runs and how Docker services are used.",
           );
           const grid = createNode("div", "launch-form-grid");
+          let appendedRuntimeControl = false;
           if (launchWizard.show_runtime_target) {
             appendSelectField(
               grid,
@@ -5809,6 +5875,7 @@
                   target: runtimeTargetPayload(value),
                 }),
             );
+            appendedRuntimeControl = true;
           }
           if (
             launchWizard.show_docker_service &&
@@ -5825,6 +5892,7 @@
                   service: value,
                 }),
             );
+            appendedRuntimeControl = true;
           }
           if (
             launchWizard.show_docker_lifecycle &&
@@ -5841,13 +5909,30 @@
                   intent: dockerLifecyclePayload(value),
                 }),
             );
+            appendedRuntimeControl = true;
+          }
+          if (!appendedRuntimeControl) {
+            const note = createLaunchField("Runtime target", true);
+            note.appendChild(
+              createNode(
+                "div",
+                "launch-note",
+                launchWizard.selected_runtime_target === "docker"
+                  ? "Docker"
+                  : "Host",
+              ),
+            );
+            grid.appendChild(note);
           }
           section.appendChild(grid);
 
           panel.appendChild(section);
         }
 
-        wizardBody.appendChild(panel);
+        setLaunchWizardPendingDisabled(panel, isRuntimeResolutionPending);
+        wizardContentPane.appendChild(panel);
+        wizardMain.appendChild(wizardContentPane);
+        wizardBody.appendChild(wizardMain);
       }
 
       function renderFileTree(windowId) {
@@ -9936,11 +10021,6 @@
         }
         frontendUnits.launchWizardSurface.flushBranchDraft();
         frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
-      });
-      wizardModal.addEventListener("click", (event) => {
-        if (event.target === wizardModal) {
-          closeLaunchWizardFromChrome();
-        }
       });
       // Issue #2698 PR 1 (B7) — interaction-guard wiring for native
       // <select> dropdowns inside the wizard body. We register

@@ -2963,6 +2963,76 @@ body {
   overflow: auto;
 }
 
+.wizard-main {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.32fr) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
+}
+
+.wizard-content-pane {
+  min-width: 0;
+}
+
+.wizard-progress-rail {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.wizard-progress-step {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.wizard-progress-marker {
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-elevated);
+}
+
+.wizard-progress-step[data-state="active"] .wizard-progress-marker {
+  border-color: var(--color-focus-ring);
+  background: var(--color-state-active);
+}
+
+.wizard-progress-step[data-state="done"] .wizard-progress-marker {
+  border-color: var(--color-state-success);
+  background: var(--color-state-success);
+}
+
+.wizard-progress-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wizard-progress-label {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--color-text-strong);
+}
+
+.wizard-progress-detail {
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
 .wizard-summary-item {
   min-width: 0;
   padding: 10px 12px;
@@ -2996,6 +3066,11 @@ body {
 .launch-panel {
   display: grid;
   gap: 12px;
+}
+
+.launch-panel.wizard-disabled {
+  opacity: 0.66;
+  pointer-events: none;
 }
 
 .launch-section {
@@ -3146,9 +3221,25 @@ body {
 .quick-start-card {
   display: grid;
   gap: 10px;
+  width: 100%;
   padding: 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.quick-start-card.selected,
+.live-session-button.selected {
+  border-color: var(--color-focus-ring);
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
+}
+
+.quick-start-card:hover:not(.selected),
+.live-session-button:hover:not(.selected) {
+  border-color: var(--color-focus-ring);
   background: var(--color-surface-elevated);
 }
 
@@ -3183,12 +3274,6 @@ body {
   font-size: var(--type-xs);
 }
 
-.quick-start-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 .live-session-button {
   width: 100%;
   display: grid;
@@ -3201,9 +3286,19 @@ body {
   cursor: pointer;
   text-align: left;
 }
-.live-session-button:hover {
+.live-session-button:hover:not(.selected) {
   border-color: var(--color-focus-ring);
   background: var(--color-surface-elevated);
+}
+
+@media (max-width: 760px) {
+  .wizard-main {
+    grid-template-columns: 1fr;
+  }
+
+  .wizard-progress-rail {
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  }
 }
 
 .live-session-name {
@@ -3425,4 +3520,3 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-

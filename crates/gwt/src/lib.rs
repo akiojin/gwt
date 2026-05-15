@@ -68,11 +68,12 @@ pub use knowledge_bridge::{
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
-    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
-    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardQuickStartView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath,
+    LaunchWizardLaunchRequest, LaunchWizardLiveSessionView, LaunchWizardMode,
+    LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
+    LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
+    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
+    QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,

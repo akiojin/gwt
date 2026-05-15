@@ -610,6 +610,10 @@ enum UserEvent {
         window_id: String,
         message: String,
     },
+    LaunchWizardRuntimeResolved {
+        wizard_id: String,
+        result: Box<Result<gwt::LaunchWizardHydration, String>>,
+    },
     ProjectIndexStatus {
         project_root: String,
         status: gwt::ProjectIndexStatusView,
@@ -5411,6 +5415,10 @@ fn main() -> wry::Result<()> {
                         message,
                     },
                 )]);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
+                let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
                 project_root,

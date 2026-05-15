@@ -21,8 +21,8 @@ use std::{
 use chrono::Utc;
 use gwt::{
     KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
-    LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView, LinkedIssueKind,
-    WindowGeometry,
+    LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView,
+    LinkedIssueKind, WindowGeometry,
 };
 use uuid::Uuid;
 
@@ -68,8 +68,8 @@ use super::{
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
     workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
-    IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
-    WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    IssueLaunchWizardPrepared, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 impl AppRuntime {
@@ -232,7 +232,12 @@ impl AppRuntime {
             linked_issue_number,
             None,
         ) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Ok(()) => {
+                if let Some(session) = self.launch_wizard.as_mut() {
+                    session.wizard.launch_path = LaunchWizardLaunchPath::ManualSetup;
+                }
+                vec![self.launch_wizard_state_outbound()]
+            }
             Err(error) => launch_agent_open_error(client_id, error),
         }
     }
@@ -646,24 +651,43 @@ impl AppRuntime {
                 ]
             }
             Some(LaunchWizardCompletion::ResolveRuntime(config)) => {
-                match self.resolve_launch_wizard_runtime_context(&mut session, *config) {
-                    Ok(()) => {
-                        self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
-                    }
-                    Err(error) => {
-                        Self::log_launch_wizard_error(
-                            &session,
-                            "resolve_runtime",
-                            action_label,
-                            requested_agent_id.as_deref(),
-                            &error,
-                        );
-                        session.wizard.error = Some(error);
-                        self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
-                    }
-                }
+                let Some(project_root) = self
+                    .tab(&session.tab_id)
+                    .map(|tab| tab.project_root.clone())
+                else {
+                    let error = "Project tab not found".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "resolve_runtime",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let wizard_id = session.wizard_id.clone();
+                let branch_name = session.wizard.branch_name.clone();
+                let cache = self.launch_wizard_cache.clone();
+                let proxy = self.proxy.clone();
+                session
+                    .wizard
+                    .mark_runtime_resolution_pending("Preparing worktree...");
+                thread::spawn(move || {
+                    let result = resolve_launch_wizard_runtime_context_hydration(
+                        &project_root,
+                        *config,
+                        branch_name,
+                        cache,
+                    );
+                    proxy.send(UserEvent::LaunchWizardRuntimeResolved {
+                        wizard_id,
+                        result: Box::new(result),
+                    });
+                });
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
                 let Some(bounds) = bounds else {
@@ -735,54 +759,79 @@ impl AppRuntime {
         }
     }
 
-    fn resolve_launch_wizard_runtime_context(
+    pub(crate) fn handle_launch_wizard_runtime_resolved(
         &mut self,
-        session: &mut LaunchWizardSession,
-        mut config: LaunchWizardLaunchRequest,
-    ) -> Result<(), String> {
-        let project_root = self
-            .tab(&session.tab_id)
-            .map(|tab| tab.project_root.clone())
-            .ok_or_else(|| "Project tab not found".to_string())?;
-
-        let worktree_path = match &mut config {
-            LaunchWizardLaunchRequest::Agent(config) => {
-                resolve_launch_worktree(&project_root, config)?;
-                config
-                    .working_dir
-                    .clone()
-                    .unwrap_or_else(|| project_root.clone())
-            }
-            LaunchWizardLaunchRequest::Shell(config) => {
-                resolve_shell_launch_worktree(&project_root, config)?;
-                config
-                    .working_dir
-                    .clone()
-                    .unwrap_or_else(|| project_root.clone())
-            }
+        wizard_id: String,
+        result: Result<LaunchWizardHydration, String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(mut session) = self.launch_wizard.take() else {
+            return Vec::new();
         };
-        let branch_name = session.wizard.branch_name.clone();
-        let quick_start_entries = self
-            .launch_wizard_cache
-            .quick_start_entries(&worktree_path, &branch_name);
-        let previous_profiles = self.launch_wizard_cache.previous_profiles(&worktree_path);
-        let agent_options = self.launch_wizard_cache.agent_options();
-        let (docker_context, docker_service_status) =
-            detect_wizard_docker_context_and_status(&worktree_path);
-        session.wizard.apply_runtime_context(LaunchWizardHydration {
-            selected_branch: None,
-            normalized_branch_name: branch_name,
-            worktree_path: Some(worktree_path.clone()),
-            quick_start_root: worktree_path,
-            docker_context,
-            docker_service_status,
-            agent_options,
-            quick_start_entries,
-            previous_profiles: Some(previous_profiles),
-        });
-        Ok(())
+        if session.wizard_id != wizard_id {
+            self.launch_wizard = Some(session);
+            return Vec::new();
+        }
+        match result {
+            Ok(hydration) => {
+                session.wizard.apply_runtime_context(hydration);
+            }
+            Err(error) => {
+                Self::log_launch_wizard_error(
+                    &session,
+                    "resolve_runtime",
+                    "runtime_resolved",
+                    None,
+                    &error,
+                );
+                session.wizard.set_hydration_error(error);
+            }
+        }
+        self.launch_wizard = Some(session);
+        vec![self.launch_wizard_state_outbound()]
     }
+}
 
+fn resolve_launch_wizard_runtime_context_hydration(
+    project_root: &Path,
+    mut config: LaunchWizardLaunchRequest,
+    branch_name: String,
+    cache: LaunchWizardMemoryCache,
+) -> Result<LaunchWizardHydration, String> {
+    let worktree_path = match &mut config {
+        LaunchWizardLaunchRequest::Agent(config) => {
+            resolve_launch_worktree(project_root, config)?;
+            config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| project_root.to_path_buf())
+        }
+        LaunchWizardLaunchRequest::Shell(config) => {
+            resolve_shell_launch_worktree(project_root, config)?;
+            config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| project_root.to_path_buf())
+        }
+    };
+    let quick_start_entries = cache.quick_start_entries(&worktree_path, &branch_name);
+    let previous_profiles = cache.previous_profiles(&worktree_path);
+    let agent_options = cache.agent_options();
+    let (docker_context, docker_service_status) =
+        detect_wizard_docker_context_and_status(&worktree_path);
+    Ok(LaunchWizardHydration {
+        selected_branch: None,
+        normalized_branch_name: branch_name,
+        worktree_path: Some(worktree_path.clone()),
+        quick_start_root: worktree_path,
+        docker_context,
+        docker_service_status,
+        agent_options,
+        quick_start_entries,
+        previous_profiles: Some(previous_profiles),
+    })
+}
+
+impl AppRuntime {
     pub(crate) fn spawn_wizard_shell_window(
         &mut self,
         tab_id: &str,
