@@ -835,11 +835,11 @@ mod tests {
         // up resizeState immediately via forceResetResizeState.
         let html = frontend_bundle_source();
         let pointerup_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
+            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
         )
         .expect("valid regex");
         let pointercancel_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId\);"#,
+            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);"#,
         )
         .expect("valid regex");
 
@@ -861,7 +861,7 @@ mod tests {
         )
         .expect("valid regex");
         let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 
@@ -885,22 +885,22 @@ mod tests {
         let html = frontend_bundle_source();
 
         assert!(
-            html.contains("function finishWindowResize(pointerId)"),
+            html.contains("function finishWindowResize(pointerId, event = null)"),
             "expected all floating window resize completion paths to share one finalizer",
         );
         assert!(
-            html.contains("finishWindowResize(event.pointerId);"),
-            "expected pointerup resize path to use the shared finalizer",
+            html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected pointerup resize path to use the shared finalizer with release coordinates",
         );
         assert!(
             html.contains("window.addEventListener(\"pointercancel\", (event) => {")
-                && html.contains("finishWindowResize(event.pointerId);"),
-            "expected pointercancel to finalize resize state",
+                && html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected pointercancel to finalize resize state with release coordinates",
         );
         assert!(
             html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
-                && html.contains("finishWindowResize(event.pointerId);"),
-            "expected lost pointer capture to finalize resize state",
+                && html.contains("finishWindowResize(event.pointerId, event);"),
+            "expected lost pointer capture to finalize resize state with release coordinates",
         );
         assert!(
             html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
