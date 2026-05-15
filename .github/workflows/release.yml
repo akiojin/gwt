@@ -114,6 +114,12 @@ jobs:
             archive_name: gwt-windows-x86_64.zip
     steps:
       - uses: actions/checkout@v6
+      - name: Reset broken pre-installed Rust on macOS runners
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -253,6 +259,11 @@ jobs:
       RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+      - name: Reset broken pre-installed Rust on macOS runners
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
