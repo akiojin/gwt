@@ -15,6 +15,7 @@ use crate::process::hidden_command;
 
 #[derive(Debug)]
 pub enum ValidationError {
+    NotNormalGitDirectory(PathBuf),
     InsufficientDiskSpace { required: u64, available: u64 },
     LockedWorktrees(Vec<PathBuf>),
     WritePermissionDenied(PathBuf),
@@ -24,6 +25,11 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotNormalGitDirectory(path) => write!(
+                f,
+                "not a normal Git repository with a .git directory: {}",
+                path.display()
+            ),
             Self::InsufficientDiskSpace {
                 required,
                 available,
@@ -153,9 +159,23 @@ pub fn check_write_permission(project_root: &Path) -> Result<(), ValidationError
     }
 }
 
+/// Confirm the migration root is a Normal Git repository with a real `.git/`
+/// directory. Linked worktrees use a `.git` marker file and are already part of
+/// a bare/worktree layout, so migrating them as Normal Git would be destructive.
+pub fn check_normal_git_directory(project_root: &Path) -> Result<(), ValidationError> {
+    if project_root.join(".git").is_dir() {
+        Ok(())
+    } else {
+        Err(ValidationError::NotNormalGitDirectory(
+            project_root.to_path_buf(),
+        ))
+    }
+}
+
 /// Run all pre-flight checks against `project_root`. Short-circuits on the
 /// first failure.
 pub fn validate(project_root: &Path) -> Result<(), ValidationError> {
+    check_normal_git_directory(project_root)?;
     check_write_permission(project_root)?;
     check_disk_space(project_root)?;
     check_locked_worktrees(project_root)?;

@@ -2117,6 +2117,9 @@ impl AppRuntime {
                 scope,
                 worktree_hash,
             } => self.rebuild_index_cell_events(project_root, scope, worktree_hash),
+            FrontendEvent::RefreshIndexStatus { project_root } => {
+                self.refresh_index_status_events(project_root)
+            }
             FrontendEvent::PostBoardEntry {
                 id,
                 entry_kind,
@@ -4203,6 +4206,17 @@ impl AppRuntime {
         );
         Vec::new()
     }
+
+    /// Settings.Index requests the full all-worktree health table on demand.
+    /// The startup path stays current-worktree only to avoid UI-visible CPU
+    /// spikes on repositories with many active worktrees.
+    pub(crate) fn refresh_index_status_events(&self, project_root: String) -> Vec<OutboundEvent> {
+        let project_root = std::path::PathBuf::from(project_root);
+        let service =
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let _request = service.spawn_full_status_refresh(self.proxy.clone(), project_root);
+        Vec::new()
+    }
 }
 
 fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
@@ -5072,6 +5086,7 @@ impl AppRuntime {
                 &worktree_path,
                 &config.agent_id,
                 config.runtime_target,
+                config.docker_service.as_deref(),
             )? {
                 if !report.trusted_entries.is_empty() {
                     proxy.send(UserEvent::LaunchProgress {
@@ -6232,33 +6247,68 @@ fn maybe_register_codex_managed_hook_trust_for_launch(
     worktree_path: &Path,
     agent_id: &gwt_agent::AgentId,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
+    docker_service: Option<&str>,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
-    if agent_id != &gwt_agent::AgentId::Codex
-        || runtime_target != gwt_agent::LaunchRuntimeTarget::Host
-    {
+    if agent_id != &gwt_agent::AgentId::Codex {
         return Ok(None);
     }
 
     let settings = if profile_config_path.exists() {
-        gwt_config::Settings::load_from_path(profile_config_path)
-            .map_err(|error| error.to_string())?
+        match gwt_config::Settings::load_from_path(profile_config_path) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(
+                    profile_config = %profile_config_path.display(),
+                    error = %error,
+                    "failed to read gwt config while preparing Codex hook trust; continuing launch"
+                );
+                gwt_config::Settings::default()
+            }
+        }
     } else {
         gwt_config::Settings::default()
     };
-    if settings.agent.codex_trust_managed_hooks != Some(true) {
+    if settings.agent.codex_trust_managed_hooks == Some(false) {
         return Ok(None);
     }
 
-    let codex_config_path =
-        codex_config_path_for_profile_config(profile_config_path).ok_or_else(|| {
-            format!(
-                "cannot derive Codex config path from gwt config path {}",
-                profile_config_path.display()
-            )
-        })?;
-    gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            let Some(codex_config_path) = codex_config_path_for_profile_config(profile_config_path)
+            else {
+                tracing::warn!(
+                    profile_config = %profile_config_path.display(),
+                    "cannot derive Codex config path while preparing Codex hook trust; continuing launch"
+                );
+                return Ok(None);
+            };
+            match gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path) {
+                Ok(report) => Ok(Some(report)),
+                Err(error) => {
+                    tracing::warn!(
+                        worktree = %worktree_path.display(),
+                        codex_config = %codex_config_path.display(),
+                        error = %error,
+                        "failed to register gwt-managed Codex hook trust; continuing launch"
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
+                worktree_path,
+                docker_service,
+            ) {
+                tracing::warn!(
+                    worktree = %worktree_path.display(),
+                    error = %error,
+                    "failed to register gwt-managed Codex hook trust in Docker; continuing launch"
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<PathBuf> {
@@ -14141,6 +14191,7 @@ exit 1
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap()
         .expect("enabled host Codex launch should register trust");
@@ -14156,7 +14207,7 @@ exit 1
     }
 
     #[test]
-    fn codex_hook_trust_launch_skips_without_explicit_host_codex_opt_in() {
+    fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_out() {
         let home = tempdir().expect("home tempdir");
         let profile_config_path = home.path().join(".gwt/config.toml");
         let worktree = tempdir().expect("worktree tempdir");
@@ -14167,9 +14218,17 @@ exit 1
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
-        assert!(unset.is_none());
+        assert_eq!(
+            unset
+                .expect("unset config should default to trusting managed Codex hooks")
+                .trusted_entries
+                .len(),
+            5
+        );
+        fs::remove_file(home.path().join(".codex/config.toml")).unwrap();
 
         let mut settings = Settings::default();
         settings.agent.codex_trust_managed_hooks = Some(false);
@@ -14179,32 +14238,74 @@ exit 1
             worktree.path(),
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
         assert!(disabled.is_none());
 
+        assert!(
+            !home.path().join(".codex/config.toml").exists(),
+            "false opt-out must not recreate Codex config"
+        );
+
         settings.agent.codex_trust_managed_hooks = Some(true);
         settings.save(&profile_config_path).unwrap();
-        let docker = super::maybe_register_codex_managed_hook_trust_for_launch(
+        let enabled = super::maybe_register_codex_managed_hook_trust_for_launch(
             &profile_config_path,
             worktree.path(),
             &gwt_agent::AgentId::Codex,
-            gwt_agent::LaunchRuntimeTarget::Docker,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
-        assert!(docker.is_none());
+        assert_eq!(
+            enabled
+                .expect("true config should register managed Codex hooks")
+                .trusted_entries
+                .len(),
+            5
+        );
 
         let claude = super::maybe_register_codex_managed_hook_trust_for_launch(
             &profile_config_path,
             worktree.path(),
             &gwt_agent::AgentId::ClaudeCode,
             gwt_agent::LaunchRuntimeTarget::Host,
+            None,
         )
         .unwrap();
         assert!(claude.is_none());
 
         assert!(
-            !home.path().join(".codex/config.toml").exists(),
+            home.path().join(".codex/config.toml").exists(),
+            "host default/true paths must create Codex config"
+        );
+    }
+
+    #[test]
+    fn codex_hook_trust_launch_is_warning_only_when_registration_fails() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let worktree = tempdir().expect("worktree tempdir");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let codex_config_parent = home.path().join(".codex");
+        fs::write(&codex_config_parent, "not a directory").unwrap();
+
+        let result = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "optional trust registration must not abort launch: {result:?}"
+        );
+        assert!(
+            result.unwrap().is_none(),
             "skip paths must not create Codex config"
         );
     }

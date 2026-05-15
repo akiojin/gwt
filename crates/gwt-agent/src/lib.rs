@@ -32,8 +32,9 @@ pub use launch::{
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, install_launch_gwt_bin_env, install_launch_gwt_bin_env_with_lookup,
-    prepare_agent_launch, resolve_launch_worktree, resolve_launch_worktree_request,
-    resolve_public_gwt_bin_with_lookup, HookForwardEnv, PreparedAgentLaunch, PreparedProcessLaunch,
+    prepare_agent_launch, register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
+    resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
+    PreparedAgentLaunch, PreparedProcessLaunch,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,

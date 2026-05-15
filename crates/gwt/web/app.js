@@ -47,7 +47,9 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
+        resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
+        syncResizeStatePointerEvent,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
@@ -371,7 +373,7 @@
           if (deferred.kind === "system_settings") {
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -384,7 +386,7 @@
             systemSettingsState.language = deferred.language
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks === true;
+              deferred.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -1852,16 +1854,17 @@
         resizeState.fitFrame = null;
       }
 
-      function finishWindowResize(pointerId) {
+      function finishWindowResize(pointerId, event = null) {
         if (!resizeState || resizeState.pointerId !== pointerId) {
           return;
         }
         const runtime = terminalMap.get(resizeState.id);
+        syncResizeStatePointerEvent(resizeState, event);
         cancelTerminalResizeFit();
         cancelResizePointermoveApply();
         cancelResizeStalenessGuard();
         // Flush the last pointer coordinates to the DOM so the final geometry
-        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // matches the latest pointer event. fitTerminal + sendGeometry below
         // observe the up-to-date `element.style.width/height`.
         applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
@@ -1929,23 +1932,16 @@
         if (!element) {
           return;
         }
-        const x = state.latestClientX ?? state.startX;
-        const y = state.latestClientY ?? state.startY;
-        const width = clamp(
-          state.width + (x - state.startX) / viewport.zoom,
-          420,
-        );
-        const height = clamp(
-          state.height + (y - state.startY) / viewport.zoom,
-          260,
-        );
+        const { clientX, clientY, width, height } = resizeGeometryFromPointerState(state, {
+          zoom: viewport.zoom,
+        });
         element.style.width = `${width}px`;
         element.style.height = `${height}px`;
         traceUi(UI_TRACE_EVENT.resizePointermoveApply, {
           window_id: state.id,
           pointer_id: state.pointerId,
-          client_x: x,
-          client_y: y,
+          client_x: clientX,
+          client_y: clientY,
           width,
           height,
         });
@@ -5429,6 +5425,12 @@
         }
 
         renderWizardSummary();
+        const showManualSetup = launchWizard.show_manual_setup !== false;
+        const isRuntimeConfirmation = Boolean(
+          launchWizard.runtime_context_resolved
+          && launchWizard.show_runtime_confirmation
+        );
+        const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
         wizardMain.appendChild(renderWizardProgressRail());
@@ -5436,7 +5438,6 @@
         const panel = createNode("div", "launch-panel");
         const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
         panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
-        const showManualSetup = launchWizard.show_manual_setup !== false;
         if (launchWizard.is_hydrating) {
           panel.appendChild(
             createNode(
@@ -5456,10 +5457,10 @@
           );
         }
 
-        if (
+        if (!isRuntimeConfirmation && (
           (launchWizard.quick_start_entries || []).length > 0 ||
           (launchWizard.live_sessions || []).length > 0
-        ) {
+        )) {
           const section = createLaunchSection(
             "Quick start",
             "Reuse a recent launch profile or jump to a running window.",
@@ -5571,7 +5572,7 @@
           panel.appendChild(section);
         }
 
-        if (launchWizard.show_branch_controls !== false) {
+        if (showSetupForms && launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -5661,7 +5662,7 @@
           panel.appendChild(section);
         }
 
-        if (showManualSetup) {
+        if (showSetupForms) {
           const section = createLaunchSection(
             "Launch",
             "Choose what to launch on the selected branch.",
@@ -5758,7 +5759,7 @@
         }
 
         if (
-          showManualSetup &&
+          showSetupForms &&
           (
             launchWizard.show_version ||
             launchWizard.show_skip_permissions ||
@@ -5813,7 +5814,7 @@
           panel.appendChild(section);
         }
 
-        if (showManualSetup && launchWizard.show_agent_settings) {
+        if (showSetupForms && launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
             "Optional: Link an issue to this launch session.",
@@ -5855,7 +5856,7 @@
             (launchWizard.docker_lifecycle_options || []).length > 0);
         if (
           launchWizard.show_runtime_confirmation &&
-          (hasRuntimeControls || !showManualSetup)
+          (hasRuntimeControls || isRuntimeConfirmation || !showManualSetup)
         ) {
           const section = createLaunchSection(
             "Runtime",
@@ -7730,7 +7731,7 @@
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
         language: "auto",
-        codexTrustManagedHooks: false,
+        codexTrustManagedHooks: true,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -7877,6 +7878,12 @@
         }
       }
 
+      function requestFullIndexStatusRefresh() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        if (!activeProjectRoot) return;
+        send({ kind: "refresh_index_status", project_root: activeProjectRoot });
+      }
+
       document.addEventListener("settings:open", (event) => {
         const target = event?.detail?.target || "system";
         const existingBody = Array.from(settingsWindowBodies).find(
@@ -7915,6 +7922,9 @@
             panel.dataset.settingsPanel !== target,
           );
         });
+        if (target === "index") {
+          requestFullIndexStatusRefresh();
+        }
       }
 
       function renderSystemPanel(panel) {
@@ -7968,7 +7978,7 @@
         trustCheckbox.type = "checkbox";
         trustCheckbox.className = "settings-checkbox";
         trustCheckbox.id = "settings-system-codex-hooks";
-        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks === true;
+        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks !== false;
         trustCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.codexTrustManagedHooks = next;
@@ -7991,7 +8001,7 @@
         const trustHelp = document.createElement("p");
         trustHelp.className = "settings-help";
         trustHelp.textContent =
-          "Registers only generated gwt hook commands in Codex hook trust state.";
+          "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
         const status = document.createElement("p");
@@ -8385,7 +8395,7 @@
               accepted: true,
               window_id: windowData.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           });
         }
 
@@ -9373,13 +9383,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -9395,13 +9406,14 @@
               systemSettingsInteractionGuard.defer({
                 kind: "system_settings_updated",
                 language: event.language,
+                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
               })
             ) {
               break;
             }
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks === true;
+              event.codex_trust_managed_hooks !== false;
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();
@@ -9653,7 +9665,7 @@
               accepted: true,
               window_id: resizeState.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           } else {
             // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
             // emits a `pointerup` whose pointerId does not match the one
@@ -9739,7 +9751,7 @@
             window_id: resizeState.id,
           });
         }
-        finishWindowResize(event.pointerId);
+        finishWindowResize(event.pointerId, event);
       });
 
       canvas.addEventListener("contextmenu", (event) => {

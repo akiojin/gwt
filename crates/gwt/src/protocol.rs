@@ -212,6 +212,12 @@ pub enum FrontendEvent {
         #[serde(default)]
         worktree_hash: Option<String>,
     },
+    /// Request the full Project Index health table. Startup only probes the
+    /// current worktree; Settings.Index asks for the expensive all-worktree
+    /// view on demand.
+    RefreshIndexStatus {
+        project_root: String,
+    },
     PostBoardEntry {
         id: String,
         entry_kind: BoardEntryKind,
@@ -1291,6 +1297,21 @@ mod tests {
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
         );
+    }
+
+    #[test]
+    fn frontend_event_accepts_project_index_full_refresh_request() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "refresh_index_status",
+            "project_root": "/repo/worktree"
+        }))
+        .expect("deserialize refresh_index_status");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::RefreshIndexStatus { project_root }
+                if project_root == "/repo/worktree"
+        ));
     }
 
     #[test]
