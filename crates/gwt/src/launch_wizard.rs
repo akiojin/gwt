@@ -88,6 +88,24 @@ pub enum QuickStartLaunchMode {
     StartNew,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchWizardLaunchPath {
+    QuickStart,
+    ManualSetup,
+    FocusSession,
+}
+
+impl LaunchWizardLaunchPath {
+    fn value(self) -> &'static str {
+        match self {
+            LaunchWizardLaunchPath::QuickStart => "quick_start",
+            LaunchWizardLaunchPath::ManualSetup => "manual_setup",
+            LaunchWizardLaunchPath::FocusSession => "focus_session",
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardQuickStartView {
     pub index: usize,
@@ -113,6 +131,14 @@ pub struct LaunchWizardSummaryView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardProgressStepView {
+    pub key: String,
+    pub label: String,
+    pub state: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
     pub mode: LaunchWizardMode,
@@ -124,6 +150,9 @@ pub struct LaunchWizardView {
     pub hydration_error: Option<String>,
     pub quick_start_entries: Vec<LaunchWizardQuickStartView>,
     pub live_sessions: Vec<LaunchWizardLiveSessionView>,
+    pub selected_launch_path: String,
+    pub selected_quick_start_index: Option<usize>,
+    pub selected_live_session_index: Option<usize>,
     pub branch_mode: String,
     pub branch_type_options: Vec<LaunchWizardOptionView>,
     pub selected_branch_type: Option<String>,
@@ -159,6 +188,13 @@ pub struct LaunchWizardView {
     pub show_skip_permissions: bool,
     pub show_codex_fast_mode: bool,
     pub show_branch_controls: bool,
+    pub show_manual_setup: bool,
+    pub show_runtime_confirmation: bool,
+    pub runtime_resolution_pending: bool,
+    pub runtime_resolution_message: Option<String>,
+    pub primary_action_label: String,
+    pub primary_action_enabled: bool,
+    pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     pub error: Option<String>,
@@ -558,6 +594,15 @@ pub enum LaunchWizardAction {
         index: usize,
         mode: QuickStartLaunchMode,
     },
+    SetLaunchPath {
+        path: LaunchWizardLaunchPath,
+    },
+    SelectQuickStart {
+        index: usize,
+    },
+    SelectLiveSession {
+        index: usize,
+    },
     FocusExistingSession {
         index: usize,
     },
@@ -619,6 +664,9 @@ pub struct LaunchWizardState {
     pub wizard_mode: LaunchWizardMode,
     pub step: LaunchWizardStep,
     pub selected: usize,
+    pub launch_path: LaunchWizardLaunchPath,
+    pub selected_quick_start_index: Option<usize>,
+    pub selected_live_session_index: Option<usize>,
     pub detected_agents: Vec<AgentOption>,
     pub quick_start_entries: Vec<QuickStartEntry>,
     previous_profiles: LaunchWizardPreviousProfiles,
@@ -643,6 +691,8 @@ pub struct LaunchWizardState {
     pub error: Option<String>,
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
+    pub runtime_resolution_pending: bool,
+    pub runtime_resolution_message: Option<String>,
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
 }
@@ -687,12 +737,16 @@ impl LaunchWizardState {
         } else {
             LaunchWizardStep::BranchAction
         };
+        let launch_path = default_launch_path(&context, &quick_start_entries);
 
         let mut state = Self {
             context: context.clone(),
             wizard_mode: LaunchWizardMode::Branch,
             step,
             selected: 0,
+            launch_path,
+            selected_quick_start_index: (!quick_start_entries.is_empty()).then_some(0),
+            selected_live_session_index: (!context.live_sessions.is_empty()).then_some(0),
             detected_agents: agent_options,
             quick_start_entries,
             previous_profiles,
@@ -717,6 +771,8 @@ impl LaunchWizardState {
             error: None,
             is_hydrating,
             runtime_context_resolved: true,
+            runtime_resolution_pending: false,
+            runtime_resolution_message: None,
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
         };
@@ -787,6 +843,7 @@ impl LaunchWizardState {
         );
         state.wizard_mode = LaunchWizardMode::StartWork;
         state.step = LaunchWizardStep::LaunchTarget;
+        state.launch_path = LaunchWizardLaunchPath::ManualSetup;
         state.selected = step_default_selection(state.step, &state);
         state.is_new_branch = true;
         state.base_branch_name = Some(base_branch_name);
@@ -837,6 +894,8 @@ impl LaunchWizardState {
     }
 
     pub fn view(&self) -> LaunchWizardView {
+        let show_manual_setup = self.show_manual_setup();
+        let show_runtime_confirmation = self.show_runtime_confirmation();
         LaunchWizardView {
             title: if self.wizard_mode == LaunchWizardMode::StartWork {
                 "Start Work".to_string()
@@ -852,6 +911,9 @@ impl LaunchWizardState {
             hydration_error: self.hydration_error.clone(),
             quick_start_entries: self.quick_start_entries_view(),
             live_sessions: self.live_sessions_view(),
+            selected_launch_path: self.launch_path.value().to_string(),
+            selected_quick_start_index: self.selected_quick_start_index,
+            selected_live_session_index: self.selected_live_session_index,
             branch_mode: if self.is_new_branch {
                 "create_new".to_string()
             } else {
@@ -883,22 +945,35 @@ impl LaunchWizardState {
             execution_mode_options: execution_mode_options_view(),
             selected_execution_mode: self.mode.clone(),
             skip_permissions: self.skip_permissions,
-            show_agent_settings: self.launch_target_is_agent(),
-            show_reasoning: self.launch_target_is_agent() && self.agent_uses_reasoning_step(),
-            show_runtime_target: self.runtime_context_resolved && self.has_docker_workflow(),
+            show_agent_settings: show_manual_setup && self.launch_target_is_agent(),
+            show_reasoning: show_manual_setup
+                && self.launch_target_is_agent()
+                && self.agent_uses_reasoning_step(),
+            show_runtime_target: show_runtime_confirmation && self.has_docker_workflow(),
             show_windows_shell: self.runtime_context_resolved
+                && show_manual_setup
                 && self.show_windows_shell_selection(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
-                && self.runtime_context_resolved
+                && show_runtime_confirmation
                 && self.docker_service_prompt_required(),
             show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
-                && self.runtime_context_resolved,
-            show_version: self.launch_target_is_agent()
+                && show_runtime_confirmation,
+            show_version: show_manual_setup
+                && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
-            show_execution_mode: self.launch_target_is_agent(),
-            show_skip_permissions: self.launch_target_is_agent(),
-            show_codex_fast_mode: self.launch_target_is_agent() && self.agent_is_codex(),
-            show_branch_controls: self.wizard_mode == LaunchWizardMode::Branch,
+            show_execution_mode: show_manual_setup && self.launch_target_is_agent(),
+            show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
+            show_codex_fast_mode: show_manual_setup
+                && self.launch_target_is_agent()
+                && self.agent_is_codex(),
+            show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
+            show_manual_setup,
+            show_runtime_confirmation,
+            runtime_resolution_pending: self.runtime_resolution_pending,
+            runtime_resolution_message: self.runtime_resolution_message.clone(),
+            primary_action_label: self.primary_action_label(),
+            primary_action_enabled: self.primary_action_enabled(),
+            progress_steps: self.progress_steps_view(),
             codex_fast_mode: self.codex_fast_mode,
             launch_summary: self.launch_summary_view(),
             error: self.error.clone(),
@@ -906,6 +981,7 @@ impl LaunchWizardState {
     }
 
     pub fn apply_hydration(&mut self, hydration: LaunchWizardHydration) {
+        let was_hydrating = self.is_hydrating;
         let LaunchWizardHydration {
             selected_branch,
             normalized_branch_name,
@@ -930,7 +1006,12 @@ impl LaunchWizardState {
         self.quick_start_entries = quick_start_entries;
         self.is_hydrating = false;
         self.runtime_context_resolved = true;
+        self.runtime_resolution_pending = false;
+        self.runtime_resolution_message = None;
         self.hydration_error = None;
+        if was_hydrating {
+            self.reset_default_launch_path();
+        }
         self.branch_name = if self.is_new_branch {
             self.branch_name.clone()
         } else {
@@ -950,7 +1031,7 @@ impl LaunchWizardState {
         self.sync_selected_agent_options();
         // Agent preference の再適用は previous_profiles が refresh されたときのみ。
         // 現 wizard 内で user が編集した draft (model / reasoning など) を上書きしない。
-        if refreshed_previous_profiles {
+        if refreshed_previous_profiles && self.launch_path != LaunchWizardLaunchPath::QuickStart {
             self.apply_preferred_agent_profile();
         }
         self.sync_docker_lifecycle_default();
@@ -961,6 +1042,8 @@ impl LaunchWizardState {
 
     pub fn mark_runtime_context_unresolved(&mut self) {
         self.runtime_context_resolved = false;
+        self.runtime_resolution_pending = false;
+        self.runtime_resolution_message = None;
         self.context.worktree_path = None;
         self.context.docker_context = None;
         self.context.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
@@ -971,20 +1054,40 @@ impl LaunchWizardState {
         self.sync_docker_lifecycle_default();
     }
 
+    pub fn mark_runtime_resolution_pending(&mut self, message: impl Into<String>) {
+        self.runtime_context_resolved = false;
+        self.runtime_resolution_pending = true;
+        self.runtime_resolution_message = Some(message.into());
+        self.error = None;
+    }
+
     pub fn apply_runtime_context(&mut self, hydration: LaunchWizardHydration) {
         self.apply_hydration(hydration);
         self.is_new_branch = false;
         self.base_branch_name = None;
         self.runtime_context_resolved = true;
+        self.runtime_resolution_pending = false;
+        self.runtime_resolution_message = None;
     }
 
     pub fn set_hydration_error(&mut self, error: String) {
         self.is_hydrating = false;
+        self.runtime_resolution_pending = false;
+        self.runtime_resolution_message = None;
         self.hydration_error = Some(error);
     }
 
     pub fn apply(&mut self, action: LaunchWizardAction) {
         self.error = None;
+        if self.runtime_resolution_pending {
+            match action {
+                LaunchWizardAction::Cancel => {
+                    self.completion = Some(LaunchWizardCompletion::Cancelled);
+                }
+                _ => return,
+            }
+            return;
+        }
 
         match action {
             LaunchWizardAction::Cancel => {
@@ -995,6 +1098,15 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::ApplyQuickStart { index, mode } => {
                 self.apply_quick_start_action(index, mode);
+            }
+            LaunchWizardAction::SetLaunchPath { path } => {
+                self.set_launch_path_selection(path);
+            }
+            LaunchWizardAction::SelectQuickStart { index } => {
+                self.select_quick_start(index);
+            }
+            LaunchWizardAction::SelectLiveSession { index } => {
+                self.select_live_session(index);
             }
             LaunchWizardAction::FocusExistingSession { index } => {
                 self.focus_existing_session(index);
@@ -1225,18 +1337,7 @@ impl LaunchWizardState {
             return;
         }
 
-        match self.build_launch_request() {
-            Ok(config) => {
-                self.completion = Some(if self.runtime_context_resolved {
-                    LaunchWizardCompletion::Launch(Box::new(config))
-                } else {
-                    LaunchWizardCompletion::ResolveRuntime(Box::new(config))
-                });
-            }
-            Err(error) => {
-                self.error = Some(error);
-            }
-        }
+        self.finish_launch_request();
     }
 
     fn apply_selection(&mut self) {
@@ -1352,6 +1453,21 @@ impl LaunchWizardState {
     }
 
     fn submit_panel(&mut self) {
+        match self.launch_path {
+            LaunchWizardLaunchPath::QuickStart => {
+                self.submit_quick_start_path();
+                return;
+            }
+            LaunchWizardLaunchPath::FocusSession => {
+                match self.selected_live_session_index {
+                    Some(index) => self.focus_existing_session(index),
+                    None => self.error = Some("No running session is available".to_string()),
+                }
+                return;
+            }
+            LaunchWizardLaunchPath::ManualSetup => {}
+        }
+
         if self.is_new_branch {
             let trimmed = self.branch_name.trim();
             if trimmed.is_empty() {
@@ -1361,6 +1477,10 @@ impl LaunchWizardState {
             self.branch_name = trimmed.to_string();
         }
 
+        self.finish_launch_request();
+    }
+
+    fn finish_launch_request(&mut self) {
         match self.build_launch_request() {
             Ok(config) => {
                 self.completion = Some(if self.runtime_context_resolved {
@@ -1375,10 +1495,39 @@ impl LaunchWizardState {
         }
     }
 
-    fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
-        let Some(entry) = self.quick_start_entries.get(index).cloned() else {
+    fn submit_quick_start_path(&mut self) {
+        let Some(index) = self.selected_quick_start_index else {
             self.error = Some("Quick start entry is unavailable".to_string());
             return;
+        };
+        let mode = self
+            .quick_start_entries
+            .get(index)
+            .map(|entry| {
+                if entry.can_reuse() {
+                    QuickStartLaunchMode::Resume
+                } else {
+                    QuickStartLaunchMode::StartNew
+                }
+            })
+            .unwrap_or(QuickStartLaunchMode::StartNew);
+        if self.prepare_quick_start_launch(index, mode) {
+            self.finish_launch_request();
+        }
+    }
+
+    fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
+        self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.selected_quick_start_index = Some(index);
+        if self.prepare_quick_start_launch(index, mode) {
+            self.finish_launch_request();
+        }
+    }
+
+    fn prepare_quick_start_launch(&mut self, index: usize, mode: QuickStartLaunchMode) -> bool {
+        let Some(entry) = self.quick_start_entries.get(index).cloned() else {
+            self.error = Some("Quick start entry is unavailable".to_string());
+            return false;
         };
 
         self.launch_target = LaunchTargetKind::Agent;
@@ -1401,29 +1550,20 @@ impl LaunchWizardState {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
                     self.completion = Some(LaunchWizardCompletion::FocusWindow { window_id });
+                    false
                 } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
-                    match self.build_launch_request() {
-                        Ok(config) => {
-                            self.completion =
-                                Some(LaunchWizardCompletion::Launch(Box::new(config)));
-                        }
-                        Err(error) => self.error = Some(error),
-                    }
+                    true
                 } else {
                     self.error = Some("No saved session is available".to_string());
+                    false
                 }
             }
             QuickStartLaunchMode::StartNew => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
-                match self.build_launch_request() {
-                    Ok(config) => {
-                        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
-                    }
-                    Err(error) => self.error = Some(error),
-                }
+                true
             }
         }
     }
@@ -1475,12 +1615,56 @@ impl LaunchWizardState {
 
     fn focus_existing_session(&mut self, index: usize) {
         if let Some(entry) = self.context.live_sessions.get(index) {
+            self.launch_path = LaunchWizardLaunchPath::FocusSession;
+            self.selected_live_session_index = Some(index);
             self.completion = Some(LaunchWizardCompletion::FocusWindow {
                 window_id: entry.window_id.clone(),
             });
         } else {
             self.error = Some("No running session is available".to_string());
         }
+    }
+
+    fn set_launch_path_selection(&mut self, path: LaunchWizardLaunchPath) {
+        match path {
+            LaunchWizardLaunchPath::QuickStart => {
+                if self.quick_start_entries.is_empty() {
+                    self.error = Some("Quick start entry is unavailable".to_string());
+                    return;
+                }
+                self.launch_path = path;
+                self.selected_quick_start_index.get_or_insert(0);
+            }
+            LaunchWizardLaunchPath::ManualSetup => {
+                self.launch_path = path;
+            }
+            LaunchWizardLaunchPath::FocusSession => {
+                if self.context.live_sessions.is_empty() {
+                    self.error = Some("No running session is available".to_string());
+                    return;
+                }
+                self.launch_path = path;
+                self.selected_live_session_index.get_or_insert(0);
+            }
+        }
+    }
+
+    fn select_quick_start(&mut self, index: usize) {
+        if self.quick_start_entries.get(index).is_none() {
+            self.error = Some("Quick start entry is unavailable".to_string());
+            return;
+        }
+        self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.selected_quick_start_index = Some(index);
+    }
+
+    fn select_live_session(&mut self, index: usize) {
+        if self.context.live_sessions.get(index).is_none() {
+            self.error = Some("No running session is available".to_string());
+            return;
+        }
+        self.launch_path = LaunchWizardLaunchPath::FocusSession;
+        self.selected_live_session_index = Some(index);
     }
 
     fn set_branch_mode(&mut self, create_new: bool) {
@@ -1532,6 +1716,7 @@ impl LaunchWizardState {
     }
 
     fn set_launch_target(&mut self, target: LaunchTargetKind) {
+        self.launch_path = LaunchWizardLaunchPath::ManualSetup;
         if self.launch_target_is_agent() && target == LaunchTargetKind::Shell {
             self.save_current_agent_draft();
         }
@@ -1848,6 +2033,125 @@ impl LaunchWizardState {
         }
 
         summary
+    }
+
+    fn reset_default_launch_path(&mut self) {
+        self.launch_path = default_launch_path(&self.context, &self.quick_start_entries);
+        if !self.quick_start_entries.is_empty() {
+            self.selected_quick_start_index.get_or_insert(0);
+        }
+        if !self.context.live_sessions.is_empty() {
+            self.selected_live_session_index.get_or_insert(0);
+        }
+    }
+
+    fn show_manual_setup(&self) -> bool {
+        self.launch_path == LaunchWizardLaunchPath::ManualSetup
+    }
+
+    fn show_runtime_confirmation(&self) -> bool {
+        self.runtime_context_resolved
+            && matches!(
+                self.launch_path,
+                LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
+            )
+    }
+
+    fn primary_action_label(&self) -> String {
+        if self.is_hydrating {
+            return "Loading...".to_string();
+        }
+        if self.runtime_resolution_pending {
+            return "Preparing...".to_string();
+        }
+        match self.launch_path {
+            LaunchWizardLaunchPath::FocusSession => "Focus".to_string(),
+            LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
+                if !self.runtime_context_resolved =>
+            {
+                "Continue".to_string()
+            }
+            LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
+                if self.is_new_branch =>
+            {
+                "Create and launch".to_string()
+            }
+            LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup => {
+                "Launch".to_string()
+            }
+        }
+    }
+
+    fn primary_action_enabled(&self) -> bool {
+        if self.is_hydrating || self.runtime_resolution_pending {
+            return false;
+        }
+        match self.launch_path {
+            LaunchWizardLaunchPath::QuickStart => self
+                .selected_quick_start_index
+                .is_some_and(|index| self.quick_start_entries.get(index).is_some()),
+            LaunchWizardLaunchPath::FocusSession => self
+                .selected_live_session_index
+                .is_some_and(|index| self.context.live_sessions.get(index).is_some()),
+            LaunchWizardLaunchPath::ManualSetup => true,
+        }
+    }
+
+    fn progress_steps_view(&self) -> Vec<LaunchWizardProgressStepView> {
+        let path_label = match self.launch_path {
+            LaunchWizardLaunchPath::QuickStart => "Quick Start",
+            LaunchWizardLaunchPath::ManualSetup => "Setup",
+            LaunchWizardLaunchPath::FocusSession => "Focus",
+        };
+        let setup_state = if self.launch_path == LaunchWizardLaunchPath::ManualSetup {
+            if self.runtime_context_resolved || self.runtime_resolution_pending {
+                "done"
+            } else {
+                "active"
+            }
+        } else {
+            "done"
+        };
+        let runtime_state = if self.runtime_resolution_pending {
+            "active"
+        } else if self.runtime_context_resolved {
+            "done"
+        } else {
+            "pending"
+        };
+        let start_state = if self.runtime_context_resolved
+            || self.launch_path == LaunchWizardLaunchPath::FocusSession
+        {
+            "active"
+        } else {
+            "pending"
+        };
+        vec![
+            LaunchWizardProgressStepView {
+                key: "path".to_string(),
+                label: path_label.to_string(),
+                state: "done".to_string(),
+                detail: None,
+            },
+            LaunchWizardProgressStepView {
+                key: "setup".to_string(),
+                label: "Settings".to_string(),
+                state: setup_state.to_string(),
+                detail: None,
+            },
+            LaunchWizardProgressStepView {
+                key: "runtime".to_string(),
+                label: "Runtime".to_string(),
+                state: runtime_state.to_string(),
+                detail: self.runtime_resolution_message.clone(),
+            },
+            LaunchWizardProgressStepView {
+                key: "start".to_string(),
+                label: "Start".to_string(),
+                state: start_state.to_string(),
+                detail: None,
+            },
+        ]
     }
 
     fn selected_branch_type_prefix(&self) -> Option<&'static str> {
@@ -2214,9 +2518,18 @@ impl LaunchWizardState {
     }
 
     fn apply_quick_start_selection(&mut self) {
+        let selected_action = self.selected_quick_start_action();
         let Some(entry) = self.selected_quick_start_entry().cloned() else {
             return;
         };
+        let selected_index = match selected_action {
+            QuickStartAction::ReuseEntry { index } | QuickStartAction::StartNewEntry { index } => {
+                index
+            }
+            QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => return,
+        };
+        self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.selected_quick_start_index = Some(selected_index);
 
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
@@ -2243,20 +2556,14 @@ impl LaunchWizardState {
         self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
         self.sync_docker_lifecycle_default();
 
-        match self.selected_quick_start_action() {
+        match selected_action {
             QuickStartAction::ReuseEntry { .. } => {
                 if let Some(window_id) = entry.live_window_id {
                     self.completion = Some(LaunchWizardCompletion::FocusWindow { window_id });
                 } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
-                    match self.build_launch_request() {
-                        Ok(config) => {
-                            self.completion =
-                                Some(LaunchWizardCompletion::Launch(Box::new(config)));
-                        }
-                        Err(error) => self.error = Some(error),
-                    }
+                    self.finish_launch_request();
                 } else {
                     self.error = Some("No saved session is available".to_string());
                 }
@@ -2264,12 +2571,7 @@ impl LaunchWizardState {
             QuickStartAction::StartNewEntry { .. } => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
-                match self.build_launch_request() {
-                    Ok(config) => {
-                        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
-                    }
-                    Err(error) => self.error = Some(error),
-                }
+                self.finish_launch_request();
             }
             QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => {}
         }
@@ -2493,6 +2795,19 @@ enum QuickStartAction {
     StartNewEntry { index: usize },
     FocusExistingSession,
     ChooseDifferent,
+}
+
+fn default_launch_path(
+    context: &LaunchWizardContext,
+    quick_start_entries: &[QuickStartEntry],
+) -> LaunchWizardLaunchPath {
+    if !quick_start_entries.is_empty() {
+        LaunchWizardLaunchPath::QuickStart
+    } else if !context.live_sessions.is_empty() {
+        LaunchWizardLaunchPath::FocusSession
+    } else {
+        LaunchWizardLaunchPath::ManualSetup
+    }
 }
 
 const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.7)";
@@ -5857,6 +6172,97 @@ mod tests {
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn quick_start_submit_skips_manual_settings_until_runtime_confirmation() {
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            ctx,
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-1",
+                "codex",
+                Some("resume-1"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                Some("app"),
+            )],
+            Default::default(),
+        );
+        state.mark_runtime_context_unresolved();
+
+        let view = state.view();
+        assert_eq!(view.selected_launch_path, "quick_start");
+        assert_eq!(view.selected_quick_start_index, Some(0));
+        assert!(!view.show_manual_setup);
+        assert!(!view.show_runtime_confirmation);
+        assert_eq!(view.primary_action_label, "Continue");
+
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::ResolveRuntime(config))
+                if matches!(
+                    config.as_ref(),
+                    LaunchWizardLaunchRequest::Agent(config)
+                        if config.resume_session_id.as_deref() == Some("resume-1")
+                )
+        ));
+
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature-current")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature-current"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        let view = state.view();
+        assert_eq!(view.selected_launch_path, "quick_start");
+        assert!(!view.show_manual_setup);
+        assert!(view.show_runtime_confirmation);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.primary_action_label, "Launch");
+    }
+
+    #[test]
+    fn runtime_resolution_pending_updates_footer_and_progress() {
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            Default::default(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.mark_runtime_resolution_pending("Preparing worktree...");
+
+        let view = state.view();
+        assert!(view.runtime_resolution_pending);
+        assert_eq!(
+            view.runtime_resolution_message.as_deref(),
+            Some("Preparing worktree...")
+        );
+        assert_eq!(view.primary_action_label, "Preparing...");
+        assert!(!view.primary_action_enabled);
+        assert!(view
+            .progress_steps
+            .iter()
+            .any(|step| step.key == "runtime" && step.state == "active"));
     }
 
     #[test]

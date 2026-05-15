@@ -1239,7 +1239,7 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
   assert.match(
     appSource,
     /wizardModal\.classList\.contains\("open"\)[\s\S]{0,500}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendAction\(\{\s*kind:\s*"cancel"/,
-    "expected Esc/backdrop/close to locally dismiss error-only wizard state before sending backend cancel",
+    "expected Esc/close to locally dismiss error-only wizard state before sending backend cancel",
   );
 });
 
@@ -1385,8 +1385,50 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Launch wizard submit button uses Continue before runtime context is resolved", () => {
   assert.match(
     appSource,
-    /launchWizard\.runtime_context_resolved === false\s*\?\s*"Continue"\s*:/,
+    /launchWizard\.primary_action_label\s*\|\|[\s\S]{0,260}?launchWizard\.runtime_context_resolved === false\s*\?\s*"Continue"\s*:/,
     "expected unresolved Launch Agent runtime context to use Continue instead of Launch",
+  );
+});
+
+test("Launch wizard renders centered split flow without backdrop dismissal", () => {
+  assert.equal(
+    appSource.includes("isStartWorkMode"),
+    false,
+    "Start Work should share the centered wizard modal instead of toggling drawer mode",
+  );
+  assert.equal(
+    appSource.includes('wizardModal.classList.toggle("is-drawer"'),
+    false,
+    "Launch Wizard should not toggle drawer placement",
+  );
+  assert.ok(
+    appSource.includes("wizard-progress-rail")
+      && appSource.includes("wizard-main")
+      && appSource.includes("wizard-content-pane"),
+    "expected the wizard body to be split into progress rail and content pane",
+  );
+  assert.equal(
+    /if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}/.test(appSource),
+    false,
+    "wizard backdrop clicks must not dismiss the wizard",
+  );
+});
+
+test("Launch wizard quick start is selected before footer submit", () => {
+  assert.ok(
+    appSource.includes('kind: "select_quick_start"'),
+    "expected quick start rows to update wizard selection instead of launching inline",
+  );
+  assert.ok(
+    appSource.includes("selected_launch_path")
+      && appSource.includes("selected_quick_start_index")
+      && appSource.includes("primary_action_label"),
+    "expected frontend to render the backend-selected launch path and footer primary label",
+  );
+  assert.equal(
+    appSource.includes("quick-start-actions"),
+    false,
+    "quick start rows should not render multiple inline action buttons",
   );
 });
 

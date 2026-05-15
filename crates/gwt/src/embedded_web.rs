@@ -2406,13 +2406,10 @@ mod tests {
             submit_button.is_match(html),
             "expected submit control to ignore error-only state and flush branch draft before dispatching submit",
         );
-        let backdrop_cancel = regex::Regex::new(
-            r#"if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}"#,
-        )
-        .expect("valid regex");
         assert!(
-            backdrop_cancel.is_match(html),
-            "expected backdrop dismissal to share the same wizard close helper",
+            !html.contains("event.target === wizardModal")
+                || !html.contains("closeLaunchWizardFromChrome();"),
+            "expected wizard backdrop clicks to stop dismissing the wizard",
         );
         // Issue #2698 PR 1 (B7) — the launch_wizard_state case now
         // also defers via `wizardInteractionGuard.defer(...)` before
@@ -2442,14 +2439,35 @@ mod tests {
             "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
         );
         assert!(
-            html.contains("isStartWorkMode")
-                && html.contains("is-drawer")
-                && html.contains("is-drawer-shell"),
-            "expected Start Work wizard mode to opt into the SPEC-2356 drawer bridge",
+            !html.contains("isStartWorkMode")
+                && !html.contains(r#"wizardModal.classList.toggle("is-drawer""#),
+            "expected Start Work wizard mode to share the centered Launch Wizard modal",
         );
         assert!(
             html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
             "expected Start Work to keep the existing Agent settings renderer available",
+        );
+    }
+
+    #[test]
+    fn embedded_web_launch_wizard_flow_redesign_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("wizard-progress-rail")
+                && html.contains("wizard-main")
+                && html.contains("wizard-content-pane"),
+            "expected Launch Wizard to render a split progress/content layout",
+        );
+        assert!(
+            html.contains("selected_launch_path")
+                && html.contains("selected_quick_start_index")
+                && html.contains("primary_action_label"),
+            "expected Launch Wizard renderer to follow backend-selected path and footer label",
+        );
+        assert!(
+            html.contains(r#"kind: "select_quick_start""#) && !html.contains("quick-start-actions"),
+            "expected Quick Start to be a selectable path submitted by the footer primary button",
         );
     }
 
