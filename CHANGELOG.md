@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.35.0] - 2026-05-15
+
+### Bug Fixes
+
+- **workspace:** Preserve done terminal state and broadcast work_items in workspace_state
+- **gui:** Restore terminal focus transfer for xterm textarea
+- **workspace:** Repair rustdoc intra-doc link for work_items rebuild
+- Ensure remote develop for Start Work
+- Require evidence gate before discussion resolve
+- **workspace:** Set agent identity from user prompts
+- **workspace:** Restrict transcript identity fallback
+- エージェント状態更新中のワークスペース操作を安定化
+- Playwright の埋め込みモジュール解決を修正
+- Trust managed Codex hooks by opt-in
+- Add UI trace profiler diagnostics
+- Avoid inactive UI trace pointer overhead
+
+### Features
+
+- Split launch wizard runtime resolution
+
+### Miscellaneous Tasks
+
+- Merge develop into work branch
+- Merge develop into codex hook trust branch
+
+### Refactor
+
+- Centralize UI trace wiring
+- Type UI trace payload
+- Isolate UI trace artifact saving
+
 ## [9.34.1] - 2026-05-14
 
 ### Bug Fixes
