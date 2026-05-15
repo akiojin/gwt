@@ -1,5 +1,61 @@
 # Lessons Learned
 
+## 2026-05-15 — Exact hook trust must include generator resolution and shell format
+
+### 事象
+
+PR #2735 の follow-up review で、Docker trust registration が `GWT_HOOK_BIN`
+fallback を独自解決しており、hook 生成時の binary path resolution とずれる
+可能性を指摘された。また exact command match を現在 runtime の shell 形式
+だけに絞ったため、PowerShell 形式で生成済みの Codex hooks を Linux Docker
+内の registration が trust できない互換性リスクも残っていた。
+
+### 原因
+
+「suffix ではなく exact command を trust する」という安全側の修正で、
+exact command の入力元を current runtime だけに寄せすぎた。hook trust は
+実行環境の shell 形式ではなく、既に生成済みの `.codex/hooks.json` に書かれた
+正規 command と一致するかを見る必要がある。
+
+### 再発防止策
+
+1. hook trust の exact match を変更する場合は、binary fallback resolution と
+   shell command format の両方を generator とそろえる。
+2. Docker / container registration は、host-generated command を検証するための
+   fallback path と、container 内で実行する `gwtd` path を別々にテストする。
+3. POSIX / PowerShell のように生成 shell が複数ある managed command では、
+   「現在 OS の command」だけでなく「生成器が出し得る exact command 群」を
+   trust 判定の対象にする。
+
+## 2026-05-15 — Hook trust recognizers must not accept shape-only gwtd paths
+
+### 事象
+
+PR #2733 の Codex review で、Codex hook trust 登録が Docker 内では
+`/root/.codex/config.toml` 固定になっており、非 root devcontainer の Codex
+設定を更新できないことを指摘された。同時に portable hook command の fallback
+判定が `.../gwtd` で終わる任意パスを trust 対象にしていたため、
+`/tmp/attacker/gwtd` のようなパスでも review signal を消せる状態だった。
+
+### 原因
+
+Docker registration と hook trust recognizer の責務が混ざり、container 内で
+実行する `gwtd` と、host で生成された hook command の fallback path を同一視
+していた。さらに recognizer が「gwt が生成した正確な command」ではなく
+「gwtd らしい suffix」を見ていたため、攻撃者が制御できる fallback path まで
+許容していた。
+
+### 再発防止策
+
+1. trust / approval / allowlist 系の matcher は、suffix や shape ではなく
+   生成器が出す exact command か、明示的に渡された exact fallback のみを
+   許可する。
+2. Docker 内で host-generated hook を登録する場合は、実行バイナリ
+   (`/usr/local/bin/gwtd`) と trust 対象 fallback (`GWT_HOOK_BIN`) を分離する。
+3. container 内の user config path は `/root` 固定にせず、
+   `${CODEX_HOME:-${HOME:-/root}/.codex}/config.toml` のように active user から
+   導出する。
+
 ## 2026-05-15 — Codex hook trust hashing must mirror event matcher semantics
 
 ### 事象
@@ -5516,3 +5572,8 @@ repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視
    inactive worktree の repair は Settings.Index の明示操作に任せる。
 3. 性能修正では `sample` と子プロセス監視で、起動 smoke 中に `index-files` や全 worktree
    `--action status` が勝手に並ばないことを確認する。
+4. 起動時 probe とオンデマンド full refresh を分離する場合、in-flight coalescing は
+   「要求を捨てる」のではなく「必要な重い可視性を後続で流す」契約にする。Settings.Index
+   のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
+   後続 retry で最後に full status を配信する。この retry は固定短時間 timeout で捨てず、
+   bootstrap が長引く初回 runtime 準備や大規模 repo でも要求を保持する。

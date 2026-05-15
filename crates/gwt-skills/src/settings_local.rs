@@ -456,12 +456,15 @@ fn event_hook_command_with_bin(
     }
 }
 
-pub(crate) fn codex_event_hook_command(event: &str) -> String {
-    codex_event_hook_command_with_bin(&gwt_hook_bin_path(), event)
+pub(crate) fn codex_event_hook_commands(event: &str) -> Vec<String> {
+    codex_event_hook_commands_with_bin(&gwt_hook_bin_path(), event)
 }
 
-pub(crate) fn codex_event_hook_command_with_bin(bin: &str, event: &str) -> String {
-    event_hook_command_with_bin(bin, event, managed_hook_shell(), ManagedHookTarget::Codex)
+pub(crate) fn codex_event_hook_commands_with_bin(bin: &str, event: &str) -> Vec<String> {
+    vec![
+        posix_codex_event_hook_command_with_bin(bin, event),
+        powershell_codex_event_hook_command_with_bin(bin, event),
+    ]
 }
 
 #[cfg(test)]
