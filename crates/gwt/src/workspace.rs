@@ -145,7 +145,10 @@ impl WorkspaceState {
             .windows
             .iter()
             .enumerate()
-            .filter_map(|(index, window)| (!window.minimized).then_some(index))
+            .filter_map(|(index, window)| {
+                (!window.minimized && (window.tab_group_id.is_none() || window.tab_group_active))
+                    .then_some(index)
+            })
             .collect::<Vec<_>>();
         if open_indices.is_empty() {
             return false;
@@ -541,19 +544,24 @@ impl WorkspaceState {
         let height = available_height.max(MIN_WINDOW_HEIGHT);
 
         for (index, window_index) in open_indices.iter().enumerate() {
-            let geometry_revision = self.next_geometry_revision(&[*window_index]);
-            let window = &mut self.persisted.windows[*window_index];
+            let group_id = self.persisted.windows[*window_index].tab_group_id.clone();
+            let members = self.group_member_indices(group_id.as_deref(), *window_index);
+            let geometry_revision = self.next_geometry_revision(&members);
             let column = index % columns;
             let row = index / columns;
-            window.geometry = WindowGeometry {
+            let geometry = WindowGeometry {
                 x: bounds.x + ARRANGE_PADDING + column as f64 * (width + ARRANGE_PADDING),
                 y: bounds.y + ARRANGE_PADDING + row as f64 * (height + ARRANGE_PADDING),
                 width,
                 height,
             };
-            window.geometry_revision = geometry_revision;
-            window.maximized = false;
-            window.pre_maximize_geometry = None;
+            for member in members {
+                let window = &mut self.persisted.windows[member];
+                window.geometry = geometry.clone();
+                window.geometry_revision = geometry_revision;
+                window.maximized = false;
+                window.pre_maximize_geometry = None;
+            }
         }
     }
 
@@ -562,25 +570,29 @@ impl WorkspaceState {
         let available_height = (bounds.height - STACK_START_INSET * 2.0).max(MIN_WINDOW_HEIGHT);
 
         for (index, window_index) in open_indices.iter().enumerate() {
-            let geometry_revision = self.next_geometry_revision(&[*window_index]);
-            let window = &mut self.persisted.windows[*window_index];
-            window.geometry = WindowGeometry {
+            let window_geometry = self.persisted.windows[*window_index].geometry.clone();
+            let group_id = self.persisted.windows[*window_index].tab_group_id.clone();
+            let members = self.group_member_indices(group_id.as_deref(), *window_index);
+            let geometry_revision = self.next_geometry_revision(&members);
+            let geometry = WindowGeometry {
                 x: bounds.x + STACK_START_INSET + index as f64 * STACK_OFFSET_X,
                 y: bounds.y + STACK_START_INSET + index as f64 * STACK_OFFSET_Y,
-                width: window
-                    .geometry
+                width: window_geometry
                     .width
                     .min(available_width)
                     .max(MIN_WINDOW_WIDTH),
-                height: window
-                    .geometry
+                height: window_geometry
                     .height
                     .min(available_height)
                     .max(MIN_WINDOW_HEIGHT),
             };
-            window.geometry_revision = geometry_revision;
-            window.maximized = false;
-            window.pre_maximize_geometry = None;
+            for member in members {
+                let window = &mut self.persisted.windows[member];
+                window.geometry = geometry.clone();
+                window.geometry_revision = geometry_revision;
+                window.maximized = false;
+                window.pre_maximize_geometry = None;
+            }
         }
     }
 
@@ -590,10 +602,18 @@ impl WorkspaceState {
         let rows = count.div_ceil(columns);
 
         for &window_index in open_indices {
-            let window = &mut self.persisted.windows[window_index];
-            if let Some(geometry) = window.pre_maximize_geometry.take() {
-                window.geometry.width = geometry.width;
-                window.geometry.height = geometry.height;
+            let group_id = self.persisted.windows[window_index].tab_group_id.clone();
+            let members = self.group_member_indices(group_id.as_deref(), window_index);
+            if let Some(geometry) = self.persisted.windows[window_index]
+                .pre_maximize_geometry
+                .clone()
+            {
+                for member in members {
+                    let window = &mut self.persisted.windows[member];
+                    window.geometry.width = geometry.width;
+                    window.geometry.height = geometry.height;
+                    window.pre_maximize_geometry = None;
+                }
             }
         }
 
@@ -617,14 +637,19 @@ impl WorkspaceState {
         }
 
         for (index, &window_index) in open_indices.iter().enumerate() {
-            let geometry_revision = self.next_geometry_revision(&[window_index]);
+            let group_id = self.persisted.windows[window_index].tab_group_id.clone();
+            let members = self.group_member_indices(group_id.as_deref(), window_index);
+            let geometry_revision = self.next_geometry_revision(&members);
             let column = index % columns;
             let row = index / columns;
-            let window = &mut self.persisted.windows[window_index];
-            window.geometry.x = column_offsets[column];
-            window.geometry.y = row_offsets[row];
-            window.geometry_revision = geometry_revision;
-            window.maximized = false;
+            for member in members {
+                let window = &mut self.persisted.windows[member];
+                window.geometry.x = column_offsets[column];
+                window.geometry.y = row_offsets[row];
+                window.geometry_revision = geometry_revision;
+                window.maximized = false;
+                window.pre_maximize_geometry = None;
+            }
         }
     }
 
@@ -779,6 +804,18 @@ mod tests {
             width: 1000.0,
             height: 760.0,
         }
+    }
+
+    fn workspace_with_five_logical_windows_in_three_physical_slots() -> WorkspaceState {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        let branches = workspace.add_window(WindowPreset::Branches, arrange_bounds());
+
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        assert!(workspace.dock_window_tab(&branches.id, &file_tree.id));
+
+        workspace
     }
 
     #[test]
@@ -1445,6 +1482,102 @@ mod tests {
         assert_eq!(shell.geometry.y, 64.0);
         assert!(codex.minimized);
         assert_eq!(codex.geometry, minimized_geometry);
+    }
+
+    #[test]
+    fn tile_arrangement_counts_tabbed_groups_as_one_physical_window() {
+        let mut workspace = workspace_with_five_logical_windows_in_three_physical_slots();
+
+        assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
+
+        let shell = workspace.window("shell-1").expect("shell");
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        let branches = workspace.window("branches-1").expect("branches");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!((shell.geometry.x, shell.geometry.y), (124.0, 64.0));
+        assert_eq!((codex.geometry.x, codex.geometry.y), (612.0, 64.0));
+        assert_eq!((branches.geometry.x, branches.geometry.y), (124.0, 432.0));
+        assert_eq!(codex.geometry, claude.geometry);
+        assert_eq!(branches.geometry, file_tree.geometry);
+    }
+
+    #[test]
+    fn stack_arrangement_counts_tabbed_groups_as_one_physical_window() {
+        let mut workspace = workspace_with_five_logical_windows_in_three_physical_slots();
+
+        assert!(workspace.arrange_windows(ArrangeMode::Stack, arrange_bounds()));
+
+        let shell = workspace.window("shell-1").expect("shell");
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        let branches = workspace.window("branches-1").expect("branches");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!((shell.geometry.x, shell.geometry.y), (148.0, 88.0));
+        assert_eq!((codex.geometry.x, codex.geometry.y), (176.0, 112.0));
+        assert_eq!((branches.geometry.x, branches.geometry.y), (204.0, 136.0));
+        assert_eq!(codex.geometry, claude.geometry);
+        assert_eq!(branches.geometry, file_tree.geometry);
+    }
+
+    #[test]
+    fn align_arrangement_counts_tabbed_groups_as_one_physical_window() {
+        let mut workspace = workspace_with_five_logical_windows_in_three_physical_slots();
+        assert!(workspace.update_geometry(
+            "shell-1",
+            WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 500.0,
+                height: 300.0,
+            },
+        ));
+        assert!(workspace.update_geometry(
+            "codex-1",
+            WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 720.0,
+                height: 420.0,
+            },
+        ));
+        assert!(workspace.update_geometry(
+            "branches-1",
+            WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 420.0,
+                height: 520.0,
+            },
+        ));
+
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        let shell = workspace.window("shell-1").expect("shell");
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        let branches = workspace.window("branches-1").expect("branches");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!((shell.geometry.x, shell.geometry.y), (124.0, 64.0));
+        assert_eq!(
+            (shell.geometry.width, shell.geometry.height),
+            (500.0, 300.0)
+        );
+        assert_eq!((codex.geometry.x, codex.geometry.y), (648.0, 64.0));
+        assert_eq!(
+            (codex.geometry.width, codex.geometry.height),
+            (720.0, 420.0)
+        );
+        assert_eq!((branches.geometry.x, branches.geometry.y), (124.0, 508.0));
+        assert_eq!(
+            (branches.geometry.width, branches.geometry.height),
+            (420.0, 520.0)
+        );
+        assert_eq!(codex.geometry, claude.geometry);
+        assert_eq!(branches.geometry, file_tree.geometry);
     }
 
     #[test]
