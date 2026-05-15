@@ -47,7 +47,9 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
+        resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
+        syncResizeStatePointerEvent,
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
@@ -1852,16 +1854,17 @@
         resizeState.fitFrame = null;
       }
 
-      function finishWindowResize(pointerId) {
+      function finishWindowResize(pointerId, event = null) {
         if (!resizeState || resizeState.pointerId !== pointerId) {
           return;
         }
         const runtime = terminalMap.get(resizeState.id);
+        syncResizeStatePointerEvent(resizeState, event);
         cancelTerminalResizeFit();
         cancelResizePointermoveApply();
         cancelResizeStalenessGuard();
         // Flush the last pointer coordinates to the DOM so the final geometry
-        // matches the latest pointermove. fitTerminal + sendGeometry below
+        // matches the latest pointer event. fitTerminal + sendGeometry below
         // observe the up-to-date `element.style.width/height`.
         applyResizePointermove(resizeState);
         fitTerminal(resizeState.id, false);
@@ -1929,23 +1932,16 @@
         if (!element) {
           return;
         }
-        const x = state.latestClientX ?? state.startX;
-        const y = state.latestClientY ?? state.startY;
-        const width = clamp(
-          state.width + (x - state.startX) / viewport.zoom,
-          420,
-        );
-        const height = clamp(
-          state.height + (y - state.startY) / viewport.zoom,
-          260,
-        );
+        const { clientX, clientY, width, height } = resizeGeometryFromPointerState(state, {
+          zoom: viewport.zoom,
+        });
         element.style.width = `${width}px`;
         element.style.height = `${height}px`;
         traceUi(UI_TRACE_EVENT.resizePointermoveApply, {
           window_id: state.id,
           pointer_id: state.pointerId,
-          client_x: x,
-          client_y: y,
+          client_x: clientX,
+          client_y: clientY,
           width,
           height,
         });
@@ -8399,7 +8395,7 @@
               accepted: true,
               window_id: windowData.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           });
         }
 
@@ -9669,7 +9665,7 @@
               accepted: true,
               window_id: resizeState.id,
             });
-            finishWindowResize(event.pointerId);
+            finishWindowResize(event.pointerId, event);
           } else {
             // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 sometimes
             // emits a `pointerup` whose pointerId does not match the one
@@ -9755,7 +9751,7 @@
             window_id: resizeState.id,
           });
         }
-        finishWindowResize(event.pointerId);
+        finishWindowResize(event.pointerId, event);
       });
 
       canvas.addEventListener("contextmenu", (event) => {
