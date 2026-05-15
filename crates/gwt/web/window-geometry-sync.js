@@ -5,6 +5,14 @@ function normalizeRevision(value) {
   return Math.trunc(value);
 }
 
+function finiteNumber(value, fallback = 0) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function positiveFiniteNumber(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 export function createGeometrySyncState() {
   return {
     localEdits: new Map(),
@@ -85,4 +93,38 @@ export function localGeometryBaseRevision(state, id, windowData) {
     workspaceRevision,
     normalizeRevision(localEdit.optimisticRevision),
   );
+}
+
+export function syncResizeStatePointerEvent(state, event) {
+  if (!state || !event) {
+    return false;
+  }
+  if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+    return false;
+  }
+  state.latestClientX = event.clientX;
+  state.latestClientY = event.clientY;
+  return true;
+}
+
+export function resizeGeometryFromPointerState(
+  state,
+  { zoom = 1, minWidth = 420, minHeight = 260 } = {},
+) {
+  const normalizedZoom = positiveFiniteNumber(zoom, 1);
+  const minimumWidth = positiveFiniteNumber(minWidth, 420);
+  const minimumHeight = positiveFiniteNumber(minHeight, 260);
+  const startX = finiteNumber(state?.startX);
+  const startY = finiteNumber(state?.startY);
+  const clientX = finiteNumber(state?.latestClientX, startX);
+  const clientY = finiteNumber(state?.latestClientY, startY);
+  const baseWidth = finiteNumber(state?.width, minimumWidth);
+  const baseHeight = finiteNumber(state?.height, minimumHeight);
+
+  return {
+    clientX,
+    clientY,
+    width: Math.max(minimumWidth, baseWidth + (clientX - startX) / normalizedZoom),
+    height: Math.max(minimumHeight, baseHeight + (clientY - startY) / normalizedZoom),
+  };
 }
