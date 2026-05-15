@@ -120,6 +120,7 @@ pub struct LaunchWizardView {
     pub selected_branch_name: String,
     pub linked_issue_number: Option<u64>,
     pub is_hydrating: bool,
+    pub runtime_context_resolved: bool,
     pub hydration_error: Option<String>,
     pub quick_start_entries: Vec<LaunchWizardQuickStartView>,
     pub live_sessions: Vec<LaunchWizardLiveSessionView>,
@@ -537,6 +538,7 @@ pub enum LaunchWizardLaunchRequest {
 #[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
     Launch(Box<LaunchWizardLaunchRequest>),
+    ResolveRuntime(Box<LaunchWizardLaunchRequest>),
     FocusWindow { window_id: String },
     Cancelled,
 }
@@ -640,6 +642,7 @@ pub struct LaunchWizardState {
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
     pub is_hydrating: bool,
+    pub runtime_context_resolved: bool,
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
 }
@@ -713,6 +716,7 @@ impl LaunchWizardState {
             completion: None,
             error: None,
             is_hydrating,
+            runtime_context_resolved: true,
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
         };
@@ -844,6 +848,7 @@ impl LaunchWizardState {
             selected_branch_name: self.context.selected_branch.name.clone(),
             linked_issue_number: self.linked_issue_number,
             is_hydrating: self.is_hydrating,
+            runtime_context_resolved: self.runtime_context_resolved,
             hydration_error: self.hydration_error.clone(),
             quick_start_entries: self.quick_start_entries_view(),
             live_sessions: self.live_sessions_view(),
@@ -880,11 +885,14 @@ impl LaunchWizardState {
             skip_permissions: self.skip_permissions,
             show_agent_settings: self.launch_target_is_agent(),
             show_reasoning: self.launch_target_is_agent() && self.agent_uses_reasoning_step(),
-            show_runtime_target: self.has_docker_workflow(),
-            show_windows_shell: self.show_windows_shell_selection(),
+            show_runtime_target: self.runtime_context_resolved && self.has_docker_workflow(),
+            show_windows_shell: self.runtime_context_resolved
+                && self.show_windows_shell_selection(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && self.runtime_context_resolved
                 && self.docker_service_prompt_required(),
-            show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker,
+            show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && self.runtime_context_resolved,
             show_version: self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: self.launch_target_is_agent(),
@@ -921,6 +929,7 @@ impl LaunchWizardState {
         Self::hydrate_live_window_ids(&self.context, &mut quick_start_entries);
         self.quick_start_entries = quick_start_entries;
         self.is_hydrating = false;
+        self.runtime_context_resolved = true;
         self.hydration_error = None;
         self.branch_name = if self.is_new_branch {
             self.branch_name.clone()
@@ -948,6 +957,25 @@ impl LaunchWizardState {
         self.selected = self
             .selected
             .min(self.current_options().len().saturating_sub(1));
+    }
+
+    pub fn mark_runtime_context_unresolved(&mut self) {
+        self.runtime_context_resolved = false;
+        self.context.worktree_path = None;
+        self.context.docker_context = None;
+        self.context.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+        self.docker_service = None;
+        self.docker_lifecycle_intent =
+            default_docker_lifecycle_intent(self.context.docker_service_status);
+        self.sync_docker_lifecycle_default();
+    }
+
+    pub fn apply_runtime_context(&mut self, hydration: LaunchWizardHydration) {
+        self.apply_hydration(hydration);
+        self.is_new_branch = false;
+        self.base_branch_name = None;
+        self.runtime_context_resolved = true;
     }
 
     pub fn set_hydration_error(&mut self, error: String) {
@@ -1199,7 +1227,11 @@ impl LaunchWizardState {
 
         match self.build_launch_request() {
             Ok(config) => {
-                self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                self.completion = Some(if self.runtime_context_resolved {
+                    LaunchWizardCompletion::Launch(Box::new(config))
+                } else {
+                    LaunchWizardCompletion::ResolveRuntime(Box::new(config))
+                });
             }
             Err(error) => {
                 self.error = Some(error);
@@ -1331,7 +1363,11 @@ impl LaunchWizardState {
 
         match self.build_launch_request() {
             Ok(config) => {
-                self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                self.completion = Some(if self.runtime_context_resolved {
+                    LaunchWizardCompletion::Launch(Box::new(config))
+                } else {
+                    LaunchWizardCompletion::ResolveRuntime(Box::new(config))
+                });
             }
             Err(error) => {
                 self.error = Some(error);
@@ -2933,7 +2969,7 @@ impl<'a> LaunchWizardFlow<'a> {
     }
 
     fn next_after_host_runtime(&self) -> Option<LaunchWizardStep> {
-        if self.state.show_windows_shell_selection() {
+        if self.state.runtime_context_resolved && self.state.show_windows_shell_selection() {
             Some(LaunchWizardStep::WindowsShell)
         } else {
             self.next_after_windows_shell()
@@ -2983,7 +3019,7 @@ impl<'a> LaunchWizardFlow<'a> {
     fn previous_before_version_select(&self) -> Option<LaunchWizardStep> {
         if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
             Some(LaunchWizardStep::DockerLifecycle)
-        } else if self.state.show_windows_shell_selection() {
+        } else if self.state.runtime_context_resolved && self.state.show_windows_shell_selection() {
             Some(LaunchWizardStep::WindowsShell)
         } else if self.state.has_docker_workflow() {
             Some(LaunchWizardStep::RuntimeTarget)
@@ -2995,7 +3031,7 @@ impl<'a> LaunchWizardFlow<'a> {
     fn previous_before_execution_mode(&self) -> Option<LaunchWizardStep> {
         if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
             Some(LaunchWizardStep::DockerLifecycle)
-        } else if self.state.show_windows_shell_selection() {
+        } else if self.state.runtime_context_resolved && self.state.show_windows_shell_selection() {
             Some(LaunchWizardStep::WindowsShell)
         } else if agent_has_npm_package(self.state.effective_agent_id()) {
             Some(LaunchWizardStep::VersionSelect)
@@ -5770,6 +5806,57 @@ mod tests {
         assert_eq!(view.selected_agent_id, "claude");
         assert_eq!(view.agent_options.len(), 2);
         assert_eq!(view.selected_runtime_target, "docker");
+    }
+
+    #[test]
+    fn phase_one_hides_runtime_until_worktree_is_resolved() {
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Default::default(),
+        );
+        state.mark_runtime_context_unresolved();
+
+        let view = state.view();
+        assert!(!view.runtime_context_resolved);
+        assert!(!view.show_runtime_target);
+        assert!(!view.show_docker_service);
+        assert!(!view.show_docker_lifecycle);
+
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion,
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature-current")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature-current"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        let view = state.view();
+        assert!(view.runtime_context_resolved);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
     }
 
     #[test]
