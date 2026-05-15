@@ -504,6 +504,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Issue #2746 — span children inside <button> would otherwise inherit
+     user-select: auto, so a sub-pixel pointer drift turns the click into a
+     text-selection drag and swallows it. Mirrors the #2744 fix on
+     .project-tab. */
+  user-select: none;
 }
 
 .split-button-menu-recent-title {
@@ -3495,6 +3500,9 @@ body {
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
+  /* Issue #2746 — see .split-button-menu-recent-row comment. Picker
+     overlay shares the same button + span-children pattern. */
+  user-select: none;
 }
 
 .recent-project-row:hover {
