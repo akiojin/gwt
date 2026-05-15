@@ -5575,4 +5575,5 @@ repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視
 4. 起動時 probe とオンデマンド full refresh を分離する場合、in-flight coalescing は
    「要求を捨てる」のではなく「必要な重い可視性を後続で流す」契約にする。Settings.Index
    のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
-   後続 retry で最後に full status を配信する。
+   後続 retry で最後に full status を配信する。この retry は固定短時間 timeout で捨てず、
+   bootstrap が長引く初回 runtime 準備や大規模 repo でも要求を保持する。
