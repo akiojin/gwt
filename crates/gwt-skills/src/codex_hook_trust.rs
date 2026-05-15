@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::settings_local::{
-    codex_event_hook_command, codex_event_hook_command_with_bin, write_text_atomically,
+    codex_event_hook_commands, codex_event_hook_commands_with_bin, write_text_atomically,
 };
 
 const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
@@ -264,16 +264,18 @@ fn is_generated_gwt_event_command(
     event_json_name: &str,
     expected_gwt_bin: Option<&str>,
 ) -> bool {
-    command == expected_generated_gwt_event_command(event_json_name, expected_gwt_bin)
+    expected_generated_gwt_event_commands(event_json_name, expected_gwt_bin)
+        .iter()
+        .any(|expected| expected == command)
 }
 
-fn expected_generated_gwt_event_command(
+fn expected_generated_gwt_event_commands(
     event_json_name: &str,
     expected_gwt_bin: Option<&str>,
-) -> String {
+) -> Vec<String> {
     expected_gwt_bin.map_or_else(
-        || codex_event_hook_command(event_json_name),
-        |bin| codex_event_hook_command_with_bin(bin, event_json_name),
+        || codex_event_hook_commands(event_json_name),
+        |bin| codex_event_hook_commands_with_bin(bin, event_json_name),
     )
 }
 
@@ -284,7 +286,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::generate_codex_hooks;
+    use crate::{generate_codex_hooks, settings_local::codex_event_hook_commands_with_bin};
 
     #[test]
     fn command_hook_hash_matches_codex_for_known_post_tool_use_fixture() {
@@ -368,7 +370,10 @@ mod tests {
                         "matcher": "*",
                         "hooks": [
                             {
-                                "command": codex_event_hook_command_with_bin(expected_fallback, event),
+                                "command": codex_event_hook_commands_with_bin(expected_fallback, event)
+                                    .into_iter()
+                                    .next()
+                                    .unwrap(),
                                 "type": "command"
                             }
                         ]
@@ -396,6 +401,49 @@ mod tests {
     }
 
     #[test]
+    fn powershell_generated_hook_with_expected_fallback_is_trusted_on_posix_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let expected_fallback = "C:/Program Files/GWT/gwtd.exe";
+        let powershell_stop_command = format!(
+            "powershell -NoProfile -Command \"& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ '{expected_fallback}' }}; & $gwtBin hook event Stop }}\""
+        );
+        fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "Stop": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": powershell_stop_command,
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries_with_expected_bin(
+            dir.path(),
+            Some(expected_fallback),
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "Linux container registration must trust exact PowerShell-generated Codex hooks"
+        );
+    }
+
+    #[test]
     fn portable_generated_hook_with_unexpected_fallback_is_not_trusted() {
         let dir = tempfile::tempdir().unwrap();
         generate_codex_hooks(dir.path()).unwrap();
@@ -403,7 +451,10 @@ mod tests {
         let hooks_content = fs::read_to_string(&hooks_path).unwrap();
         let mut hooks_json: Value = serde_json::from_str(&hooks_content).unwrap();
         hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"] = Value::String(
-            codex_event_hook_command_with_bin("/tmp/attacker/gwtd", "Stop"),
+            codex_event_hook_commands_with_bin("/tmp/attacker/gwtd", "Stop")
+                .into_iter()
+                .next()
+                .unwrap(),
         );
         fs::write(
             &hooks_path,

@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-05-15 — Exact hook trust must include generator resolution and shell format
+
+### 事象
+
+PR #2735 の follow-up review で、Docker trust registration が `GWT_HOOK_BIN`
+fallback を独自解決しており、hook 生成時の binary path resolution とずれる
+可能性を指摘された。また exact command match を現在 runtime の shell 形式
+だけに絞ったため、PowerShell 形式で生成済みの Codex hooks を Linux Docker
+内の registration が trust できない互換性リスクも残っていた。
+
+### 原因
+
+「suffix ではなく exact command を trust する」という安全側の修正で、
+exact command の入力元を current runtime だけに寄せすぎた。hook trust は
+実行環境の shell 形式ではなく、既に生成済みの `.codex/hooks.json` に書かれた
+正規 command と一致するかを見る必要がある。
+
+### 再発防止策
+
+1. hook trust の exact match を変更する場合は、binary fallback resolution と
+   shell command format の両方を generator とそろえる。
+2. Docker / container registration は、host-generated command を検証するための
+   fallback path と、container 内で実行する `gwtd` path を別々にテストする。
+3. POSIX / PowerShell のように生成 shell が複数ある managed command では、
+   「現在 OS の command」だけでなく「生成器が出し得る exact command 群」を
+   trust 判定の対象にする。
+
 ## 2026-05-15 — Hook trust recognizers must not accept shape-only gwtd paths
 
 ### 事象

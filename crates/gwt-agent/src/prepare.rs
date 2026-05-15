@@ -559,6 +559,18 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe.to_path_buf()
 }
 
+fn resolve_generated_hook_gwt_bin_with_lookup(
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> PathBuf {
+    if is_named_gwt_binary(current_exe) && !is_bunx_temp_executable(current_exe) {
+        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
+            return candidate;
+        }
+    }
+    resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+}
+
 fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
     if !is_named_gwt_binary(path) {
         return None;
@@ -607,11 +619,12 @@ pub fn register_codex_managed_hook_trust_in_docker(
 ) -> Result<(), String> {
     let launch = resolve_docker_launch_plan(worktree, docker_service)?;
     let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
-    let host_gwt_bin =
-        resolve_public_gwt_bin_with_lookup(&current_exe, |command| which::which(command).ok())
-            .into_os_string()
-            .into_string()
-            .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
+    let host_gwt_bin = resolve_generated_hook_gwt_bin_with_lookup(&current_exe, |command| {
+        which::which(command).ok()
+    })
+    .into_os_string()
+    .into_string()
+    .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
     let args = docker_codex_hook_trust_registration_args(&launch.container_cwd, &host_gwt_bin);
     let output = gwt_docker::compose_service_exec_capture_with_files(
         &launch.compose_files,
@@ -1928,6 +1941,20 @@ mod tests {
         assert!(
             !script.contains("/root/.codex/config.toml"),
             "script must not hard-code root's Codex config path, got: {script}"
+        );
+    }
+
+    #[test]
+    fn docker_codex_hook_trust_fallback_matches_gui_hook_generator_sibling() {
+        let fallback = resolve_generated_hook_gwt_bin_with_lookup(
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            |_| Some(PathBuf::from("/usr/local/bin/gwtd")),
+        );
+
+        assert_eq!(
+            fallback,
+            PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd"),
+            "Docker trust fallback must match settings_local::gwt_hook_bin_path for GUI launches"
         );
     }
 
