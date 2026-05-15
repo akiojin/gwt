@@ -1404,6 +1404,49 @@ test("Launch wizard separates launch settings from runtime controls", () => {
   }
 });
 
+test("Launch wizard runtime confirmation shows summary without setup forms", () => {
+  assert.match(
+    appSource,
+    /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*\);/,
+    "expected renderer to derive a dedicated Runtime confirmation state",
+  );
+  assert.match(
+    appSource,
+    /const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    "expected manual setup forms to be suppressed during Runtime confirmation",
+  );
+  assert.match(
+    appSource,
+    /renderWizardSummary\(\);[\s\S]*?const isRuntimeConfirmation = Boolean/,
+    "expected read-only launch summary to remain visible before Runtime-only body rendering",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(\s*!isRuntimeConfirmation\s*&&\s*\(\s*\(launchWizard\.quick_start_entries \|\| \[\]\)\.length > 0/,
+    "expected Quick Start selection rows to be hidden during Runtime confirmation",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
+    "expected Branch controls to be part of setup forms only",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(\s*showSetupForms\s*\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch"/,
+    "expected Launch controls to be part of setup forms only",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_codex_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
+    "expected Launch settings controls to be part of setup forms only",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_agent_settings\s*\)/,
+    "expected Linked issue controls to be part of setup forms only",
+  );
+});
+
 test("Launch wizard submit button uses Continue before runtime context is resolved", () => {
   assert.match(
     appSource,

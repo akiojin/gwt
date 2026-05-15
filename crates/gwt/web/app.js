@@ -5429,6 +5429,11 @@
         }
 
         renderWizardSummary();
+        const isRuntimeConfirmation = Boolean(
+          launchWizard.runtime_context_resolved
+          && launchWizard.show_runtime_confirmation
+        );
+        const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
         wizardMain.appendChild(renderWizardProgressRail());
@@ -5456,10 +5461,10 @@
           );
         }
 
-        if (
+        if (!isRuntimeConfirmation && (
           (launchWizard.quick_start_entries || []).length > 0 ||
           (launchWizard.live_sessions || []).length > 0
-        ) {
+        )) {
           const section = createLaunchSection(
             "Quick start",
             "Reuse a recent launch profile or jump to a running window.",
@@ -5571,7 +5576,7 @@
           panel.appendChild(section);
         }
 
-        if (launchWizard.show_branch_controls !== false) {
+        if (showSetupForms && launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -5661,7 +5666,7 @@
           panel.appendChild(section);
         }
 
-        if (showManualSetup) {
+        if (showSetupForms) {
           const section = createLaunchSection(
             "Launch",
             "Choose what to launch on the selected branch.",
@@ -5758,7 +5763,7 @@
         }
 
         if (
-          showManualSetup &&
+          showSetupForms &&
           (
             launchWizard.show_version ||
             launchWizard.show_skip_permissions ||
@@ -5813,7 +5818,7 @@
           panel.appendChild(section);
         }
 
-        if (showManualSetup && launchWizard.show_agent_settings) {
+        if (showSetupForms && launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
             "Optional: Link an issue to this launch session.",
@@ -5855,7 +5860,7 @@
             (launchWizard.docker_lifecycle_options || []).length > 0);
         if (
           launchWizard.show_runtime_confirmation &&
-          (hasRuntimeControls || !showManualSetup)
+          (hasRuntimeControls || isRuntimeConfirmation || !showManualSetup)
         ) {
           const section = createLaunchSection(
             "Runtime",
