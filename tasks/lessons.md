@@ -5522,6 +5522,35 @@ CPU% ではなく main-thread blocking として体感遅延になった。
 
 - Issue #2725
 
+## Frontend gating を追加するときは変数初期化順序を実行時に pin する
+
+### 事象
+
+Launch Wizard の Runtime confirmation 分離で `showSetupForms` を追加した後、Start Work 直後の画面で
+Agent select が操作できなくなった。静的 contract test は通っていたが、実 UI では wizard body
+rendering が壊れていた。
+
+### 原因
+
+`renderLaunchWizard()` 内で `showSetupForms = showManualSetup && !isRuntimeConfirmation` を
+`showManualSetup` の `const` 宣言より前に評価していた。JavaScript の temporal dead zone により
+render 時に例外が発生し、フォームが正常に描画されなかった。既存テストは「文字列が存在すること」
+を主に見ており、依存する local const の初期化順序を pin していなかった。
+
+### 再発防止策
+
+1. frontend render helper に新しい gating 変数を追加するときは、その変数が依存する local const の
+   宣言後に評価されることを contract test に含める。
+2. 可能なら static string assertion だけでなく、`node --check` / frontend unit / live smoke の
+   どれかで runtime parse/execution に近い確認も併用する。
+3. Launch Wizard の Settings/Runtime 分離では、Start Work / Launch Agent / Quick Start の入口ごとに
+   初期 phase と Runtime confirmation phase の両方を確認する。
+
+### 関連 PR / Issue
+
+- PR #2731
+- SPEC-2014
+
 ## Project Index は起動時 visibility と repair scheduling を分離する
 
 ### 事象
