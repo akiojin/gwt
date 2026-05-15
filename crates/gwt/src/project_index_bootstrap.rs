@@ -18,7 +18,6 @@ pub enum ProjectIndexBootstrapRequest {
 }
 
 const FULL_STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
-const FULL_STATUS_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 
 type BootstrapFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync + 'static;
 type StatusProbeFn = dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static;
@@ -87,7 +86,6 @@ impl ProjectIndexBootstrapService {
             Arc::new(gwt::index_worker::bootstrap_project_index_for_path),
             Arc::new(cached_aggregate_status_probe),
             FULL_STATUS_RETRY_DELAY,
-            FULL_STATUS_RETRY_TIMEOUT,
         )
     }
 
@@ -98,7 +96,6 @@ impl ProjectIndexBootstrapService {
         bootstrap: Arc<BootstrapFn>,
         status_probe: Arc<StatusProbeFn>,
         retry_delay: Duration,
-        retry_timeout: Duration,
     ) -> ProjectIndexBootstrapRequest {
         let request = self.spawn_full_status_refresh_once_with(
             proxy.clone(),
@@ -115,7 +112,6 @@ impl ProjectIndexBootstrapService {
             bootstrap,
             status_probe,
             retry_delay,
-            retry_timeout,
         )
     }
 
@@ -141,7 +137,6 @@ impl ProjectIndexBootstrapService {
         bootstrap: Arc<BootstrapFn>,
         status_probe: Arc<StatusProbeFn>,
         retry_delay: Duration,
-        retry_timeout: Duration,
     ) -> ProjectIndexBootstrapRequest {
         let project_key = normalize_project_root(&project_root);
         let project_root_label = project_key.display().to_string();
@@ -169,15 +164,6 @@ impl ProjectIndexBootstrapService {
                 };
                 let started = Instant::now();
                 loop {
-                    if started.elapsed() >= retry_timeout {
-                        tracing::warn!(
-                            target: "gwt::index",
-                            worktree = %project_root_label,
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            "timed out waiting to retry project index full status refresh"
-                        );
-                        return;
-                    }
                     thread::sleep(retry_delay);
                     match service_for_thread.spawn_full_status_refresh_once_with(
                         proxy.clone(),
@@ -806,7 +792,6 @@ mod tests {
                 gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "full table")
             }),
             Duration::from_millis(5),
-            Duration::from_secs(2),
         );
         assert_eq!(full, super::ProjectIndexBootstrapRequest::AlreadyRunning);
         assert!(
