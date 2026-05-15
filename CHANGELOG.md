@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.35.2] - 2026-05-15
+
+### Bug Fixes
+
+- **ci:** Bypass broken cargo proxy on macos runner image via rustup run
+
 ## [9.35.1] - 2026-05-15
 
 ### Bug Fixes
