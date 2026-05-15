@@ -124,7 +124,13 @@ fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {
     let git_dir = resolve_git_dir(repo_root)?;
     let common_dir = resolve_common_git_dir(&git_dir);
     let config = fs::read_to_string(common_dir.join("config")).ok()?;
-    parse_origin_url_from_git_config(&config)
+    let url = parse_origin_url_from_git_config(&config)?;
+    let mut rewrite_configs = read_user_git_config_contents();
+    rewrite_configs.push(config);
+    Some(apply_url_instead_of_rewrite(
+        &url,
+        &url_rewrite_rules_from_configs(&rewrite_configs),
+    ))
 }
 
 fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
@@ -135,7 +141,7 @@ fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
     if dot_git.is_file() {
         return resolve_gitdir_file(&dot_git);
     }
-    if repo_root.join("config").is_file() {
+    if repo_root.join("config").is_file() && repo_root.join("HEAD").is_file() {
         return Some(repo_root.to_path_buf());
     }
     None
@@ -202,6 +208,112 @@ fn parse_origin_url_from_git_config(config: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UrlRewriteRule {
+    base: String,
+    instead_of: String,
+}
+
+fn url_rewrite_rules_from_configs(configs: &[String]) -> Vec<UrlRewriteRule> {
+    configs
+        .iter()
+        .flat_map(|config| parse_url_rewrite_rules_from_git_config(config))
+        .collect()
+}
+
+fn parse_url_rewrite_rules_from_git_config(config: &str) -> Vec<UrlRewriteRule> {
+    let mut rules = Vec::new();
+    let mut current_base = None;
+    for raw_line in config.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            current_base = url_rewrite_base_from_section(section.trim());
+            continue;
+        }
+        let Some(base) = current_base.as_ref() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("insteadOf") {
+            let instead_of = clean_git_config_value(value);
+            if !instead_of.is_empty() {
+                rules.push(UrlRewriteRule {
+                    base: base.clone(),
+                    instead_of: instead_of.to_string(),
+                });
+            }
+        }
+    }
+    rules
+}
+
+fn url_rewrite_base_from_section(section: &str) -> Option<String> {
+    if section.len() >= 4 && section[..3].eq_ignore_ascii_case("url") {
+        let rest = section[3..].trim_start();
+        if let Some(value) = rest.strip_prefix('.') {
+            let value = value.trim();
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+        let value = rest.trim();
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            return Some(value[1..value.len() - 1].to_string());
+        }
+    }
+    None
+}
+
+fn apply_url_instead_of_rewrite(url: &str, rules: &[UrlRewriteRule]) -> String {
+    let Some(rule) = rules
+        .iter()
+        .filter(|rule| url.starts_with(&rule.instead_of))
+        .max_by_key(|rule| rule.instead_of.len())
+    else {
+        return url.to_string();
+    };
+    format!("{}{}", rule.base, &url[rule.instead_of.len()..])
+}
+
+fn read_user_git_config_contents() -> Vec<String> {
+    user_git_config_paths()
+        .into_iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .collect()
+}
+
+fn user_git_config_paths() -> Vec<PathBuf> {
+    if let Some(path) = non_empty_env_path("GIT_CONFIG_GLOBAL") {
+        return vec![path];
+    }
+    let mut paths = Vec::new();
+    if let Some(xdg_config_home) = non_empty_env_path("XDG_CONFIG_HOME") {
+        paths.push(xdg_config_home.join("git").join("config"));
+    } else if let Some(home) = home_dir_from_env() {
+        paths.push(home.join(".config").join("git").join("config"));
+    }
+    if let Some(home) = home_dir_from_env() {
+        paths.push(home.join(".gitconfig"));
+    }
+    paths
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    non_empty_env_path("HOME").or_else(|| non_empty_env_path("USERPROFILE"))
+}
+
+fn non_empty_env_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn is_origin_remote_section(section: &str) -> bool {
@@ -310,6 +422,47 @@ mod tests {
         assert_eq!(
             actual.as_str(),
             compute_repo_hash("https://github.com/example/config-only.git").as_str()
+        );
+    }
+
+    #[test]
+    fn detect_repo_hash_ignores_plain_directory_with_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config"),
+            r#"
+[remote "origin"]
+    url = https://github.com/example/not-a-repo.git
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(detect_repo_hash(dir.path()), None);
+    }
+
+    #[test]
+    fn detect_repo_hash_applies_local_url_instead_of_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            repo.join(".git/config"),
+            r#"
+[url "git@github.com:"]
+    insteadOf = gh:
+[remote "origin"]
+    url = gh:example/rewrite.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+"#,
+        )
+        .unwrap();
+
+        let actual = detect_repo_hash(&repo).expect("repo hash");
+
+        assert_eq!(
+            actual.as_str(),
+            compute_repo_hash("git@github.com:example/rewrite.git").as_str()
         );
     }
 
