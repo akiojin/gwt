@@ -7882,6 +7882,12 @@
         }
       }
 
+      function requestFullIndexStatusRefresh() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        if (!activeProjectRoot) return;
+        send({ kind: "refresh_index_status", project_root: activeProjectRoot });
+      }
+
       document.addEventListener("settings:open", (event) => {
         const target = event?.detail?.target || "system";
         const existingBody = Array.from(settingsWindowBodies).find(
@@ -7920,6 +7926,9 @@
             panel.dataset.settingsPanel !== target,
           );
         });
+        if (target === "index") {
+          requestFullIndexStatusRefresh();
+        }
       }
 
       function renderSystemPanel(panel) {

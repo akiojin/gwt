@@ -444,14 +444,42 @@ pub fn aggregate_project_index_status_for_path(project_root: &Path) -> ProjectIn
     if let Some(fixture) = load_test_fixture_status() {
         return fixture;
     }
-    match aggregate_project_index_status_for_path_inner(project_root) {
+    match aggregate_project_index_status_for_path_inner(
+        project_root,
+        StatusProbeScope::AllWorktrees,
+    ) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
     }
 }
 
+/// Probe only the current worktree. This is the startup path: it gives the
+/// project tab and auto-repair orchestrator enough health data without
+/// spawning one Python status process for every inactive worktree.
+pub fn aggregate_current_worktree_index_status_for_path(
+    project_root: &Path,
+) -> ProjectIndexStatusView {
+    if let Some(fixture) = load_test_fixture_status() {
+        return fixture;
+    }
+    match aggregate_project_index_status_for_path_inner(
+        project_root,
+        StatusProbeScope::CurrentWorktree,
+    ) {
+        Ok(status) => status,
+        Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusProbeScope {
+    AllWorktrees,
+    CurrentWorktree,
+}
+
 fn aggregate_project_index_status_for_path_inner(
     project_root: &Path,
+    probe_scope: StatusProbeScope,
 ) -> Result<ProjectIndexStatusView, String> {
     let Some(repo_root) = resolve_git_worktree_root(project_root) else {
         return Ok(ProjectIndexStatusView::new(
@@ -475,7 +503,13 @@ fn aggregate_project_index_status_for_path_inner(
         "project index runtime ensured for aggregated status"
     );
 
-    let inputs = list_worktree_probe_inputs(&repo_root)?;
+    let inputs = match probe_scope {
+        StatusProbeScope::AllWorktrees => list_worktree_probe_inputs(&repo_root)?,
+        StatusProbeScope::CurrentWorktree => {
+            let inputs = list_worktree_probe_inputs(&repo_root)?;
+            collect_current_worktree_probe_inputs(inputs, &repo_root)
+        }
+    };
     let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(inputs.len());
     for input in inputs {
         let payload = probe_worktree_status(&repo_root, &repo_hash, &input.worktree_hash);
@@ -489,6 +523,17 @@ fn aggregate_project_index_status_for_path_inner(
         report.runner_hash.as_str(),
         &probes,
     ))
+}
+
+fn collect_current_worktree_probe_inputs(
+    inputs: Vec<WorktreeProbeInput>,
+    current_worktree_root: &Path,
+) -> Vec<WorktreeProbeInput> {
+    let current = canonicalize_path(current_worktree_root.to_path_buf());
+    inputs
+        .into_iter()
+        .filter(|input| canonicalize_path(input.path.clone()) == current)
+        .collect()
 }
 
 /// Enumerate worktrees under `repo_root` via `git worktree list --porcelain`.
@@ -788,6 +833,45 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     targets
 }
 
+/// Collect startup auto-repair targets for the currently opened worktree.
+///
+/// Repo-shared scopes (`issues`, `specs`) are still eligible, but per-worktree
+/// file scopes are limited to `project_root`. Inactive worktrees remain
+/// visible in the aggregated health table and can be repaired explicitly from
+/// Settings.Index.
+pub fn collect_unhealthy_rebuild_targets_for_project_root(
+    scopes: &ProjectIndexScopes,
+    project_root: &Path,
+) -> Vec<RebuildTarget> {
+    let current_hash = compute_worktree_hash(project_root).ok();
+    collect_unhealthy_rebuild_targets_for_worktree_hash(
+        scopes,
+        current_hash.as_ref().map(|hash| hash.as_str()),
+    )
+}
+
+fn collect_unhealthy_rebuild_targets_for_worktree_hash(
+    scopes: &ProjectIndexScopes,
+    current_worktree_hash: Option<&str>,
+) -> Vec<RebuildTarget> {
+    let mut targets = Vec::new();
+    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Issues, None));
+    }
+    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Specs, None));
+    }
+    if let Some(current_hash) = current_worktree_hash {
+        if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
+            targets.push((IndexRebuildScope::Files, Some(current_hash.to_string())));
+        }
+        if matches!(scopes.files_docs.get(current_hash), Some(view) if !view.healthy) {
+            targets.push((IndexRebuildScope::FilesDocs, Some(current_hash.to_string())));
+        }
+    }
+    targets
+}
+
 /// Auto-repair every unhealthy scope reported in `initial_status` by
 /// rebuilding them serially in a background thread.
 ///
@@ -818,6 +902,34 @@ where
         return None;
     }
     let targets = collect_unhealthy_rebuild_targets(&initial_status.scopes);
+    auto_repair_unhealthy_targets(
+        project_root,
+        initial_status,
+        targets,
+        spawner,
+        final_status_provider,
+        event_sink,
+    )
+}
+
+/// Auto-repair a preselected list of unhealthy targets while preserving the
+/// full initial status payload in progress events.
+pub fn auto_repair_unhealthy_targets<S, F, P>(
+    project_root: PathBuf,
+    initial_status: &ProjectIndexStatusView,
+    targets: Vec<RebuildTarget>,
+    spawner: S,
+    final_status_provider: P,
+    event_sink: F,
+) -> Option<std::thread::JoinHandle<()>>
+where
+    S: IndexRebuildSpawner,
+    F: Fn(ProjectIndexStatusView) + Send + 'static,
+    P: FnOnce(&Path) -> ProjectIndexStatusView + Send + 'static,
+{
+    if initial_status.state != ProjectIndexStatusState::RepairRequired {
+        return None;
+    }
     if targets.is_empty() {
         return None;
     }
@@ -1448,6 +1560,30 @@ detached
     }
 
     #[test]
+    fn current_worktree_probe_inputs_exclude_inactive_worktrees() {
+        let current = tempfile::tempdir().expect("current worktree");
+        let inactive = tempfile::tempdir().expect("inactive worktree");
+        let inputs = vec![
+            WorktreeProbeInput {
+                worktree_hash: "current-hash".to_string(),
+                branch: "develop".to_string(),
+                path: current.path().to_path_buf(),
+            },
+            WorktreeProbeInput {
+                worktree_hash: "inactive-hash".to_string(),
+                branch: "feature/inactive".to_string(),
+                path: inactive.path().to_path_buf(),
+            },
+        ];
+
+        let filtered = collect_current_worktree_probe_inputs(inputs, current.path());
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].worktree_hash, "current-hash");
+        assert_eq!(filtered[0].branch, "develop");
+    }
+
+    #[test]
     fn aggregate_uses_test_fixture_when_env_var_set() {
         // SPEC-1939 T-IDX-109/110 follow-up scaffolding: when
         // GWT_INDEX_TEST_FIXTURE is set, the aggregator returns the parsed
@@ -1684,6 +1820,52 @@ detached
             scopes,
             worktrees: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn startup_auto_repair_targets_only_current_worktree_file_scopes() {
+        let current = tempfile::tempdir().expect("current worktree");
+        let inactive = tempfile::tempdir().expect("inactive worktree");
+        let current_hash = compute_worktree_hash(current.path())
+            .expect("current hash")
+            .to_string();
+        let inactive_hash = compute_worktree_hash(inactive.path())
+            .expect("inactive hash")
+            .to_string();
+
+        let mut scopes = ProjectIndexScopes {
+            issues: Some(ScopeHealthView::unhealthy("missing")),
+            specs: Some(ScopeHealthView::unhealthy("count_mismatch")),
+            ..Default::default()
+        };
+        scopes.files.insert(
+            current_hash.clone(),
+            ScopeHealthView::unhealthy("manifest_missing"),
+        );
+        scopes.files_docs.insert(
+            current_hash.clone(),
+            ScopeHealthView::unhealthy("collection_missing"),
+        );
+        scopes.files.insert(
+            inactive_hash.clone(),
+            ScopeHealthView::unhealthy("manifest_missing"),
+        );
+        scopes.files_docs.insert(
+            inactive_hash,
+            ScopeHealthView::unhealthy("collection_missing"),
+        );
+
+        let targets = collect_unhealthy_rebuild_targets_for_project_root(&scopes, current.path());
+
+        assert_eq!(
+            targets,
+            vec![
+                (IndexRebuildScope::Issues, None),
+                (IndexRebuildScope::Specs, None),
+                (IndexRebuildScope::Files, Some(current_hash.clone())),
+                (IndexRebuildScope::FilesDocs, Some(current_hash)),
+            ]
+        );
     }
 
     #[test]

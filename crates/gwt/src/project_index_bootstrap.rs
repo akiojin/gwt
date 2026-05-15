@@ -61,6 +61,19 @@ impl ProjectIndexBootstrapService {
             proxy,
             project_root,
             gwt::index_worker::bootstrap_project_index_for_path,
+            current_worktree_status_probe,
+        )
+    }
+
+    pub(crate) fn spawn_full_status_refresh(
+        &self,
+        proxy: AppEventProxy,
+        project_root: PathBuf,
+    ) -> ProjectIndexBootstrapRequest {
+        self.spawn_with(
+            proxy,
+            project_root,
+            gwt::index_worker::bootstrap_project_index_for_path,
             cached_aggregate_status_probe,
         )
     }
@@ -434,16 +447,30 @@ pub(crate) fn trigger_auto_repair_for_project(
     };
     let final_status_provider = |path: &Path| -> gwt::ProjectIndexStatusView {
         gwt::global_aggregated_status_cache().invalidate(path);
-        gwt::aggregate_project_index_status_for_path(path)
+        gwt::aggregate_current_worktree_index_status_for_path(path)
     };
+    let targets = gwt::collect_unhealthy_rebuild_targets_for_project_root(
+        &initial_status.scopes,
+        &project_root,
+    );
+    if targets.is_empty() {
+        tracing::info!(
+            target: "gwt::index",
+            worktree = %project_root_label,
+            "skipping startup auto-rebuild because only inactive worktree scopes require repair"
+        );
+        return None;
+    }
     tracing::info!(
         target: "gwt::index",
         worktree = %project_root_label,
+        target_count = targets.len(),
         "kicking auto-rebuild orchestrator after repair_required status"
     );
-    gwt::auto_repair_unhealthy_scopes(
+    gwt::auto_repair_unhealthy_targets(
         project_root,
         initial_status,
+        targets,
         ServiceBackedRebuildSpawner::with_default_runner(service),
         final_status_provider,
         event_sink,
@@ -470,6 +497,10 @@ fn normalize_project_root(project_root: &Path) -> PathBuf {
 fn cached_aggregate_status_probe(project_root: &Path) -> gwt::ProjectIndexStatusView {
     gwt::global_aggregated_status_cache()
         .get_or_compute(project_root, gwt::aggregate_project_index_status_for_path)
+}
+
+fn current_worktree_status_probe(project_root: &Path) -> gwt::ProjectIndexStatusView {
+    gwt::aggregate_current_worktree_index_status_for_path(project_root)
 }
 
 #[cfg(test)]
