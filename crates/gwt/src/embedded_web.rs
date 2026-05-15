@@ -2366,8 +2366,8 @@ mod tests {
             r#"function sendWizardAction\(action\)\s*\{\s*send\(\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\}\);\s*\}"#,
         )
         .expect("valid regex");
-        let close_controls = regex::Regex::new(
-            r#"wizardCloseButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\);\s*wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\);"#,
+        let footer_close_control = regex::Regex::new(
+            r#"wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\);"#,
         )
         .expect("valid regex");
         let submit_button = regex::Regex::new(
@@ -2389,8 +2389,12 @@ mod tests {
             "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
         );
         assert!(
-            close_controls.is_match(html),
-            "expected both close controls to share the wizard close helper",
+            !html.contains(r#"id="wizard-close-button""#) && !html.contains("wizardCloseButton"),
+            "expected Launch Wizard to avoid a duplicate header Close control",
+        );
+        assert!(
+            footer_close_control.is_match(html),
+            "expected footer dismiss control to own the wizard close helper",
         );
         assert!(
             html.contains("function closeLaunchWizardFromChrome()")
