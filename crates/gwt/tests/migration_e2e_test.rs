@@ -352,6 +352,39 @@ fn t103_e2e_locked_worktree_blocks_migration_with_no_changes() {
 }
 
 #[test]
+fn t103_git_file_worktree_marker_aborts_before_backup() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".git"),
+        "gitdir: ../repo.git/worktrees/feature\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("README.md"), "# sample\n").unwrap();
+
+    let result = execute_migration(
+        project.path(),
+        MigrationOptions::default(),
+        |_phase, _pct| {},
+    );
+
+    let err = result.expect_err("linked worktree marker must not be migrated as Normal Git");
+    assert_eq!(err.phase, MigrationPhase::Validate);
+    assert_eq!(err.recovery, RecoveryState::Untouched);
+    assert!(
+        err.message
+            .contains("not a normal Git repository with a .git directory"),
+        "unexpected migration error: {err}"
+    );
+    assert!(
+        !project
+            .path()
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME)
+            .exists(),
+        "validation must fail before creating .gwt-migration-backup"
+    );
+}
+
+#[test]
 fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     // SPEC-1934 US-6.6: when a phase after Backup fails, rollback must
     // restore the original Normal Git layout. We provoke the failure by
