@@ -2123,6 +2123,7 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::ManualSetup => "Setup",
             LaunchWizardLaunchPath::FocusSession => "Focus",
         };
+        let runtime_confirmation_active = self.show_runtime_confirmation();
         let setup_state = if self.launch_path == LaunchWizardLaunchPath::ManualSetup {
             if self.runtime_context_resolved || self.runtime_resolution_pending {
                 "done"
@@ -2132,15 +2133,15 @@ impl LaunchWizardState {
         } else {
             "done"
         };
-        let runtime_state = if self.runtime_resolution_pending {
+        let runtime_state = if self.runtime_resolution_pending || runtime_confirmation_active {
             "active"
         } else if self.runtime_context_resolved {
             "done"
         } else {
             "pending"
         };
-        let start_state = if self.runtime_context_resolved
-            || self.launch_path == LaunchWizardLaunchPath::FocusSession
+        let start_state = if self.launch_path == LaunchWizardLaunchPath::FocusSession
+            || (self.runtime_context_resolved && !runtime_confirmation_active)
         {
             "active"
         } else {
@@ -6189,6 +6190,18 @@ mod tests {
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+        assert!(
+            view.progress_steps
+                .iter()
+                .any(|step| step.key == "runtime" && step.state == "active"),
+            "Runtime confirmation must keep the Runtime rail step active",
+        );
+        assert!(
+            view.progress_steps
+                .iter()
+                .any(|step| step.key == "start" && step.state == "pending"),
+            "Start must stay pending while Runtime choices are still visible",
+        );
     }
 
     #[test]
