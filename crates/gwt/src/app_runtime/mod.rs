@@ -2117,6 +2117,9 @@ impl AppRuntime {
                 scope,
                 worktree_hash,
             } => self.rebuild_index_cell_events(project_root, scope, worktree_hash),
+            FrontendEvent::RefreshIndexStatus { project_root } => {
+                self.refresh_index_status_events(project_root)
+            }
             FrontendEvent::PostBoardEntry {
                 id,
                 entry_kind,
@@ -4175,6 +4178,17 @@ impl AppRuntime {
             scope,
             worktree_hash,
         );
+        Vec::new()
+    }
+
+    /// Settings.Index requests the full all-worktree health table on demand.
+    /// The startup path stays current-worktree only to avoid UI-visible CPU
+    /// spikes on repositories with many active worktrees.
+    pub(crate) fn refresh_index_status_events(&self, project_root: String) -> Vec<OutboundEvent> {
+        let project_root = std::path::PathBuf::from(project_root);
+        let service =
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let _request = service.spawn_full_status_refresh(self.proxy.clone(), project_root);
         Vec::new()
     }
 }

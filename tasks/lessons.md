@@ -5440,3 +5440,25 @@ CPU% ではなく main-thread blocking として体感遅延になった。
 ### 関連 PR / Issue
 
 - Issue #2725
+
+## Project Index は起動時 visibility と repair scheduling を分離する
+
+### 事象
+
+GUI 起動直後に Project Index が全 active worktree の status probe と auto-repair を走らせ、
+worktree が多いリポジトリでは 15 秒以上 Python/Chroma プロセスが連続起動して UI がカクついた。
+
+### 原因
+
+Project tab の dot 表示、Settings.Index の全 worktree health 表示、startup auto-repair の
+3 つが同じ aggregated status 経路を共有していた。起動時に必要なのは現在の worktree と
+repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視性まで毎回読んでいた。
+
+### 再発防止策
+
+1. 起動時 status probe は current worktree 限定にする。全 worktree の health table は
+   Settings.Index を開いた時だけオンデマンドで取得する。
+2. Startup auto-repair は repo-shared scopes と current worktree の file scopes だけを対象にし、
+   inactive worktree の repair は Settings.Index の明示操作に任せる。
+3. 性能修正では `sample` と子プロセス監視で、起動 smoke 中に `index-files` や全 worktree
+   `--action status` が勝手に並ばないことを確認する。
