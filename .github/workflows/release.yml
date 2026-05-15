@@ -120,17 +120,16 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
-          # PATH when it has to install rustup itself. The macos-14 image ships
-          # an extra rustup binary outside ~/.cargo/bin so the action skips the
-          # PATH update, leaving the freshly created rustc/cargo proxies
-          # invisible after the wipe. Re-add the path here to bridge that gap.
+          # The macos-14 image can expose rustup outside ~/.cargo/bin. After
+          # wiping ~/.cargo, rustc/cargo proxy binaries may be absent, so macOS
+          # release steps use `rustup run stable ...` instead of proxy commands.
           mkdir -p "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        if: runner.os != 'macOS'
         with:
           key: gwt-${{ matrix.platform }}
         continue-on-error: true
@@ -271,20 +270,14 @@ jobs:
         run: |
           set -e
           rm -rf "$HOME/.cargo" "$HOME/.rustup" || true
-          # dtolnay's rust-toolchain action only appends $CARGO_HOME/bin to
-          # PATH when it has to install rustup itself. The macos-14 image ships
-          # an extra rustup binary outside ~/.cargo/bin so the action skips the
-          # PATH update, leaving the freshly created rustc/cargo proxies
-          # invisible after the wipe. Re-add the path here to bridge that gap.
+          # The macos-14 image can expose rustup outside ~/.cargo/bin. After
+          # wiping ~/.cargo, rustc/cargo proxy binaries may be absent, so this
+          # job uses `rustup run stable ...` instead of proxy commands.
           mkdir -p "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gwt-dmg
-        continue-on-error: true
       - name: Build gwt bundle binaries for aarch64
         run: rustup run stable cargo build --release -p gwt --target aarch64-apple-darwin --bin gwt --bin gwtd
       - name: Build gwt bundle binaries for x86_64
