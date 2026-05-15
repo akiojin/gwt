@@ -391,6 +391,176 @@ fn spawn_board_projection_watcher(
     })
 }
 
+/// Workspace projection file watcher (SPEC-2359 Phase U-5).
+///
+/// Mirrors [`BoardProjectionWatcherRegistry`] but watches
+/// `~/.gwt/projects/<repo_hash>/workspace/current.json` instead of the
+/// Board projection. Required because `gwtd workspace update
+/// --title-summary` is invoked from out-of-band CLI processes (e.g. from
+/// inside a Claude Code agent's hook) whose `publish_workspace_change`
+/// daemon path silently no-ops when no daemon endpoint is registered for
+/// the agent's worktree scope (the installed `/Applications/GWT.app`
+/// only registers a daemon for its startup `/` scope, not for each
+/// project tab it opens). Without a file watcher, those updates never
+/// reach the GUI so the agent pane heading stays on the `agent_id`
+/// fallback ("CLAUDE CODE") even when the projection on disk reflects
+/// the new `title_summary`.
+enum WorkspaceProjectionWatcherMessage {
+    Changed(Vec<PathBuf>),
+    Stop,
+}
+
+struct WorkspaceProjectionWatcher {
+    tx: std_mpsc::Sender<WorkspaceProjectionWatcherMessage>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for WorkspaceProjectionWatcher {
+    fn drop(&mut self) {
+        let _ = self.tx.send(WorkspaceProjectionWatcherMessage::Stop);
+        if let Some(join_handle) = self.join_handle.take() {
+            if let Err(error) = join_handle.join() {
+                tracing::warn!(?error, "workspace projection watcher thread join failed");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkspaceProjectionWatcherRegistry {
+    watchers: HashMap<PathBuf, WorkspaceProjectionWatcher>,
+}
+
+impl WorkspaceProjectionWatcherRegistry {
+    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+        let mut active_roots = HashSet::new();
+        for tab in &app.tabs {
+            let project_root = tab.project_root.clone();
+            let key = board_projection_watch_key(&project_root);
+            active_roots.insert(key.clone());
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.watchers.entry(key) {
+                if let Some(watcher) =
+                    spawn_workspace_projection_watcher(project_root, proxy.clone())
+                {
+                    entry.insert(watcher);
+                }
+            }
+        }
+
+        self.watchers
+            .retain(|project_root, _| active_roots.contains(project_root));
+    }
+
+    fn shutdown(&mut self) {
+        self.watchers.clear();
+    }
+}
+
+fn spawn_workspace_projection_watcher(
+    project_root: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<WorkspaceProjectionWatcher> {
+    let name = format!(
+        "gwt-workspace-watch-{}",
+        project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project")
+    );
+    let (tx, rx) = std_mpsc::channel::<WorkspaceProjectionWatcherMessage>();
+    let stop_tx = tx.clone();
+    let join_handle = match thread::Builder::new().name(name).spawn(move || {
+        let projection_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
+        let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        // The workspace dir is created lazily by `save_workspace_projection`;
+        // the watcher needs the directory to exist before `notify` can attach.
+        // Best-effort create — if it fails, the watcher just won't fire until
+        // the dir appears on its own.
+        if let Err(error) = std::fs::create_dir_all(&watch_dir) {
+            tracing::debug!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "workspace projection watcher could not ensure watch dir (will retry on first write)"
+            );
+        }
+        let Some(projection_file_name) = projection_path
+            .file_name()
+            .map(std::borrow::ToOwned::to_owned)
+        else {
+            return;
+        };
+
+        let mut debouncer = match notify_debouncer_mini::new_debouncer(
+            Duration::from_millis(250),
+            move |res: notify_debouncer_mini::DebounceEventResult| {
+                if let Ok(events) = res {
+                    let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
+                    if !paths.is_empty() {
+                        let _ = tx.send(WorkspaceProjectionWatcherMessage::Changed(paths));
+                    }
+                }
+            },
+        ) {
+            Ok(debouncer) => debouncer,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "workspace projection watcher init failed"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = debouncer
+            .watcher()
+            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
+        {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "workspace projection watcher path failed"
+            );
+            return;
+        }
+
+        while let Ok(message) = rx.recv() {
+            match message {
+                WorkspaceProjectionWatcherMessage::Changed(paths) => {
+                    if paths
+                        .iter()
+                        .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
+                    {
+                        tracing::info!(
+                            project_root = %project_root.display(),
+                            "workspace projection watcher detected current.json change"
+                        );
+                        let _ = proxy.send_event(UserEvent::WorkspaceProjectionChanged {
+                            project_root: project_root.clone(),
+                        });
+                    }
+                }
+                WorkspaceProjectionWatcherMessage::Stop => break,
+            }
+        }
+    }) {
+        Ok(join_handle) => join_handle,
+        Err(error) => {
+            tracing::warn!(error = %error, "workspace projection watcher thread failed to spawn");
+            return None;
+        }
+    };
+    Some(WorkspaceProjectionWatcher {
+        tx: stop_tx,
+        join_handle: Some(join_handle),
+    })
+}
+
 /// Daemon broadcast subscriber registry — one [`DaemonSubscriber`]
 /// per active project. Mirrors [`BoardProjectionWatcherRegistry`] but
 /// listens for `DaemonFrame::Event { channel: "board" }` from a running
@@ -906,6 +1076,33 @@ mod tests {
         assert!(
             *stopped.lock().expect("stopped flag"),
             "dropping a watcher must wake and join its thread"
+        );
+    }
+
+    #[test]
+    fn workspace_projection_watcher_drop_sends_stop_to_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopped = Arc::new(Mutex::new(false));
+        let stopped_in_thread = stopped.clone();
+        let join_handle = std::thread::spawn(move || {
+            if matches!(
+                rx.recv(),
+                Ok(super::WorkspaceProjectionWatcherMessage::Stop)
+            ) {
+                *stopped_in_thread.lock().expect("stopped flag") = true;
+            }
+        });
+
+        let watcher = super::WorkspaceProjectionWatcher {
+            tx,
+            join_handle: Some(join_handle),
+        };
+
+        drop(watcher);
+
+        assert!(
+            *stopped.lock().expect("stopped flag"),
+            "dropping a workspace watcher must wake and join its thread"
         );
     }
 
@@ -5250,6 +5447,8 @@ fn main() -> wry::Result<()> {
     app.bootstrap();
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     board_projection_watchers.sync(&app, proxy.clone());
+    let mut workspace_projection_watchers = WorkspaceProjectionWatcherRegistry::default();
+    workspace_projection_watchers.sync(&app, proxy.clone());
     #[cfg(unix)]
     let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
     #[cfg(unix)]
@@ -5342,6 +5541,7 @@ fn main() -> wry::Result<()> {
                 // child process outlives the window.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                workspace_projection_watchers.shutdown();
                 #[cfg(unix)]
                 board_daemon_subscribers.shutdown();
                 server.shutdown();
@@ -5350,6 +5550,7 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::QuitApp) => {
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                workspace_projection_watchers.shutdown();
                 #[cfg(unix)]
                 board_daemon_subscribers.shutdown();
                 server.shutdown();
@@ -5361,6 +5562,7 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_frontend_event(client_id, event);
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
+                    workspace_projection_watchers.sync(&app, proxy.clone());
                     #[cfg(unix)]
                     board_daemon_subscribers.sync(&app, proxy.clone());
                 }
@@ -5669,6 +5871,7 @@ fn main() -> wry::Result<()> {
             }) => {
                 let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
                 board_projection_watchers.sync(&app, proxy.clone());
+                workspace_projection_watchers.sync(&app, proxy.clone());
                 #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
@@ -5690,6 +5893,7 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::CloneProjectDone { workspace_home }) => {
                 let events = app.handle_clone_project_done(&workspace_home);
                 board_projection_watchers.sync(&app, proxy.clone());
+                workspace_projection_watchers.sync(&app, proxy.clone());
                 #[cfg(unix)]
                 board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
@@ -5707,6 +5911,7 @@ fn main() -> wry::Result<()> {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
                             board_projection_watchers.sync(&app, proxy.clone());
+                            workspace_projection_watchers.sync(&app, proxy.clone());
                             #[cfg(unix)]
                             board_daemon_subscribers.sync(&app, proxy.clone());
                             clients.dispatch(events);
@@ -5724,6 +5929,7 @@ fn main() -> wry::Result<()> {
                 // path other than CloseRequested, still release PTY children.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                workspace_projection_watchers.shutdown();
                 #[cfg(unix)]
                 board_daemon_subscribers.shutdown();
                 server.shutdown();
