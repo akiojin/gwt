@@ -5,11 +5,12 @@
 //! upstream repository (HTTPS clone, SSH clone, second worktree) always
 //! resolves to the same `RepoHash`.
 
-use std::{fmt, path::Path};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use sha2::{Digest, Sha256};
-
-use crate::process::scrub_git_env;
 
 const HASH_HEX_LEN: usize = 16;
 
@@ -112,24 +113,122 @@ pub fn compute_path_hash(path: &Path) -> RepoHash {
 
 /// Detect a `RepoHash` from the `origin` remote configured for `repo_root`.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
-    let mut cmd = crate::process::hidden_command("git");
-    cmd.args(["remote", "get-url", "origin"])
-        .current_dir(repo_root);
-    scrub_git_env(&mut cmd);
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let url = origin_url_from_git_config(repo_root)?;
     if url.is_empty() {
         return None;
     }
     Some(compute_repo_hash(&url))
 }
 
+fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(repo_root)?;
+    let common_dir = resolve_common_git_dir(&git_dir);
+    let config = fs::read_to_string(common_dir.join("config")).ok()?;
+    parse_origin_url_from_git_config(&config)
+}
+
+fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if dot_git.is_file() {
+        return resolve_gitdir_file(&dot_git);
+    }
+    if repo_root.join("config").is_file() {
+        return Some(repo_root.to_path_buf());
+    }
+    None
+}
+
+fn resolve_gitdir_file(dot_git: &Path) -> Option<PathBuf> {
+    let contents = fs::read_to_string(dot_git).ok()?;
+    let raw = contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let git_dir = PathBuf::from(raw);
+    if git_dir.is_absolute() {
+        Some(git_dir)
+    } else {
+        Some(dot_git.parent()?.join(git_dir))
+    }
+}
+
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let Ok(contents) = fs::read_to_string(git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    let raw = contents.lines().next().unwrap_or_default().trim();
+    if raw.is_empty() {
+        return git_dir.to_path_buf();
+    }
+    let common_dir = PathBuf::from(raw);
+    if common_dir.is_absolute() {
+        common_dir
+    } else {
+        git_dir.join(common_dir)
+    }
+}
+
+fn parse_origin_url_from_git_config(config: &str) -> Option<String> {
+    let mut in_origin_remote = false;
+    for raw_line in config.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            in_origin_remote = is_origin_remote_section(section.trim());
+            continue;
+        }
+        if !in_origin_remote {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("url") {
+            let url = clean_git_config_value(value);
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_origin_remote_section(section: &str) -> bool {
+    section.eq_ignore_ascii_case(r#"remote "origin""#)
+        || section.eq_ignore_ascii_case("remote.origin")
+}
+
+fn clean_git_config_value(value: &str) -> &str {
+    let trimmed = value.trim();
+    let trimmed = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let mut end = trimmed.len();
+    for marker in [" #", "\t#", " ;", "\t;"] {
+        if let Some(index) = trimmed.find(marker) {
+            end = end.min(index);
+        }
+    }
+    trimmed[..end].trim()
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
+
+    use crate::process::scrub_git_env;
 
     use super::*;
 
@@ -186,6 +285,31 @@ mod tests {
         assert_eq!(
             actual.as_str(),
             compute_repo_hash("https://github.com/example/project.git").as_str()
+        );
+    }
+
+    #[test]
+    fn detect_repo_hash_reads_origin_remote_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(
+            repo.join(".git/config"),
+            r#"
+[core]
+    repositoryformatversion = 0
+[remote "origin"]
+    url = https://github.com/example/config-only.git
+    fetch = +refs/heads/*:refs/remotes/origin/*
+"#,
+        )
+        .unwrap();
+
+        let actual = detect_repo_hash(&repo).expect("repo hash");
+
+        assert_eq!(
+            actual.as_str(),
+            compute_repo_hash("https://github.com/example/config-only.git").as_str()
         );
     }
 
