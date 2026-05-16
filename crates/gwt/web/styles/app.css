@@ -81,6 +81,10 @@ body {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   cursor: pointer;
+  /* Issue #2744 — text-selection drag on the label span swallows click
+     events when `user-select` defaults to `text`. Disable selection on
+     the entire tab so any click inside reaches the parent handler. */
+  user-select: none;
 }
 
 .project-tab.active {
