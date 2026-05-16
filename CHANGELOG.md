@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.36.1] - 2026-05-16
+
+### Bug Fixes
+
+- **gui:** Open Project Recent click does not open project (user-select default swallows click)
+- **gui:** Keep Open Project Recent rows inside the dropdown and surface full path on hover
+- **launch-wizard:** Preserve user-selected agent across hydration
+- **gui:** Make full project tab clickable by disabling text selection
+
 ## [9.36.0] - 2026-05-15
 
 ### Bug Fixes
