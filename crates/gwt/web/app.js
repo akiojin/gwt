@@ -1203,6 +1203,9 @@
             const row = document.createElement("button");
             row.type = "button";
             row.className = "recent-project-row";
+            // Issue #2746 follow-up — meta truncates with ellipsis, so the
+            // full path lives in the native title tooltip on hover/focus.
+            row.title = `${project.kind} · ${project.path}`;
             const titleEl = document.createElement("span");
             titleEl.className = "recent-project-title";
             titleEl.textContent = project.title;
@@ -1246,6 +1249,9 @@
             "split-button-menu-item split-button-menu-recent-row";
           row.setAttribute("role", "menuitem");
           row.tabIndex = -1;
+          // Issue #2746 follow-up — meta truncates with ellipsis, so the
+          // full path lives in the native title tooltip on hover/focus.
+          row.title = `${project.kind} · ${project.path}`;
           const titleEl = document.createElement("span");
           titleEl.className = "split-button-menu-recent-title";
           titleEl.textContent = project.title;
