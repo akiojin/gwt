@@ -488,6 +488,10 @@ body {
 
 .split-button-menu-recent {
   display: grid;
+  /* Issue #2746 follow-up — without minmax(0, 1fr) the implicit auto track
+     grows to fit the longest meta path, so the row outgrows the dropdown
+     and the hover background bleeds past the right edge. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
 
@@ -504,6 +508,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Issue #2746 follow-up — flex columns default to `min-width: auto`,
+     which equals the meta span's min-content. Force 0 so the row honors
+     the menu width and meta's text-overflow: ellipsis actually engages. */
+  min-width: 0;
   /* Issue #2746 — span children inside <button> would otherwise inherit
      user-select: auto, so a sub-pixel pointer drift turns the click into a
      text-selection drag and swallows it. Mirrors the #2744 fix on
