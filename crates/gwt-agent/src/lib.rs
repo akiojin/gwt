@@ -5,6 +5,8 @@
 //! Gemini, OpenCode, Copilot, and custom agents).
 
 pub mod audit;
+pub mod backend;
+pub mod backend_store;
 pub mod custom;
 pub mod detect;
 pub mod environment;
@@ -21,6 +23,10 @@ pub(crate) mod test_capture;
 
 pub use audit::{
     is_secret_env_key, redact_env_value_for_audit, redact_secrets_in_agent, REDACTED_PLACEHOLDER,
+};
+pub use backend::{AgentBackendProfile, BuiltinAgentId};
+pub use backend_store::{
+    add_backend, delete_backend, load_backends_for_agent, save_backends_for_agent, update_backend,
 };
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
