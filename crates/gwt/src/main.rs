@@ -1313,6 +1313,37 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_handlers_are_owned_by_runtime_events_module() {
+        let runtime_mod_source = include_str!("app_runtime/mod.rs");
+        let runtime_events_source = include_str!("app_runtime/runtime_events.rs");
+
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_output"),
+            "runtime output handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_status"),
+            "runtime status handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_hook_event"),
+            "runtime hook handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("RuntimeDaemonPublish"),
+            "daemon publish queue should live beside runtime event handlers"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_output"),
+            "app_runtime/mod.rs should not regain runtime output handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("enum RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain the daemon publish queue"
+        );
+    }
+
+    #[test]
     fn gui_front_door_launch_surface_reuses_same_server_url_for_browser_and_native_webview() {
         let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
 
