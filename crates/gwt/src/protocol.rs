@@ -1268,6 +1268,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "file_content_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "file_content_save_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "branch_entries",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -1544,6 +1554,8 @@ impl BackendEvent {
             BackendEvent::FileContentText { .. } => "file_content_text",
             BackendEvent::FileContentHex { .. } => "file_content_hex",
             BackendEvent::FileContentError { .. } => "file_content_error",
+            BackendEvent::FileContentSaved { .. } => "file_content_saved",
+            BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
             BackendEvent::BoardEntries { .. } => "board_entries",
             BackendEvent::BoardHistoryPage { .. } => "board_history_page",
