@@ -1852,6 +1852,7 @@ mod tests {
             "/operator-shell.js",
             "/focus-trap.js",
             "/terminal-context-menu.js",
+            "/terminal-wheel-scroll.js",
             "/custom-agent-env-editor.js",
         ] {
             assert!(
