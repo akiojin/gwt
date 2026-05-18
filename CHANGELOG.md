@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.36.2] - 2026-05-18
+
+### Miscellaneous Tasks
+
+- **deps-dev:** Bump @commitlint/config-conventional
+- **deps-dev:** Bump @playwright/test from 1.59.1 to 1.60.0
+- **deps-dev:** Bump @commitlint/cli from 21.0.0 to 21.0.1
+
 ## [9.36.1] - 2026-05-16
 
 ### Bug Fixes
