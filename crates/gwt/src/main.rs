@@ -2506,6 +2506,113 @@ mod tests {
             BackendEvent::FileTreeWorktreeSelected { worktree_id: ref selected, .. } if selected == &worktree_id
         ));
 
+        // SPEC-2006 Phase 2 amendment: save_file_content_event must cover
+        // WindowNotFound / WindowMismatch / successful text save / Conflict
+        // (mismatched expected_mtime) / OutOfRange (hex offset >= size).
+        let missing_save = runtime.save_file_content_event(
+            "missing",
+            "README.md",
+            gwt::FileContentMode::Text,
+            0,
+            0,
+            Some("ignored".to_string()),
+            Some(gwt::Encoding::Utf8),
+            Some(gwt::Newline::Lf),
+            Some(false),
+            None,
+            None,
+        );
+        assert!(matches!(
+            missing_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::WindowNotFound,
+                ..
+            }
+        ));
+
+        let wrong_save = runtime.save_file_content_event(
+            &branches_id,
+            "README.md",
+            gwt::FileContentMode::Text,
+            0,
+            0,
+            Some("ignored".to_string()),
+            Some(gwt::Encoding::Utf8),
+            Some(gwt::Newline::Lf),
+            Some(false),
+            None,
+            None,
+        );
+        assert!(matches!(
+            wrong_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::WindowMismatch,
+                ..
+            }
+        ));
+
+        // Re-read current README.md metadata to drive a successful save.
+        let read_event = runtime.load_file_content_event(
+            &file_tree_id,
+            "README.md",
+            FileContentMode::Text,
+            None,
+            None,
+        );
+        let (saved_mtime, saved_size, encoding, newline, has_bom) = match read_event {
+            BackendEvent::FileContentText {
+                mtime,
+                total_size,
+                encoding,
+                newline,
+                has_bom,
+                ..
+            } => (mtime, total_size, encoding, newline, has_bom),
+            other => panic!("expected FileContentText, got {other:?}"),
+        };
+
+        let conflict_save = runtime.save_file_content_event(
+            &file_tree_id,
+            "README.md",
+            gwt::FileContentMode::Text,
+            saved_mtime.saturating_add(99),
+            saved_size,
+            Some("conflict".to_string()),
+            Some(encoding),
+            Some(newline),
+            Some(has_bom),
+            None,
+            None,
+        );
+        assert!(matches!(
+            conflict_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::Conflict,
+                ..
+            }
+        ));
+
+        let hex_out_of_range = runtime.save_file_content_event(
+            &file_tree_id,
+            "README.md",
+            gwt::FileContentMode::Hex,
+            saved_mtime,
+            saved_size,
+            None,
+            None,
+            None,
+            None,
+            Some(saved_size + 100),
+            Some(0xFF),
+        );
+        assert!(matches!(
+            hex_out_of_range,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::OutOfRange,
+                ..
+            }
+        ));
+
         let missing_branches = runtime.load_branches_events("client-1", "missing");
         assert_eq!(missing_branches.len(), 1);
         assert!(matches!(

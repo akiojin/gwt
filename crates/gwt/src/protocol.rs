@@ -9,7 +9,7 @@ use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
-    file_content::Encoding,
+    file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -35,6 +35,24 @@ pub enum FileContentErrorKind {
     IoError,
     NotAFile,
     BinaryNotText,
+    WindowNotFound,
+    WindowMismatch,
+}
+
+/// SPEC-2006 Phase 2 amendment: structured error variants for the write
+/// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
+/// can match exhaustively on save-only outcomes (conflict / read-only /
+/// out-of-range / encoding fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentSaveErrorKind {
+    Denied,
+    Conflict,
+    ReadOnly,
+    OutOfRange,
+    TooLarge,
+    IoError,
+    NotAFile,
     WindowNotFound,
     WindowMismatch,
 }
@@ -171,6 +189,28 @@ pub enum FrontendEvent {
         hex_offset: Option<u64>,
         #[serde(default)]
         hex_length: Option<u64>,
+    },
+    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
+    /// byte back to disk. `expected_mtime` / `expected_size` are the values
+    /// returned by the most recent read; mismatch raises Conflict.
+    SaveFileContent {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        expected_mtime: u64,
+        expected_size: u64,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        encoding: Option<Encoding>,
+        #[serde(default)]
+        newline: Option<Newline>,
+        #[serde(default)]
+        has_bom: Option<bool>,
+        #[serde(default)]
+        hex_offset: Option<u64>,
+        #[serde(default)]
+        hex_byte: Option<u8>,
     },
     LoadBranches {
         id: String,
@@ -486,6 +526,11 @@ fn default_board_history_limit() -> usize {
     50
 }
 
+#[allow(dead_code)]
+fn default_newline() -> Newline {
+    Newline::Lf
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
@@ -742,6 +787,16 @@ pub enum BackendEvent {
         encoding: Encoding,
         text: String,
         total_size: u64,
+        // SPEC-2006 Phase 2 amendment: extra fields the GUI needs to support
+        // dirty/save/conflict flows. Defaults keep older clients compiling.
+        #[serde(default)]
+        mtime: u64,
+        #[serde(default)]
+        has_bom: bool,
+        #[serde(default = "default_newline")]
+        newline: Newline,
+        #[serde(default)]
+        read_only: bool,
     },
     FileContentHex {
         id: String,
@@ -749,6 +804,10 @@ pub enum BackendEvent {
         offset: u64,
         bytes_b64: String,
         total_size: u64,
+        #[serde(default)]
+        mtime: u64,
+        #[serde(default)]
+        read_only: bool,
     },
     FileContentError {
         id: String,
@@ -759,6 +818,29 @@ pub enum BackendEvent {
         size: Option<u64>,
         #[serde(default)]
         limit: Option<u64>,
+    },
+    /// SPEC-2006 Phase 2 amendment: successful write. `new_mtime` / `new_size`
+    /// become the next `expected_*` baseline so subsequent saves keep their
+    /// conflict checks aligned with what is actually on disk.
+    FileContentSaved {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        new_mtime: u64,
+        new_size: u64,
+        #[serde(default)]
+        encoding_fallback: u64,
+    },
+    FileContentSaveError {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        error_kind: FileContentSaveErrorKind,
+        message: String,
+        #[serde(default)]
+        current_mtime: Option<u64>,
+        #[serde(default)]
+        current_size: Option<u64>,
     },
     BranchEntries {
         id: String,
