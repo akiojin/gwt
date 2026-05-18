@@ -10,6 +10,7 @@ pub mod daemon_runtime;
 #[cfg(unix)]
 pub mod daemon_subscriber;
 mod discussion_resume;
+pub mod file_content;
 pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
@@ -20,6 +21,7 @@ pub mod launch_wizard;
 pub mod managed_assets;
 pub mod migration;
 pub mod native_app;
+pub(crate) mod path_filter;
 pub mod persistence;
 pub mod preset;
 pub mod process;
@@ -50,6 +52,10 @@ pub use custom_agents_service::{
     update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
+pub use file_content::{
+    file_kind, read_binary_chunk, read_text_file, BinaryChunk, ContentLimits, Encoding,
+    FileContentError, FileKind, TextResult,
+};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::{
