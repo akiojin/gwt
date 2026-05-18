@@ -43,6 +43,13 @@ pub struct CustomCodingAgent {
     pub skip_permissions_args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Opt-in flag for Launch Wizard Execution Mode `Resume` visibility.
+    ///
+    /// `mode_args.resume` 単独で interactive picker を起動できる custom agent
+    /// だけが `true` を設定する。default は `false` で、Launch Wizard は
+    /// Resume option を除外する。SPEC-2014 2026-05-18 amendment FR-C / FR-D.
+    #[serde(default)]
+    pub supports_resume_picker: bool,
 }
 
 impl CustomCodingAgent {
@@ -87,6 +94,7 @@ mod tests {
             }),
             skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("KEY".to_string(), "VALUE".to_string())]),
+            supports_resume_picker: false,
         }
     }
 
@@ -208,6 +216,32 @@ mod tests {
             decoded.env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").unwrap(),
             "openai/gpt-oss-20b"
         );
+    }
+
+    #[test]
+    fn supports_resume_picker_defaults_to_false_in_toml() {
+        // SPEC-2014 2026-05-18 amendment FR-C: custom agent の picker capability
+        // は opt-in。既存の TOML から flag を省略しても default false で読める。
+        let toml_text = r#"
+id = "legacy-agent"
+display_name = "Legacy"
+type = "command"
+command = "legacy-cli"
+"#;
+        let decoded: CustomCodingAgent =
+            toml::from_str(toml_text).expect("legacy TOML deserializes");
+        assert!(!decoded.supports_resume_picker);
+
+        let toml_with_flag = r#"
+id = "picker-agent"
+display_name = "Picker Agent"
+type = "command"
+command = "picker-cli"
+supports_resume_picker = true
+"#;
+        let decoded: CustomCodingAgent =
+            toml::from_str(toml_with_flag).expect("opt-in TOML deserializes");
+        assert!(decoded.supports_resume_picker);
     }
 
     #[test]
