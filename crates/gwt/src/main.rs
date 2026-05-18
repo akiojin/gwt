@@ -1720,6 +1720,7 @@ mod tests {
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
             persist_dispatcher,
+            file_tree_worktree_roots: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -2472,6 +2473,37 @@ mod tests {
             }
             other => panic!("expected FileContentHex, got {other:?}"),
         }
+
+        // SPEC-2009 amendment: Worktree Picker handlers must cover window
+        // mismatch, picker enumeration, and explicit selection.
+        assert!(matches!(
+            runtime.list_file_tree_worktrees_event("missing"),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window not found"
+        ));
+        assert!(matches!(
+            runtime.list_file_tree_worktrees_event(&branches_id),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window is not a file tree"
+        ));
+        let worktrees_event = runtime.list_file_tree_worktrees_event(&file_tree_id);
+        let worktree_id = match worktrees_event {
+            BackendEvent::FileTreeWorktrees { entries, .. } => {
+                assert!(
+                    !entries.is_empty(),
+                    "test repo must list at least one worktree"
+                );
+                entries[0].id.clone()
+            }
+            other => panic!("expected FileTreeWorktrees, got {other:?}"),
+        };
+
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, "unknown-id"),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Unknown worktree id"
+        ));
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
+            BackendEvent::FileTreeWorktreeSelected { worktree_id: ref selected, .. } if selected == &worktree_id
+        ));
 
         let missing_branches = runtime.load_branches_events("client-1", "missing");
         assert_eq!(missing_branches.len(), 1);

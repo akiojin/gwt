@@ -1805,6 +1805,10 @@ pub struct AppRuntime {
     /// Async writer that flushes session/workspace snapshots off the event
     /// loop thread (Issue #2694 Phase B).
     pub(crate) persist_dispatcher: persist_dispatcher::PersistDispatcher,
+    /// SPEC-2009 amendment: per-window selected worktree root for File Tree
+    /// windows. Reset every time the user reopens the picker, so this is a
+    /// transient in-memory map and is not persisted with the session state.
+    pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
 }
 
 impl ProjectTabRuntime {
@@ -1886,6 +1890,7 @@ impl AppRuntime {
             pending_update: None,
             pty_writers,
             persist_dispatcher,
+            file_tree_worktree_roots: HashMap::new(),
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -2026,6 +2031,16 @@ impl AppRuntime {
                 vec![OutboundEvent::reply(
                     client_id,
                     self.load_file_tree_event(&id, &path),
+                )]
+            }
+            FrontendEvent::ListFileTreeWorktrees { id } => vec![OutboundEvent::reply(
+                client_id,
+                self.list_file_tree_worktrees_event(&id),
+            )],
+            FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    self.select_file_tree_worktree_event(&id, &worktree_id),
                 )]
             }
             FrontendEvent::LoadFileContent {
@@ -3262,35 +3277,16 @@ impl AppRuntime {
     }
 
     pub(crate) fn load_file_tree_event(&self, id: &str, path: &str) -> BackendEvent {
-        let Some(address) = self.window_lookup.get(id) else {
-            return BackendEvent::FileTreeError {
-                id: id.to_string(),
-                path: path.to_string(),
-                message: "Window not found".to_string(),
-            };
+        let root = match self.resolve_file_tree_root(id) {
+            Ok(root) => root,
+            Err(message) => {
+                return BackendEvent::FileTreeError {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    message,
+                };
+            }
         };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return BackendEvent::FileTreeError {
-                id: id.to_string(),
-                path: path.to_string(),
-                message: "Project tab not found".to_string(),
-            };
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return BackendEvent::FileTreeError {
-                id: id.to_string(),
-                path: path.to_string(),
-                message: "Window not found".to_string(),
-            };
-        };
-
-        if window.preset != WindowPreset::FileTree {
-            return BackendEvent::FileTreeError {
-                id: id.to_string(),
-                path: path.to_string(),
-                message: "Window is not a file tree".to_string(),
-            };
-        }
 
         let relative_path = if path.is_empty() {
             None
@@ -3298,7 +3294,7 @@ impl AppRuntime {
             Some(Path::new(path))
         };
 
-        match list_directory_entries(&tab.project_root, relative_path) {
+        match list_directory_entries(&root, relative_path) {
             Ok(entries) => BackendEvent::FileTreeEntries {
                 id: id.to_string(),
                 path: path.to_string(),
@@ -3309,6 +3305,134 @@ impl AppRuntime {
                 path: path.to_string(),
                 message: error.to_string(),
             },
+        }
+    }
+
+    /// Resolve the worktree root for a File Tree window. Prefers the user's
+    /// picker selection (`file_tree_worktree_roots`); falls back to
+    /// `tab.project_root` for backward compatibility with existing callers
+    /// that pre-date the picker. Returns a human-readable error message on
+    /// invalid window id / wrong preset.
+    fn resolve_file_tree_root(&self, id: &str) -> Result<std::path::PathBuf, String> {
+        let address = self
+            .window_lookup
+            .get(id)
+            .ok_or_else(|| "Window not found".to_string())?;
+        let tab = self
+            .tab(&address.tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
+        let window = tab
+            .workspace
+            .window(&address.raw_id)
+            .ok_or_else(|| "Window not found".to_string())?;
+        if window.preset != WindowPreset::FileTree {
+            return Err("Window is not a file tree".to_string());
+        }
+        Ok(self
+            .file_tree_worktree_roots
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| tab.project_root.clone()))
+    }
+
+    pub(crate) fn list_file_tree_worktrees_event(&self, id: &str) -> BackendEvent {
+        let address = match self.window_lookup.get(id) {
+            Some(addr) => addr,
+            None => {
+                return BackendEvent::FileTreeWorktreeError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                };
+            }
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Project tab not found".to_string(),
+            };
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+        if window.preset != WindowPreset::FileTree {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Window is not a file tree".to_string(),
+            };
+        }
+        match gwt::worktree_inventory::enumerate_worktrees(
+            &tab.project_root,
+            Some(&tab.project_root),
+        ) {
+            Ok(entries) => BackendEvent::FileTreeWorktrees {
+                id: id.to_string(),
+                entries,
+            },
+            Err(err) => BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: err.to_string(),
+            },
+        }
+    }
+
+    pub(crate) fn select_file_tree_worktree_event(
+        &mut self,
+        id: &str,
+        worktree_id: &str,
+    ) -> BackendEvent {
+        let address = match self.window_lookup.get(id) {
+            Some(addr) => addr,
+            None => {
+                return BackendEvent::FileTreeWorktreeError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                };
+            }
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Project tab not found".to_string(),
+            };
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+        if window.preset != WindowPreset::FileTree {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Window is not a file tree".to_string(),
+            };
+        }
+        let entries = match gwt::worktree_inventory::enumerate_worktrees(
+            &tab.project_root,
+            Some(&tab.project_root),
+        ) {
+            Ok(entries) => entries,
+            Err(err) => {
+                return BackendEvent::FileTreeWorktreeError {
+                    id: id.to_string(),
+                    message: err.to_string(),
+                };
+            }
+        };
+        let Some(selected) = entries.into_iter().find(|entry| entry.id == worktree_id) else {
+            return BackendEvent::FileTreeWorktreeError {
+                id: id.to_string(),
+                message: "Unknown worktree id".to_string(),
+            };
+        };
+        self.file_tree_worktree_roots
+            .insert(id.to_string(), selected.path);
+        BackendEvent::FileTreeWorktreeSelected {
+            id: id.to_string(),
+            worktree_id: worktree_id.to_string(),
         }
     }
 
@@ -7276,6 +7400,7 @@ exit 1
             pending_update: None,
             pty_writers,
             persist_dispatcher,
+            file_tree_worktree_roots: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
