@@ -83,6 +83,13 @@ function resolveAssetPath(pathname: string): string | null {
   if (pathname === "/assets/xterm/addon-fit.mjs") {
     return path.join(WEB_ROOT, "vendor/xterm/addon-fit.mjs");
   }
+  // SPEC-2009 Phase 2b: highlight.js bundled module + dark theme.
+  if (pathname === "/assets/highlight/highlight.min.js") {
+    return path.join(WEB_ROOT, "vendor/highlight/highlight.min.js");
+  }
+  if (pathname === "/assets/highlight/github-dark.min.css") {
+    return path.join(WEB_ROOT, "vendor/highlight/github-dark.min.css");
+  }
   if (pathname.startsWith("/assets/fonts/")) {
     return path.join(WEB_ROOT, "fonts", path.basename(pathname));
   }

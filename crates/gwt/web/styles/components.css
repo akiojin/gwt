@@ -3535,3 +3535,81 @@ kbd.op-kbd {
   border-top: 1px solid var(--color-border);
   justify-content: flex-end;
 }
+
+/* SPEC-2009 Phase 2b — File Tree text viewer syntax highlighting overlay.
+   The editor stacks a highlighted <pre> beneath a transparent <textarea>.
+   Both use identical monospace metrics so the caret aligns over the
+   colored tokens. The textarea's text color is transparent so only the
+   highlighted layer is visible; the caret stays opaque via caret-color. */
+:root[data-theme] .file-tree-viewer-editor-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl,
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.5;
+  letter-spacing: var(--tracking-mono);
+  white-space: pre;
+  word-spacing: 0;
+  tab-size: 4;
+  overflow: auto;
+  border: 0;
+  box-sizing: border-box;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl {
+  z-index: 0;
+  pointer-events: none;
+  background: var(--color-surface);
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl code.hljs {
+  display: block;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor {
+  z-index: 1;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--color-text);
+  resize: none;
+  outline: none;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor::selection {
+  background: var(--color-state-active);
+  color: transparent;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor:focus-visible {
+  outline: 2px solid var(--color-state-active);
+  outline-offset: -2px;
+}
+
+:root[data-theme] .file-tree-viewer-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-strong, var(--color-text));
+  background: var(--color-surface-elevated, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0 6px;
+  font-size: var(--type-2xs);
+}

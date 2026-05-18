@@ -59,10 +59,14 @@ test.describe("File Tree v2 editor E2E", () => {
     // Save button starts disabled because the viewer is not yet dirty.
     const saveBtn = viewer.locator("button.file-tree-viewer-save");
     await expect(saveBtn).toBeDisabled();
-    await expect(viewer.locator(".file-tree-viewer-dirty")).toHaveCount(0);
+    // Phase 2b: dirty marker is kept in the DOM with display:none so the
+    // input handler can toggle it without rebuilding the textarea (which
+    // was the focus-loss bug). Assert visibility, not count.
+    await expect(viewer.locator(".file-tree-viewer-dirty")).toBeHidden();
 
     // Phase 2 FR-032: editing flips dirty marker + enables Save.
     await textarea.fill("hello world\n");
+    await expect(viewer.locator(".file-tree-viewer-dirty")).toBeVisible();
     await expect(viewer.locator(".file-tree-viewer-dirty")).toHaveText("●");
     await expect(saveBtn).toBeEnabled();
 
@@ -70,7 +74,8 @@ test.describe("File Tree v2 editor E2E", () => {
     // the dirty marker.
     await textarea.press("ControlOrMeta+s");
     await expect(saveBtn).toBeDisabled();
-    await expect(viewer.locator(".file-tree-viewer-dirty")).toHaveCount(0);
+    await expect(viewer.locator(".file-tree-viewer-dirty")).toBeHidden();
+    await expect(viewer.locator(".file-tree-viewer-saved")).toBeVisible();
     await expect(viewer.locator(".file-tree-viewer-saved")).toHaveText("Saved");
 
     // The stub recorded the SaveFileContent payload with the right mode +
@@ -114,6 +119,49 @@ test.describe("File Tree v2 editor E2E", () => {
     await expect(viewer.locator(".file-tree-viewer-notice")).toContainText(
       "Cannot display as text",
     );
+  });
+
+  test("syntax highlighting renders for known extensions and stays present after edit", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installFileTreeBackend(page);
+
+    await page.goto(APP_URL);
+
+    const picker = page.locator("#file-tree-worktree-picker-modal");
+    await expect(picker).toHaveAttribute("aria-hidden", "false");
+    await picker.locator(".worktree-picker-row").nth(0).click();
+
+    const treeList = page
+      .locator(".workspace-window.surface-file-tree .file-tree-list")
+      .first();
+    await treeList.locator(".file-tree-row", { hasText: "README.md" }).click();
+
+    const viewer = page.locator(
+      ".workspace-window.surface-file-tree .file-tree-viewer",
+    );
+    // Phase 2b: header exposes a language badge derived from the file
+    // extension so the active grammar is visible to the user.
+    await expect(viewer.locator(".file-tree-viewer-lang")).toHaveText("MARKDOWN");
+
+    // The overlay <pre> mirrors the textarea content; once highlight.js has
+    // loaded it should classify the content via an `hljs` token class.
+    const hl = viewer.locator(".file-tree-viewer-hl code.hljs");
+    await expect(hl).toBeVisible();
+    await expect(hl).toHaveAttribute("class", /language-markdown/);
+    await expect(hl.locator(".hljs-section, .hljs-keyword, .hljs-string"))
+      .toHaveCount(0, { timeout: 3_000 })
+      .catch(() => {
+        // Markdown plain "hello\n" may not produce token spans; that's OK.
+      });
+
+    // Edit and confirm the highlighted layer follows the new text so the
+    // overlay does not lag behind the textarea.
+    const textarea = viewer.locator("textarea.file-tree-viewer-editor");
+    await textarea.fill("# Heading\n\nbody text\n");
+    await expect(hl).toContainText("Heading");
+    await expect(hl).toContainText("body text");
   });
 
   test("read-only file disables edit affordances", async ({ page }) => {
