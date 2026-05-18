@@ -465,10 +465,14 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
     /function\s+workspaceCardsFromProjection\([^)]*\)[\s\S]+journal_entries/,
     "expected Workspace Kanban to render Workspace journal entries from active_work_projection",
   );
+  // SPEC-2359 US-42 — Resume action now opens the Workspace Resume
+  // Picker via `list_resumable_agents` instead of the legacy
+  // `resume_workspace` event. The picker drives the actual restart with
+  // `resume_workspace_agent` after the user selects a candidate agent.
   assert.match(
     workspaceKanbanSource,
-    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+resume_workspace[\s\S]+source:\s*"journal"[\s\S]+source:\s*"current"/,
-    "expected Workspace card Resume action to send card-scoped resume_workspace events",
+    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+list_resumable_agents/,
+    "expected Workspace card Resume action to ask the backend to list resumable agents",
   );
   assert.match(
     workspaceKanbanSource,

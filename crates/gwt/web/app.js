@@ -25,6 +25,7 @@
         visibleBoardEntries,
       } from "/board-surface.js";
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
+      import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
@@ -4285,6 +4286,19 @@
         return node;
       }
 
+      // SPEC-2359 US-42 — Workspace Resume Picker controller. The
+      // Workspace Overview Resume button asks the backend to list
+      // resumable agents; the response opens this modal so the user can
+      // pick which previously-assigned agent to restart in-place
+      // (without going through the Launch Wizard).
+      const workspaceResumePicker = createWorkspaceResumePickerController({
+        modalEl: document.getElementById("workspace-resume-picker-modal"),
+        dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
+        createNode,
+        send,
+        getResumeBounds: () => visibleBounds(),
+      });
+
       const workspaceKanbanSurface = createWorkspaceKanbanSurface({
         activeWorkspace,
         agentStatusLabel,
@@ -4296,6 +4310,7 @@
         send,
         windowMap,
         workspaceWindowById,
+        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
       });
 
       function boardTimestampLabel(value) {
@@ -9875,6 +9890,13 @@
               message: event.message || "Unable to open Launch Wizard",
             };
             frontendUnits.launchWizardSurface.render();
+            break;
+          // SPEC-2359 US-42 — Resume Picker dispatcher slots.
+          case "workspace_resumable_agents":
+            workspaceResumePicker.handleAgentsList(event);
+            break;
+          case "workspace_resume_agent_error":
+            workspaceResumePicker.handleError(event);
             break;
           case "launch_wizard_state":
             // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.

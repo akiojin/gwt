@@ -82,7 +82,7 @@ pub use launch_wizard::{
     LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
     LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
     LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
-    QuickStartLaunchMode, ShellLaunchConfig,
+    QuickStartLaunchMode, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,

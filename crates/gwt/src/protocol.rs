@@ -306,6 +306,25 @@ pub enum FrontendEvent {
         #[serde(default)]
         journal_id: Option<String>,
     },
+    /// SPEC-2359 US-42: enumerate agents that can be resumed for the
+    /// current Workspace. The Resume button on a Workspace card sends
+    /// this instead of [`Self::ResumeWorkspace`] so the user can pick
+    /// which previous agent to restart without going through the Launch
+    /// Wizard.
+    ListResumableAgents {
+        #[serde(default)]
+        workspace_id: Option<String>,
+    },
+    /// SPEC-2359 US-42: spawn a single previously-assigned agent in the
+    /// current Workspace without opening the Launch Wizard. The
+    /// `session_id` matches one of the entries returned by
+    /// [`BackendEvent::WorkspaceResumableAgents`]. `bounds` carries the
+    /// frontend's current viewport so the spawned agent window appears at
+    /// a sensible position inside the visible canvas.
+    ResumeWorkspaceAgent {
+        session_id: String,
+        bounds: WindowGeometry,
+    },
     OpenLaunchWizard {
         id: String,
         branch_name: String,
@@ -883,6 +902,23 @@ pub enum BackendEvent {
     },
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
+    },
+    /// SPEC-2359 US-42: response to [`FrontendEvent::ListResumableAgents`].
+    /// `agents` is empty when the active Workspace has no resumable
+    /// agents (no `is_assigned()` entry with a recoverable session id),
+    /// so the picker modal can render an explicit "Nothing to resume"
+    /// notice instead of silently leaving the user without feedback.
+    WorkspaceResumableAgents {
+        agents: Vec<crate::launch_wizard::ResumableAgentView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+    },
+    /// SPEC-2359 US-42: spawn failure for [`FrontendEvent::ResumeWorkspaceAgent`].
+    /// Client-scoped reply so the picker modal can keep itself open and
+    /// re-enable the selected entry with the user-facing reason.
+    WorkspaceResumeAgentError {
+        session_id: String,
+        message: String,
     },
     LaunchProgress {
         id: String,
