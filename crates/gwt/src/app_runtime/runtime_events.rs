@@ -491,10 +491,7 @@ mod tests {
         let queue = Mutex::new(None);
 
         assert!(runtime_daemon_publish_sender_from(&queue, |_receiver| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "spawn failed",
-            ))
+            Err(std::io::Error::other("spawn failed"))
         })
         .is_none());
         assert!(queue.lock().expect("queue").is_none());
