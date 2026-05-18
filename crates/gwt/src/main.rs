@@ -6007,20 +6007,50 @@ fn main() -> wry::Result<()> {
     // only way to ask the server to shut down. Route both through the
     // existing `UserEvent::QuitApp` path so the event_loop closure can run
     // the same graceful shutdown sequence as the GUI close button.
+    //
+    // macOS caveat: `tao::EventLoop` without a native `Window` does not
+    // reliably wake the `NSApp.run()` runloop on `EventLoopProxy::send_event`,
+    // so the dispatched `UserEvent::QuitApp` may sit in the queue
+    // indefinitely. We arm a synchronous `std::thread` fallback timer that
+    // calls `std::process::exit(0)` if the graceful path does not complete
+    // within a short grace period. Using `std::thread::sleep` keeps the
+    // backstop independent of the tokio runtime / timer driver, so it fires
+    // even when the event_loop has stalled.
     if serve_args.is_some() {
-        let proxy_for_signal = proxy.clone();
+        let graceful_grace = std::time::Duration::from_secs(5);
+        let trigger_shutdown = move |label: &'static str| {
+            eprintln!("gwt serve: {label} received, shutting down...");
+            // Arm the backstop FIRST so a stalled event loop cannot keep the
+            // process alive forever.
+            std::thread::Builder::new()
+                .name("gwt-serve-exit-backstop".to_string())
+                .spawn(move || {
+                    std::thread::sleep(graceful_grace);
+                    eprintln!(
+                        "gwt serve: graceful shutdown timed out after {graceful_grace:?}; exiting now"
+                    );
+                    std::process::exit(0);
+                })
+                .expect("spawn exit backstop thread");
+        };
+
+        let proxy_for_int = proxy.clone();
+        let trigger_int = trigger_shutdown;
         drop(runtime.handle().spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
-                let _ = proxy_for_signal.send_event(UserEvent::QuitApp);
+                trigger_int("SIGINT");
+                let _ = proxy_for_int.send_event(UserEvent::QuitApp);
             }
         }));
         #[cfg(unix)]
         {
             let proxy_for_term = proxy.clone();
+            let trigger_term = trigger_shutdown;
             drop(runtime.handle().spawn(async move {
                 use tokio::signal::unix::{signal, SignalKind};
                 if let Ok(mut sig) = signal(SignalKind::terminate()) {
                     if sig.recv().await.is_some() {
+                        trigger_term("SIGTERM");
                         let _ = proxy_for_term.send_event(UserEvent::QuitApp);
                     }
                 }
