@@ -1045,7 +1045,17 @@ impl LaunchWizardState {
         // 現在選択 agent の per-agent draft / previous profile だけ refresh する。
         // preferred agent identity の適用は constructor (apply_preferred_agent_profile)
         // と set_agent_id 経由の明示的 agent 切替に限定する。
+        //
+        // SPEC-2014 2026-05-18 amendment FR-A follow-up:
+        // Runtime confirmation 経路 (apply_runtime_context → apply_hydration) で
+        // refreshed_previous_profiles が true のとき、user がフォームで選択した
+        // Execution Mode / Model / Reasoning / Version / Skip Permissions /
+        // Codex Fast Mode が `agent_drafts` に未保存だと、
+        // `restore_agent_draft_or_defaults` の reset 分岐で "normal" / 空値に
+        // 戻ってしまう。in-memory draft を refresh 直前に capture することで、
+        // user が現フォームで指定した値を保持する。
         if refreshed_previous_profiles && self.launch_path != LaunchWizardLaunchPath::QuickStart {
+            self.save_current_agent_draft();
             self.restore_agent_draft_or_defaults();
         }
         self.sync_docker_lifecycle_default();
@@ -4518,6 +4528,59 @@ mod tests {
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
         assert!(config.skip_permissions);
         assert!(config.codex_fast_mode);
+    }
+
+    // SPEC-2014 2026-05-18 amendment FR-A follow-up:
+    // Runtime confirmation 経路 (apply_runtime_context) が previous_profiles を
+    // refresh するとき、user が Settings/Wizard フォームで選んだ Execution Mode を
+    // silent に "normal" へ戻してはならない。Resume → Continue → Normal の 3 値
+    // それぞれが Runtime confirmation 後も保持されることを固定する。
+    #[test]
+    fn apply_runtime_context_preserves_user_execution_mode_after_settings_step() {
+        for mode in ["resume", "continue", "normal"] {
+            let codex_session = sample_session_record(
+                "feature/old",
+                Path::new("/tmp/old-repo"),
+                gwt_agent::AgentId::Codex,
+                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                None,
+            );
+            let previous_profiles =
+                previous_launch_profiles_from_sessions(std::slice::from_ref(&codex_session));
+            let mut state = LaunchWizardState::open_with_previous_profiles(
+                context(branch("feature/current"), "feature/current"),
+                sample_agent_options(),
+                Vec::new(),
+                previous_profiles.clone(),
+            );
+            // user picks Codex Execution Mode explicitly on the manual form.
+            state.apply(LaunchWizardAction::SetAgent {
+                agent_id: "codex".to_string(),
+            });
+            state.apply(LaunchWizardAction::SetExecutionMode {
+                mode: mode.to_string(),
+            });
+            assert_eq!(state.view().selected_execution_mode, mode);
+
+            // Runtime confirmation arrives, refreshing previous_profiles.
+            state.apply_runtime_context(LaunchWizardHydration {
+                selected_branch: Some(branch("feature/current")),
+                normalized_branch_name: "feature/current".to_string(),
+                worktree_path: Some(PathBuf::from("/tmp/current-repo")),
+                quick_start_root: PathBuf::from("/tmp/current-repo"),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::Unknown,
+                agent_options: sample_agent_options(),
+                quick_start_entries: Vec::new(),
+                previous_profiles: Some(previous_profiles),
+            });
+
+            assert_eq!(
+                state.view().selected_execution_mode,
+                mode,
+                "Runtime confirmation must preserve Execution Mode {mode:?}"
+            );
+        }
     }
 
     // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:
