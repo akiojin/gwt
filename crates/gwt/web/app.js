@@ -32,6 +32,7 @@
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -1173,7 +1174,82 @@
           indexStatusByProjectRoot,
           aggregateProjectTabDotState,
           send,
+          requestCloseProjectTab,
         });
+      }
+
+      // SPEC-2013 FR-012: the frontend decides whether the close request
+      // needs confirmation. When running_agent_count is 0 we send the
+      // existing close_project_tab message immediately; otherwise we open
+      // the confirm modal and only emit the message once Close anyway is
+      // pressed. Cancel never emits a message.
+      const closeProjectTabModalEl = document.getElementById(
+        "close-project-tab-modal",
+      );
+      const closeProjectTabModalDialogEl = closeProjectTabModalEl
+        ? closeProjectTabModalEl.querySelector(".modal-shell")
+        : null;
+      let closeProjectTabModalState = {
+        open: false,
+        tabId: null,
+        tabTitle: null,
+        runningAgents: [],
+      };
+
+      function renderCloseProjectTabModal() {
+        if (!closeProjectTabModalEl || !closeProjectTabModalDialogEl) {
+          return;
+        }
+        renderCloseProjectTabConfirmModal({
+          modalEl: closeProjectTabModalEl,
+          dialogEl: closeProjectTabModalDialogEl,
+          state: closeProjectTabModalState,
+          createNode,
+          onCancel: () => {
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+          },
+          onConfirm: () => {
+            const targetId = closeProjectTabModalState.tabId;
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+            if (targetId) {
+              send({ kind: "close_project_tab", tab_id: targetId });
+            }
+          },
+        });
+      }
+
+      function requestCloseProjectTab(tabId) {
+        const tabs = appState.tabs || [];
+        const tab = tabs.find((entry) => entry.id === tabId);
+        const runningAgents = Array.isArray(tab && tab.running_agents)
+          ? tab.running_agents
+          : [];
+        const count = Number.isFinite(tab && tab.running_agent_count)
+          ? tab.running_agent_count
+          : runningAgents.length;
+        if (count <= 0) {
+          send({ kind: "close_project_tab", tab_id: tabId });
+          return;
+        }
+        closeProjectTabModalState = {
+          open: true,
+          tabId,
+          tabTitle: (tab && tab.title) || null,
+          runningAgents,
+        };
+        renderCloseProjectTabModal();
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
