@@ -630,6 +630,10 @@ impl AgentLaunchBuilder {
         );
 
         args.extend(canonical_launch_args(&AgentId::Codex));
+        // SPEC-2014 2026-05-18 amendment FR-B:
+        // - Continue        → `codex resume --last`  (resume the most recent session)
+        // - Resume + id     → `codex resume <id>`    (Quick Start: replay specific session)
+        // - Resume (no id)  → `codex resume`         (Execution Mode picker; do NOT add `--last`)
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -639,8 +643,6 @@ impl AgentLaunchBuilder {
                 args.push("resume".to_string());
                 if let Some(ref id) = self.resume_session_id {
                     args.push(id.clone());
-                } else {
-                    args.push("--last".to_string());
                 }
             }
             SessionMode::Normal => {}
@@ -1047,15 +1049,29 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_resume_without_id_uses_last_session() {
+    fn build_codex_resume_without_id_opens_picker() {
+        // SPEC-2014 2026-05-18 amendment FR-B / SC-A:
+        // Codex Execution Mode Resume (no session id) must produce a bare
+        // `codex resume` so the interactive picker opens. `--last` is reserved
+        // for Continue mode only.
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .build();
 
-        assert!(config
+        let resume_index = config
             .args
-            .windows(2)
-            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+            .iter()
+            .position(|arg| arg == "resume")
+            .expect("codex args must contain the `resume` subcommand");
+        assert_ne!(
+            config.args.get(resume_index + 1).map(String::as_str),
+            Some("--last"),
+            "Execution Mode Resume must not append --last; that is Continue's role"
+        );
+        assert!(
+            !config.args.contains(&"--last".to_string()),
+            "no --last anywhere when SessionMode::Resume has no resume_session_id"
+        );
     }
 
     #[test]
@@ -1604,6 +1620,7 @@ mod tests {
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://proxy.local:32768".to_string(),
             )]),
+            supports_resume_picker: false,
         };
 
         let config = AgentLaunchBuilder::new(AgentId::Custom("proxy-agent".into()))

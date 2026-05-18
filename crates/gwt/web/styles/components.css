@@ -1535,6 +1535,76 @@ kbd.op-kbd {
   color: var(--color-canvas);
   border-color: var(--color-state-active);
 }
+/* SPEC-2013 FR-012: destructive variant — used by the project tab close
+   confirm modal's `Close anyway` action to telegraph that running agents
+   will be stopped. Falls back to `--color-state-danger` if defined,
+   otherwise a neutral red so the variant stays visible regardless of
+   theme token availability. */
+:root[data-theme] .wizard-button.destructive,
+:root[data-theme] .wizard-button.primary.destructive {
+  background: var(--color-state-danger, #c83a3a);
+  color: var(--color-canvas, #ffffff);
+  border-color: var(--color-state-danger, #c83a3a);
+}
+:root[data-theme] .wizard-button.destructive:hover,
+:root[data-theme] .wizard-button.primary.destructive:hover {
+  background: var(--color-state-danger-hover, #d24f4f);
+  border-color: var(--color-state-danger-hover, #d24f4f);
+}
+
+/* SPEC-2013 FR-012: close project tab confirm modal layout primitives.
+   Reuses .modal-backdrop / .modal-shell base from existing modals; only
+   the body / list spacing and footer alignment are scoped here. */
+.close-project-tab-modal-shell {
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 480px;
+}
+.close-project-tab-modal__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.close-project-tab-modal__subtitle {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__summary {
+  margin: 0;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-item::before {
+  content: "•";
+  margin-right: 6px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__agent-branch {
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__more {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+.close-project-tab-modal__footer.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
 
 /* Floating window chrome */
 :root[data-theme] .window {
@@ -3323,4 +3393,145 @@ kbd.op-kbd {
   padding: var(--space-3);
   text-align: center;
   color: var(--color-text-subtle);
+}
+
+/* SPEC-2009 amendment Phase 2: File Tree editor affordance.
+   - dirty marker shows a leading ● when the textarea/hex view has unsaved
+     edits.
+   - the Save button mirrors `disabled` via attribute selector so the
+     wizard-button style still applies cleanly.
+   - Saved badge fades in (no animation: just present until the JS clears
+     it after ~2 sec).
+   - hex cells become focusable buttons so keyboard activation matches the
+     mouse click flow. */
+:root[data-theme] .file-tree-viewer-dirty {
+  color: var(--color-state-warning, #d97706);
+  font-weight: 700;
+  font-size: var(--type-sm);
+  margin-right: 4px;
+}
+
+:root[data-theme] .file-tree-viewer-readonly {
+  color: var(--color-text-subtle);
+  font-size: var(--type-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+:root[data-theme] .file-tree-viewer-saved {
+  color: var(--color-status-success, #2a7);
+  font-size: var(--type-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+:root[data-theme] .file-tree-viewer-save[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+:root[data-theme] textarea.file-tree-viewer-editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  resize: none;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  padding: 0;
+  outline: none;
+  white-space: pre;
+  overflow: auto;
+}
+
+:root[data-theme] textarea.file-tree-viewer-editor:focus-visible {
+  outline: 2px solid var(--color-state-active);
+  outline-offset: 2px;
+}
+
+:root[data-theme] .file-tree-hex-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 8px 1fr 8px;
+  gap: 6px;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .file-tree-hex-offset {
+  color: var(--color-text-subtle);
+}
+
+:root[data-theme] .file-tree-hex-cell {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-text);
+  padding: 0 2px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+:root[data-theme] .file-tree-hex-cell:hover,
+:root[data-theme] .file-tree-hex-cell:focus-visible {
+  border-color: var(--color-state-active);
+  outline: none;
+}
+
+:root[data-theme] .file-tree-hex-cell[disabled] {
+  cursor: not-allowed;
+  color: var(--color-text-subtle);
+}
+
+:root[data-theme] .file-tree-hex-divider {
+  color: var(--color-text-subtle);
+}
+
+/* Discard / Conflict modals share the same display gating pattern as the
+   worktree picker (`aria-hidden="false"` flips display:flex via the
+   `.modal-backdrop` primitive). Picker-style padded shell so the buttons
+   are not flush against the rounded surface. */
+:root[data-theme] #file-tree-discard-modal[aria-hidden="false"],
+:root[data-theme] #file-tree-conflict-modal[aria-hidden="false"] {
+  display: flex;
+}
+
+:root[data-theme] #file-tree-discard-modal > .discard-modal-shell,
+:root[data-theme] #file-tree-conflict-modal > .conflict-modal-shell {
+  min-width: 360px;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-theme] .discard-modal-header,
+:root[data-theme] .conflict-modal-header {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+:root[data-theme] .discard-modal-header h2,
+:root[data-theme] .conflict-modal-header h2 {
+  margin: 0;
+  font-size: var(--type-md);
+}
+
+:root[data-theme] .discard-modal-body,
+:root[data-theme] .conflict-modal-body {
+  padding: var(--space-3);
+  color: var(--color-text);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .discard-modal-footer,
+:root[data-theme] .conflict-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  justify-content: flex-end;
 }
