@@ -2028,6 +2028,16 @@ impl AppRuntime {
                     self.load_file_tree_event(&id, &path),
                 )]
             }
+            FrontendEvent::LoadFileContent {
+                id,
+                path,
+                mode,
+                hex_offset,
+                hex_length,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                self.load_file_content_event(&id, &path, mode, hex_offset, hex_length),
+            )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
@@ -3299,6 +3309,93 @@ impl AppRuntime {
                 path: path.to_string(),
                 message: error.to_string(),
             },
+        }
+    }
+
+    pub(crate) fn load_file_content_event(
+        &self,
+        id: &str,
+        path: &str,
+        mode: FileContentMode,
+        hex_offset: Option<u64>,
+        hex_length: Option<u64>,
+    ) -> BackendEvent {
+        let make_error =
+            |kind: FileContentErrorKind, message: String, size: Option<u64>, limit: Option<u64>| {
+                BackendEvent::FileContentError {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    error_kind: kind,
+                    message,
+                    size,
+                    limit,
+                }
+            };
+
+        let Some(address) = self.window_lookup.get(id) else {
+            return make_error(
+                FileContentErrorKind::WindowNotFound,
+                "Window not found".to_string(),
+                None,
+                None,
+            );
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return make_error(
+                FileContentErrorKind::WindowNotFound,
+                "Project tab not found".to_string(),
+                None,
+                None,
+            );
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return make_error(
+                FileContentErrorKind::WindowNotFound,
+                "Window not found".to_string(),
+                None,
+                None,
+            );
+        };
+
+        if window.preset != WindowPreset::FileTree {
+            return make_error(
+                FileContentErrorKind::WindowMismatch,
+                "Window is not a file tree".to_string(),
+                None,
+                None,
+            );
+        }
+
+        let relative_path = Path::new(path);
+        let limits = ContentLimits::default();
+
+        match mode {
+            FileContentMode::Text => {
+                match read_text_file(&tab.project_root, relative_path, &limits) {
+                    Ok(result) => BackendEvent::FileContentText {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        encoding: result.encoding,
+                        text: result.text,
+                        total_size: result.total_size,
+                    },
+                    Err(err) => file_content_error_to_event(id, path, err),
+                }
+            }
+            FileContentMode::Hex => {
+                let offset = hex_offset.unwrap_or(0);
+                let length = hex_length.unwrap_or(64 * 16);
+                match read_binary_chunk(&tab.project_root, relative_path, offset, length, &limits) {
+                    Ok(chunk) => BackendEvent::FileContentHex {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        offset: chunk.offset,
+                        bytes_b64: base64::engine::general_purpose::STANDARD.encode(chunk.bytes),
+                        total_size: chunk.total_size,
+                    },
+                    Err(err) => file_content_error_to_event(id, path, err),
+                }
+            }
         }
     }
 
@@ -6317,6 +6414,44 @@ fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<Pa
         return None;
     }
     Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
+}
+
+fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> BackendEvent {
+    let (kind, message, size, limit) = match err {
+        FileContentError::Denied => (
+            FileContentErrorKind::Denied,
+            "Access denied".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::TooLarge { size, limit } => (
+            FileContentErrorKind::TooLarge,
+            format!("File too large ({} bytes, limit {})", size, limit),
+            Some(size),
+            Some(limit),
+        ),
+        FileContentError::IoError(message) => (FileContentErrorKind::IoError, message, None, None),
+        FileContentError::NotAFile => (
+            FileContentErrorKind::NotAFile,
+            "Not a file".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::BinaryNotText => (
+            FileContentErrorKind::BinaryNotText,
+            "Cannot decode as text".to_string(),
+            None,
+            None,
+        ),
+    };
+    BackendEvent::FileContentError {
+        id: id.to_string(),
+        path: path.to_string(),
+        error_kind: kind,
+        message,
+        size,
+        limit,
+    }
 }
 
 #[cfg(test)]

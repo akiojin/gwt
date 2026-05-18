@@ -12,14 +12,16 @@ use std::{
 
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use base64::Engine;
+use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
     cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
     list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_agent,
-    resolve_launch_spec, workspace_state_path, BackendEvent, BranchEntriesPhase, BranchListEntry,
-    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState,
-    LiveSessionEntry, ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    load_session_state, migrate_legacy_workspace_state, read_binary_chunk, read_text_file,
+    refresh_managed_gwt_assets_for_agent, resolve_launch_spec, workspace_state_path, BackendEvent,
+    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
+    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -879,6 +881,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
+    use gwt::protocol::{FileContentErrorKind, FileContentMode};
     use gwt::{
         empty_workspace_state, AgentOption, ArrangeMode, BackendEvent, BranchCleanupInfo,
         BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
@@ -2401,6 +2404,74 @@ mod tests {
             runtime.load_file_tree_event(&file_tree_id, ""),
             BackendEvent::FileTreeEntries { ref entries, .. } if !entries.is_empty()
         ));
+
+        // SPEC-2006 amendment: load_file_content_event covers text, hex, denied,
+        // and window-mismatch paths through the same File Tree window contract.
+        assert!(matches!(
+            runtime.load_file_content_event(
+                "missing",
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::WindowNotFound,
+                ..
+            }
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &branches_id,
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::WindowMismatch,
+                ..
+            }
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &file_tree_id,
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentText { ref text, .. } if text == "hello"
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &file_tree_id,
+                ".git/HEAD",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::Denied,
+                ..
+            }
+        ));
+        let hex_event = runtime.load_file_content_event(
+            &file_tree_id,
+            "README.md",
+            FileContentMode::Hex,
+            Some(0),
+            Some(16),
+        );
+        match hex_event {
+            BackendEvent::FileContentHex {
+                offset, total_size, ..
+            } => {
+                assert_eq!(offset, 0);
+                assert_eq!(total_size, 5);
+            }
+            other => panic!("expected FileContentHex, got {other:?}"),
+        }
 
         let missing_branches = runtime.load_branches_events("client-1", "missing");
         assert_eq!(missing_branches.len(), 1);

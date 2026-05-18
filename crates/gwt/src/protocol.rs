@@ -9,6 +9,7 @@ use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
+    file_content::Encoding,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -17,6 +18,25 @@ use crate::{
     },
     preset::WindowPreset,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentMode {
+    Text,
+    Hex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentErrorKind {
+    Denied,
+    TooLarge,
+    IoError,
+    NotAFile,
+    BinaryNotText,
+    WindowNotFound,
+    WindowMismatch,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +154,15 @@ pub enum FrontendEvent {
     LoadFileTree {
         id: String,
         path: Option<String>,
+    },
+    LoadFileContent {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        #[serde(default)]
+        hex_offset: Option<u64>,
+        #[serde(default)]
+        hex_length: Option<u64>,
     },
     LoadBranches {
         id: String,
@@ -686,6 +715,30 @@ pub enum BackendEvent {
         id: String,
         path: String,
         message: String,
+    },
+    FileContentText {
+        id: String,
+        path: String,
+        encoding: Encoding,
+        text: String,
+        total_size: u64,
+    },
+    FileContentHex {
+        id: String,
+        path: String,
+        offset: u64,
+        bytes_b64: String,
+        total_size: u64,
+    },
+    FileContentError {
+        id: String,
+        path: String,
+        error_kind: FileContentErrorKind,
+        message: String,
+        #[serde(default)]
+        size: Option<u64>,
+        #[serde(default)]
+        limit: Option<u64>,
     },
     BranchEntries {
         id: String,

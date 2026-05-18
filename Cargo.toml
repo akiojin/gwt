@@ -125,6 +125,10 @@ notify-debouncer-mini = "0.7"
 # .gitignore filtering for the watcher
 ignore = "0.4"
 
+# Text encoding auto-detection (SPEC-2006 amendment: file content domain)
+chardetng = "0.1"
+encoding_rs = "0.8"
+
 # Hex encoding for hash values
 hex = "0.4"
 
