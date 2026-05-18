@@ -138,12 +138,22 @@ All other changes require the TDD loop.
 
 ## Phase 3: Verification
 
-Run the smallest meaningful validation set first, then broaden:
+Delegate environment-aware verification to `gwt-verify --mode full`. The
+sub-skill classifies the changed surfaces per
+`.codex/skills/gwt-verify/references/test-matrix.md`, runs the appropriate
+matrix per surface (cargo for Rust crates, `pnpm test:frontend-*` for frontend
+JS, `pnpm test:visual` only for WebView/browser UI surfaces, `pnpm
+test:release-*` only for release-system changes, `pnpm lint:skills` for skill
+asset changes), and returns an evidence bundle in `## Verification Report`
+form. Do not hard-code a static cargo command list here — the right matrix is
+determined by what actually changed.
 
-1. **Tests**: `cargo test -p gwt-core -p gwt` (or narrower scope first)
-2. **Lint**: `cargo clippy --all-targets --all-features -- -D warnings`
-3. **Format**: `cargo fmt -- --check`
-4. **Build**: `cargo build -p gwt`
+The skill is considered green when:
+
+- `gwt-verify --mode full` exits with `Overall: PASS`
+- the evidence bundle records no `failed: tooling-missing` entry
+- no Playwright snapshot diff is unresolved (visual regression must be
+  triaged before declaring PASS, not silently regenerated)
 
 In SPEC mode, also verify:
 
@@ -198,6 +208,8 @@ Stop only when:
 - the next task depends on a product or scope decision that is not inferable
 - a merge conflict or review request is ambiguous enough to risk wrong behavior
 - required repo/auth/tooling access is unavailable
+- `gwt-verify` returns `failed: tooling-missing` and the auto-install path
+  cannot recover (see `.codex/skills/gwt-verify/references/tooling-bootstrap.md`)
 - implementation reveals a gap between spec.md and the actual behavior
   (acceptance scenario inaccuracy, missing data-model section, undocumented
   registration table, dependency chain not captured in tasks.md, etc.) that

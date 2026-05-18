@@ -36,14 +36,17 @@ In SPEC mode, it reconciles all artifacts. In standalone mode, it verifies user 
 
 ### 5. Code verification
 
-Run all verification commands and confirm success:
+Delegate to `gwt-verify --mode full` and require `Overall: PASS` in the
+evidence bundle. The sub-skill picks the matrix per changed surface (see
+`.claude/skills/gwt-verify/references/test-matrix.md`) — cargo for Rust
+crates, `pnpm test:frontend-*` for frontend JS, `pnpm test:visual` for
+WebView/browser UI surfaces only (Playwright is not invoked for non-browser
+surfaces), `pnpm test:release-*` for release-system changes, and
+`pnpm lint:skills` for skill assets.
 
-```bash
-cargo test -p gwt-core -p gwt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt -- --check
-cargo build -p gwt
-```
+If `gwt-verify` returns `Overall: FAIL` or `failed: tooling-missing`, the
+gate fails. Do not declare completion. Route the failure for repair per
+the failure-handling section below.
 
 ## Standalone mode checks
 

@@ -590,6 +590,34 @@ mod tests {
     }
 
     #[test]
+    fn distribute_materializes_gwt_verify_skill_and_command() {
+        // SPEC-1935 Phase 17 (FR-122): gwt-verify must materialize to both
+        // Claude Code and Codex targets, alongside its references and the
+        // slash-command wrapper.
+        let dir = tempfile::tempdir().unwrap();
+        distribute_to_worktree(dir.path()).unwrap();
+
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".claude/skills/gwt-verify/references/test-matrix.md",
+            ".claude/skills/gwt-verify/references/playwright-runbook.md",
+            ".claude/skills/gwt-verify/references/tooling-bootstrap.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/references/test-matrix.md",
+            ".codex/skills/gwt-verify/references/playwright-runbook.md",
+            ".codex/skills/gwt-verify/references/tooling-bootstrap.md",
+            ".claude/commands/gwt-verify.md",
+        ] {
+            let path = dir.path().join(relative);
+            assert!(
+                path.exists(),
+                "gwt-verify materialization must produce {}",
+                relative
+            );
+        }
+    }
+
+    #[test]
     fn distribute_creates_canonical_project_search_skills() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
