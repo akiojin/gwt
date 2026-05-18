@@ -1,5 +1,42 @@
 # Lessons Learned
 
+## 2026-05-18 — Launch Agent Execution Mode の Resume を silent downgrade させない
+
+### 事象
+
+ユーザー報告で「Launch Agent の Execution Mode が機能しない」が判明。Execution Mode で
+`Resume` を選んでも実際は `claude --continue` / `codex resume --last` 相当の Continue
+動作になり、agent の interactive session picker が開かなかった。
+
+### 原因
+
+1. `crates/gwt/src/launch_wizard.rs:1277` で `mode == "resume"` かつ
+   `resume_session_id is None` の場合に **silently `SessionMode::Continue` に
+   downgrade** されていた。Quick Start 経由でないと resume_session_id がセット
+   されないため、通常フォームの Resume は Continue 扱いになっていた。
+2. `crates/gwt-agent/src/launch.rs:638-645` で Codex builder は
+   `SessionMode::Resume` + `resume_session_id is None` のとき常に `--last` を
+   付与しており、仮に (1) を直しても `codex resume` ではなく `codex resume --last`
+   になり picker mode が成立しなかった。
+3. `execution_mode_value_from_session_mode` (launch_wizard.rs:3631) が
+   `SessionMode::Resume` を `"continue"` に collapse しており、前回 profile から
+   Resume を復元できなかった。
+
+### 再発防止策
+
+1. 「ユーザー UI 上の選択肢」と「agent CLI に渡す引数」を 1:1 で対応させる。
+   UI が `Resume` と表示している以上、内部で `Continue` に黙って差し替えてはいけない。
+   downgrade が必要な状況 (capability 不在 等) は明示的に UI から option を除外する。
+2. CLI 引数を組み立てる builder では、`SessionMode::Resume` + `resume_session_id`
+   の有無で picker mode と id 指定 mode を **別物として扱う**。デフォルトで
+   `--last` のような便宜 flag を勝手に足さない。
+3. `SessionMode` <-> 表示文字列の変換 helper は片方向 collapse を避け、
+   ラウンドトリップ可能にする (`Resume → "resume"`, `Continue → "continue"`,
+   `Normal → "normal"`)。
+4. 新しい Execution Mode option を追加するときは、agent 側の capability
+   (`AgentId::supports_resume_picker()` 等) を view 構築に渡し、対応していない
+   agent では option を除外する設計にする。
+
 ## 2026-05-15 — Exact hook trust must include generator resolution and shell format
 
 ### 事象

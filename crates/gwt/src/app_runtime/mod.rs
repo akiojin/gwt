@@ -2235,7 +2235,7 @@ impl AppRuntime {
             }
             FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
-                self.resume_workspace_events(source, journal_id)
+                self.resume_workspace_events(&client_id, source, journal_id)
             }
             FrontendEvent::OpenLaunchWizard {
                 id,
@@ -9016,6 +9016,77 @@ exit 1
             events.first().map(|event| &event.event),
             Some(BackendEvent::LaunchWizardOpenError { title, message })
                 if title == "Launch Agent" && message == "Window not found"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
+        // SPEC-2359 / Issue #2757: Resume クリックで `resume_workspace_events`
+        // が早期 return / Start Work fallback 失敗を起こした場合、frontend で
+        // 可視な `LaunchWizardOpenError` を return しなければならない。
+        // 旧経路は `ProjectOpenError` を broadcast していたが、project 開放中は
+        // `renderProjectPicker` が hidden なので silent failure になっていた。
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Current,
+                journal_id: None,
+            },
+        );
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(
+            matches!(
+                events.first().map(|event| &event.target),
+                Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+            ),
+            "Resume failure must be replied to the originating client, not broadcast as ProjectOpenError"
+        );
+        assert!(
+            matches!(
+                events.first().map(|event| &event.event),
+                Some(BackendEvent::LaunchWizardOpenError { title, message })
+                    if title == "Resume Workspace" && !message.is_empty()
+            ),
+            "Resume failure must surface as LaunchWizardOpenError so Workspace Overview can render a visible overlay"
+        );
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_without_active_tab_returns_launch_wizard_open_error() {
+        // Same contract for the `Open a project before resuming work` early return.
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Current,
+                journal_id: None,
+            },
+        );
+
+        assert!(matches!(
+            events.first().map(|event| &event.target),
+            Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardOpenError { title, message })
+                if title == "Resume Workspace"
+                    && message == "Open a project before resuming work"
         ));
     }
 

@@ -1817,6 +1817,7 @@ mod tests {
                     mode_args: None,
                     skip_permissions_args: Vec::new(),
                     env: HashMap::new(),
+                    supports_resume_picker: false,
                 }),
             },
         ]
