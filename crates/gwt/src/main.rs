@@ -1593,10 +1593,7 @@ mod tests {
     // 集計し、shell preset の Running 窓や agent の Stopped 窓を含めない。
     #[test]
     fn project_tab_view_running_agents_counts_only_agent_preset_running_windows() {
-        fn tab_with_windows(
-            tab_id: &str,
-            windows: Vec<PersistedWindowState>,
-        ) -> ProjectTabRuntime {
+        fn tab_with_windows(tab_id: &str, windows: Vec<PersistedWindowState>) -> ProjectTabRuntime {
             let mut persisted = empty_workspace_state();
             persisted.next_z_index = (windows.len() as u32).saturating_add(1);
             persisted.windows = windows;
@@ -1628,7 +1625,8 @@ mod tests {
             "tab-with-agents",
             vec![shell_running, agent_running, agent_stopped, tagged_window],
         );
-        let mut tab_no_agents_windows = sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        let mut tab_no_agents_windows =
+            sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
         tab_no_agents_windows.id = "shell-only".to_string();
         let tab_no_agents = tab_with_windows("tab-no-agents", vec![tab_no_agents_windows]);
 
