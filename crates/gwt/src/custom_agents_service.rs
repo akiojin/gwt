@@ -68,6 +68,47 @@ pub fn probe_backend(base_url: &str, api_key: &str) -> Result<Vec<String>, Probe
     list_model_ids_blocking(base_url, api_key)
 }
 
+/// SPEC-1921 SC-023 (2026-05-18 amendment): persist a brand-new External
+/// Agent (gwt が built-in として知らない CLI) under
+/// `[tools.customCodingAgents.*]`. Rejects rows whose `command` matches a
+/// built-in agent's package name (`@anthropic-ai/claude-code`,
+/// `@openai/codex`, …) so impersonation never reaches disk — those LLM
+/// redirection use cases belong to the `Agent Backends` surface.
+pub fn add_external_agent(
+    config_path: &Path,
+    agent: CustomCodingAgent,
+) -> Result<CustomCodingAgent, CustomAgentsServiceError> {
+    use gwt_agent::custom::ExternalAgentValidationError;
+
+    match agent.validate_external_only() {
+        Ok(()) => {}
+        Err(ExternalAgentValidationError::InvalidFields) => {
+            return Err(CustomAgentsServiceError::InvalidInput(format!(
+                "invalid agent id or fields: {}",
+                agent.id
+            )));
+        }
+        Err(ExternalAgentValidationError::BuiltInImpersonation {
+            builtin_display_name,
+            command,
+        }) => {
+            return Err(CustomAgentsServiceError::InvalidInput(format!(
+                "command `{command}` impersonates the built-in {builtin_display_name} \
+                 package; use the Agent Backends Settings tab to redirect that \
+                 agent's LLM traffic instead",
+            )));
+        }
+    }
+
+    let mut entries = load_stored_custom_agents_from_path(config_path)?;
+    if entries.iter().any(|entry| entry.agent.id == agent.id) {
+        return Err(CustomAgentsServiceError::Duplicate(agent.id));
+    }
+    entries.push(StoredCustomAgent::new(agent.clone()));
+    save_stored_custom_agents_to_path(config_path, &entries)?;
+    Ok(agent)
+}
+
 /// Persist a new custom agent seeded from the selected preset. Fails if the id
 /// already exists or the preset payload fails validation.
 /// Does NOT re-run the `/v1/models` probe; callers are expected to call
@@ -466,5 +507,77 @@ mod tests {
     fn preset_id_serializes_as_snake_case() {
         let json = serde_json::to_string(&PresetId::ClaudeCodeOpenaiCompat).unwrap();
         assert_eq!(json, "\"claude_code_openai_compat\"");
+    }
+
+    fn external_agent_sample(id: &str, command: &str) -> CustomCodingAgent {
+        use gwt_agent::custom::{CustomAgentType, ModeArgs};
+        use std::collections::HashMap;
+        CustomCodingAgent {
+            id: id.into(),
+            display_name: "Aider".into(),
+            agent_type: CustomAgentType::Command,
+            command: command.into(),
+            default_args: vec![],
+            mode_args: Some(ModeArgs::default()),
+            skip_permissions_args: vec![],
+            env: HashMap::new(),
+            supports_resume_picker: false,
+        }
+    }
+
+    #[test]
+    fn add_external_agent_persists_unrelated_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let agent = external_agent_sample("aider", "aider");
+        let saved = add_external_agent(&path, agent).expect("save");
+        assert_eq!(saved.id, "aider");
+        let listed = list_custom_agents(&path).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].command, "aider");
+    }
+
+    #[test]
+    fn add_external_agent_rejects_built_in_impersonation() {
+        // SPEC-1921 SC-023: the External Agent add path MUST refuse rows
+        // whose `command` matches a built-in agent's package, with a
+        // message routing the user to `Agent Backends`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for command in [
+            "@anthropic-ai/claude-code",
+            "@anthropic-ai/claude-code@latest",
+            "@openai/codex",
+        ] {
+            let agent = external_agent_sample("forbidden", command);
+            let err = add_external_agent(&path, agent).unwrap_err();
+            let message = match err {
+                CustomAgentsServiceError::InvalidInput(msg) => msg,
+                other => panic!("expected InvalidInput, got {other:?}"),
+            };
+            assert!(
+                message.contains("impersonates") && message.contains("Agent Backends"),
+                "error must route user to Agent Backends: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_external_agent_rejects_duplicate_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        add_external_agent(&path, external_agent_sample("aider", "aider")).expect("first save");
+        let err = add_external_agent(&path, external_agent_sample("aider", "aider")).unwrap_err();
+        assert!(matches!(err, CustomAgentsServiceError::Duplicate(_)));
+    }
+
+    #[test]
+    fn add_external_agent_rejects_invalid_field_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut agent = external_agent_sample("bad", "cmd");
+        agent.id = String::new();
+        let err = add_external_agent(&path, agent).unwrap_err();
+        assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 }
