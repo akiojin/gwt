@@ -38,6 +38,11 @@ export function shouldOverrideTerminalWheel(event, { window, isWindowsHost: host
   return check();
 }
 
+export function isTerminalMouseTrackingActive(terminal) {
+  const mouseTrackingMode = terminal?.modes?.mouseTrackingMode;
+  return typeof mouseTrackingMode === "string" && mouseTrackingMode !== "none";
+}
+
 export function createTerminalWheelScrollController({
   terminalRoot,
   terminal,
@@ -58,7 +63,8 @@ export function createTerminalWheelScrollController({
       !shouldOverrideTerminalWheel(event, {
         window,
         isWindowsHost: hostCheck,
-      })
+      }) ||
+      isTerminalMouseTrackingActive(terminal)
     ) {
       return;
     }

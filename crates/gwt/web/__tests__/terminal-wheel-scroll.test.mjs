@@ -9,6 +9,7 @@ import test from "node:test";
 
 import {
   createTerminalWheelScrollController,
+  isTerminalMouseTrackingActive,
   wheelDeltaToScrollLines,
 } from "../terminal-wheel-scroll.js";
 
@@ -21,6 +22,21 @@ test("Windows terminal plain wheel scrolls xterm scrollback and stops bubbling",
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(fixture.scrollCalls, [3]);
   assert.equal(fixture.bubbledWheelCount, 0);
+  fixture.dispose();
+});
+
+test("Windows terminal mouse tracking lets xterm receive plain wheel events", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => true,
+    terminalOptions: { modes: { mouseTrackingMode: "any" } },
+  });
+  const event = wheelEvent(fixture.window, { deltaY: 96 });
+
+  fixture.terminalRoot.dispatchEvent(event);
+
+  assert.equal(event.defaultPrevented, false);
+  assert.deepEqual(fixture.scrollCalls, []);
+  assert.equal(fixture.bubbledWheelCount, 1);
   fixture.dispose();
 });
 
@@ -71,7 +87,13 @@ test("wheelDeltaToScrollLines handles pixel, line, and page units", () => {
   assert.equal(wheelDeltaToScrollLines({ deltaY: 0, deltaMode: 0 }), 0);
 });
 
-function mountFixture({ isWindowsHost }) {
+test("isTerminalMouseTrackingActive reads xterm public mouse tracking mode", () => {
+  assert.equal(isTerminalMouseTrackingActive({ modes: { mouseTrackingMode: "none" } }), false);
+  assert.equal(isTerminalMouseTrackingActive({ modes: { mouseTrackingMode: "vt200" } }), true);
+  assert.equal(isTerminalMouseTrackingActive({}), false);
+});
+
+function mountFixture({ isWindowsHost, terminalOptions = {} }) {
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
   let bubbledWheelCount = 0;
@@ -83,6 +105,7 @@ function mountFixture({ isWindowsHost }) {
     terminalRoot,
     terminal: {
       scrollLines: (lines) => scrollCalls.push(lines),
+      ...terminalOptions,
     },
     window: { navigator: { platform: "Win32" } },
     isWindowsHost,
