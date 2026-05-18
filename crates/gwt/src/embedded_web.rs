@@ -25,6 +25,11 @@ pub fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
+// SPEC-2013 FR-012: close project tab confirm modal renderer.
+pub fn close_project_tab_confirm_modal_js() -> &'static str {
+    include_str!("../web/close-project-tab-confirm-modal.js")
+}
+
 pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
@@ -178,6 +183,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/branch-cleanup-modal.js",
         source: branch_cleanup_modal_js,
         marker: "renderBranchCleanupModal",
+    },
+    RootJsModuleAsset {
+        path: "/close-project-tab-confirm-modal.js",
+        source: close_project_tab_confirm_modal_js,
+        marker: "renderCloseProjectTabConfirmModal",
     },
     RootJsModuleAsset {
         path: "/migration-modal.js",
@@ -1821,6 +1831,7 @@ mod tests {
 
         for module_path in [
             "/branch-cleanup-modal.js",
+            "/close-project-tab-confirm-modal.js",
             "/migration-modal.js",
             "/window-docking.js",
             "/board-surface.js",

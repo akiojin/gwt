@@ -522,6 +522,23 @@
           tabindex="-1"
         ></div>
       </div>
+      <!-- SPEC-2013 FR-012: confirm modal shown when the project tab
+           close (`×`) is invoked while one or more agent panes are still
+           running. Renderer lives in /close-project-tab-confirm-modal.js
+           and the wiring lives in /app.js. -->
+      <div
+        class="modal-backdrop"
+        id="close-project-tab-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell close-project-tab-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close project tab"
+          tabindex="-1"
+        ></div>
+      </div>
       <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
            window. Renderer lives in /app.js (frontendUnits.worktreePicker).
            Opens once per File Tree window open; selection routes the tree

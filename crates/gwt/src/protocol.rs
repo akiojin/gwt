@@ -551,6 +551,20 @@ pub struct ProjectTabView {
     pub project_root: String,
     pub kind: ProjectKind,
     pub workspace: WorkspaceView,
+    #[serde(default)]
+    pub running_agent_count: u32,
+    #[serde(default)]
+    pub running_agents: Vec<RunningAgentSummary>,
+}
+
+// SPEC-2013 FR-011: project tab close 確認 modal が表示する running agent の
+// 最小情報。`display_name` は `dynamic_title` → `purpose_title` → `title` の
+// 優先順で、`branch` は worktree から導出する。frontend はこのリストを
+// 集計結果として消費し、tab close 経路の確認ダイアログに反映する。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunningAgentSummary {
+    pub display_name: String,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
