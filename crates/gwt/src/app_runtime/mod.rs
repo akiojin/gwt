@@ -4783,10 +4783,8 @@ impl AppRuntime {
                 return Vec::new();
             }
             let _ = self.persist();
-            let mut events = vec![self.workspace_state_broadcast()];
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
-            }
+            let mut events = Vec::new();
+            self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             return events;
         }
         if matches!(
@@ -4866,10 +4864,7 @@ impl AppRuntime {
                 &window_id,
             ) {
                 let _ = self.persist();
-                events.push(self.workspace_state_broadcast());
-                if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                    events.push(event);
-                }
+                self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             }
             return events;
         }
@@ -5758,6 +5753,16 @@ impl AppRuntime {
         OutboundEvent::broadcast(BackendEvent::WorkspaceState {
             workspace: self.app_state_view(),
         })
+    }
+
+    pub(crate) fn push_workspace_and_active_work_projection_broadcasts(
+        &self,
+        events: &mut Vec<OutboundEvent>,
+    ) {
+        events.push(self.workspace_state_broadcast());
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
     }
 
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
@@ -10238,6 +10243,36 @@ exit 1
         assert!(!runtime.active_agent_sessions.contains_key(&window_id));
         assert!(!runtime.window_lookup.contains_key(&window_id));
         assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
+    fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_events() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let mut events = Vec::new();
+        runtime.push_workspace_and_active_work_projection_broadcasts(&mut events);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
     }
 
     #[test]

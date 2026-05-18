@@ -1051,6 +1051,468 @@ pub enum BackendEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendEventDeliveryClass {
+    Streamed,
+    IdempotentLatest,
+    Snapshot,
+    EphemeralStatus,
+    Error,
+    BestEffortDaemon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendEventBackpressurePolicy {
+    PreserveOrder,
+    LatestWins,
+    ClientScopedSnapshot,
+    BestEffort,
+    FailOpenError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendEventPolicy {
+    pub kind: &'static str,
+    pub delivery: BackendEventDeliveryClass,
+    pub backpressure: BackendEventBackpressurePolicy,
+}
+
+impl BackendEventPolicy {
+    const fn new(
+        kind: &'static str,
+        delivery: BackendEventDeliveryClass,
+        backpressure: BackendEventBackpressurePolicy,
+    ) -> Self {
+        Self {
+            kind,
+            delivery,
+            backpressure,
+        }
+    }
+
+    pub fn coalesces_on_frontend(self) -> bool {
+        matches!(self.delivery, BackendEventDeliveryClass::IdempotentLatest)
+    }
+}
+
+pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "workspace_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "active_work_projection",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "window_list",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "terminal_output",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "terminal_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "terminal_status",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "window_state",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktrees",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktree_selected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktree_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "file_content_text",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_content_hex",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_content_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "branch_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "board_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "board_history_page",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "profile_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "log_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "log_entry_appended",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_search_results",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_detail",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_bridge_phase_updated",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "branch_cleanup_result",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "branch_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "board_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "profile_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "log_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "project_open_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_parent_selected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "github_repository_search_results",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "github_repository_search_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_done",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "launch_wizard_open_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "launch_wizard_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "launch_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_index_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "runtime_hook_event",
+        BackendEventDeliveryClass::BestEffortDaemon,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "update_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "update_ready",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_apply_pending_persisted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_apply_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_preset_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_deleted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "backend_connection_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "migration_detected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "migration_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "migration_done",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "migration_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "system_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "system_settings_updated",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "system_settings_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "workspace_projection_prune_result",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "workspace_projection_prune_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "ui_trace_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "ui_trace_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+];
+
+pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
+    BACKEND_EVENT_POLICIES
+        .iter()
+        .find(|policy| policy.kind == kind)
+        .copied()
+}
+
+impl BackendEvent {
+    pub fn event_kind(&self) -> &'static str {
+        match self {
+            BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::TerminalOutput { .. } => "terminal_output",
+            BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::WindowState { .. } => "window_state",
+            BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
+            BackendEvent::FileTreeError { .. } => "file_tree_error",
+            BackendEvent::FileTreeWorktrees { .. } => "file_tree_worktrees",
+            BackendEvent::FileTreeWorktreeSelected { .. } => "file_tree_worktree_selected",
+            BackendEvent::FileTreeWorktreeError { .. } => "file_tree_worktree_error",
+            BackendEvent::FileContentText { .. } => "file_content_text",
+            BackendEvent::FileContentHex { .. } => "file_content_hex",
+            BackendEvent::FileContentError { .. } => "file_content_error",
+            BackendEvent::BranchEntries { .. } => "branch_entries",
+            BackendEvent::BoardEntries { .. } => "board_entries",
+            BackendEvent::BoardHistoryPage { .. } => "board_history_page",
+            BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
+            BackendEvent::LogEntries { .. } => "log_entries",
+            BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
+            BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
+            BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
+            BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
+            BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
+            BackendEvent::BranchError { .. } => "branch_error",
+            BackendEvent::BoardError { .. } => "board_error",
+            BackendEvent::ProfileError { .. } => "profile_error",
+            BackendEvent::LogError { .. } => "log_error",
+            BackendEvent::KnowledgeError { .. } => "knowledge_error",
+            BackendEvent::ProjectOpenError { .. } => "project_open_error",
+            BackendEvent::CloneProjectParentSelected { .. } => "clone_project_parent_selected",
+            BackendEvent::GithubRepositorySearchResults { .. } => {
+                "github_repository_search_results"
+            }
+            BackendEvent::GithubRepositorySearchError { .. } => "github_repository_search_error",
+            BackendEvent::CloneProjectProgress { .. } => "clone_project_progress",
+            BackendEvent::CloneProjectDone { .. } => "clone_project_done",
+            BackendEvent::CloneProjectError { .. } => "clone_project_error",
+            BackendEvent::LaunchWizardOpenError { .. } => "launch_wizard_open_error",
+            BackendEvent::LaunchWizardState { .. } => "launch_wizard_state",
+            BackendEvent::LaunchProgress { .. } => "launch_progress",
+            BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
+            BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
+            BackendEvent::UpdateState(_) => "update_state",
+            BackendEvent::UpdateProgress { .. } => "update_progress",
+            BackendEvent::UpdateReady { .. } => "update_ready",
+            BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
+            BackendEvent::UpdateApplyError { .. } => "update_apply_error",
+            BackendEvent::CustomAgentList { .. } => "custom_agent_list",
+            BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
+            BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
+            BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
+            BackendEvent::BackendConnectionResult { .. } => "backend_connection_result",
+            BackendEvent::CustomAgentError { .. } => "custom_agent_error",
+            BackendEvent::MigrationDetected { .. } => "migration_detected",
+            BackendEvent::MigrationProgress { .. } => "migration_progress",
+            BackendEvent::MigrationDone { .. } => "migration_done",
+            BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::SystemSettings { .. } => "system_settings",
+            BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
+            BackendEvent::SystemSettingsError { .. } => "system_settings_error",
+            BackendEvent::WorkspaceProjectionPruneResult { .. } => {
+                "workspace_projection_prune_result"
+            }
+            BackendEvent::WorkspaceProjectionPruneError { .. } => {
+                "workspace_projection_prune_error"
+            }
+            BackendEvent::UiTraceSaved { .. } => "ui_trace_saved",
+            BackendEvent::UiTraceError { .. } => "ui_trace_error",
+        }
+    }
+
+    pub fn delivery_policy(&self) -> BackendEventPolicy {
+        backend_event_policy(self.event_kind())
+            .expect("BackendEvent variant must be present in BACKEND_EVENT_POLICIES")
+    }
+}
+
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
 /// Serializes as `snake_case` string so the frontend can compare against
 /// literal values without string-matching the human-readable message.
@@ -1101,8 +1563,9 @@ mod tests {
     };
 
     use super::{
-        BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload,
+        backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
+        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload,
     };
 
     #[test]
@@ -1238,6 +1701,109 @@ mod tests {
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
         );
+    }
+
+    #[test]
+    fn backend_event_policy_classifies_high_risk_delivery_contract() {
+        let terminal_output =
+            backend_event_policy("terminal_output").expect("terminal_output policy");
+        assert_eq!(terminal_output.kind, "terminal_output");
+        assert_eq!(
+            terminal_output.delivery,
+            BackendEventDeliveryClass::Streamed
+        );
+        assert_eq!(
+            terminal_output.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
+        let workspace_state =
+            backend_event_policy("workspace_state").expect("workspace_state policy");
+        assert_eq!(
+            workspace_state.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            workspace_state.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+        assert!(workspace_state.coalesces_on_frontend());
+
+        let active_work_projection =
+            backend_event_policy("active_work_projection").expect("active_work_projection policy");
+        assert_eq!(
+            active_work_projection.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            active_work_projection.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+
+        let terminal_snapshot =
+            backend_event_policy("terminal_snapshot").expect("terminal_snapshot policy");
+        assert_eq!(
+            terminal_snapshot.delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            terminal_snapshot.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+        assert!(!terminal_snapshot.coalesces_on_frontend());
+
+        let runtime_hook_event =
+            backend_event_policy("runtime_hook_event").expect("runtime_hook_event policy");
+        assert_eq!(
+            runtime_hook_event.delivery,
+            BackendEventDeliveryClass::BestEffortDaemon
+        );
+        assert_eq!(
+            runtime_hook_event.backpressure,
+            BackendEventBackpressurePolicy::BestEffort
+        );
+    }
+
+    #[test]
+    fn frontend_coalescing_contract_matches_backend_latest_wins_policy() {
+        let frontend_dispatcher = include_str!("../web/socket-receive-dispatcher.js");
+
+        for kind in [
+            "workspace_state",
+            "active_work_projection",
+            "window_list",
+            "project_index_status",
+            "launch_wizard_state",
+            "update_state",
+        ] {
+            let policy = backend_event_policy(kind).expect("backend event policy");
+            assert!(
+                policy.coalesces_on_frontend(),
+                "{kind} should be latest-wins in backend policy"
+            );
+            assert!(
+                frontend_dispatcher.contains(&format!("\"{kind}\"")),
+                "{kind} should be listed in DEFAULT_COALESCE_KINDS"
+            );
+        }
+
+        for kind in ["terminal_output", "terminal_snapshot", "runtime_hook_event"] {
+            let policy = backend_event_policy(kind).expect("backend event policy");
+            assert!(
+                !policy.coalesces_on_frontend(),
+                "{kind} must preserve delivery semantics on the frontend"
+            );
+            assert!(
+                !frontend_dispatcher.contains(&format!("\"{kind}\"")),
+                "{kind} must not be listed in DEFAULT_COALESCE_KINDS"
+            );
+        }
+
+        let event = BackendEvent::TerminalOutput {
+            id: "tab-1::shell-1".to_string(),
+            data_base64: "ZWNobw==".to_string(),
+        };
+        assert_eq!(event.delivery_policy().kind, "terminal_output");
     }
 
     #[test]

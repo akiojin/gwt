@@ -60,6 +60,35 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+test("default coalescing policy mirrors backend latest-wins event policy", () => {
+  for (const kind of [
+    "workspace_state",
+    "active_work_projection",
+    "window_list",
+    "project_index_status",
+    "launch_wizard_state",
+    "update_state",
+  ]) {
+    assert.equal(
+      DEFAULT_COALESCE_KINDS.has(kind),
+      true,
+      `${kind} should collapse to the latest event`,
+    );
+  }
+
+  for (const kind of [
+    "terminal_output",
+    "terminal_snapshot",
+    "runtime_hook_event",
+  ]) {
+    assert.equal(
+      DEFAULT_COALESCE_KINDS.has(kind),
+      false,
+      `${kind} must preserve delivery semantics`,
+    );
+  }
+});
+
 test("dispatcher flushes once per frame and renders only the latest workspace_state", () => {
   const received = [];
   const scheduler = manualScheduler();
