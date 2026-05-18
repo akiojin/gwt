@@ -65,6 +65,17 @@ pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
+// SPEC-2009 Phase 2b — syntax highlighting for the File Tree text viewer.
+// highlight.js ES module + a dark GitHub-style theme. Bundled into the gwt
+// binary so the viewer works offline without CDN reach.
+pub fn highlight_js() -> &'static str {
+    include_str!("../web/vendor/highlight/highlight.min.js")
+}
+
+pub fn highlight_css() -> &'static str {
+    include_str!("../web/vendor/highlight/github-dark.min.css")
+}
+
 // SPEC-2356 Operator Design System — module assets.
 pub fn theme_manager_js() -> &'static str {
     include_str!("../web/theme-manager.js")
@@ -382,6 +393,17 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
+    )
+}
+
+pub async fn highlight_js_handler() -> impl IntoResponse {
+    js_response(highlight_js())
+}
+
+pub async fn highlight_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        highlight_css(),
     )
 }
 
