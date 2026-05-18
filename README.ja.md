@@ -96,6 +96,39 @@ gwt
 `http://127.0.0.1:<port>/` のような URL を出力します。ネイティブアプリの起動中は、
 同じ URL を通常のブラウザでも開けます。
 
+### Headless / Browser-only モード
+
+`gwt serve` (等価 alias: `gwt --headless`) は、ネイティブウィンドウを開かずに
+同じ UI を起動します。embedded HTTP / WebSocket サーバーだけが立ち上がり、
+オペレーターは出力された URL を任意のブラウザで開いて操作します。
+
+```bash
+gwt serve                              # 127.0.0.1、ランダムポート、手動オープン
+gwt serve --port 8787 --open           # 固定ポート + システムブラウザ自動起動
+gwt serve --bind 0.0.0.0 --port 8787   # LAN (VPN 越し含む) へ公開
+gwt --headless --port 8787             # `gwt serve --port 8787` と同じ
+```
+
+信頼境界は **LAN のみ** (VPN-extended LAN を含む) です。`gwt serve` には
+TLS 終端、認証ゲート、レート制限は組み込まれていません。`--bind` で
+公開した IP に到達できる主体はすべて trusted と見なされ、ターミナル起動を
+含む全 UI 操作が可能になります。既定値は `127.0.0.1` で、ネイティブ GUI と
+同じローカルループバック信頼モデルを維持します。外部からアクセスする場合は、
+ポートを公開インターネットに晒さず、VPN (Tailscale、WireGuard など) 越しで
+LAN に入ってから接続してください。
+
+すべての HTTP / WebSocket リクエストは `tracing::info!(target = "gwt_access",
+...)` で記録されるため、stderr と `~/.gwt/logs/<date>/` で「どこからアクセス
+されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
+ヘルスチェックでログが埋まりません。
+
+Lifecycle: `gwt serve` プロセスが agent / PTY の寿命を所有します。ブラウザの
+タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取った
+ときに、PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。
+GUI と headless は別の lock kind を使うので、同じ worktree で `gwt` と
+`gwt serve` を同時に起動できます。起動時に共存 warning が stderr に出るので、
+意図しない並走は気付けます。
+
 CLI サブコマンドは `gwtd` で処理され、GUI は起動しません。
 
 ```bash

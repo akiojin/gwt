@@ -98,6 +98,39 @@ directory. The app also starts a local HTTP/WebSocket server for the WebView
 surface and prints a URL such as `http://127.0.0.1:<port>/` to stderr. You can
 open that URL in a regular browser while the native app is running.
 
+### Headless / Browser-only mode
+
+`gwt serve` (equivalent alias: `gwt --headless`) launches the same UI without
+opening a native window. The embedded HTTP / WebSocket server stays up and
+the operator opens the printed URL in any browser instead.
+
+```bash
+gwt serve                              # 127.0.0.1, random port, manual open
+gwt serve --port 8787 --open           # fixed port + system browser
+gwt serve --bind 0.0.0.0 --port 8787   # share with the LAN (VPN-extended)
+gwt --headless --port 8787             # same as `gwt serve --port 8787`
+```
+
+Trust boundary: **LAN only** (including VPN-extended LAN). `gwt serve` does
+not ship TLS termination, an authentication gate, or rate limiting. Anyone
+that can reach the bind address can drive the embedded UI, which includes
+spawning terminals. The `--bind` flag is opt-in: the default `127.0.0.1`
+keeps the same loopback-trust behaviour as the native GUI. For external
+access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather than
+exposing the port to the public Internet.
+
+Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
+"gwt_access", ...)` so the operator can see *which* peer is connecting in
+real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
+`debug!` to avoid drowning the stream with health probes.
+
+Lifecycle: the `gwt serve` process owns the agent / PTY lifetime. Closing a
+browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM`
+asks the server to drain PTYs and exit gracefully. The GUI and a headless
+session for the same worktree are isolated by separate lock kinds, so you
+can run `gwt` and `gwt serve` together; a startup warning surfaces the
+co-existence so it is intentional, not accidental.
+
 CLI subcommands run through `gwtd` without opening a GUI window:
 
 ```bash

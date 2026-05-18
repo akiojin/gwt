@@ -178,6 +178,31 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     }
 }
 
+/// SPEC-1942 US-14 / FR-095: best-effort `--open` implementation. Spawns the
+/// platform-specific browser launcher (`open` on macOS, `xdg-open` on Linux,
+/// `cmd /C start` on Windows) and detaches; failures are logged but never
+/// block the server, matching the acceptance scenario "spawn failure prints
+/// the URL on stderr and the server keeps running".
+fn spawn_open_default_browser(url: &str) {
+    let url_owned = url.to_string();
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url_owned).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url_owned])
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(&url_owned)
+            .spawn()
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "gwt serve: could not auto-open browser ({error}); open this URL manually: {url_owned}"
+        );
+    }
+}
+
 fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
 }
@@ -5771,9 +5796,10 @@ fn main() -> wry::Result<()> {
     gwt_agent::environment::apply_host_path_hydration_to_std_env();
 
     let argv: Vec<String> = std::env::args().collect();
+    let route = front_door_route(&argv);
     if !matches!(
-        front_door_route(&argv),
-        runtime_support::FrontDoorRoute::Gui
+        route,
+        runtime_support::FrontDoorRoute::Gui | runtime_support::FrontDoorRoute::Headless
     ) {
         attach_parent_console_for_cli();
         if let Err(error) = run_cli(&argv) {
@@ -5781,6 +5807,19 @@ fn main() -> wry::Result<()> {
             std::process::exit(1);
         }
     }
+
+    // SPEC-1942 US-14: parse `gwt serve` / `gwt --headless` argv up front so a
+    // bad flag bundle fails fast before any bootstrap side effects.
+    let serve_args = match route {
+        runtime_support::FrontDoorRoute::Headless => match gwt::cli::serve::parse(&argv[1..]) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                eprintln!("gwt serve: {error}");
+                std::process::exit(2);
+            }
+        },
+        _ => None,
+    };
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
@@ -5793,17 +5832,28 @@ fn main() -> wry::Result<()> {
     }
 
     let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let _gui_instance_lock = match gwt::gui_single_instance::acquire_gui_instance_lock(
+    let lock_kind = if serve_args.is_some() {
+        gwt::gui_single_instance::LockKind::Headless
+    } else {
+        gwt::gui_single_instance::LockKind::Gui
+    };
+    let lock_role_label = if serve_args.is_some() {
+        "headless"
+    } else {
+        "GUI"
+    };
+    let _instance_lock_outcome = match gwt::gui_single_instance::acquire_instance_lock(
         &gwt_core::paths::gwt_home(),
         &startup_dir,
+        lock_kind,
     ) {
-        Ok(lock) => lock,
+        Ok(outcome) => outcome,
         Err(error @ gwt::gui_single_instance::GuiInstanceLockError::AlreadyRunning { .. }) => {
-            eprintln!("gwt GUI startup failed: {error}");
+            eprintln!("gwt {lock_role_label} startup failed: {error}");
             std::process::exit(2);
         }
         Err(error) => {
-            eprintln!("gwt GUI startup failed: {error}");
+            eprintln!("gwt {lock_role_label} startup failed: {error}");
             std::process::exit(1);
         }
     };
@@ -5867,8 +5917,14 @@ fn main() -> wry::Result<()> {
         }
     }
 
-    let mut server = EmbeddedServer::start(
+    let (bind_addr, bind_port) = match serve_args.as_ref() {
+        Some(args) => (args.bind, args.port),
+        None => (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0_u16),
+    };
+    let mut server = EmbeddedServer::start_with_bind(
         &runtime,
+        bind_addr,
+        bind_port,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
         pty_writers,
@@ -5877,6 +5933,9 @@ fn main() -> wry::Result<()> {
     app.set_hook_forward_target(server.hook_forward_target());
     let front_door = gui_front_door_launch_surface(server.url());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
+    if serve_args.is_some() {
+        eprintln!("gwt serve: press Ctrl-C to stop");
+    }
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
     // written to that path so the CI workflow can read it back into
@@ -5894,46 +5953,92 @@ fn main() -> wry::Result<()> {
         app.active_project_root().map(Path::to_path_buf),
     );
 
-    let window = WindowBuilder::new()
-        .with_title(APP_NAME)
-        .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
-        .build(&event_loop)
-        .expect("window");
+    // SPEC-1942 US-14: GUI path builds a wry/tao surface; headless path keeps
+    // the event_loop alive without any native window so the same closure can
+    // process UserEvent::Frontend / RuntimeHook / QuitApp messages from
+    // browser clients and signal handlers alike.
+    let webview_surface: Option<wry::WebView> = if serve_args.is_none() {
+        let window = WindowBuilder::new()
+            .with_title(APP_NAME)
+            .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
+            .build(&event_loop)
+            .expect("window");
+        let builder = WebViewBuilder::new().with_url(front_door.webview_url);
+
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android"
+        ))]
+        let webview = builder.build(&window)?;
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android"
+        )))]
+        let webview = {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+            let vbox = window.default_vbox().unwrap();
+            builder.build_gtk(vbox)?
+        };
+        // Keep the Window alive on the heap for the lifetime of the event
+        // loop. WebView holds the underlying NSWindow / HWND alive via the
+        // platform handle, but Box<Window> would still drop the Rust struct
+        // when this block ends — which is fine because the OS window stays.
+        let _ = window;
+        Some(webview)
+    } else {
+        None
+    };
+
     #[cfg(target_os = "macos")]
-    let native_menu = {
-        let native_menu = gwt::MacosNativeMenu::new();
-        native_menu.init_for_app();
-        native_menu
+    let native_menu = if serve_args.is_none() {
+        let menu = gwt::MacosNativeMenu::new();
+        menu.init_for_app();
+        Some(menu)
+    } else {
+        None
     };
 
-    let builder = WebViewBuilder::new().with_url(front_door.webview_url);
-
-    #[cfg(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    ))]
-    let webview = builder.build(&window)?;
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    )))]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().unwrap();
-        builder.build_gtk(vbox)?
-    };
+    // SPEC-1942 US-14 / FR-097: in headless mode, Ctrl-C / SIGTERM are the
+    // only way to ask the server to shut down. Route both through the
+    // existing `UserEvent::QuitApp` path so the event_loop closure can run
+    // the same graceful shutdown sequence as the GUI close button.
+    if serve_args.is_some() {
+        let proxy_for_signal = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = proxy_for_signal.send_event(UserEvent::QuitApp);
+            }
+        }));
+        #[cfg(unix)]
+        {
+            let proxy_for_term = proxy.clone();
+            drop(runtime.handle().spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    if sig.recv().await.is_some() {
+                        let _ = proxy_for_term.send_event(UserEvent::QuitApp);
+                    }
+                }
+            }));
+        }
+        if let Some(args) = serve_args.as_ref() {
+            if args.open {
+                spawn_open_default_browser(server.url());
+            }
+        }
+    }
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        let _ = &webview;
+        let _ = webview_surface.as_ref();
         let _ = &runtime;
         #[cfg(target_os = "macos")]
-        let _ = &native_menu;
+        let _ = native_menu.as_ref();
 
         match event {
             Event::WindowEvent {
@@ -6320,8 +6425,15 @@ fn main() -> wry::Result<()> {
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
-                            if let Err(error) = webview.reload() {
-                                eprintln!("webview reload failed: {error}");
+                            // SPEC-1942 US-14: headless mode has no native
+                            // WebView; the menu item itself only ships in
+                            // GUI builds, but guard against accidental
+                            // dispatch when the headless path leaves the
+                            // option as `None`.
+                            if let Some(webview) = webview_surface.as_ref() {
+                                if let Err(error) = webview.reload() {
+                                    eprintln!("webview reload failed: {error}");
+                                }
                             }
                         }
                     }
