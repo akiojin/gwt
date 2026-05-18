@@ -3948,8 +3948,12 @@
 
       function renderFileTreeViewer(windowId) {
         const state = ensureFileTreeState(windowId);
+        // The workspace window element exposes its id via `data-id`
+        // (see `ensureWindow`), not `data-window-id`. Using the right
+        // attribute is required for the viewer DOM lookup to resolve in
+        // both production and Playwright fixtures.
         const surface = document.querySelector(
-          `[data-window-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
+          `[data-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
         );
         if (!surface) return;
         const header = surface.querySelector(".file-tree-viewer-header");
