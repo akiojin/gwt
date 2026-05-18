@@ -2053,6 +2053,34 @@ impl AppRuntime {
                 client_id,
                 self.load_file_content_event(&id, &path, mode, hex_offset, hex_length),
             )],
+            FrontendEvent::SaveFileContent {
+                id,
+                path,
+                mode,
+                expected_mtime,
+                expected_size,
+                text,
+                encoding,
+                newline,
+                has_bom,
+                hex_offset,
+                hex_byte,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                self.save_file_content_event(
+                    &id,
+                    &path,
+                    mode,
+                    expected_mtime,
+                    expected_size,
+                    text,
+                    encoding,
+                    newline,
+                    has_bom,
+                    hex_offset,
+                    hex_byte,
+                ),
+            )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
@@ -3456,68 +3484,170 @@ impl AppRuntime {
                 }
             };
 
-        let Some(address) = self.window_lookup.get(id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Window not found".to_string(),
-                None,
-                None,
-            );
+        let root = match self.resolve_file_tree_root(id) {
+            Ok(root) => root,
+            Err(message) => {
+                let kind = if message == "Window is not a file tree" {
+                    FileContentErrorKind::WindowMismatch
+                } else {
+                    FileContentErrorKind::WindowNotFound
+                };
+                return make_error(kind, message, None, None);
+            }
         };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Project tab not found".to_string(),
-                None,
-                None,
-            );
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Window not found".to_string(),
-                None,
-                None,
-            );
-        };
-
-        if window.preset != WindowPreset::FileTree {
-            return make_error(
-                FileContentErrorKind::WindowMismatch,
-                "Window is not a file tree".to_string(),
-                None,
-                None,
-            );
-        }
 
         let relative_path = Path::new(path);
         let limits = ContentLimits::default();
 
         match mode {
-            FileContentMode::Text => {
-                match read_text_file(&tab.project_root, relative_path, &limits) {
-                    Ok(result) => BackendEvent::FileContentText {
-                        id: id.to_string(),
-                        path: path.to_string(),
-                        encoding: result.encoding,
-                        text: result.text,
-                        total_size: result.total_size,
-                    },
-                    Err(err) => file_content_error_to_event(id, path, err),
-                }
-            }
+            FileContentMode::Text => match read_text_file(&root, relative_path, &limits) {
+                Ok(result) => BackendEvent::FileContentText {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    encoding: result.encoding,
+                    text: result.text,
+                    total_size: result.total_size,
+                    mtime: result.mtime,
+                    has_bom: result.has_bom,
+                    newline: result.newline,
+                    read_only: result.read_only,
+                },
+                Err(err) => file_content_error_to_event(id, path, err),
+            },
             FileContentMode::Hex => {
                 let offset = hex_offset.unwrap_or(0);
                 let length = hex_length.unwrap_or(64 * 16);
-                match read_binary_chunk(&tab.project_root, relative_path, offset, length, &limits) {
+                match read_binary_chunk(&root, relative_path, offset, length, &limits) {
                     Ok(chunk) => BackendEvent::FileContentHex {
                         id: id.to_string(),
                         path: path.to_string(),
                         offset: chunk.offset,
                         bytes_b64: base64::engine::general_purpose::STANDARD.encode(chunk.bytes),
                         total_size: chunk.total_size,
+                        mtime: chunk.mtime,
+                        read_only: chunk.read_only,
                     },
                     Err(err) => file_content_error_to_event(id, path, err),
+                }
+            }
+        }
+    }
+
+    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
+    /// byte back to disk, mapping every domain error to the structured
+    /// `FileContentSaveErrorKind` variant the GUI listens for.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_file_content_event(
+        &self,
+        id: &str,
+        path: &str,
+        mode: FileContentMode,
+        expected_mtime: u64,
+        expected_size: u64,
+        text: Option<String>,
+        encoding: Option<gwt::Encoding>,
+        newline: Option<gwt::Newline>,
+        has_bom: Option<bool>,
+        hex_offset: Option<u64>,
+        hex_byte: Option<u8>,
+    ) -> BackendEvent {
+        let root = match self.resolve_file_tree_root(id) {
+            Ok(root) => root,
+            Err(message) => {
+                let kind = if message == "Window is not a file tree" {
+                    gwt::FileContentSaveErrorKind::WindowMismatch
+                } else {
+                    gwt::FileContentSaveErrorKind::WindowNotFound
+                };
+                return BackendEvent::FileContentSaveError {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    mode,
+                    error_kind: kind,
+                    message,
+                    current_mtime: None,
+                    current_size: None,
+                };
+            }
+        };
+
+        let relative_path = Path::new(path);
+        let limits = ContentLimits::default();
+        let expected = gwt::ExpectedMetadata {
+            mtime: expected_mtime,
+            size: expected_size,
+        };
+
+        match mode {
+            FileContentMode::Text => {
+                let Some(text) = text else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(text) missing text payload".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                let encoding = encoding.unwrap_or(gwt::Encoding::Utf8);
+                let newline = newline.unwrap_or(gwt::Newline::Lf);
+                let has_bom = has_bom.unwrap_or(false);
+                match gwt::write_text_file(
+                    &root,
+                    relative_path,
+                    &text,
+                    encoding,
+                    newline,
+                    has_bom,
+                    expected,
+                    &limits,
+                ) {
+                    Ok(outcome) => BackendEvent::FileContentSaved {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        mode,
+                        new_mtime: outcome.new_mtime,
+                        new_size: outcome.new_size,
+                        encoding_fallback: outcome.encoding_fallback,
+                    },
+                    Err(err) => write_error_to_event(id, path, mode, err),
+                }
+            }
+            FileContentMode::Hex => {
+                let Some(offset) = hex_offset else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(hex) missing hex_offset".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                let Some(byte) = hex_byte else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(hex) missing hex_byte".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                match gwt::write_binary_byte(&root, relative_path, offset, byte, expected) {
+                    Ok(outcome) => BackendEvent::FileContentSaved {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        mode,
+                        new_mtime: outcome.new_mtime,
+                        new_size: outcome.new_size,
+                        encoding_fallback: outcome.encoding_fallback,
+                    },
+                    Err(err) => write_error_to_event(id, path, mode, err),
                 }
             }
         }
@@ -6540,6 +6670,69 @@ fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<Pa
     Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
 }
 
+fn file_content_save_error(
+    id: &str,
+    path: &str,
+    mode: FileContentMode,
+    kind: gwt::FileContentSaveErrorKind,
+    message: String,
+    current_mtime: Option<u64>,
+    current_size: Option<u64>,
+) -> BackendEvent {
+    BackendEvent::FileContentSaveError {
+        id: id.to_string(),
+        path: path.to_string(),
+        mode,
+        error_kind: kind,
+        message,
+        current_mtime,
+        current_size,
+    }
+}
+
+fn write_error_to_event(
+    id: &str,
+    path: &str,
+    mode: FileContentMode,
+    err: FileContentError,
+) -> BackendEvent {
+    use gwt::FileContentSaveErrorKind as Kind;
+    let (kind, message, current_mtime, current_size) = match err {
+        FileContentError::Denied => (Kind::Denied, "Access denied".to_string(), None, None),
+        FileContentError::TooLarge { size, limit } => (
+            Kind::TooLarge,
+            format!("File too large ({} bytes, limit {})", size, limit),
+            None,
+            None,
+        ),
+        FileContentError::IoError(message) => (Kind::IoError, message, None, None),
+        FileContentError::NotAFile => (Kind::NotAFile, "Not a file".to_string(), None, None),
+        FileContentError::BinaryNotText => (
+            Kind::IoError,
+            "Cannot decode as text".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::Conflict {
+            current_mtime,
+            current_size,
+        } => (
+            Kind::Conflict,
+            format!("File changed externally (current mtime={current_mtime}, size={current_size})"),
+            Some(current_mtime),
+            Some(current_size),
+        ),
+        FileContentError::ReadOnly => (Kind::ReadOnly, "File is read-only".to_string(), None, None),
+        FileContentError::OutOfRange { offset, size } => (
+            Kind::OutOfRange,
+            format!("Offset {offset} is outside file (size {size})"),
+            None,
+            Some(size),
+        ),
+    };
+    file_content_save_error(id, path, mode, kind, message, current_mtime, current_size)
+}
+
 fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> BackendEvent {
     let (kind, message, size, limit) = match err {
         FileContentError::Denied => (
@@ -6565,6 +6758,31 @@ fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> B
             FileContentErrorKind::BinaryNotText,
             "Cannot decode as text".to_string(),
             None,
+            None,
+        ),
+        // SPEC-2006 Phase 2 variants are write-only and should never reach
+        // the read-path mapping. Map defensively to IoError so the read
+        // surface keeps working if a future caller funnels them here by
+        // mistake; the write surface owns the structured Save error variant.
+        FileContentError::Conflict {
+            current_mtime,
+            current_size,
+        } => (
+            FileContentErrorKind::IoError,
+            format!("Unexpected Conflict in read path (mtime={current_mtime} size={current_size})"),
+            Some(current_size),
+            None,
+        ),
+        FileContentError::ReadOnly => (
+            FileContentErrorKind::IoError,
+            "Unexpected ReadOnly in read path".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::OutOfRange { offset, size } => (
+            FileContentErrorKind::IoError,
+            format!("Unexpected OutOfRange in read path (offset={offset} size={size})"),
+            Some(size),
             None,
         ),
     };

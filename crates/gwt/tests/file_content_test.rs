@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gwt::file_content::{
-    file_kind, read_binary_chunk, read_text_file, ContentLimits, Encoding, FileContentError,
-    FileKind,
+    file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file,
+    ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline,
 };
 use tempfile::tempdir;
 
@@ -255,4 +255,327 @@ fn read_binary_chunk_returns_empty_chunk_for_zero_byte_file() {
     assert_eq!(chunk.offset, 0);
     assert!(chunk.bytes.is_empty());
     assert_eq!(chunk.total_size, 0);
+}
+
+// SPEC-2006 Phase 2 amendment: read_text_file must expose mtime/has_bom/newline
+// so the GUI can preserve them across a save round-trip.
+#[test]
+fn read_text_file_detects_crlf_lf_and_bom_metadata() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "lf.txt", b"alpha\nbeta\n");
+    write_at(dir.path(), "crlf.txt", b"alpha\r\nbeta\r\n");
+    write_at(dir.path(), "bom.txt", b"\xEF\xBB\xBFhello\n");
+
+    let limits = ContentLimits::default();
+
+    let lf = read_text_file(dir.path(), Path::new("lf.txt"), &limits).expect("lf");
+    assert_eq!(lf.newline, Newline::Lf);
+    assert!(!lf.has_bom);
+    assert!(
+        lf.mtime > 0,
+        "mtime should be populated from filesystem metadata"
+    );
+    assert_eq!(lf.total_size, 11);
+
+    let crlf = read_text_file(dir.path(), Path::new("crlf.txt"), &limits).expect("crlf");
+    assert_eq!(crlf.newline, Newline::Crlf);
+    assert!(!crlf.has_bom);
+
+    let bom = read_text_file(dir.path(), Path::new("bom.txt"), &limits).expect("bom");
+    assert!(bom.has_bom);
+    assert_eq!(bom.encoding, Encoding::Utf8);
+    assert_eq!(bom.newline, Newline::Lf);
+}
+
+#[test]
+fn write_text_file_round_trips_utf8_lf_without_bom() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "note.txt", b"hello\n");
+
+    let limits = ContentLimits::default();
+    let before = read_text_file(dir.path(), Path::new("note.txt"), &limits).expect("read");
+    let outcome = write_text_file(
+        dir.path(),
+        Path::new("note.txt"),
+        "hello world\n",
+        before.encoding,
+        before.newline,
+        before.has_bom,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+        &limits,
+    )
+    .expect("write");
+    assert_eq!(outcome.encoding_fallback, 0);
+    assert!(outcome.new_size >= "hello world\n".len() as u64);
+
+    let after_bytes = std::fs::read(dir.path().join("note.txt")).expect("re-read");
+    assert_eq!(after_bytes, b"hello world\n".to_vec());
+}
+
+#[test]
+fn write_text_file_preserves_utf8_bom_and_crlf_round_trip() {
+    let dir = tempdir().expect("tempdir");
+    let original: &[u8] = b"\xEF\xBB\xBFalpha\r\nbeta\r\n";
+    write_at(dir.path(), "crlf-bom.txt", original);
+
+    let limits = ContentLimits::default();
+    let before = read_text_file(dir.path(), Path::new("crlf-bom.txt"), &limits).expect("read");
+    assert!(before.has_bom);
+    assert_eq!(before.newline, Newline::Crlf);
+
+    write_text_file(
+        dir.path(),
+        Path::new("crlf-bom.txt"),
+        &before.text,
+        before.encoding,
+        before.newline,
+        before.has_bom,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+        &limits,
+    )
+    .expect("write");
+
+    let after_bytes = std::fs::read(dir.path().join("crlf-bom.txt")).expect("re-read");
+    assert_eq!(
+        after_bytes,
+        original.to_vec(),
+        "BOM + CRLF must survive a round-trip"
+    );
+}
+
+#[test]
+fn write_text_file_round_trips_shift_jis_and_euc_jp() {
+    let dir = tempdir().expect("tempdir");
+    let sjis = encoding_rs::SHIFT_JIS.encode("こんにちは\n").0.into_owned();
+    write_at(dir.path(), "sjis.txt", &sjis);
+    let euc = encoding_rs::EUC_JP.encode("こんばんは\n").0.into_owned();
+    write_at(dir.path(), "euc.txt", &euc);
+
+    let limits = ContentLimits::default();
+    for (name, expected_enc) in [
+        ("sjis.txt", Encoding::ShiftJis),
+        ("euc.txt", Encoding::EucJp),
+    ] {
+        let before = read_text_file(dir.path(), Path::new(name), &limits).expect("read");
+        assert_eq!(before.encoding, expected_enc);
+        let mutated = format!("{}追記\n", before.text);
+        let outcome = write_text_file(
+            dir.path(),
+            Path::new(name),
+            &mutated,
+            before.encoding,
+            before.newline,
+            before.has_bom,
+            ExpectedMetadata {
+                mtime: before.mtime,
+                size: before.total_size,
+            },
+            &limits,
+        )
+        .expect("write");
+        assert_eq!(
+            outcome.encoding_fallback, 0,
+            "Japanese text must encode without fallback"
+        );
+
+        let after = read_text_file(dir.path(), Path::new(name), &limits).expect("re-read");
+        assert_eq!(after.encoding, expected_enc);
+        assert_eq!(after.text, mutated);
+    }
+}
+
+#[test]
+fn write_text_file_rejects_conflict_when_mtime_mismatches() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "race.txt", b"original\n");
+
+    let limits = ContentLimits::default();
+    let before = read_text_file(dir.path(), Path::new("race.txt"), &limits).expect("read");
+
+    // Simulate an external editor mutating the file after we read it.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(dir.path().join("race.txt"), b"external write\n").expect("external write");
+
+    let err = write_text_file(
+        dir.path(),
+        Path::new("race.txt"),
+        "our edit\n",
+        before.encoding,
+        before.newline,
+        before.has_bom,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+        &limits,
+    )
+    .expect_err("conflict");
+    match err {
+        FileContentError::Conflict { current_size, .. } => {
+            assert_eq!(current_size, b"external write\n".len() as u64);
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+
+    // Disk content must remain the external write — atomic write never ran.
+    let on_disk = std::fs::read(dir.path().join("race.txt")).expect("re-read");
+    assert_eq!(on_disk, b"external write\n".to_vec());
+}
+
+#[test]
+fn write_text_file_rejects_read_only_files() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "ro.txt", b"keep\n");
+    let target = dir.path().join("ro.txt");
+    let mut perms = std::fs::metadata(&target).expect("metadata").permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&target, perms).expect("chmod ro");
+
+    let limits = ContentLimits::default();
+    let before = read_text_file(dir.path(), Path::new("ro.txt"), &limits).expect("read");
+    assert!(
+        before.read_only,
+        "TextResult.read_only must reflect permissions"
+    );
+
+    let err = write_text_file(
+        dir.path(),
+        Path::new("ro.txt"),
+        "new\n",
+        before.encoding,
+        before.newline,
+        before.has_bom,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+        &limits,
+    )
+    .expect_err("read-only");
+    assert!(matches!(err, FileContentError::ReadOnly));
+
+    // Restore writeable so tempdir cleanup succeeds.
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        let mut perms = std::fs::metadata(&target).expect("metadata").permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&target, perms);
+    }
+}
+
+#[test]
+fn write_text_file_rejects_deny_rule_targets() {
+    let dir = tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".git")).expect("create .git");
+    write_at(dir.path(), ".git/HEAD", b"ref: refs/heads/main\n");
+
+    let limits = ContentLimits::default();
+    let err = write_text_file(
+        dir.path(),
+        Path::new(".git/HEAD"),
+        "ref: refs/heads/feature\n",
+        Encoding::Utf8,
+        Newline::Lf,
+        false,
+        ExpectedMetadata { mtime: 0, size: 0 },
+        &limits,
+    )
+    .expect_err("deny");
+    assert!(matches!(err, FileContentError::Denied));
+}
+
+#[test]
+fn write_binary_byte_replaces_a_single_byte_in_place() {
+    let dir = tempdir().expect("tempdir");
+    let payload: Vec<u8> = (0u8..16).collect();
+    write_at(dir.path(), "bin.dat", &payload);
+
+    let limits = ContentLimits::default();
+    let before = read_binary_chunk(dir.path(), Path::new("bin.dat"), 0, 16, &limits).expect("read");
+
+    let outcome = write_binary_byte(
+        dir.path(),
+        Path::new("bin.dat"),
+        4,
+        0xAB,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+    )
+    .expect("write");
+    assert_eq!(
+        outcome.new_size, 16,
+        "single-byte replace must not change file size"
+    );
+
+    let after = std::fs::read(dir.path().join("bin.dat")).expect("re-read");
+    assert_eq!(after[4], 0xAB);
+    assert_eq!(after.len(), 16);
+    // Other bytes must be untouched.
+    for i in [0usize, 3, 5, 15] {
+        assert_eq!(after[i], i as u8);
+    }
+}
+
+#[test]
+fn write_binary_byte_returns_out_of_range_for_offset_at_or_beyond_size() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "tiny.dat", &[0xCAu8, 0xFE]);
+
+    let limits = ContentLimits::default();
+    let before = read_binary_chunk(dir.path(), Path::new("tiny.dat"), 0, 2, &limits).expect("read");
+
+    let err = write_binary_byte(
+        dir.path(),
+        Path::new("tiny.dat"),
+        2,
+        0x00,
+        ExpectedMetadata {
+            mtime: before.mtime,
+            size: before.total_size,
+        },
+    )
+    .expect_err("oor");
+    match err {
+        FileContentError::OutOfRange { offset, size } => {
+            assert_eq!(offset, 2);
+            assert_eq!(size, 2);
+        }
+        other => panic!("expected OutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn write_binary_byte_rejects_conflict_and_deny() {
+    let dir = tempdir().expect("tempdir");
+    write_at(dir.path(), "data.bin", &[0u8, 1, 2, 3]);
+
+    let conflict_err = write_binary_byte(
+        dir.path(),
+        Path::new("data.bin"),
+        1,
+        0xFF,
+        ExpectedMetadata { mtime: 0, size: 99 },
+    )
+    .expect_err("conflict");
+    assert!(matches!(conflict_err, FileContentError::Conflict { .. }));
+
+    std::fs::create_dir_all(dir.path().join(".gwt")).expect("create .gwt");
+    write_at(dir.path(), ".gwt/state.bin", &[0u8; 8]);
+    let deny_err = write_binary_byte(
+        dir.path(),
+        Path::new(".gwt/state.bin"),
+        0,
+        0x42,
+        ExpectedMetadata { mtime: 0, size: 0 },
+    )
+    .expect_err("deny");
+    assert!(matches!(deny_err, FileContentError::Denied));
 }
