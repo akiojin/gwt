@@ -25,6 +25,11 @@ pub fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
+// SPEC-2013 FR-012: close project tab confirm modal renderer.
+pub fn close_project_tab_confirm_modal_js() -> &'static str {
+    include_str!("../web/close-project-tab-confirm-modal.js")
+}
+
 pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
@@ -67,6 +72,17 @@ pub fn xterm_fit_js() -> &'static str {
 
 pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
+}
+
+// SPEC-2009 Phase 2b — syntax highlighting for the File Tree text viewer.
+// highlight.js ES module + a dark GitHub-style theme. Bundled into the gwt
+// binary so the viewer works offline without CDN reach.
+pub fn highlight_js() -> &'static str {
+    include_str!("../web/vendor/highlight/highlight.min.js")
+}
+
+pub fn highlight_css() -> &'static str {
+    include_str!("../web/vendor/highlight/github-dark.min.css")
 }
 
 // SPEC-2356 Operator Design System — module assets.
@@ -171,6 +187,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/branch-cleanup-modal.js",
         source: branch_cleanup_modal_js,
         marker: "renderBranchCleanupModal",
+    },
+    RootJsModuleAsset {
+        path: "/close-project-tab-confirm-modal.js",
+        source: close_project_tab_confirm_modal_js,
+        marker: "renderCloseProjectTabConfirmModal",
     },
     RootJsModuleAsset {
         path: "/migration-modal.js",
@@ -391,6 +412,17 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
+    )
+}
+
+pub async fn highlight_js_handler() -> impl IntoResponse {
+    js_response(highlight_js())
+}
+
+pub async fn highlight_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        highlight_css(),
     )
 }
 
@@ -1809,6 +1841,7 @@ mod tests {
 
         for module_path in [
             "/branch-cleanup-modal.js",
+            "/close-project-tab-confirm-modal.js",
             "/migration-modal.js",
             "/window-docking.js",
             "/board-surface.js",

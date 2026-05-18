@@ -1535,6 +1535,76 @@ kbd.op-kbd {
   color: var(--color-canvas);
   border-color: var(--color-state-active);
 }
+/* SPEC-2013 FR-012: destructive variant — used by the project tab close
+   confirm modal's `Close anyway` action to telegraph that running agents
+   will be stopped. Falls back to `--color-state-danger` if defined,
+   otherwise a neutral red so the variant stays visible regardless of
+   theme token availability. */
+:root[data-theme] .wizard-button.destructive,
+:root[data-theme] .wizard-button.primary.destructive {
+  background: var(--color-state-danger, #c83a3a);
+  color: var(--color-canvas, #ffffff);
+  border-color: var(--color-state-danger, #c83a3a);
+}
+:root[data-theme] .wizard-button.destructive:hover,
+:root[data-theme] .wizard-button.primary.destructive:hover {
+  background: var(--color-state-danger-hover, #d24f4f);
+  border-color: var(--color-state-danger-hover, #d24f4f);
+}
+
+/* SPEC-2013 FR-012: close project tab confirm modal layout primitives.
+   Reuses .modal-backdrop / .modal-shell base from existing modals; only
+   the body / list spacing and footer alignment are scoped here. */
+.close-project-tab-modal-shell {
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 480px;
+}
+.close-project-tab-modal__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.close-project-tab-modal__subtitle {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__summary {
+  margin: 0;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-item::before {
+  content: "•";
+  margin-right: 6px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__agent-branch {
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__more {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+.close-project-tab-modal__footer.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
 
 /* Floating window chrome */
 :root[data-theme] .window {
@@ -3464,4 +3534,82 @@ kbd.op-kbd {
   padding: var(--space-3);
   border-top: 1px solid var(--color-border);
   justify-content: flex-end;
+}
+
+/* SPEC-2009 Phase 2b — File Tree text viewer syntax highlighting overlay.
+   The editor stacks a highlighted <pre> beneath a transparent <textarea>.
+   Both use identical monospace metrics so the caret aligns over the
+   colored tokens. The textarea's text color is transparent so only the
+   highlighted layer is visible; the caret stays opaque via caret-color. */
+:root[data-theme] .file-tree-viewer-editor-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl,
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.5;
+  letter-spacing: var(--tracking-mono);
+  white-space: pre;
+  word-spacing: 0;
+  tab-size: 4;
+  overflow: auto;
+  border: 0;
+  box-sizing: border-box;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl {
+  z-index: 0;
+  pointer-events: none;
+  background: var(--color-surface);
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > .file-tree-viewer-hl code.hljs {
+  display: block;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor {
+  z-index: 1;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--color-text);
+  resize: none;
+  outline: none;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor::selection {
+  background: var(--color-state-active);
+  color: transparent;
+}
+
+:root[data-theme] .file-tree-viewer-editor-wrap > textarea.file-tree-viewer-editor:focus-visible {
+  outline: 2px solid var(--color-state-active);
+  outline-offset: -2px;
+}
+
+:root[data-theme] .file-tree-viewer-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-strong, var(--color-text));
+  background: var(--color-surface-elevated, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0 6px;
+  font-size: var(--type-2xs);
 }

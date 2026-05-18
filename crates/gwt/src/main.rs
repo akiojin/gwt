@@ -1313,6 +1313,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_handlers_are_owned_by_runtime_events_module() {
+        let runtime_mod_source = include_str!("app_runtime/mod.rs");
+        let runtime_events_source = include_str!("app_runtime/runtime_events.rs");
+
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_output"),
+            "runtime output handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_status"),
+            "runtime status handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_hook_event"),
+            "runtime hook handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("RuntimeDaemonPublish"),
+            "daemon publish queue should live beside runtime event handlers"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_output"),
+            "app_runtime/mod.rs should not regain runtime output handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_status"),
+            "app_runtime/mod.rs should not regain runtime status handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_hook_event"),
+            "app_runtime/mod.rs should not regain runtime hook handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_daemon_runtime_"),
+            "app_runtime/mod.rs should not regain daemon runtime event handlers"
+        );
+        assert!(
+            !runtime_mod_source.contains("enum RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain the daemon publish queue"
+        );
+        assert!(
+            !runtime_mod_source.contains("RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain daemon publish queue ownership"
+        );
+    }
+
+    #[test]
     fn gui_front_door_launch_surface_reuses_same_server_url_for_browser_and_native_webview() {
         let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
 
@@ -1585,6 +1632,121 @@ mod tests {
 
         assert!(hook_forward_authorized(&headers, "secret-token"));
         assert!(!hook_forward_authorized(&headers, "other-token"));
+    }
+
+    // SPEC-2013 FR-011: `ProjectTabView` の `running_agent_count` /
+    // `running_agents` は agent preset (Agent / Claude / Codex もしくは
+    // `agent_id` 設定済み) かつ `WindowState::Running` の window のみを
+    // 集計し、shell preset の Running 窓や agent の Stopped 窓を含めない。
+    #[test]
+    fn project_tab_view_running_agents_counts_only_agent_preset_running_windows() {
+        fn tab_with_windows(tab_id: &str, windows: Vec<PersistedWindowState>) -> ProjectTabRuntime {
+            let mut persisted = empty_workspace_state();
+            persisted.next_z_index = (windows.len() as u32).saturating_add(1);
+            persisted.windows = windows;
+            ProjectTabRuntime {
+                id: tab_id.to_string(),
+                title: "Repo".to_string(),
+                project_root: PathBuf::from("E:/gwt/test-repo"),
+                kind: gwt::ProjectKind::Git,
+                workspace: WorkspaceState::from_persisted(persisted),
+                migration_pending: false,
+                main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+            }
+        }
+
+        let mut shell_running = sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        shell_running.id = "shell-1".to_string();
+        let mut agent_running = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
+        agent_running.id = "claude-1".to_string();
+        agent_running.dynamic_title = Some("claude (live)".to_string());
+        agent_running.dynamic_title_detail = Some("feature/foo".to_string());
+        let mut agent_stopped = sample_window(WindowPreset::Codex, WindowProcessStatus::Stopped);
+        agent_stopped.id = "codex-1".to_string();
+        let mut tagged_window = sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        tagged_window.id = "shell-with-agent-id".to_string();
+        tagged_window.agent_id = Some("custom-agent".to_string());
+        tagged_window.purpose_title = Some("Custom Pane".to_string());
+
+        let tab_with_agents = tab_with_windows(
+            "tab-with-agents",
+            vec![shell_running, agent_running, agent_stopped, tagged_window],
+        );
+        let mut tab_no_agents_windows =
+            sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        tab_no_agents_windows.id = "shell-only".to_string();
+        let tab_no_agents = tab_with_windows("tab-no-agents", vec![tab_no_agents_windows]);
+
+        let view = app_state_view_from_parts(
+            &[tab_with_agents, tab_no_agents],
+            Some("tab-with-agents"),
+            &[],
+        );
+
+        let agent_tab = view
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-with-agents")
+            .expect("agent tab present");
+        assert_eq!(
+            agent_tab.running_agent_count, 2,
+            "agent preset Running + agent_id-tagged Running が 2 件 (shell Running と agent Stopped は除外) であること"
+        );
+        assert_eq!(agent_tab.running_agents.len(), 2);
+        let claude_summary = agent_tab
+            .running_agents
+            .iter()
+            .find(|summary| summary.display_name == "claude (live)")
+            .expect("claude summary uses dynamic_title");
+        assert_eq!(claude_summary.branch.as_deref(), Some("feature/foo"));
+        let custom_summary = agent_tab
+            .running_agents
+            .iter()
+            .find(|summary| summary.display_name == "Custom Pane")
+            .expect("agent_id-tagged summary falls back to purpose_title");
+        assert_eq!(custom_summary.branch, None);
+
+        let bare_tab = view
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-no-agents")
+            .expect("non-agent tab present");
+        assert_eq!(bare_tab.running_agent_count, 0);
+        assert!(bare_tab.running_agents.is_empty());
+    }
+
+    // SPEC-2013 FR-011 wire contract: `ProjectTabView` の serialize 結果は
+    // `running_agent_count` と `running_agents` の 2 フィールドを必ず含む。
+    // frontend は両フィールドの存在を前提に modal 表示判定を行うため、
+    // shape を test で固定する。
+    #[test]
+    fn project_tab_view_serializes_running_agents_fields() {
+        let view = gwt::ProjectTabView {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: "/tmp/repo".to_string(),
+            kind: gwt::ProjectKind::Git,
+            workspace: gwt::WorkspaceView {
+                viewport: CanvasViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    zoom: 1.0,
+                },
+                windows: Vec::new(),
+                work_items: Vec::new(),
+            },
+            running_agent_count: 1,
+            running_agents: vec![gwt::RunningAgentSummary {
+                display_name: "claude".to_string(),
+                branch: Some("feature/x".to_string()),
+            }],
+        };
+        let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(serialized["running_agent_count"], serde_json::json!(1));
+        assert_eq!(
+            serialized["running_agents"],
+            serde_json::json!([{ "display_name": "claude", "branch": "feature/x" }])
+        );
     }
 
     #[test]
@@ -2875,6 +3037,36 @@ mod tests {
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
+    }
+
+    #[test]
+    fn runtime_status_missing_window_cleans_active_agent_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let stale_id = "tab-1::stale-agent".to_string();
+        runtime.active_agent_sessions.insert(
+            stale_id.clone(),
+            sample_active_agent_session("tab-1", &stale_id),
+        );
+        runtime
+            .window_details
+            .insert(stale_id.clone(), "stale detail".to_string());
+
+        let events =
+            runtime.handle_runtime_status(stale_id.clone(), WindowProcessStatus::Exited, None);
+
+        assert!(events.is_empty());
+        assert!(!runtime.active_agent_sessions.contains_key(&stale_id));
+        assert!(!runtime.window_details.contains_key(&stale_id));
     }
 
     #[test]

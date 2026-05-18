@@ -33,6 +33,7 @@
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -1174,7 +1175,82 @@
           indexStatusByProjectRoot,
           aggregateProjectTabDotState,
           send,
+          requestCloseProjectTab,
         });
+      }
+
+      // SPEC-2013 FR-012: the frontend decides whether the close request
+      // needs confirmation. When running_agent_count is 0 we send the
+      // existing close_project_tab message immediately; otherwise we open
+      // the confirm modal and only emit the message once Close anyway is
+      // pressed. Cancel never emits a message.
+      const closeProjectTabModalEl = document.getElementById(
+        "close-project-tab-modal",
+      );
+      const closeProjectTabModalDialogEl = closeProjectTabModalEl
+        ? closeProjectTabModalEl.querySelector(".modal-shell")
+        : null;
+      let closeProjectTabModalState = {
+        open: false,
+        tabId: null,
+        tabTitle: null,
+        runningAgents: [],
+      };
+
+      function renderCloseProjectTabModal() {
+        if (!closeProjectTabModalEl || !closeProjectTabModalDialogEl) {
+          return;
+        }
+        renderCloseProjectTabConfirmModal({
+          modalEl: closeProjectTabModalEl,
+          dialogEl: closeProjectTabModalDialogEl,
+          state: closeProjectTabModalState,
+          createNode,
+          onCancel: () => {
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+          },
+          onConfirm: () => {
+            const targetId = closeProjectTabModalState.tabId;
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+            if (targetId) {
+              send({ kind: "close_project_tab", tab_id: targetId });
+            }
+          },
+        });
+      }
+
+      function requestCloseProjectTab(tabId) {
+        const tabs = appState.tabs || [];
+        const tab = tabs.find((entry) => entry.id === tabId);
+        const runningAgents = Array.isArray(tab && tab.running_agents)
+          ? tab.running_agents
+          : [];
+        const count = Number.isFinite(tab && tab.running_agent_count)
+          ? tab.running_agent_count
+          : runningAgents.length;
+        if (count <= 0) {
+          send({ kind: "close_project_tab", tab_id: tabId });
+          return;
+        }
+        closeProjectTabModalState = {
+          open: true,
+          tabId,
+          tabTitle: (tab && tab.title) || null,
+          runningAgents,
+        };
+        renderCloseProjectTabModal();
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
@@ -3654,6 +3730,72 @@
           ?.addEventListener("click", () => closeWorktreePicker(windowId));
       }
 
+      // SPEC-2009 amendment Phase 2b: lazy-load highlight.js once on first
+      // text viewer use. Bundled module sits at /assets/highlight/.
+      let highlightModulePromise = null;
+      function loadHighlightModule() {
+        if (!highlightModulePromise) {
+          highlightModulePromise = import("/assets/highlight/highlight.min.js")
+            .then((mod) => mod.default || mod)
+            .catch((err) => {
+              console.warn("highlight.js failed to load", err);
+              return null;
+            });
+        }
+        return highlightModulePromise;
+      }
+
+      const FILE_EXT_TO_LANGUAGE = {
+        js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+        ts: "typescript", tsx: "typescript",
+        rs: "rust", py: "python", rb: "ruby", go: "go", java: "java",
+        c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp",
+        sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
+        json: "json", yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini",
+        md: "markdown", markdown: "markdown",
+        html: "xml", htm: "xml", xml: "xml", svg: "xml",
+        css: "css", scss: "scss", less: "less",
+        sql: "sql", dockerfile: "dockerfile",
+        kt: "kotlin", swift: "swift", php: "php", lua: "lua",
+        vue: "xml", graphql: "graphql", gql: "graphql",
+      };
+
+      function detectLanguageByExtension(path) {
+        if (!path) return "";
+        const base = String(path).split("/").pop() || "";
+        if (/^Dockerfile/i.test(base)) return "dockerfile";
+        if (/^Makefile/i.test(base)) return "makefile";
+        const dot = base.lastIndexOf(".");
+        if (dot < 0) return "";
+        const ext = base.slice(dot + 1).toLowerCase();
+        return FILE_EXT_TO_LANGUAGE[ext] || "";
+      }
+
+      function applySyntaxHighlight(codeEl, text, language) {
+        if (!codeEl) return;
+        // Always set raw text first so the viewer renders something even
+        // before highlight.js loads (or if it fails to load entirely).
+        codeEl.textContent = text || "";
+        codeEl.className = language ? `hljs language-${language}` : "hljs";
+        loadHighlightModule().then((hljs) => {
+          if (!hljs) return;
+          try {
+            if (language && hljs.getLanguage && hljs.getLanguage(language)) {
+              const html = hljs.highlight(text || "", { language, ignoreIllegals: true }).value;
+              codeEl.innerHTML = html;
+              codeEl.className = `hljs language-${language}`;
+            } else {
+              const result = hljs.highlightAuto(text || "");
+              codeEl.innerHTML = result.value;
+              codeEl.className = `hljs language-${result.language || "plaintext"}`;
+            }
+          } catch (e) {
+            // Fall back to plain text on highlight failure.
+            codeEl.textContent = text || "";
+          }
+        });
+      }
+
       // SPEC-2009 amendment Phase 2: helper to decode the binary chunk sent
       // by the backend over base64 so the hex viewer can mutate single
       // bytes locally before issuing a save_file_content(mode=hex).
@@ -3958,8 +4100,12 @@
 
       function renderFileTreeViewer(windowId) {
         const state = ensureFileTreeState(windowId);
+        // The workspace window element exposes its id via `data-id`
+        // (see `ensureWindow`), not `data-window-id`. Using the right
+        // attribute is required for the viewer DOM lookup to resolve in
+        // both production and Playwright fixtures.
         const surface = document.querySelector(
-          `[data-window-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
+          `[data-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
         );
         if (!surface) return;
         const header = surface.querySelector(".file-tree-viewer-header");
@@ -3997,7 +4143,20 @@
             break;
           case "text": {
             header.appendChild(headerPath);
-            if (v.dirty) header.appendChild(dirtyMarker);
+            // SPEC-2009 Phase 2b: dirty marker / Saved badge live in the
+            // header as toggleable elements so the input handler can flip
+            // their visibility without a full re-render. Keeping the
+            // textarea alive across keystrokes is what stops focus loss
+            // mid-typing (Phase 2 had a re-render-on-input loop that
+            // recreated the textarea each character — visible in headed
+            // Playwright but masked by fill() in the headless smoke).
+            dirtyMarker.style.display = v.dirty ? "" : "none";
+            header.appendChild(dirtyMarker);
+            const langBadge = makeEl("span", {
+              className: "file-tree-viewer-lang",
+              text: detectLanguageByExtension(v.path).toUpperCase() || "PLAIN",
+            });
+            header.appendChild(langBadge);
             header.appendChild(
               makeEl("span", {
                 className: "file-tree-viewer-meta",
@@ -4017,19 +4176,35 @@
               attrs: { type: "button" },
               text: v.saveInFlight ? "Saving…" : "Save",
             });
-            if (!v.dirty || v.readOnly || v.saveInFlight) {
-              saveBtn.setAttribute("disabled", "");
-            }
+            const updateSaveBtn = () => {
+              saveBtn.textContent = v.saveInFlight ? "Saving…" : "Save";
+              if (!v.dirty || v.readOnly || v.saveInFlight) {
+                saveBtn.setAttribute("disabled", "");
+              } else {
+                saveBtn.removeAttribute("disabled");
+              }
+            };
+            updateSaveBtn();
             saveBtn.addEventListener("click", () => requestSaveFileContent(windowId));
             header.appendChild(saveBtn);
-            if (v.savedAt && Date.now() - v.savedAt < 2000) {
-              header.appendChild(
-                makeEl("span", {
-                  className: "file-tree-viewer-saved",
-                  text: "Saved",
-                }),
-              );
-            }
+            const savedBadge = makeEl("span", {
+              className: "file-tree-viewer-saved",
+              text: "Saved",
+            });
+            savedBadge.style.display = v.savedAt && Date.now() - v.savedAt < 2000 ? "" : "none";
+            header.appendChild(savedBadge);
+
+            // Overlay editor: highlighted <pre> sits behind a transparent
+            // <textarea>. Both share the same monospace metrics so the
+            // overlay aligns character-for-character. Scroll syncs in
+            // both directions so the highlight follows the caret.
+            const wrap = makeEl("div", { className: "file-tree-viewer-editor-wrap" });
+            const language = detectLanguageByExtension(v.path);
+            const hlPre = makeEl("pre", { className: "file-tree-viewer-hl" });
+            const hlCode = makeEl("code", {
+              className: language ? `hljs language-${language}` : "hljs",
+            });
+            hlPre.appendChild(hlCode);
             const textarea = makeEl("textarea", {
               className: "file-tree-viewer-text file-tree-viewer-editor",
               attrs: { spellcheck: "false", wrap: "off" },
@@ -4038,12 +4213,23 @@
             if (v.readOnly || v.saveInFlight) {
               textarea.setAttribute("disabled", "");
             }
+            applySyntaxHighlight(hlCode, v.text, language);
+            const syncScroll = () => {
+              hlPre.scrollTop = textarea.scrollTop;
+              hlPre.scrollLeft = textarea.scrollLeft;
+            };
+            textarea.addEventListener("scroll", syncScroll);
             textarea.addEventListener("input", () => {
               v.text = textarea.value;
               v.dirty = v.text !== v.originalText;
-              renderFileTreeViewer(windowId);
+              dirtyMarker.style.display = v.dirty ? "" : "none";
+              updateSaveBtn();
+              applySyntaxHighlight(hlCode, v.text, language);
+              syncScroll();
             });
-            body.appendChild(textarea);
+            wrap.appendChild(hlPre);
+            wrap.appendChild(textarea);
+            body.appendChild(wrap);
             break;
           }
           case "binary": {
