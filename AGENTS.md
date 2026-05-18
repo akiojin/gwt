@@ -285,6 +285,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | gwt-discussion | `/gwt:gwt-discussion` | Investigate ideas, spec gaps, and implementation concerns. Updates `spec` / `plan` when discussion stabilizes and returns an action bundle for the next step. |
 | gwt-plan-spec | `/gwt:gwt-plan-spec` | Generate or refresh `plan` / `tasks` and related planning artifacts for a SPEC. |
 | gwt-build-spec | `/gwt:gwt-build-spec` | Implement an approved SPEC or approved standalone task with TDD, verification, and PR handoff. |
+| gwt-verify | `/gwt:gwt-verify` | Environment-aware verification. Classifies changed surfaces and runs the correct matrix (cargo for Rust crates, pnpm for frontend JS, Playwright only for WebView/browser UI, release scripts only for release-system changes). Called from `gwt-build-spec` Phase 3 (`--mode full`) and `gwt-manage-pr` before PR create/update (`--mode pre-pr`). |
 | gwt-manage-pr | `/gwt:gwt-manage-pr` | Create, inspect, update, or unblock a PR through one visible PR lifecycle entrypoint. |
 | gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-discussion. |
 
@@ -309,7 +310,8 @@ gwt-register-issue / gwt-fix-issue
 2. **Fix an existing Issue** → `gwt-fix-issue` (Issue 起点で直接修正か SPEC 化かを決める)
 3. **Discuss and shape the work** → `gwt-discussion` (investigation → design clarification → action bundle)
 4. **Plan implementation** → `gwt-plan-spec` (SDD architecture → tasks)
-5. **Build with TDD** → `gwt-build-spec` (Red-Green-Refactor → verification)
-6. **Manage PRs** → `gwt-manage-pr` (create, check, or fix)
-7. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
+5. **Build with TDD** → `gwt-build-spec` (Red-Green-Refactor → verification via `gwt-verify`)
+6. **Verify changes** → `gwt-verify` (surface→matrix selection; Playwright only for WebView/browser UI)
+7. **Manage PRs** → `gwt-manage-pr` (create, check, or fix; requires `gwt-verify --mode pre-pr` PASS)
+8. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
 <!-- END gwt managed skills -->
