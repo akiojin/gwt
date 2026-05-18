@@ -8,7 +8,7 @@ function ensureChild(parent, selector, create) {
   return child;
 }
 
-function createTabButton(document, send) {
+function createTabButton(document, send, requestCloseProjectTab) {
   const button = document.createElement("div");
   button.className = "project-tab";
   button.setAttribute("role", "button");
@@ -43,7 +43,15 @@ function createTabButton(document, send) {
   });
   close.addEventListener("click", (event) => {
     event.stopPropagation();
-    send({ kind: "close_project_tab", tab_id: button.dataset.projectTabId });
+    const tabId = button.dataset.projectTabId;
+    // SPEC-2013 FR-012: agent 起動中の判定と modal 表示は app.js が
+    // 所有する。renderer は単に request callback を呼ぶだけにし、
+    // callback が未指定のときだけ legacy direct-send にフォールバックする。
+    if (typeof requestCloseProjectTab === "function") {
+      requestCloseProjectTab(tabId);
+      return;
+    }
+    send({ kind: "close_project_tab", tab_id: tabId });
   });
 
   return button;
@@ -70,6 +78,7 @@ export function renderProjectTabs({
   indexStatusByProjectRoot,
   aggregateProjectTabDotState,
   send,
+  requestCloseProjectTab,
 }) {
   if (!projectTabs) {
     return;
@@ -95,7 +104,7 @@ export function renderProjectTabs({
   nextTabs.forEach((tab, index) => {
     let button = existingButtons.get(tab.id);
     if (!button) {
-      button = createTabButton(document, send);
+      button = createTabButton(document, send, requestCloseProjectTab);
     }
 
     const dot = ensureChild(button, "[data-role='project-tab-dot']", (doc) => {
@@ -117,7 +126,12 @@ export function renderProjectTabs({
       element.textContent = "×";
       element.addEventListener("click", (event) => {
         event.stopPropagation();
-        send({ kind: "close_project_tab", tab_id: button.dataset.projectTabId });
+        const tabId = button.dataset.projectTabId;
+        if (typeof requestCloseProjectTab === "function") {
+          requestCloseProjectTab(tabId);
+          return;
+        }
+        send({ kind: "close_project_tab", tab_id: tabId });
       });
       return element;
     });

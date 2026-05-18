@@ -1535,6 +1535,76 @@ kbd.op-kbd {
   color: var(--color-canvas);
   border-color: var(--color-state-active);
 }
+/* SPEC-2013 FR-012: destructive variant — used by the project tab close
+   confirm modal's `Close anyway` action to telegraph that running agents
+   will be stopped. Falls back to `--color-state-danger` if defined,
+   otherwise a neutral red so the variant stays visible regardless of
+   theme token availability. */
+:root[data-theme] .wizard-button.destructive,
+:root[data-theme] .wizard-button.primary.destructive {
+  background: var(--color-state-danger, #c83a3a);
+  color: var(--color-canvas, #ffffff);
+  border-color: var(--color-state-danger, #c83a3a);
+}
+:root[data-theme] .wizard-button.destructive:hover,
+:root[data-theme] .wizard-button.primary.destructive:hover {
+  background: var(--color-state-danger-hover, #d24f4f);
+  border-color: var(--color-state-danger-hover, #d24f4f);
+}
+
+/* SPEC-2013 FR-012: close project tab confirm modal layout primitives.
+   Reuses .modal-backdrop / .modal-shell base from existing modals; only
+   the body / list spacing and footer alignment are scoped here. */
+.close-project-tab-modal-shell {
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 480px;
+}
+.close-project-tab-modal__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.close-project-tab-modal__subtitle {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__summary {
+  margin: 0;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.close-project-tab-modal__agent-item::before {
+  content: "•";
+  margin-right: 6px;
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__agent-branch {
+  color: var(--color-text-muted, #888);
+}
+.close-project-tab-modal__more {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+.close-project-tab-modal__footer.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
 
 /* Floating window chrome */
 :root[data-theme] .window {

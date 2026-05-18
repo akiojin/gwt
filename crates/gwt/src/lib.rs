@@ -115,7 +115,7 @@ pub use protocol::{
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileContentErrorKind,
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
     GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-    ProjectTabView, RecentProjectView, UiTraceEntry, UiTracePayload,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
     WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
     WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
