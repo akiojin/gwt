@@ -786,7 +786,7 @@ mod tests {
         // handshake — otherwise a window created hidden never drains
         // its deferred buffer until the user manually resizes.
         let reveal_completes_handshake = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,[\s\S]*?\)\s*\{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
         let write_gate = regex::Regex::new(
@@ -1497,7 +1497,7 @@ mod tests {
     fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
         let js = app_js();
         let render_activation = regex::Regex::new(
-            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
+            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false,?[\s\S]*?\}\);"#,
         )
         .expect("valid regex");
         // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
@@ -1513,13 +1513,14 @@ mod tests {
         // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
         // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
         assert!(
-            js.contains("function scheduleTerminalFocusActivation(windowId)"),
-            "expected a shared xterm activation helper for programmatic window focus",
+            js.contains("function scheduleTerminalFocusActivation(")
+                && js.contains("shouldPersistGeometry = true"),
+            "expected a shared xterm activation helper for programmatic window focus with geometry persistence enabled by default",
         );
         assert!(
             activation_helper.is_match(js),
@@ -1527,7 +1528,7 @@ mod tests {
         );
         assert!(
             render_activation.is_match(js),
-            "expected workspace render to reactivate the topmost terminal for cycle focus, window list, command palette, and tab activation",
+            "expected workspace render to reactivate the topmost terminal without echoing geometry into backend resize broadcasts",
         );
     }
 

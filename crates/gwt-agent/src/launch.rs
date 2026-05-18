@@ -839,6 +839,13 @@ mod tests {
     // points (wizard, preset, session-load migration). Regression guard for
     // the preset-path gap that caused Codex Plan-mode scroll to die.
 
+    fn project_relative_path(relative: &str) -> String {
+        std::path::PathBuf::from("/tmp/project")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn canonical_launch_args_for_codex_contains_no_alt_screen() {
         let args = canonical_launch_args(&AgentId::Codex);
@@ -1443,7 +1450,7 @@ mod tests {
             .any(|pair| pair[0] == "--model" && pair[1] == "anthropic/claude-sonnet-4-5"));
         assert_eq!(
             config.env_vars.get("OPENCODE_CONFIG_DIR"),
-            Some(&"/tmp/project/.gwt/opencode".to_string())
+            Some(&project_relative_path(".gwt/opencode"))
         );
     }
 
@@ -1471,7 +1478,7 @@ mod tests {
             .any(|pair| pair[0] == "--thinking" && pair[1] == "high"));
         assert_eq!(
             config.env_vars.get("OPENCLAW_CONFIG_PATH"),
-            Some(&"/tmp/project/.gwt/openclaw/openclaw.json".to_string())
+            Some(&project_relative_path(".gwt/openclaw/openclaw.json"))
         );
     }
 
@@ -1496,7 +1503,7 @@ mod tests {
             .any(|pair| pair[0] == "--model" && pair[1] == "openrouter/anthropic/claude-sonnet-4"));
         assert_eq!(
             config.env_vars.get("HERMES_HOME"),
-            Some(&"/tmp/project/.gwt/hermes".to_string())
+            Some(&project_relative_path(".gwt/hermes"))
         );
         assert_eq!(
             config.env_vars.get("HERMES_ACCEPT_HOOKS"),

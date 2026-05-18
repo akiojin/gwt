@@ -4101,7 +4101,10 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
-        assert_eq!(launch.remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            launch.remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -5500,7 +5503,10 @@ mod tests {
             Some("enabled")
         );
         assert!(!effective_env.contains_key("SECRET"));
-        assert_eq!(remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
