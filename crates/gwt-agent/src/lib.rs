@@ -11,6 +11,7 @@ pub mod custom;
 pub mod detect;
 pub mod environment;
 pub mod launch;
+pub mod migration;
 pub mod prepare;
 pub mod presets;
 pub mod session;
@@ -35,6 +36,7 @@ pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
     ResolvedRunner,
 };
+pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
     branch_worktree_path, install_launch_gwt_bin_env, install_launch_gwt_bin_env_with_lookup,
@@ -55,7 +57,8 @@ pub use session::{
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,
-    save_stored_custom_agents_to_path, StoredCustomAgent, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
+    migrate_and_load_stored_custom_agents, save_stored_custom_agents_to_path, StoredCustomAgent,
+    DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
 };
 pub use types::{
     builtin_agent_descriptor_for_command, builtin_agent_descriptors, resolve_agent_id, AgentColor,
