@@ -3098,3 +3098,229 @@ kbd.op-kbd {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+
+/* SPEC-2009 amendment: File Tree v2 — Worktree Picker + Split Viewer + Hex.
+   The legacy `.file-tree-root` keeps the existing styling so single-pane
+   workflows still render the same way; the new `--split` modifier opts into
+   the per-window split layout that surfaces the picker, tree, and viewer. */
+:root[data-theme] .file-tree-root--split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+:root[data-theme] .file-tree-split {
+  display: grid;
+  grid-template-columns: var(--file-tree-left-ratio, 40%) 6px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 480px) {
+  :root[data-theme] .file-tree-split {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 6px 1fr;
+  }
+  :root[data-theme] .file-tree-splitter {
+    cursor: row-resize;
+  }
+}
+
+:root[data-theme] .file-tree-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+:root[data-theme] .file-tree-splitter {
+  background: var(--color-border);
+  cursor: col-resize;
+  user-select: none;
+  transition: background 120ms ease-in-out;
+}
+
+:root[data-theme] .file-tree-splitter:hover,
+:root[data-theme] .file-tree-splitter:focus-visible {
+  background: var(--color-state-active);
+  outline: none;
+}
+
+:root[data-theme] .file-tree-viewer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+:root[data-theme] .file-tree-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .file-tree-viewer-path {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:root[data-theme] .file-tree-viewer-meta {
+  color: var(--color-text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+}
+
+:root[data-theme] .file-tree-viewer-placeholder {
+  color: var(--color-text-subtle);
+  font-style: italic;
+}
+
+:root[data-theme] .file-tree-viewer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+}
+
+:root[data-theme] .file-tree-viewer-text,
+:root[data-theme] .file-tree-viewer-hex {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  white-space: pre;
+  color: var(--color-text);
+}
+
+:root[data-theme] .file-tree-viewer-notice,
+:root[data-theme] .file-tree-viewer-empty,
+:root[data-theme] .file-tree-viewer-error {
+  font-size: var(--type-xs);
+  color: var(--color-text-subtle);
+  padding: var(--space-3) 0;
+}
+
+:root[data-theme] .file-tree-viewer-error {
+  color: var(--color-status-danger, #d22);
+}
+
+:root[data-theme] .file-tree-worktree-trigger {
+  background: transparent;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 4px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+:root[data-theme] .file-tree-worktree-trigger:hover {
+  border-style: solid;
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] #file-tree-worktree-picker-modal[aria-hidden="false"] {
+  display: flex;
+}
+
+/* The picker reuses the shared modal frame primitive defined in app.css
+   per SPEC-2356 (border, radius, max-height, surface colour). Only the
+   picker-specific min/max width and the inner flex column layout are
+   contributed here, and the selector is intentionally scoped through a
+   child class so the canonical primitive declaration remains the first
+   match for embedded_web.rs's modal frame contract test. */
+:root[data-theme] #file-tree-worktree-picker-modal > .worktree-picker-shell {
+  min-width: 380px;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-theme] .worktree-picker-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+:root[data-theme] .worktree-picker-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: var(--type-md);
+}
+
+:root[data-theme] .worktree-picker-body {
+  overflow: auto;
+  padding: var(--space-2);
+}
+
+:root[data-theme] .worktree-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .worktree-picker-row {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:root[data-theme] .worktree-picker-row:hover,
+:root[data-theme] .worktree-picker-row:focus-visible {
+  border-color: var(--color-state-active);
+  outline: none;
+}
+
+:root[data-theme] .worktree-picker-row-label {
+  font-weight: 600;
+}
+
+:root[data-theme] .worktree-picker-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  color: var(--color-text-subtle);
+  flex-wrap: wrap;
+}
+
+:root[data-theme] .worktree-picker-kind {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+:root[data-theme] .worktree-picker-active {
+  color: var(--color-status-success, #2a7);
+}
+
+:root[data-theme] .worktree-picker-path {
+  word-break: break-all;
+}
+
+:root[data-theme] .worktree-picker-empty,
+:root[data-theme] .worktree-picker-error {
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--color-text-subtle);
+}

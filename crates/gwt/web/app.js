@@ -3373,9 +3373,362 @@
             loading: new Set(),
             selectedPath: "",
             error: "",
+            // SPEC-2009 amendment: per-window picker + viewer state.
+            picker: {
+              open: false,
+              loading: false,
+              entries: [],
+              error: "",
+            },
+            selectedWorktreeId: "",
+            selectedWorktreeLabel: "",
+            splitterRatio: 0.4,
+            viewer: {
+              path: "",
+              mode: "empty", // empty | text | binary | hex | error | loading
+              text: "",
+              encoding: "",
+              totalSize: 0,
+              hexOffset: 0,
+              hexBytes: "",
+              error: { kind: "", message: "", size: null, limit: null },
+            },
           });
         }
         return fileTreeStateMap.get(windowId);
+      }
+
+      function requestFileTreeWorktrees(windowId) {
+        const state = ensureFileTreeState(windowId);
+        state.picker.loading = true;
+        state.picker.error = "";
+        send({ kind: "list_file_tree_worktrees", id: windowId });
+      }
+
+      function selectFileTreeWorktree(windowId, worktreeId) {
+        send({
+          kind: "select_file_tree_worktree",
+          id: windowId,
+          worktree_id: worktreeId,
+        });
+      }
+
+      function requestFileContent(windowId, path, mode, hexOffset = null, hexLength = null) {
+        send({
+          kind: "load_file_content",
+          id: windowId,
+          path,
+          mode,
+          hex_offset: hexOffset,
+          hex_length: hexLength,
+        });
+      }
+
+      function formatHexDump(offset, base64Bytes) {
+        let binary;
+        try {
+          binary = atob(base64Bytes || "");
+        } catch (e) {
+          return "(invalid hex chunk)";
+        }
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const BYTES_PER_LINE = 16;
+        const lines = [];
+        for (let i = 0; i < bytes.length; i += BYTES_PER_LINE) {
+          const slice = bytes.slice(i, i + BYTES_PER_LINE);
+          const lineOffset = (offset + i).toString(16).padStart(8, "0").toUpperCase();
+          const hexParts = [];
+          const asciiParts = [];
+          for (let j = 0; j < BYTES_PER_LINE; j += 1) {
+            if (j < slice.length) {
+              const b = slice[j];
+              hexParts.push(b.toString(16).padStart(2, "0").toUpperCase());
+              asciiParts.push(b >= 0x20 && b < 0x7F ? String.fromCharCode(b) : ".");
+            } else {
+              hexParts.push("  ");
+              asciiParts.push(" ");
+            }
+          }
+          lines.push(lineOffset + "  " + hexParts.join(" ") + "  |" + asciiParts.join("") + "|");
+        }
+        return lines.join("\n");
+      }
+
+      function formatBytes(size) {
+        if (size === null || size === undefined) {
+          return "";
+        }
+        if (size < 1024) {
+          return size + " B";
+        }
+        if (size < 1024 * 1024) {
+          return (size / 1024).toFixed(1) + " KiB";
+        }
+        return (size / (1024 * 1024)).toFixed(2) + " MiB";
+      }
+
+      function makeEl(tag, options = {}, children = []) {
+        const el = document.createElement(tag);
+        if (options.className) el.className = options.className;
+        if (options.text != null) el.textContent = String(options.text);
+        if (options.attrs) {
+          for (const [k, v] of Object.entries(options.attrs)) {
+            if (v == null) continue;
+            el.setAttribute(k, String(v));
+          }
+        }
+        if (options.dataset) {
+          for (const [k, v] of Object.entries(options.dataset)) {
+            if (v == null) continue;
+            el.dataset[k] = String(v);
+          }
+        }
+        for (const child of children) {
+          if (child == null) continue;
+          if (typeof child === "string") {
+            el.appendChild(document.createTextNode(child));
+          } else {
+            el.appendChild(child);
+          }
+        }
+        return el;
+      }
+
+      function clearChildren(el) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+      }
+
+      function openWorktreePicker(windowId) {
+        const state = ensureFileTreeState(windowId);
+        state.picker.open = true;
+        state.picker.entries = [];
+        state.picker.error = "";
+        renderWorktreePicker(windowId);
+        requestFileTreeWorktrees(windowId);
+      }
+
+      function closeWorktreePicker(windowId) {
+        const state = ensureFileTreeState(windowId);
+        state.picker.open = false;
+        renderWorktreePicker(windowId);
+      }
+
+      function renderWorktreePicker(windowId) {
+        const modal = document.getElementById("file-tree-worktree-picker-modal");
+        if (!modal) return;
+        const shell = modal.querySelector(".modal-shell");
+        if (!shell) return;
+        const state = ensureFileTreeState(windowId);
+        clearChildren(shell);
+        if (!state.picker.open) {
+          modal.setAttribute("aria-hidden", "true");
+          modal.style.display = "none";
+          modal.dataset.windowId = "";
+          return;
+        }
+        modal.dataset.windowId = windowId;
+        modal.setAttribute("aria-hidden", "false");
+        modal.style.display = "flex";
+
+        const header = makeEl("header", { className: "worktree-picker-header" }, [
+          makeEl("h2", { text: "Select Worktree" }),
+          makeEl("button", {
+            className: "icon-button",
+            text: "×",
+            attrs: { type: "button", "aria-label": "Close picker" },
+            dataset: { pickerAction: "cancel" },
+          }),
+        ]);
+        const bodyContainer = makeEl("div", { className: "worktree-picker-body" });
+        if (state.picker.loading && state.picker.entries.length === 0) {
+          bodyContainer.appendChild(
+            makeEl("div", { className: "worktree-picker-empty", text: "Loading worktrees…" }),
+          );
+        } else if (state.picker.error) {
+          bodyContainer.appendChild(
+            makeEl("div", { className: "worktree-picker-error", text: state.picker.error }),
+          );
+        } else if (state.picker.entries.length === 0) {
+          bodyContainer.appendChild(
+            makeEl("div", {
+              className: "worktree-picker-empty",
+              text: "No worktrees available. Use Start Work to create a workspace.",
+            }),
+          );
+        } else {
+          const list = makeEl("div", { className: "worktree-picker-list" });
+          for (const entry of state.picker.entries) {
+            const row = makeEl(
+              "button",
+              {
+                className: "worktree-picker-row",
+                attrs: { type: "button" },
+                dataset: { worktreeId: entry.id },
+              },
+              [
+                makeEl("div", { className: "worktree-picker-row-label", text: entry.label }),
+                makeEl("div", { className: "worktree-picker-row-meta" }, [
+                  makeEl("span", {
+                    className: "worktree-picker-kind",
+                    text: entry.kind === "bare_main" ? "main" : "workspace",
+                  }),
+                  entry.is_active
+                    ? makeEl("span", { className: "worktree-picker-active", text: "active" })
+                    : null,
+                  makeEl("span", { className: "worktree-picker-path", text: entry.path }),
+                ]),
+              ],
+            );
+            row.addEventListener("click", (event) => {
+              event.preventDefault();
+              state.selectedWorktreeId = entry.id;
+              state.selectedWorktreeLabel = entry.label;
+              closeWorktreePicker(windowId);
+              selectFileTreeWorktree(windowId, entry.id);
+              // Reset tree + viewer state when switching worktree.
+              state.loaded.clear();
+              state.expanded.clear();
+              state.loading.clear();
+              state.error = "";
+              state.viewer = {
+                path: "",
+                mode: "empty",
+                text: "",
+                encoding: "",
+                totalSize: 0,
+                hexOffset: 0,
+                hexBytes: "",
+                error: { kind: "", message: "", size: null, limit: null },
+              };
+              requestFileTree(windowId, "");
+              renderFileTreeViewer(windowId);
+              renderFileTree(windowId);
+            });
+            list.appendChild(row);
+          }
+          bodyContainer.appendChild(list);
+        }
+        shell.appendChild(header);
+        shell.appendChild(bodyContainer);
+        shell
+          .querySelector('[data-picker-action="cancel"]')
+          ?.addEventListener("click", () => closeWorktreePicker(windowId));
+      }
+
+      function renderFileTreeViewer(windowId) {
+        const state = ensureFileTreeState(windowId);
+        const surface = document.querySelector(
+          `[data-window-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
+        );
+        if (!surface) return;
+        const header = surface.querySelector(".file-tree-viewer-header");
+        const body = surface.querySelector(".file-tree-viewer-body");
+        if (!header || !body) return;
+        clearChildren(header);
+        clearChildren(body);
+        const v = state.viewer;
+        const sizeLabel = v.totalSize ? formatBytes(v.totalSize) : "";
+        switch (v.mode) {
+          case "empty":
+            header.appendChild(
+              makeEl("span", {
+                className: "file-tree-viewer-placeholder",
+                text: "No file selected",
+              }),
+            );
+            body.appendChild(
+              makeEl("div", {
+                className: "file-tree-viewer-empty",
+                text: "Select a file to view its contents.",
+              }),
+            );
+            break;
+          case "loading":
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
+            );
+            body.appendChild(
+              makeEl("div", { className: "file-tree-viewer-empty", text: "Loading…" }),
+            );
+            break;
+          case "text":
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
+            );
+            header.appendChild(
+              makeEl("span", {
+                className: "file-tree-viewer-meta",
+                text: (v.encoding || "") + " · " + sizeLabel,
+              }),
+            );
+            body.appendChild(makeEl("pre", { className: "file-tree-viewer-text", text: v.text }));
+            break;
+          case "binary": {
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
+            );
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-meta", text: "binary · " + sizeLabel }),
+            );
+            const btn = makeEl("button", {
+              className: "wizard-button",
+              text: "View as hex",
+              attrs: { type: "button" },
+              dataset: { viewerAction: "view-as-hex" },
+            });
+            btn.addEventListener("click", () => {
+              v.mode = "loading";
+              v.hexOffset = 0;
+              v.hexBytes = "";
+              renderFileTreeViewer(windowId);
+              requestFileContent(windowId, v.path, "hex", 0, 64 * 16);
+            });
+            header.appendChild(btn);
+            body.appendChild(
+              makeEl("div", {
+                className: "file-tree-viewer-notice",
+                text:
+                  "Cannot display as text. Use “View as hex” for a 16-byte/row hex dump.",
+              }),
+            );
+            break;
+          }
+          case "hex":
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
+            );
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-meta", text: "hex · " + sizeLabel }),
+            );
+            body.appendChild(
+              makeEl("pre", {
+                className: "file-tree-viewer-hex",
+                text: formatHexDump(v.hexOffset, v.hexBytes),
+              }),
+            );
+            break;
+          case "error":
+            header.appendChild(
+              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
+            );
+            body.appendChild(
+              makeEl("div", {
+                className: "file-tree-viewer-error",
+                text: v.error.message || "Unable to load file",
+              }),
+            );
+            break;
+          default:
+            header.appendChild(
+              makeEl("span", {
+                className: "file-tree-viewer-placeholder",
+                text: "Unknown state",
+              }),
+            );
+        }
       }
 
       function ensureBranchListState(windowId) {
@@ -5942,6 +6295,14 @@
         wizardBody.appendChild(wizardMain);
       }
 
+      function applyFileTreeSplitterRatio(split, ratio) {
+        if (!split) return;
+        const clamped = Math.min(0.9, Math.max(0.1, Number(ratio) || 0.4));
+        const leftPercent = (clamped * 100).toFixed(2);
+        split.style.setProperty("--file-tree-left-ratio", leftPercent + "%");
+        split.dataset.leftRatio = String(clamped);
+      }
+
       function renderFileTree(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -6021,6 +6382,21 @@
                     requestFileTree(windowId, entry.path);
                   }
                 }
+              } else {
+                // SPEC-2009 amendment: file row activation routes to viewer.
+                state.viewer = {
+                  ...state.viewer,
+                  path: entry.path,
+                  mode: "loading",
+                  text: "",
+                  encoding: "",
+                  totalSize: 0,
+                  hexOffset: 0,
+                  hexBytes: "",
+                  error: { kind: "", message: "", size: null, limit: null },
+                };
+                renderFileTreeViewer(windowId);
+                requestFileContent(windowId, entry.path, "text");
               }
               renderFileTree(windowId);
             };
@@ -7204,46 +7580,130 @@
         }
 
         if (surface === "file-tree") {
-          body.innerHTML = `
-            <div class="file-tree-root">
-              <div class="file-tree-toolbar workspace-toolbar">
-                <div class="file-tree-path">Repository</div>
-                <button class="icon-button" data-action="refresh-tree" aria-label="Refresh tree">↻</button>
-              </div>
-              <div class="file-tree-scroll workspace-scroll">
-                <div class="file-tree-list"></div>
-              </div>
-              <div class="file-tree-footer">.</div>
-            </div>
-          `;
+          // SPEC-2009 amendment: File Tree window now opens with a worktree
+          // picker, then renders a single window split into a left directory
+          // tree pane and a right file content viewer pane. The legacy
+          // `.file-tree-root` class wraps the whole composition so existing
+          // styles (and embedded HTML contract tests) still hit.
+          const root = makeEl("div", { className: "file-tree-root file-tree-root--split" });
+          const toolbar = makeEl("div", {
+            className: "file-tree-toolbar workspace-toolbar",
+          });
+          const pathLabel = makeEl("button", {
+            className: "file-tree-path file-tree-worktree-trigger",
+            attrs: { type: "button" },
+            dataset: { action: "open-worktree-picker" },
+            text: "Select worktree…",
+          });
+          const refreshBtn = makeEl("button", {
+            className: "icon-button",
+            attrs: { "aria-label": "Refresh tree", type: "button" },
+            dataset: { action: "refresh-tree" },
+            text: "↻",
+          });
+          toolbar.appendChild(pathLabel);
+          toolbar.appendChild(refreshBtn);
+
+          const split = makeEl("div", { className: "file-tree-split" });
+          const pane = makeEl("div", { className: "file-tree-pane" });
+          const scroll = makeEl("div", { className: "file-tree-scroll workspace-scroll" });
+          const list = makeEl("div", { className: "file-tree-list" });
+          scroll.appendChild(list);
+          pane.appendChild(scroll);
+          pane.appendChild(makeEl("div", { className: "file-tree-footer", text: "." }));
+
+          const splitter = makeEl("div", {
+            className: "file-tree-splitter",
+            attrs: { role: "separator", "aria-orientation": "vertical", tabindex: "0" },
+            dataset: { action: "drag-splitter" },
+          });
+
+          const viewer = makeEl("div", { className: "file-tree-viewer" });
+          viewer.appendChild(makeEl("div", { className: "file-tree-viewer-header" }));
+          viewer.appendChild(makeEl("div", { className: "file-tree-viewer-body" }));
+
+          split.appendChild(pane);
+          split.appendChild(splitter);
+          split.appendChild(viewer);
+
+          root.appendChild(toolbar);
+          root.appendChild(split);
+          clearChildren(body);
+          body.appendChild(root);
+
+          // Apply initial splitter ratio.
+          const initialState = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+            windowData.id,
+          );
+          applyFileTreeSplitterRatio(split, initialState.splitterRatio);
+
           body.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
             socketTransport.send({ kind: "focus_window", id: windowData.id });
           });
-          body
-            .querySelector("[data-action='refresh-tree']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
+
+          pathLabel.addEventListener("click", (event) => {
+            event.stopPropagation();
+            frontendUnits.branchesFileTreeSurface.openWorktreePicker(windowData.id);
+          });
+
+          refreshBtn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              windowData.id,
+            );
+            if (!state.selectedWorktreeId) {
+              frontendUnits.branchesFileTreeSurface.openWorktreePicker(windowData.id);
+              return;
+            }
+            state.loaded.clear();
+            state.expanded.clear();
+            state.loading.clear();
+            state.error = "";
+            frontendUnits.branchesFileTreeSurface.requestFileTree(windowData.id, "");
+            frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
+          });
+
+          // Splitter drag: pointer events keep the handler small and ignore
+          // the canvas pan/zoom because the modal capture absorbs them.
+          splitter.addEventListener("pointerdown", (event) => {
+            event.preventDefault();
+            splitter.setPointerCapture(event.pointerId);
+            const onMove = (moveEvent) => {
+              const rect = split.getBoundingClientRect();
+              if (rect.width <= 0) return;
+              const ratio = (moveEvent.clientX - rect.left) / rect.width;
+              const clamped = Math.min(0.9, Math.max(0.1, ratio));
               const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
                 windowData.id,
               );
-              state.loaded.clear();
-              state.expanded.clear();
-              state.loading.clear();
-              state.error = "";
-              frontendUnits.branchesFileTreeSurface.requestFileTree(
-                windowData.id,
-                "",
-              );
-              frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
-            });
-          const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
-            windowData.id,
-          );
-          if (!state.loaded.has("")) {
-            frontendUnits.branchesFileTreeSurface.requestFileTree(windowData.id, "");
+              state.splitterRatio = clamped;
+              applyFileTreeSplitterRatio(split, clamped);
+            };
+            const onUp = () => {
+              splitter.releasePointerCapture(event.pointerId);
+              splitter.removeEventListener("pointermove", onMove);
+              splitter.removeEventListener("pointerup", onUp);
+              splitter.removeEventListener("pointercancel", onUp);
+            };
+            splitter.addEventListener("pointermove", onMove);
+            splitter.addEventListener("pointerup", onUp);
+            splitter.addEventListener("pointercancel", onUp);
+          });
+
+          // Initial state: prompt for worktree selection. The picker fires
+          // the first directory load once the user picks.
+          if (!initialState.selectedWorktreeId) {
+            pathLabel.textContent = "Select worktree…";
+            frontendUnits.branchesFileTreeSurface.openWorktreePicker(windowData.id);
+          } else {
+            pathLabel.textContent = initialState.selectedWorktreeLabel || "Worktree";
+            if (!initialState.loaded.has("")) {
+              frontendUnits.branchesFileTreeSurface.requestFileTree(windowData.id, "");
+            }
           }
           frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
+          frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(windowData.id);
           return;
         }
 
@@ -8617,6 +9077,12 @@
         openBranchCleanupModal,
         closeBranchCleanupModal,
         renderBranchCleanupModal,
+        // SPEC-2009 amendment: Worktree picker + file content viewer.
+        openWorktreePicker,
+        closeWorktreePicker,
+        renderWorktreePicker,
+        renderFileTreeViewer,
+        requestFileContent,
       });
 
       const profileSurface = Object.freeze({
@@ -8796,6 +9262,113 @@
             state.loading.delete(event.path);
             state.error = event.message;
             frontendUnits.branchesFileTreeSurface.renderFileTree(event.id);
+            break;
+          }
+          case "file_tree_worktrees": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            state.picker.entries = Array.isArray(event.entries) ? event.entries : [];
+            state.picker.loading = false;
+            state.picker.error = "";
+            frontendUnits.branchesFileTreeSurface.renderWorktreePicker(event.id);
+            break;
+          }
+          case "file_tree_worktree_selected": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            state.selectedWorktreeId = event.worktree_id || "";
+            // After selection, refresh tree contents.
+            state.loaded.clear();
+            state.expanded.clear();
+            state.loading.clear();
+            state.error = "";
+            frontendUnits.branchesFileTreeSurface.requestFileTree(event.id, "");
+            frontendUnits.branchesFileTreeSurface.renderFileTree(event.id);
+            break;
+          }
+          case "file_tree_worktree_error": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            state.picker.loading = false;
+            state.picker.error = event.message || "Unable to enumerate worktrees";
+            frontendUnits.branchesFileTreeSurface.renderWorktreePicker(event.id);
+            break;
+          }
+          case "file_content_text": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            state.viewer = {
+              ...state.viewer,
+              path: event.path,
+              mode: "text",
+              text: event.text || "",
+              encoding: (event.encoding || "").toString().toUpperCase(),
+              totalSize: event.total_size || 0,
+              hexOffset: 0,
+              hexBytes: "",
+              error: { kind: "", message: "", size: null, limit: null },
+            };
+            frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
+            break;
+          }
+          case "file_content_hex": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            state.viewer = {
+              ...state.viewer,
+              path: event.path,
+              mode: "hex",
+              text: "",
+              encoding: "",
+              totalSize: event.total_size || 0,
+              hexOffset: event.offset || 0,
+              hexBytes: event.bytes_b64 || "",
+              error: { kind: "", message: "", size: null, limit: null },
+            };
+            frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
+            break;
+          }
+          case "file_content_error": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            const errorKind = (event.error_kind || "").toString();
+            // SPEC-2009 amendment FR-026/029: binary detection is reported as
+            // an error variant from the file_content domain. The GUI flips
+            // the viewer into a "binary" notice (with a hex affordance) when
+            // the user attempted a text read; everything else surfaces the
+            // raw notice.
+            if (errorKind === "binary_not_text" && state.viewer.mode === "loading") {
+              state.viewer = {
+                ...state.viewer,
+                path: event.path,
+                mode: "binary",
+                text: "",
+                encoding: "",
+                totalSize: event.size || state.viewer.totalSize || 0,
+                hexOffset: 0,
+                hexBytes: "",
+                error: { kind: errorKind, message: event.message || "", size: event.size, limit: event.limit },
+              };
+            } else {
+              state.viewer = {
+                ...state.viewer,
+                path: event.path,
+                mode: "error",
+                text: "",
+                encoding: "",
+                totalSize: event.size || 0,
+                hexOffset: 0,
+                hexBytes: "",
+                error: { kind: errorKind, message: event.message || "", size: event.size, limit: event.limit },
+              };
+            }
+            frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
             break;
           }
           case "branch_entries": {

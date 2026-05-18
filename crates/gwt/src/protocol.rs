@@ -17,6 +17,7 @@ use crate::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
     },
     preset::WindowPreset,
+    worktree_inventory::WorktreeEntry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +155,13 @@ pub enum FrontendEvent {
     LoadFileTree {
         id: String,
         path: Option<String>,
+    },
+    ListFileTreeWorktrees {
+        id: String,
+    },
+    SelectFileTreeWorktree {
+        id: String,
+        worktree_id: String,
     },
     LoadFileContent {
         id: String,
@@ -714,6 +722,18 @@ pub enum BackendEvent {
     FileTreeError {
         id: String,
         path: String,
+        message: String,
+    },
+    FileTreeWorktrees {
+        id: String,
+        entries: Vec<WorktreeEntry>,
+    },
+    FileTreeWorktreeSelected {
+        id: String,
+        worktree_id: String,
+    },
+    FileTreeWorktreeError {
+        id: String,
         message: String,
     },
     FileContentText {

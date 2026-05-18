@@ -32,6 +32,7 @@ pub mod start_work;
 pub mod system_settings;
 pub mod window_state;
 pub mod workspace;
+pub mod worktree_inventory;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
