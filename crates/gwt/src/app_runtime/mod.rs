@@ -9786,6 +9786,77 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_resume_workspace_journal_populates_quick_start_entries_from_prior_sessions() {
+        // SPEC-2359 US-44 (Issue #2757) follow-on: when the user clicks
+        // `Resume` on a Workspace journal card whose branch already has a
+        // prior session on disk, the Launch Wizard should expose that prior
+        // session through the Quick Start panel immediately. Without this,
+        // the Quick Start panel only fills after the user completes the
+        // runtime resolution step, which forces a multi-click resume path
+        // even though the resumable session metadata is already known.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "work/20260518-resume-qs";
+        run_git(&repo, &["branch", branch]);
+        gwt_core::workspace_projection::save_workspace_projection(
+            &repo,
+            &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+        )
+        .expect("save projection");
+        append_workspace_resume_journal(
+            &repo,
+            "journal-quickstart",
+            temp.path().join("work").join("20260518-resume-qs"),
+            "SPEC-2359",
+            "Resume with prior Codex session available",
+        );
+
+        // Pre-seed a Session toml that matches the resumable branch so the
+        // wizard cache exposes it through Quick Start entries.
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let mut session = gwt_agent::Session::new(&repo, branch, gwt_agent::AgentId::Codex);
+        session.display_name = "Codex".to_string();
+        session.agent_session_id = Some("prior-codex-uuid".to_string());
+        session.tool_version = Some("installed".to_string());
+        session.save(&sessions_dir).expect("save session toml");
+
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Journal,
+                journal_id: Some("journal-quickstart".to_string()),
+            },
+        );
+
+        let session_ref = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard opened");
+        let view = session_ref.wizard.view();
+        assert_eq!(view.branch_name, branch);
+        assert!(
+            !view.quick_start_entries.is_empty(),
+            "Resume must pre-populate Quick Start entries so the prior session is immediately resumable; saw empty Quick Start panel"
+        );
+        assert!(
+            view.quick_start_entries
+                .iter()
+                .any(|entry| entry.resume_session_id.as_deref() == Some("prior-codex-uuid")),
+            "Expected the prior Codex session to appear in Quick Start entries with its resume_session_id surfaced"
+        );
+    }
+
+    #[test]
     fn app_runtime_resume_workspace_journal_falls_back_to_new_work_branch_when_branch_is_missing() {
         let _env_lock = env_test_lock()
             .lock()

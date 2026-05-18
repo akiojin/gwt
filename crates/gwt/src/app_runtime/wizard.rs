@@ -168,7 +168,20 @@ impl AppRuntime {
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let worktree_path = None;
         let quick_start_root = project_root.to_path_buf();
-        let quick_start_entries = Vec::new();
+        // SPEC-2359 US-44 (Issue #2757): when this wizard is opened by a
+        // Workspace Resume action, pre-populate Quick Start entries from
+        // prior sessions on this branch so the user can immediately re-launch
+        // the most recent Claude Code / Codex session via the Quick Start
+        // panel (which carries `resume_session_id` and triggers
+        // `--resume <uuid>` at launch time). Other entry points keep the
+        // deferred path (populated during runtime hydration) so Add Agent /
+        // Branches launch flows stay fast on open.
+        let quick_start_entries = if workspace_resume_context.is_some() {
+            self.launch_wizard_cache
+                .quick_start_entries(&quick_start_root, &normalized_branch_name)
+        } else {
+            Vec::new()
+        };
         let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
