@@ -34,6 +34,7 @@ const ROOT_MODULES = new Set([
   "project-tabs-renderer.js",
   "socket-receive-dispatcher.js",
   "terminal-context-menu.js",
+  "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",
   "theme-manager.js",
   "theme-toggle.js",

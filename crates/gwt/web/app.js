@@ -27,6 +27,7 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
         renderProjectTabs as renderProjectTabsView,
@@ -3114,11 +3115,17 @@
           terminalContainer,
           terminal,
         );
+        const wheelScrollCleanup = createTerminalWheelScrollController({
+          terminalRoot: terminalContainer,
+          terminal,
+          window,
+        });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
           contextMenuCleanup();
+          wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {

@@ -53,6 +53,10 @@ pub fn terminal_context_menu_js() -> &'static str {
     include_str!("../web/terminal-context-menu.js")
 }
 
+pub fn terminal_wheel_scroll_js() -> &'static str {
+    include_str!("../web/terminal-wheel-scroll.js")
+}
+
 pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -202,6 +206,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-context-menu.js",
         source: terminal_context_menu_js,
         marker: "createTerminalContextMenuController",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-wheel-scroll.js",
+        source: terminal_wheel_scroll_js,
+        marker: "createTerminalWheelScrollController",
     },
     RootJsModuleAsset {
         path: "/theme-manager.js",
