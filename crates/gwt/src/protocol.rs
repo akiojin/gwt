@@ -1269,8 +1269,8 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "file_content_saved",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "file_content_save_error",
@@ -1673,7 +1673,7 @@ mod tests {
     use super::{
         backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
         BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, ProfileEntryView,
-        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -1870,40 +1870,29 @@ mod tests {
             runtime_hook_event.backpressure,
             BackendEventBackpressurePolicy::BestEffort
         );
+
+        let file_content_saved =
+            backend_event_policy("file_content_saved").expect("file_content_saved policy");
+        assert_eq!(
+            file_content_saved.delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            file_content_saved.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
     }
 
     #[test]
     fn frontend_coalescing_contract_matches_backend_latest_wins_policy() {
         let frontend_dispatcher = include_str!("../web/socket-receive-dispatcher.js");
 
-        for kind in [
-            "workspace_state",
-            "active_work_projection",
-            "window_list",
-            "project_index_status",
-            "launch_wizard_state",
-            "update_state",
-        ] {
-            let policy = backend_event_policy(kind).expect("backend event policy");
-            assert!(
+        for policy in BACKEND_EVENT_POLICIES {
+            assert_eq!(
+                frontend_dispatcher.contains(&format!("\"{}\"", policy.kind)),
                 policy.coalesces_on_frontend(),
-                "{kind} should be latest-wins in backend policy"
-            );
-            assert!(
-                frontend_dispatcher.contains(&format!("\"{kind}\"")),
-                "{kind} should be listed in DEFAULT_COALESCE_KINDS"
-            );
-        }
-
-        for kind in ["terminal_output", "terminal_snapshot", "runtime_hook_event"] {
-            let policy = backend_event_policy(kind).expect("backend event policy");
-            assert!(
-                !policy.coalesces_on_frontend(),
-                "{kind} must preserve delivery semantics on the frontend"
-            );
-            assert!(
-                !frontend_dispatcher.contains(&format!("\"{kind}\"")),
-                "{kind} must not be listed in DEFAULT_COALESCE_KINDS"
+                "{} backend policy disagrees with DEFAULT_COALESCE_KINDS",
+                policy.kind
             );
         }
 

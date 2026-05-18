@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::sync::mpsc as std_mpsc;
+#[cfg(unix)]
+use std::sync::Mutex;
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
@@ -80,6 +82,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let Some(_address) = self.window_lookup.get(&id).cloned() else {
             self.remove_window_state_tracking(&id);
+            self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
@@ -247,26 +250,44 @@ enum RuntimeDaemonPublishEnqueueError {
 
 #[cfg(unix)]
 static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
-    Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>,
+    Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(unix)]
-fn runtime_daemon_publish_sender() -> Option<&'static std_mpsc::SyncSender<RuntimeDaemonPublish>> {
-    RUNTIME_DAEMON_PUBLISH_QUEUE
-        .get_or_init(|| {
-            let (sender, receiver) = std_mpsc::sync_channel(RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY);
-            match std::thread::Builder::new()
-                .name("gwt-runtime-daemon-publish-worker".to_string())
-                .spawn(move || run_runtime_daemon_publish_worker(receiver))
-            {
-                Ok(_handle) => Some(sender),
-                Err(err) => {
-                    tracing::debug!(error = %err, "runtime daemon publish worker spawn failed");
-                    None
-                }
-            }
-        })
-        .as_ref()
+fn runtime_daemon_publish_sender() -> Option<std_mpsc::SyncSender<RuntimeDaemonPublish>> {
+    let queue = RUNTIME_DAEMON_PUBLISH_QUEUE.get_or_init(|| Mutex::new(None));
+    runtime_daemon_publish_sender_from(queue, |receiver| {
+        std::thread::Builder::new()
+            .name("gwt-runtime-daemon-publish-worker".to_string())
+            .spawn(move || run_runtime_daemon_publish_worker(receiver))
+            .map(|_handle| ())
+    })
+}
+
+#[cfg(unix)]
+fn runtime_daemon_publish_sender_from(
+    queue: &Mutex<Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>>,
+    spawn_worker: impl FnOnce(std_mpsc::Receiver<RuntimeDaemonPublish>) -> std::io::Result<()>,
+) -> Option<std_mpsc::SyncSender<RuntimeDaemonPublish>> {
+    let Ok(mut queue) = queue.lock() else {
+        tracing::debug!("runtime daemon publish queue lock poisoned");
+        return None;
+    };
+    if let Some(sender) = queue.as_ref() {
+        return Some(sender.clone());
+    }
+
+    let (sender, receiver) = std_mpsc::sync_channel(RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY);
+    match spawn_worker(receiver) {
+        Ok(()) => {
+            *queue = Some(sender.clone());
+            Some(sender)
+        }
+        Err(err) => {
+            tracing::debug!(error = %err, "runtime daemon publish worker spawn failed");
+            None
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -292,7 +313,7 @@ fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
     let Some(sender) = runtime_daemon_publish_sender() else {
         return;
     };
-    if let Err(err) = try_enqueue_runtime_daemon_publish(sender, publish) {
+    if let Err(err) = try_enqueue_runtime_daemon_publish(&sender, publish) {
         tracing::debug!(
             ?err,
             "runtime daemon publish queue rejected event (non-fatal)"
@@ -425,11 +446,12 @@ mod tests {
     use std::path::PathBuf;
 
     #[cfg(unix)]
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex};
 
     #[cfg(unix)]
     use super::{
-        try_enqueue_runtime_daemon_publish, RuntimeDaemonPublish, RuntimeDaemonPublishEnqueueError,
+        runtime_daemon_publish_sender_from, try_enqueue_runtime_daemon_publish,
+        RuntimeDaemonPublish, RuntimeDaemonPublishEnqueueError,
     };
     #[cfg(unix)]
     use crate::WindowProcessStatus;
@@ -461,5 +483,25 @@ mod tests {
             ),
             Err(RuntimeDaemonPublishEnqueueError::Full)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_daemon_publish_sender_retries_after_spawn_failure() {
+        let queue = Mutex::new(None);
+
+        assert!(runtime_daemon_publish_sender_from(&queue, |_receiver| {
+            Err(std::io::Error::other("spawn failed"))
+        })
+        .is_none());
+        assert!(queue.lock().expect("queue").is_none());
+
+        assert!(runtime_daemon_publish_sender_from(&queue, |_receiver| Ok(())).is_some());
+        assert!(queue.lock().expect("queue").is_some());
+
+        assert!(runtime_daemon_publish_sender_from(&queue, |_receiver| {
+            panic!("sender should be reused without spawning a second worker")
+        })
+        .is_some());
     }
 }
