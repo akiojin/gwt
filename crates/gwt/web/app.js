@@ -27,6 +27,7 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
         renderProjectTabs as renderProjectTabsView,
@@ -2109,7 +2110,10 @@
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
-      function scheduleTerminalFocusActivation(windowId) {
+      function scheduleTerminalFocusActivation(
+        windowId,
+        { shouldPersistGeometry = true } = {},
+      ) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.activationFrame !== null) {
           return;
@@ -2124,8 +2128,9 @@
           // step when a modal is open or a text input owns focus, so the
           // Clone Project URL/Search field (and other modal inputs) keep
           // keyboard focus while the background terminal keeps streaming
-          // `workspace_state` events. Geometry sync still runs every
-          // cycle so xterm reflows are unaffected.
+          // `workspace_state` events. Geometry persistence is controlled
+          // by the caller so routine workspace renders do not echo
+          // backend resize broadcasts back into another workspace render.
           const shouldFocus = !shouldSkipTerminalFocusActivation({
             doc: document,
             modalElements: [
@@ -2136,18 +2141,17 @@
               migrationModal,
             ],
           });
-          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit + persist
-          // geometry so xterm's cell metrics are populated by the time
-          // proposeDimensions runs. The previous order (fit-then-refresh)
-          // silently no-op'd whenever the terminal had been display:none —
-          // proposeDimensions returns undefined when cell.width === 0,
-          // leaving the viewport stuck on the pre-hidden cols/rows until
-          // the next OS resize.
+          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit so xterm's
+          // cell metrics are populated by the time proposeDimensions
+          // runs. The previous order (fit-then-refresh) silently no-op'd
+          // whenever the terminal had been display:none — proposeDimensions
+          // returns undefined when cell.width === 0, leaving the viewport
+          // stuck on the pre-hidden cols/rows until the next OS resize.
           runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
             shouldFocus,
-            shouldPersistGeometry: true,
+            shouldPersistGeometry,
             sendGeometry,
           });
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
@@ -3190,11 +3194,17 @@
           terminalContainer,
           terminal,
         );
+        const wheelScrollCleanup = createTerminalWheelScrollController({
+          terminalRoot: terminalContainer,
+          terminal,
+          window,
+        });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
           contextMenuCleanup();
+          wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
@@ -9659,7 +9669,9 @@
             const topmostId = topmostWindowId(workspace);
             if (topmostId && ids.has(topmostId)) {
               focusWindowLocally(topmostId);
-              scheduleTerminalFocusActivation(topmostId);
+              scheduleTerminalFocusActivation(topmostId, {
+                shouldPersistGeometry: false,
+              });
             } else {
               focusedId = null;
             }

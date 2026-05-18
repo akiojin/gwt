@@ -5614,3 +5614,27 @@ repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視
    のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
    後続 retry で最後に full status を配信する。この retry は固定短時間 timeout で捨てず、
    bootstrap が長引く初回 runtime 準備や大規模 repo でも要求を保持する。
+
+## Agent launch は親環境の色抑制フラグをそのまま継承しない
+
+### 事象
+
+Codex セッションから Windows GUI を起動して手動確認したところ、ホイールスクロールは動いたが
+Agent window 内の TTY 表示が白一色になった。
+
+### 原因
+
+親 Codex セッションの環境に `NO_COLOR=1` と `TERM=dumb` があり、gwt は `TERM` と `COLORTERM`
+を `xterm-256color` / `truecolor` に補正していた一方で、`NO_COLOR` は子 Agent に引き継いでいた。
+初回修正では launch env map から `NO_COLOR` を削除しただけで、PTY spawn が親 process env を継承する
+経路の `env_remove("NO_COLOR")` 相当を設定していなかったため、子 Agent process には `NO_COLOR=1` が
+残り続けた。そのため agent CLI 側が ANSI 色を出さず、xterm.js / CSS ではなく launch env が色を抑制していた。
+
+### 再発防止策
+
+1. GUI / Agent launch 環境を作るときは、terminal capability を補正するだけでなく、親の
+   color suppressor env (`NO_COLOR` など) が意図せず残らないことを確認する。`env_vars` から
+   消すだけでは不十分で、PTY spawn の `remove_env` にも入れて inherited env を明示削除する。
+2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
+3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
+   frontend DOM の computed color、launch env の順に切り分ける。

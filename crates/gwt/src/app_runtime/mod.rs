@@ -6407,6 +6407,7 @@ mod tests {
         collections::HashMap,
         ffi::OsString,
         fs,
+        io::Write,
         path::{Path, PathBuf},
         sync::{mpsc, Arc, Mutex, RwLock},
         thread,
@@ -6425,8 +6426,8 @@ mod tests {
     use gwt_config::{Profile, Settings};
     use gwt_core::{
         coordination::{
-            load_snapshot, post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind,
-            BoardMention, BoardMentionTargetKind,
+            coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
+            BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
         },
         logging::{current_log_file, LogEvent, LogLevel},
         paths::gwt_cache_dir,
@@ -11604,6 +11605,14 @@ exit 1
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let parent_id = "history-parent".to_string();
+        let events_path = coordination_events_path(&repo);
+        fs::create_dir_all(
+            events_path
+                .parent()
+                .expect("coordination event log has parent"),
+        )
+        .expect("create coordination dir");
+        let mut events = fs::File::create(&events_path).expect("create legacy event log");
         for idx in 0..505 {
             let mut entry = BoardEntry::new(
                 AuthorKind::Agent,
@@ -11618,8 +11627,11 @@ exit 1
             if idx == 0 {
                 entry.id = parent_id.clone();
             }
-            post_entry(&repo, entry).expect("seed board entry");
+            serde_json::to_writer(&mut events, &CoordinationEvent::MessageAppended { entry })
+                .expect("write board seed event");
+            events.write_all(b"\n").expect("write board seed newline");
         }
+        events.flush().expect("flush board seed events");
         let snapshot = load_snapshot(&repo).expect("load board snapshot");
         assert!(!snapshot
             .board
