@@ -273,13 +273,21 @@ impl AppRuntime {
 
     pub(crate) fn resume_workspace_events(
         &mut self,
+        client_id: &str,
         source: gwt::WorkspaceResumeSource,
         journal_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        // SPEC-2359 / Issue #2757: Resume click failures must surface through
+        // `LaunchWizardOpenError` (a client-scoped reply) instead of the
+        // legacy `ProjectOpenError` broadcast, which the frontend renders only
+        // on the project picker overlay and is therefore invisible while a
+        // project tab is already open.
         let error_event = |message: &str| {
-            vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: message.to_string(),
-            })]
+            vec![launch_wizard_open_error(
+                client_id,
+                "Resume Workspace",
+                message,
+            )]
         };
 
         let Some(tab_id) = self.active_tab_id.clone() else {
