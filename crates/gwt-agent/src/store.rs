@@ -75,6 +75,13 @@ struct CustomAgentToml {
     mode_args: Option<ModeArgs>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     env: HashMap<String, String>,
+    #[serde(
+        default,
+        rename = "supportsResumePicker",
+        alias = "supports_resume_picker",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    supports_resume_picker: bool,
 }
 
 impl CustomAgentToml {
@@ -92,6 +99,7 @@ impl CustomAgentToml {
             skip_permissions_args: self.skip_permissions_args,
             mode_args: self.mode_args,
             env: self.env,
+            supports_resume_picker: self.supports_resume_picker,
         };
 
         agent.validate().then_some(agent)
@@ -109,6 +117,7 @@ impl From<&CustomCodingAgent> for CustomAgentToml {
             skip_permissions_args: agent.skip_permissions_args.clone(),
             mode_args: agent.mode_args.clone(),
             env: agent.env.clone(),
+            supports_resume_picker: agent.supports_resume_picker,
         }
     }
 }
@@ -430,6 +439,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let a2 = StoredCustomAgent::new(CustomCodingAgent {
             id: "dup".to_string(),
@@ -440,6 +450,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let err = save_stored_custom_agents_to_path(&path, &[a1, a2]).unwrap_err();
         assert!(err.contains("duplicate"));
@@ -458,6 +469,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let err = save_stored_custom_agents_to_path(&path, &[entry]).unwrap_err();
         assert!(err.contains("invalid"));
@@ -532,6 +544,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("FOO".to_string(), "BAR".to_string())]),
+            supports_resume_picker: false,
         });
         save_stored_custom_agents_to_path(&config_path, &[entry]).expect("save");
 
