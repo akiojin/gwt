@@ -1,3 +1,4 @@
+pub mod backend_service;
 pub mod board_audience;
 pub mod branch_cleanup;
 pub mod branch_list;
