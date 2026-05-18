@@ -55,6 +55,16 @@ impl AgentId {
             .iter()
             .find(|descriptor| descriptor.id == *self)
     }
+
+    /// Whether this agent's CLI exposes an interactive session picker when its
+    /// resume command is invoked without a session id (e.g. `claude --resume`
+    /// shows the picker, `codex resume` shows the picker). Used by the Launch
+    /// Wizard to gate the Execution Mode `Resume` option.
+    ///
+    /// SPEC-2014 2026-05-18 amendment FR-C.
+    pub fn supports_resume_picker(&self) -> bool {
+        matches!(self, Self::ClaudeCode | Self::Codex)
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -412,6 +422,27 @@ mod tests {
     #[test]
     fn session_mode_default_is_normal() {
         assert_eq!(SessionMode::default(), SessionMode::Normal);
+    }
+
+    #[test]
+    fn supports_resume_picker_only_for_picker_capable_builtins() {
+        // SPEC-2014 2026-05-18 amendment FR-C: Claude Code と Codex のみ
+        // interactive picker (`claude --resume` / `codex resume`) を持つ。
+        assert!(AgentId::ClaudeCode.supports_resume_picker());
+        assert!(AgentId::Codex.supports_resume_picker());
+        for non_picker in [
+            AgentId::Gemini,
+            AgentId::OpenCode,
+            AgentId::OpenClaw,
+            AgentId::Hermes,
+            AgentId::Copilot,
+            AgentId::Custom("aider".into()),
+        ] {
+            assert!(
+                !non_picker.supports_resume_picker(),
+                "{non_picker:?} should not advertise picker support"
+            );
+        }
     }
 
     #[test]

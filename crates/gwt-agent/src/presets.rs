@@ -271,6 +271,7 @@ pub fn claude_code_openai_compat_preset(
         mode_args: None,
         skip_permissions_args: vec!["--dangerously-skip-permissions".to_string()],
         env,
+        supports_resume_picker: false,
     }
 }
 

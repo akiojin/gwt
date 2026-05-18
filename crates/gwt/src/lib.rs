@@ -54,8 +54,9 @@ pub use custom_agents_service::{
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_content::{
-    file_kind, read_binary_chunk, read_text_file, BinaryChunk, ContentLimits, Encoding,
-    FileContentError, FileKind, TextResult,
+    file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file, BinaryChunk,
+    ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline, TextResult,
+    WriteOutcome,
 };
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
@@ -111,9 +112,10 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
-    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, UiTraceEntry, UiTracePayload,
+    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileContentErrorKind,
+    FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
+    GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, UiTraceEntry, UiTracePayload,
     WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
     WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,

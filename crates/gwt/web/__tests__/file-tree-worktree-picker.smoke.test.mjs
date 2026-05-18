@@ -78,3 +78,48 @@ test("File Tree split layout CSS contract ships expected selectors", async () =>
     );
   }
 });
+
+test("index.html exposes Phase 2 Discard / Conflict modal landing pads", async () => {
+  // SPEC-2009 amendment Phase 2 FR-034/035: app.js mounts editor flow modals
+  // into these landing pads. Their absence would silently drop the Save /
+  // Discard / Overwrite / Reload affordances.
+  const { document } = await loadIndex();
+  for (const id of ["file-tree-discard-modal", "file-tree-conflict-modal"]) {
+    const modal = document.getElementById(id);
+    assert.ok(modal, `${id} landing pad must exist for the editor flow`);
+    assert.ok(
+      modal.classList.contains("modal-backdrop"),
+      `${id} must reuse the shared modal-backdrop primitive`,
+    );
+    const shell = modal.querySelector(".modal-shell");
+    assert.ok(shell, `${id} must include a .modal-shell so app.js can mount content`);
+    assert.equal(
+      shell.getAttribute("role"),
+      "dialog",
+      `${id} shell must announce role=dialog for assistive tech`,
+    );
+  }
+});
+
+test("editor CSS contract ships dirty / Save / hex cell / modal styles", async () => {
+  // SPEC-2009 amendment Phase 2 FR-032/033/036/037: editor-specific
+  // affordances depend on these selectors. The contract guard runs from CI
+  // so regressions surface before they hit production.
+  const cssPath = path.resolve(here, "..", "styles", "components.css");
+  const css = await readFile(cssPath, "utf8");
+  for (const cls of [
+    ".file-tree-viewer-dirty",
+    ".file-tree-viewer-readonly",
+    ".file-tree-viewer-saved",
+    ".file-tree-viewer-save[disabled]",
+    "textarea.file-tree-viewer-editor",
+    ".file-tree-hex-cell",
+    ".discard-modal-shell",
+    ".conflict-modal-shell",
+  ]) {
+    assert.ok(
+      css.includes(cls),
+      `components.css must declare ${cls} so the editor flow renders correctly`,
+    );
+  }
+});
