@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.38.0] - 2026-05-19
+
+### Bug Fixes
+
+- **gui:** Keep tao::Window alive for the event_loop lifetime
+- **installer:** Pin gwt.exe / gwtd.exe Name in WiX manifest
+
+### Features
+
+- **serve:** Open default browser unless --no-open is passed
+
+### Refactor
+
+- **repo:** Retract develop worktree auto-select for bare layout
+
 ## [9.37.0] - 2026-05-19
 
 ### Bug Fixes
