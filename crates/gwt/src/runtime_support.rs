@@ -888,6 +888,122 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // SPEC-1934 2026-05-20 Update: Open Project Auto-Select Retraction
+    // US-7 / US-8 / FR-050 / FR-052 / SC-034..SC-037
+    // -------------------------------------------------------------------
+
+    fn make_worktree_marker(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let worktree = parent.join(name);
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: ../repo.git/worktrees/{name}\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(parent.join("repo.git").join("worktrees").join(name)).unwrap();
+        worktree
+    }
+
+    #[test]
+    fn resolve_project_target_opens_workspace_home_for_bare_with_develop_worktree() {
+        // SC-034: workspace_home (= parent dir) を Open Project で選んだとき、
+        // `develop` worktree が存在しても auto-select せず、workspace_home を
+        // project_root として返す。これにより Workspace Overview が hub になる。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_dir = tmp.path().join("repo.git");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        let _develop = make_worktree_marker(tmp.path(), "develop");
+
+        let target = super::resolve_project_target(tmp.path()).expect("bare workspace home target");
+
+        assert_eq!(target.kind, gwt::ProjectKind::Git);
+        assert!(!target.needs_migration);
+        assert_eq!(
+            target.project_root,
+            dunce::canonicalize(tmp.path()).unwrap(),
+            "Open Project on workspace home must not redirect to develop worktree (SC-034)"
+        );
+    }
+
+    #[test]
+    fn resolve_project_target_respects_direct_worktree_pick_under_bare() {
+        // SC-035: user が worktree dir を直接 Open Project で指定した場合は、
+        // workspace_home に rebasing せずその worktree を開く。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_dir = tmp.path().join("repo.git");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        let develop = make_worktree_marker(tmp.path(), "develop");
+
+        let target = super::resolve_project_target(&develop).expect("direct worktree target");
+
+        assert_eq!(target.kind, gwt::ProjectKind::Git);
+        assert!(!target.needs_migration);
+        assert_eq!(
+            target.project_root,
+            dunce::canonicalize(&develop).unwrap(),
+            "Direct worktree pick must be honored, not rebased to workspace home (SC-035)"
+        );
+    }
+
+    #[test]
+    fn resolve_project_target_handles_bare_without_any_worktree() {
+        // SC-036: bare のみで worktree 0 件 (Clone Project 直後の状態) でも
+        // workspace_home を Git project として返す。empty state は Workspace
+        // Overview 側で描画する。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_dir = tmp.path().join("repo.git");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+
+        let target = super::resolve_project_target(tmp.path()).expect("bare-only target");
+
+        assert_eq!(target.kind, gwt::ProjectKind::Git);
+        assert!(!target.needs_migration);
+        assert_eq!(
+            target.project_root,
+            dunce::canonicalize(tmp.path()).unwrap(),
+            "Bare-only workspace home must open Workspace Overview (SC-036)"
+        );
+    }
+
+    #[test]
+    fn resolve_project_target_does_not_recreate_after_worktree_remove() {
+        // SC-037: develop worktree が削除された状態でも auto-repair / auto-create
+        // しない。bare layout のまま workspace_home を返す。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_dir = tmp.path().join("repo.git");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_dir.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+
+        let before = super::resolve_project_target(tmp.path()).expect("first resolve");
+        assert_eq!(
+            before.project_root,
+            dunce::canonicalize(tmp.path()).unwrap()
+        );
+        assert!(
+            !tmp.path().join("develop").exists(),
+            "resolve must not create develop worktree side-effects (SC-037)"
+        );
+
+        let after = super::resolve_project_target(tmp.path()).expect("second resolve");
+        assert_eq!(after.project_root, before.project_root);
+        assert!(
+            !tmp.path().join("develop").exists(),
+            "repeated resolve must remain idempotent and side-effect free"
+        );
+    }
+
+    // -------------------------------------------------------------------
     // Issue #2054: gwt pr remote resolution must tolerate non-GitHub
     // `origin` and explicit env overrides.
     // -------------------------------------------------------------------
