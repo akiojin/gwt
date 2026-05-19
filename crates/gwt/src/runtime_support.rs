@@ -37,6 +37,41 @@ pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> 
     window.preset.requires_process() && window.status == WindowProcessStatus::Running
 }
 
+// SPEC-2013 FR-011: `cli::pane::is_agent_pane` と同じ判定 (`agent_id` 設定済み
+// もしくは preset が Agent / Claude / Codex のいずれか) を runtime_support
+// 側でも露出し、`ProjectTabView` 生成箇所から重複定義なく参照できるようにする。
+pub fn window_is_agent_pane(window: &gwt::PersistedWindowState) -> bool {
+    window.agent_id.is_some()
+        || matches!(
+            window.preset,
+            WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex
+        )
+}
+
+// SPEC-2013 FR-011: agent preset の Running 窓だけを `RunningAgentSummary` に
+// 集計する。`display_name` は cli/pane.rs と同じ優先順 (`dynamic_title` →
+// `purpose_title` → `title`)、`branch` は `dynamic_title_detail` を best-effort
+// で流用する (agent runtime が detail 行に branch / worktree subtitle を載せる
+// 既存規約)。
+pub fn collect_running_agents(
+    windows: &[gwt::PersistedWindowState],
+) -> Vec<gwt::RunningAgentSummary> {
+    windows
+        .iter()
+        .filter(|window| {
+            window_is_agent_pane(window) && window.status == WindowProcessStatus::Running
+        })
+        .map(|window| gwt::RunningAgentSummary {
+            display_name: window
+                .dynamic_title
+                .clone()
+                .or_else(|| window.purpose_title.clone())
+                .unwrap_or_else(|| window.title.clone()),
+            branch: window.dynamic_title_detail.clone(),
+        })
+        .collect()
+}
+
 pub fn current_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -82,12 +117,17 @@ pub fn app_state_view_from_parts(
         app_version: current_app_version().to_string(),
         tabs: tabs
             .iter()
-            .map(|tab| gwt::ProjectTabView {
-                id: tab.id.clone(),
-                title: tab.title.clone(),
-                project_root: tab.project_root.display().to_string(),
-                kind: tab.kind,
-                workspace: workspace_view_for_tab(tab),
+            .map(|tab| {
+                let running_agents = collect_running_agents(&tab.workspace.persisted().windows);
+                gwt::ProjectTabView {
+                    id: tab.id.clone(),
+                    title: tab.title.clone(),
+                    project_root: tab.project_root.display().to_string(),
+                    kind: tab.kind,
+                    workspace: workspace_view_for_tab(tab),
+                    running_agent_count: running_agents.len() as u32,
+                    running_agents,
+                }
             })
             .collect(),
         active_tab_id: active_tab_id.map(str::to_owned),
@@ -419,11 +459,16 @@ pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
+    /// SPEC-1942 US-14: `gwt serve` / `gwt --headless` — bootstrap the same
+    /// embedded server stack as the GUI route but skip wry/tao so the user
+    /// can open the UI in any browser.
+    Headless,
 }
 
 pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
     match argv.get(1).map(String::as_str) {
         Some("issue" | "pr" | "actions") => FrontDoorRoute::RepoBackedCli,
+        Some("serve" | "--headless") => FrontDoorRoute::Headless,
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
             debug_assert!(matches!(
                 top_verb,
@@ -464,7 +509,10 @@ pub fn run_cli(argv: &[String]) -> io::Result<()> {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             std::process::exit(gwt::cli::dispatch(&mut env, argv));
         }
-        FrontDoorRoute::Gui => Ok(()),
+        // Gui and Headless are both bootstrapped by `main()` after `run_cli`
+        // returns; `run_cli` itself only dispatches verbs that exit the
+        // process.
+        FrontDoorRoute::Gui | FrontDoorRoute::Headless => Ok(()),
     }
 }
 
@@ -730,6 +778,42 @@ mod tests {
             assert!(
                 gwt::cli::should_dispatch_cli(&args),
                 "non-GUI helper tooling must stay on the CLI path: {args:?}"
+            );
+        }
+    }
+
+    // SPEC-1942 US-14 / FR-093: `gwt serve` keeps the GUI bootstrap stack
+    // (logging, AppRuntime, EmbeddedServer, watchers) but skips wry/tao so the
+    // user can open the same UI in any browser.
+    #[test]
+    fn front_door_route_routes_serve_subcommand_to_headless() {
+        for args in [
+            argv(&["gwt", "serve"]),
+            argv(&["gwt", "serve", "--port", "8787"]),
+            argv(&["gwt", "serve", "--bind", "0.0.0.0", "--open"]),
+        ] {
+            assert_eq!(front_door_route(&args), FrontDoorRoute::Headless);
+            assert!(
+                !gwt::cli::should_dispatch_cli(&args),
+                "serve must not fall through to CLI dispatch (route is handled by main): {args:?}"
+            );
+        }
+    }
+
+    // SPEC-1942 US-14 / FR-094: `gwt --headless` is an equivalent alias for
+    // `gwt serve`. Both must resolve to `FrontDoorRoute::Headless` so user
+    // mental models stay flexible.
+    #[test]
+    fn front_door_route_routes_dash_dash_headless_flag_to_headless() {
+        for args in [
+            argv(&["gwt", "--headless"]),
+            argv(&["gwt", "--headless", "--port", "8787"]),
+            argv(&["gwt", "--headless", "--bind", "0.0.0.0"]),
+        ] {
+            assert_eq!(front_door_route(&args), FrontDoorRoute::Headless);
+            assert!(
+                !gwt::cli::should_dispatch_cli(&args),
+                "--headless must not fall through to CLI dispatch: {args:?}"
             );
         }
     }

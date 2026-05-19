@@ -75,6 +75,13 @@ struct CustomAgentToml {
     mode_args: Option<ModeArgs>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     env: HashMap<String, String>,
+    #[serde(
+        default,
+        rename = "supportsResumePicker",
+        alias = "supports_resume_picker",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    supports_resume_picker: bool,
 }
 
 impl CustomAgentToml {
@@ -92,6 +99,7 @@ impl CustomAgentToml {
             skip_permissions_args: self.skip_permissions_args,
             mode_args: self.mode_args,
             env: self.env,
+            supports_resume_picker: self.supports_resume_picker,
         };
 
         agent.validate().then_some(agent)
@@ -109,6 +117,7 @@ impl From<&CustomCodingAgent> for CustomAgentToml {
             skip_permissions_args: agent.skip_permissions_args.clone(),
             mode_args: agent.mode_args.clone(),
             env: agent.env.clone(),
+            supports_resume_picker: agent.supports_resume_picker,
         }
     }
 }
@@ -122,9 +131,41 @@ pub fn load_custom_agents_from_path(path: &Path) -> Result<Vec<CustomCodingAgent
         .collect())
 }
 
+/// SPEC-1921 FR-101: load External Agents from `path` after running the
+/// idempotent silent migration of legacy `ClaudeCodeOpenaiCompat` rows into
+/// `[builtinAgents.claudeCode.backends.*]`. Production startup paths should
+/// call this variant exactly once before any other code touches the global
+/// config; service-layer load paths can continue to use
+/// [`load_custom_agents_from_path`] / [`load_stored_custom_agents_from_path`]
+/// without re-triggering the migration scan.
+pub fn migrate_and_load_stored_custom_agents(
+    path: &Path,
+) -> Result<Vec<StoredCustomAgent>, String> {
+    match crate::migration::migrate_legacy_backend_rows(path) {
+        Ok(report) if report.changed() => {
+            tracing::info!(
+                migrated = ?report.migrated_claude_code_ids,
+                renamed = ?report.renamed,
+                "migrated legacy Claude Code backend rows to builtinAgents.claudeCode.backends"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            warn!(error = %err, "legacy backend migration failed; loading config as-is");
+        }
+    }
+    load_stored_custom_agents_from_path(path)
+}
+
 /// Load stored custom agents (with raw sibling-field tables) from the given
 /// path. Used by callers that later want to re-save with
 /// [`save_stored_custom_agents_to_path`].
+///
+/// **Note (SPEC-1921 FR-101)**: this function does NOT auto-run the
+/// `migrate_legacy_backend_rows` scan. Backend Override migration is an
+/// explicit startup operation owned by [`migrate_and_load_stored_custom_agents`]
+/// so the legacy preset round-trip path can still be exercised by tests
+/// that target the pre-amendment contract.
 pub fn load_stored_custom_agents_from_path(path: &Path) -> Result<Vec<StoredCustomAgent>, String> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -430,6 +471,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let a2 = StoredCustomAgent::new(CustomCodingAgent {
             id: "dup".to_string(),
@@ -440,6 +482,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let err = save_stored_custom_agents_to_path(&path, &[a1, a2]).unwrap_err();
         assert!(err.contains("duplicate"));
@@ -458,13 +501,24 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec![],
             env: HashMap::new(),
+            supports_resume_picker: false,
         });
         let err = save_stored_custom_agents_to_path(&path, &[entry]).unwrap_err();
         assert!(err.contains("invalid"));
     }
 
     #[test]
-    fn preset_roundtrip_preserves_all_twelve_env_entries() {
+    fn preset_persisted_through_legacy_path_is_silently_migrated_when_caller_opts_in() {
+        // SPEC-1921 2026-05-18 amendment: the legacy `ClaudeCodeOpenaiCompat`
+        // preset row used to live under `[tools.customCodingAgents.<id>]`
+        // and round-trip with all 12 env entries. FR-101 moves any such row
+        // into `[builtinAgents.claudeCode.backends.<id>]` when callers opt
+        // into the migrating load via
+        // [`migrate_and_load_stored_custom_agents`]. The derived
+        // [`AgentBackendProfile`] keeps the user-visible inputs (base_url,
+        // api_key, model); the telemetry-disable env vars are re-derived by
+        // the launch builder at spawn time rather than persisted under each
+        // backend row (FR-098).
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
 
@@ -475,47 +529,29 @@ default = { id = "default", label = "Default", arg = "" }
             "sk-test-key",
             "openai/gpt-oss-20b",
         );
-        let entries = vec![StoredCustomAgent::new(preset)];
-        save_stored_custom_agents_to_path(&config_path, &entries).expect("save preset");
+        save_stored_custom_agents_to_path(&config_path, &[StoredCustomAgent::new(preset)])
+            .expect("save preset");
 
-        let reloaded = load_custom_agents_from_path(&config_path).expect("reload");
-        assert_eq!(reloaded.len(), 1);
-        let agent = &reloaded[0];
-        assert_eq!(agent.id, "claude-code-openai");
-        assert_eq!(agent.agent_type, CustomAgentType::Bunx);
-        assert_eq!(agent.command, "@anthropic-ai/claude-code@latest");
-        assert_eq!(
-            agent.skip_permissions_args,
-            vec!["--dangerously-skip-permissions".to_string()]
+        // Migrating load: preset is no longer an External Agent.
+        let reloaded = migrate_and_load_stored_custom_agents(&config_path).expect("migrating load");
+        assert!(
+            reloaded.is_empty(),
+            "legacy preset row must be migrated out of customCodingAgents"
         );
-        assert_eq!(
-            agent.env.len(),
-            12,
-            "all 12 preset env entries survive TOML round-trip"
-        );
-        assert!(!agent.env.contains_key("CLAUDE_CODE_NO_FLICKER"));
-        assert_eq!(
-            agent.env.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("sk-test-key")
-        );
-        assert_eq!(
-            agent.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("http://192.168.100.166:32768")
-        );
-        assert_eq!(
-            agent
-                .env
-                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-                .map(String::as_str),
-            Some("openai/gpt-oss-20b")
-        );
-        assert_eq!(
-            agent
-                .env
-                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-                .map(String::as_str),
-            Some("1")
-        );
+
+        // The migrated row lives under [builtinAgents.claudeCode.backends.*].
+        let backends = crate::backend_store::load_backends_for_agent(
+            &config_path,
+            crate::backend::BuiltinAgentId::ClaudeCode,
+        )
+        .expect("load backends");
+        assert_eq!(backends.len(), 1);
+        let backend = &backends[0];
+        assert_eq!(backend.id, "claude-code-openai");
+        assert_eq!(backend.display_name, "Claude Code (OpenAI-compat)");
+        assert_eq!(backend.base_url, "http://192.168.100.166:32768");
+        assert_eq!(backend.api_key, "sk-test-key");
+        assert_eq!(backend.model, "openai/gpt-oss-20b");
     }
 
     #[test]
@@ -532,6 +568,7 @@ default = { id = "default", label = "Default", arg = "" }
             mode_args: None,
             skip_permissions_args: vec!["--yolo".to_string()],
             env: HashMap::from([("FOO".to_string(), "BAR".to_string())]),
+            supports_resume_picker: false,
         });
         save_stored_custom_agents_to_path(&config_path, &[entry]).expect("save");
 
@@ -576,5 +613,66 @@ command = "old-cli"
             DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
             "GWT_DISABLE_GLOBAL_CUSTOM_AGENTS"
         );
+    }
+
+    #[test]
+    fn migrate_and_load_runs_legacy_backend_migration_before_returning() {
+        // SPEC-1921 FR-101: production startup uses
+        // `migrate_and_load_stored_custom_agents` as a single load + migrate
+        // entry point. The legacy preset row whose `command` is
+        // `@anthropic-ai/claude-code@latest` and whose env contains
+        // `ANTHROPIC_BASE_URL` is moved to
+        // `[builtinAgents.claudeCode.backends.<id>]` before External Agent
+        // hydration runs.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tools.customCodingAgents.legacy-cc]
+id = "legacy-cc"
+displayName = "Legacy CC"
+agentType = "bunx"
+command = "@anthropic-ai/claude-code@latest"
+
+[tools.customCodingAgents.legacy-cc.env]
+ANTHROPIC_API_KEY = "sk-legacy"
+ANTHROPIC_BASE_URL = "http://192.168.1.1:1234"
+ANTHROPIC_DEFAULT_OPUS_MODEL = "openai/gpt-oss-20b"
+
+[tools.customCodingAgents.aider]
+id = "aider"
+displayName = "Aider"
+agentType = "command"
+command = "aider"
+"#,
+        )
+        .expect("write");
+
+        // Migrating load triggers FR-101.
+        let agents = migrate_and_load_stored_custom_agents(&path).expect("migrating load");
+        // External `aider` agent survives.
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent.id, "aider");
+
+        // Legacy row has been moved to the backends section.
+        let backends = crate::backend_store::load_backends_for_agent(
+            &path,
+            crate::backend::BuiltinAgentId::ClaudeCode,
+        )
+        .expect("load backends");
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].id, "legacy-cc");
+        assert_eq!(backends[0].base_url, "http://192.168.1.1:1234");
+
+        // Second migrating load is a no-op: idempotent.
+        let agents_again = migrate_and_load_stored_custom_agents(&path).expect("reload");
+        assert_eq!(agents_again.len(), 1);
+        let backends_again = crate::backend_store::load_backends_for_agent(
+            &path,
+            crate::backend::BuiltinAgentId::ClaudeCode,
+        )
+        .expect("reload backends");
+        assert_eq!(backends_again.len(), 1);
     }
 }

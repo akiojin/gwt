@@ -9,6 +9,7 @@ use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
+    file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -16,7 +17,45 @@ use crate::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
     },
     preset::WindowPreset,
+    worktree_inventory::WorktreeEntry,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentMode {
+    Text,
+    Hex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentErrorKind {
+    Denied,
+    TooLarge,
+    IoError,
+    NotAFile,
+    BinaryNotText,
+    WindowNotFound,
+    WindowMismatch,
+}
+
+/// SPEC-2006 Phase 2 amendment: structured error variants for the write
+/// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
+/// can match exhaustively on save-only outcomes (conflict / read-only /
+/// out-of-range / encoding fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileContentSaveErrorKind {
+    Denied,
+    Conflict,
+    ReadOnly,
+    OutOfRange,
+    TooLarge,
+    IoError,
+    NotAFile,
+    WindowNotFound,
+    WindowMismatch,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +173,44 @@ pub enum FrontendEvent {
     LoadFileTree {
         id: String,
         path: Option<String>,
+    },
+    ListFileTreeWorktrees {
+        id: String,
+    },
+    SelectFileTreeWorktree {
+        id: String,
+        worktree_id: String,
+    },
+    LoadFileContent {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        #[serde(default)]
+        hex_offset: Option<u64>,
+        #[serde(default)]
+        hex_length: Option<u64>,
+    },
+    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
+    /// byte back to disk. `expected_mtime` / `expected_size` are the values
+    /// returned by the most recent read; mismatch raises Conflict.
+    SaveFileContent {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        expected_mtime: u64,
+        expected_size: u64,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        encoding: Option<Encoding>,
+        #[serde(default)]
+        newline: Option<Newline>,
+        #[serde(default)]
+        has_bom: Option<bool>,
+        #[serde(default)]
+        hex_offset: Option<u64>,
+        #[serde(default)]
+        hex_byte: Option<u8>,
     },
     LoadBranches {
         id: String,
@@ -269,6 +346,25 @@ pub enum FrontendEvent {
         #[serde(default)]
         journal_id: Option<String>,
     },
+    /// SPEC-2359 US-42: enumerate agents that can be resumed for the
+    /// current Workspace. The Resume button on a Workspace card sends
+    /// this instead of [`Self::ResumeWorkspace`] so the user can pick
+    /// which previous agent to restart without going through the Launch
+    /// Wizard.
+    ListResumableAgents {
+        #[serde(default)]
+        workspace_id: Option<String>,
+    },
+    /// SPEC-2359 US-42: spawn a single previously-assigned agent in the
+    /// current Workspace without opening the Launch Wizard. The
+    /// `session_id` matches one of the entries returned by
+    /// [`BackendEvent::WorkspaceResumableAgents`]. `bounds` carries the
+    /// frontend's current viewport so the spawned agent window appears at
+    /// a sensible position inside the visible canvas.
+    ResumeWorkspaceAgent {
+        session_id: String,
+        bounds: WindowGeometry,
+    },
     OpenLaunchWizard {
         id: String,
         branch_name: String,
@@ -338,6 +434,41 @@ pub enum FrontendEvent {
     /// [`BackendEvent::BackendConnectionResult`] on success or
     /// [`BackendEvent::CustomAgentError`] on failure.
     TestBackendConnection {
+        base_url: String,
+        api_key: String,
+    },
+    /// Settings > Agent Backends (SPEC-1921 2026-05-18 amendment / FR-099):
+    /// list every saved Backend Override profile for the given built-in
+    /// agent. Response is [`BackendEvent::AgentBackendList`].
+    ListAgentBackends {
+        agent: gwt_agent::BuiltinAgentId,
+    },
+    /// Settings > Agent Backends > Add: persist a new Backend Override
+    /// profile under `[builtinAgents.<agent>.backends.<id>]`. Response is
+    /// [`BackendEvent::AgentBackendSaved`] on success or
+    /// [`BackendEvent::AgentBackendError`] on failure.
+    AddAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Settings > Agent Backends > Edit: replace an existing profile in
+    /// place. The patch id must match an existing entry.
+    UpdateAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Settings > Agent Backends > Delete: remove the profile with the
+    /// given id.
+    DeleteAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+    },
+    /// Settings > Agent Backends > Test connection: same `/v1/models` probe
+    /// as [`FrontendEvent::TestBackendConnection`], scoped to the chosen
+    /// built-in agent for future per-agent probe variation.
+    TestAgentBackendConnection {
+        agent: gwt_agent::BuiltinAgentId,
         base_url: String,
         api_key: String,
     },
@@ -449,6 +580,11 @@ fn default_board_history_limit() -> usize {
     50
 }
 
+#[allow(dead_code)]
+fn default_newline() -> Newline {
+    Newline::Lf
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
@@ -469,6 +605,20 @@ pub struct ProjectTabView {
     pub project_root: String,
     pub kind: ProjectKind,
     pub workspace: WorkspaceView,
+    #[serde(default)]
+    pub running_agent_count: u32,
+    #[serde(default)]
+    pub running_agents: Vec<RunningAgentSummary>,
+}
+
+// SPEC-2013 FR-011: project tab close 確認 modal が表示する running agent の
+// 最小情報。`display_name` は `dynamic_title` → `purpose_title` → `title` の
+// 優先順で、`branch` は worktree から導出する。frontend はこのリストを
+// 集計結果として消費し、tab close 経路の確認ダイアログに反映する。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunningAgentSummary {
+    pub display_name: String,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -687,6 +837,79 @@ pub enum BackendEvent {
         path: String,
         message: String,
     },
+    FileTreeWorktrees {
+        id: String,
+        entries: Vec<WorktreeEntry>,
+    },
+    FileTreeWorktreeSelected {
+        id: String,
+        worktree_id: String,
+    },
+    FileTreeWorktreeError {
+        id: String,
+        message: String,
+    },
+    FileContentText {
+        id: String,
+        path: String,
+        encoding: Encoding,
+        text: String,
+        total_size: u64,
+        // SPEC-2006 Phase 2 amendment: extra fields the GUI needs to support
+        // dirty/save/conflict flows. Defaults keep older clients compiling.
+        #[serde(default)]
+        mtime: u64,
+        #[serde(default)]
+        has_bom: bool,
+        #[serde(default = "default_newline")]
+        newline: Newline,
+        #[serde(default)]
+        read_only: bool,
+    },
+    FileContentHex {
+        id: String,
+        path: String,
+        offset: u64,
+        bytes_b64: String,
+        total_size: u64,
+        #[serde(default)]
+        mtime: u64,
+        #[serde(default)]
+        read_only: bool,
+    },
+    FileContentError {
+        id: String,
+        path: String,
+        error_kind: FileContentErrorKind,
+        message: String,
+        #[serde(default)]
+        size: Option<u64>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
+    /// SPEC-2006 Phase 2 amendment: successful write. `new_mtime` / `new_size`
+    /// become the next `expected_*` baseline so subsequent saves keep their
+    /// conflict checks aligned with what is actually on disk.
+    FileContentSaved {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        new_mtime: u64,
+        new_size: u64,
+        #[serde(default)]
+        encoding_fallback: u64,
+    },
+    FileContentSaveError {
+        id: String,
+        path: String,
+        mode: FileContentMode,
+        error_kind: FileContentSaveErrorKind,
+        message: String,
+        #[serde(default)]
+        current_mtime: Option<u64>,
+        #[serde(default)]
+        current_size: Option<u64>,
+    },
     BranchEntries {
         id: String,
         phase: BranchEntriesPhase,
@@ -811,6 +1034,23 @@ pub enum BackendEvent {
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
+    /// SPEC-2359 US-42: response to [`FrontendEvent::ListResumableAgents`].
+    /// `agents` is empty when the active Workspace has no resumable
+    /// agents (no `is_assigned()` entry with a recoverable session id),
+    /// so the picker modal can render an explicit "Nothing to resume"
+    /// notice instead of silently leaving the user without feedback.
+    WorkspaceResumableAgents {
+        agents: Vec<crate::launch_wizard::ResumableAgentView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+    },
+    /// SPEC-2359 US-42: spawn failure for [`FrontendEvent::ResumeWorkspaceAgent`].
+    /// Client-scoped reply so the picker modal can keep itself open and
+    /// re-enable the selected entry with the user-facing reason.
+    WorkspaceResumeAgentError {
+        session_id: String,
+        message: String,
+    },
     LaunchProgress {
         id: String,
         message: String,
@@ -889,6 +1129,28 @@ pub enum BackendEvent {
     /// Error reply for any custom-agent mutation or probe request.
     /// `code` is a stable machine-readable tag; `message` is human-readable.
     CustomAgentError {
+        code: CustomAgentErrorCode,
+        message: String,
+    },
+    /// Response to [`FrontendEvent::ListAgentBackends`].
+    AgentBackendList {
+        agent: gwt_agent::BuiltinAgentId,
+        backends: Vec<gwt_agent::AgentBackendProfile>,
+    },
+    /// Response to [`FrontendEvent::AddAgentBackend`] /
+    /// [`FrontendEvent::UpdateAgentBackend`] (save success).
+    AgentBackendSaved {
+        agent: gwt_agent::BuiltinAgentId,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Response to [`FrontendEvent::DeleteAgentBackend`].
+    AgentBackendDeleted {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+    },
+    /// Error reply for any agent-backend mutation or probe request.
+    AgentBackendError {
+        agent: gwt_agent::BuiltinAgentId,
         code: CustomAgentErrorCode,
         message: String,
     },
@@ -978,6 +1240,516 @@ pub enum BackendEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendEventDeliveryClass {
+    Streamed,
+    IdempotentLatest,
+    Snapshot,
+    EphemeralStatus,
+    Error,
+    BestEffortDaemon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendEventBackpressurePolicy {
+    PreserveOrder,
+    LatestWins,
+    ClientScopedSnapshot,
+    BestEffort,
+    FailOpenError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendEventPolicy {
+    pub kind: &'static str,
+    pub delivery: BackendEventDeliveryClass,
+    pub backpressure: BackendEventBackpressurePolicy,
+}
+
+impl BackendEventPolicy {
+    const fn new(
+        kind: &'static str,
+        delivery: BackendEventDeliveryClass,
+        backpressure: BackendEventBackpressurePolicy,
+    ) -> Self {
+        Self {
+            kind,
+            delivery,
+            backpressure,
+        }
+    }
+
+    pub fn coalesces_on_frontend(self) -> bool {
+        matches!(self.delivery, BackendEventDeliveryClass::IdempotentLatest)
+    }
+}
+
+pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
+    BackendEventPolicy::new(
+        "workspace_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "active_work_projection",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "window_list",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "terminal_output",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "terminal_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "terminal_status",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "window_state",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktrees",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktree_selected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "file_tree_worktree_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "file_content_text",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_content_hex",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_content_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "file_content_saved",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "file_content_save_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "branch_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "board_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "board_history_page",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "profile_snapshot",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "log_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "log_entry_appended",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_search_results",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_detail",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_bridge_phase_updated",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "branch_cleanup_result",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "branch_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "board_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "profile_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "log_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "project_open_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_parent_selected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "github_repository_search_results",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "github_repository_search_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_done",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "clone_project_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "launch_wizard_open_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "launch_wizard_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "workspace_resumable_agents",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "workspace_resume_agent_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "launch_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_index_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "runtime_hook_event",
+        BackendEventDeliveryClass::BestEffortDaemon,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "update_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "update_ready",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_apply_pending_persisted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "update_apply_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_preset_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_deleted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "backend_connection_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "custom_agent_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_deleted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "migration_detected",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "migration_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "migration_done",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "migration_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "system_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "system_settings_updated",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "system_settings_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "workspace_projection_prune_result",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "workspace_projection_prune_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "ui_trace_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "ui_trace_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+];
+
+pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
+    BACKEND_EVENT_POLICIES
+        .iter()
+        .find(|policy| policy.kind == kind)
+        .copied()
+}
+
+impl BackendEvent {
+    pub fn event_kind(&self) -> &'static str {
+        match self {
+            BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
+            BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::TerminalOutput { .. } => "terminal_output",
+            BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::WindowState { .. } => "window_state",
+            BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
+            BackendEvent::FileTreeError { .. } => "file_tree_error",
+            BackendEvent::FileTreeWorktrees { .. } => "file_tree_worktrees",
+            BackendEvent::FileTreeWorktreeSelected { .. } => "file_tree_worktree_selected",
+            BackendEvent::FileTreeWorktreeError { .. } => "file_tree_worktree_error",
+            BackendEvent::FileContentText { .. } => "file_content_text",
+            BackendEvent::FileContentHex { .. } => "file_content_hex",
+            BackendEvent::FileContentError { .. } => "file_content_error",
+            BackendEvent::FileContentSaved { .. } => "file_content_saved",
+            BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
+            BackendEvent::BranchEntries { .. } => "branch_entries",
+            BackendEvent::BoardEntries { .. } => "board_entries",
+            BackendEvent::BoardHistoryPage { .. } => "board_history_page",
+            BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
+            BackendEvent::LogEntries { .. } => "log_entries",
+            BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
+            BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
+            BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
+            BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
+            BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
+            BackendEvent::BranchError { .. } => "branch_error",
+            BackendEvent::BoardError { .. } => "board_error",
+            BackendEvent::ProfileError { .. } => "profile_error",
+            BackendEvent::LogError { .. } => "log_error",
+            BackendEvent::KnowledgeError { .. } => "knowledge_error",
+            BackendEvent::ProjectOpenError { .. } => "project_open_error",
+            BackendEvent::CloneProjectParentSelected { .. } => "clone_project_parent_selected",
+            BackendEvent::GithubRepositorySearchResults { .. } => {
+                "github_repository_search_results"
+            }
+            BackendEvent::GithubRepositorySearchError { .. } => "github_repository_search_error",
+            BackendEvent::CloneProjectProgress { .. } => "clone_project_progress",
+            BackendEvent::CloneProjectDone { .. } => "clone_project_done",
+            BackendEvent::CloneProjectError { .. } => "clone_project_error",
+            BackendEvent::LaunchWizardOpenError { .. } => "launch_wizard_open_error",
+            BackendEvent::LaunchWizardState { .. } => "launch_wizard_state",
+            BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
+            BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
+            BackendEvent::LaunchProgress { .. } => "launch_progress",
+            BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
+            BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
+            BackendEvent::UpdateState(_) => "update_state",
+            BackendEvent::UpdateProgress { .. } => "update_progress",
+            BackendEvent::UpdateReady { .. } => "update_ready",
+            BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
+            BackendEvent::UpdateApplyError { .. } => "update_apply_error",
+            BackendEvent::CustomAgentList { .. } => "custom_agent_list",
+            BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
+            BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
+            BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
+            BackendEvent::BackendConnectionResult { .. } => "backend_connection_result",
+            BackendEvent::CustomAgentError { .. } => "custom_agent_error",
+            BackendEvent::AgentBackendList { .. } => "agent_backend_list",
+            BackendEvent::AgentBackendSaved { .. } => "agent_backend_saved",
+            BackendEvent::AgentBackendDeleted { .. } => "agent_backend_deleted",
+            BackendEvent::AgentBackendError { .. } => "agent_backend_error",
+            BackendEvent::MigrationDetected { .. } => "migration_detected",
+            BackendEvent::MigrationProgress { .. } => "migration_progress",
+            BackendEvent::MigrationDone { .. } => "migration_done",
+            BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::SystemSettings { .. } => "system_settings",
+            BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
+            BackendEvent::SystemSettingsError { .. } => "system_settings_error",
+            BackendEvent::WorkspaceProjectionPruneResult { .. } => {
+                "workspace_projection_prune_result"
+            }
+            BackendEvent::WorkspaceProjectionPruneError { .. } => {
+                "workspace_projection_prune_error"
+            }
+            BackendEvent::UiTraceSaved { .. } => "ui_trace_saved",
+            BackendEvent::UiTraceError { .. } => "ui_trace_error",
+        }
+    }
+
+    pub fn delivery_policy(&self) -> BackendEventPolicy {
+        backend_event_policy(self.event_kind())
+            .expect("BackendEvent variant must be present in BACKEND_EVENT_POLICIES")
+    }
+}
+
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
 /// Serializes as `snake_case` string so the frontend can compare against
 /// literal values without string-matching the human-readable message.
@@ -1028,8 +1800,9 @@ mod tests {
     };
 
     use super::{
-        BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload,
+        backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
+        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -1165,6 +1938,98 @@ mod tests {
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
         );
+    }
+
+    #[test]
+    fn backend_event_policy_classifies_high_risk_delivery_contract() {
+        let terminal_output =
+            backend_event_policy("terminal_output").expect("terminal_output policy");
+        assert_eq!(terminal_output.kind, "terminal_output");
+        assert_eq!(
+            terminal_output.delivery,
+            BackendEventDeliveryClass::Streamed
+        );
+        assert_eq!(
+            terminal_output.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+
+        let workspace_state =
+            backend_event_policy("workspace_state").expect("workspace_state policy");
+        assert_eq!(
+            workspace_state.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            workspace_state.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+        assert!(workspace_state.coalesces_on_frontend());
+
+        let active_work_projection =
+            backend_event_policy("active_work_projection").expect("active_work_projection policy");
+        assert_eq!(
+            active_work_projection.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            active_work_projection.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+
+        let terminal_snapshot =
+            backend_event_policy("terminal_snapshot").expect("terminal_snapshot policy");
+        assert_eq!(
+            terminal_snapshot.delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            terminal_snapshot.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+        assert!(!terminal_snapshot.coalesces_on_frontend());
+
+        let runtime_hook_event =
+            backend_event_policy("runtime_hook_event").expect("runtime_hook_event policy");
+        assert_eq!(
+            runtime_hook_event.delivery,
+            BackendEventDeliveryClass::BestEffortDaemon
+        );
+        assert_eq!(
+            runtime_hook_event.backpressure,
+            BackendEventBackpressurePolicy::BestEffort
+        );
+
+        let file_content_saved =
+            backend_event_policy("file_content_saved").expect("file_content_saved policy");
+        assert_eq!(
+            file_content_saved.delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            file_content_saved.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn frontend_coalescing_contract_matches_backend_latest_wins_policy() {
+        let frontend_dispatcher = include_str!("../web/socket-receive-dispatcher.js");
+
+        for policy in BACKEND_EVENT_POLICIES {
+            assert_eq!(
+                frontend_dispatcher.contains(&format!("\"{}\"", policy.kind)),
+                policy.coalesces_on_frontend(),
+                "{} backend policy disagrees with DEFAULT_COALESCE_KINDS",
+                policy.kind
+            );
+        }
+
+        let event = BackendEvent::TerminalOutput {
+            id: "tab-1::shell-1".to_string(),
+            data_base64: "ZWNobw==".to_string(),
+        };
+        assert_eq!(event.delivery_policy().kind, "terminal_output");
     }
 
     #[test]

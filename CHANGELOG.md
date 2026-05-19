@@ -1,6 +1,72 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.37.0] - 2026-05-19
+
+### Bug Fixes
+
+- **workspace:** Surface Resume failures with LaunchWizardOpenError
+- **launch-wizard:** Execution mode resume launches per-agent session picker
+- **file-tree:** Align viewer DOM selector with workspace window data-id
+- **playwright:** Register close-project-tab-confirm-modal.js in embedded routes
+- **protocol:** Classify file save backend events
+- Windows terminal wheel scrollback を復旧
+- Git worktree paths avoid Windows verbatim args
+- Stabilize terminal resize and color handling
+- **runtime:** Harden runtime event delivery follow-up
+- **runtime:** Satisfy unix daemon publish clippy
+- **gui:** Preserve terminal mouse wheel reporting
+- **workspace:** Pre-populate Quick Start entries when Resume opens the wizard
+- **workspace:** Make maximize_window idempotent to stop WS flood
+- **workspace:** List unassigned Resume candidates with readable layout
+- **serve:** Backstop std::thread timer for headless shutdown (SPEC-1942 US-14)
+- **serve:** Suppress Dock icon and menu bar on macOS (SPEC-1942 US-14)
+- **serve:** Address PR #2770 CI failures and review threads
+- **serve:** Mark serve_mode_test #[ignore] for CI parity
+
+### Features
+
+- **file-tree:** Add file content read domain with encoding auto-detection
+- **file-tree:** Add worktree picker, split viewer, and hex mode for File Tree window
+- **file-tree:** Add file content write API with atomic save and conflict detection
+- **file-tree:** Wire text + hex edit affordance with dirty/save/conflict flow
+- **skills:** Add gwt-verify environment-aware test execution skill (SPEC-1935 Phase 17)
+- **gui:** Confirm project tab close when agents are still running
+- **file-tree:** Add syntax highlighting and fix focus-loss on text edit
+- **agent:** Introduce backend override profile schema (SPEC-1921 Phase 63A)
+- **agent:** Idempotent legacy backend migration (SPEC-1921 Phase 63B)
+- **agent:** Claude code backend profile env injection (SPEC-1921 Phase 63C-backend)
+- **agent:** Backend service, codex home, impersonation safety (SPEC-1921 63D/E/G + T295)
+- **agent:** Codex backend launch integration (SPEC-1921 Phase 63E)
+- **protocol:** Wire agent backend WebSocket dispatch (SPEC-1921 Phase 63D)
+- **frontend:** Settings agent backends tab (SPEC-1921 Phase 63D)
+- **service:** Add external agent path with impersonation guard (SPEC-1921 63G)
+- **workspace:** Bypass Launch Wizard with Resume Picker (SPEC-2359 US-42)
+- **serve:** Add gwt serve / --headless browser-only launch (SPEC-1942 US-14)
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into runtime events pr
+- Develop をマージ
+- Merge develop
+- Merge develop
+- Merge origin/develop into work/20260518-1134
+
+### Refactor
+
+- **protocol:** Add event delivery policy contracts
+- **runtime:** Extract app runtime event handlers
+- **agent:** Deprecate legacy preset path, redirect ui (SPEC-1921 63H)
+
+### Styling
+
+- **gui:** Apply cargo fmt to project_tab_view tests
+
+### Testing
+
+- **agent:** Rename fr-091 fixtures to claude-code path (SPEC-1921 Phase 63F)
+- **frontend:** Launch wizard backend picker contract surface (SPEC-1921 T298/T299/T301)
+
 ## [9.36.2] - 2026-05-18
 
 ### Miscellaneous Tasks

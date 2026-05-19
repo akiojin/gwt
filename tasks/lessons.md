@@ -1,5 +1,42 @@
 # Lessons Learned
 
+## 2026-05-18 — Launch Agent Execution Mode の Resume を silent downgrade させない
+
+### 事象
+
+ユーザー報告で「Launch Agent の Execution Mode が機能しない」が判明。Execution Mode で
+`Resume` を選んでも実際は `claude --continue` / `codex resume --last` 相当の Continue
+動作になり、agent の interactive session picker が開かなかった。
+
+### 原因
+
+1. `crates/gwt/src/launch_wizard.rs:1277` で `mode == "resume"` かつ
+   `resume_session_id is None` の場合に **silently `SessionMode::Continue` に
+   downgrade** されていた。Quick Start 経由でないと resume_session_id がセット
+   されないため、通常フォームの Resume は Continue 扱いになっていた。
+2. `crates/gwt-agent/src/launch.rs:638-645` で Codex builder は
+   `SessionMode::Resume` + `resume_session_id is None` のとき常に `--last` を
+   付与しており、仮に (1) を直しても `codex resume` ではなく `codex resume --last`
+   になり picker mode が成立しなかった。
+3. `execution_mode_value_from_session_mode` (launch_wizard.rs:3631) が
+   `SessionMode::Resume` を `"continue"` に collapse しており、前回 profile から
+   Resume を復元できなかった。
+
+### 再発防止策
+
+1. 「ユーザー UI 上の選択肢」と「agent CLI に渡す引数」を 1:1 で対応させる。
+   UI が `Resume` と表示している以上、内部で `Continue` に黙って差し替えてはいけない。
+   downgrade が必要な状況 (capability 不在 等) は明示的に UI から option を除外する。
+2. CLI 引数を組み立てる builder では、`SessionMode::Resume` + `resume_session_id`
+   の有無で picker mode と id 指定 mode を **別物として扱う**。デフォルトで
+   `--last` のような便宜 flag を勝手に足さない。
+3. `SessionMode` <-> 表示文字列の変換 helper は片方向 collapse を避け、
+   ラウンドトリップ可能にする (`Resume → "resume"`, `Continue → "continue"`,
+   `Normal → "normal"`)。
+4. 新しい Execution Mode option を追加するときは、agent 側の capability
+   (`AgentId::supports_resume_picker()` 等) を view 構築に渡し、対応していない
+   agent では option を除外する設計にする。
+
 ## 2026-05-15 — Exact hook trust must include generator resolution and shell format
 
 ### 事象
@@ -5577,3 +5614,27 @@ repo-shared scopes だけなのに、Settings.Index 向けの全 worktree 可視
    のようにユーザーが明示的に開いた full table は、startup current-only probe と衝突しても
    後続 retry で最後に full status を配信する。この retry は固定短時間 timeout で捨てず、
    bootstrap が長引く初回 runtime 準備や大規模 repo でも要求を保持する。
+
+## Agent launch は親環境の色抑制フラグをそのまま継承しない
+
+### 事象
+
+Codex セッションから Windows GUI を起動して手動確認したところ、ホイールスクロールは動いたが
+Agent window 内の TTY 表示が白一色になった。
+
+### 原因
+
+親 Codex セッションの環境に `NO_COLOR=1` と `TERM=dumb` があり、gwt は `TERM` と `COLORTERM`
+を `xterm-256color` / `truecolor` に補正していた一方で、`NO_COLOR` は子 Agent に引き継いでいた。
+初回修正では launch env map から `NO_COLOR` を削除しただけで、PTY spawn が親 process env を継承する
+経路の `env_remove("NO_COLOR")` 相当を設定していなかったため、子 Agent process には `NO_COLOR=1` が
+残り続けた。そのため agent CLI 側が ANSI 色を出さず、xterm.js / CSS ではなく launch env が色を抑制していた。
+
+### 再発防止策
+
+1. GUI / Agent launch 環境を作るときは、terminal capability を補正するだけでなく、親の
+   color suppressor env (`NO_COLOR` など) が意図せず残らないことを確認する。`env_vars` から
+   消すだけでは不十分で、PTY spawn の `remove_env` にも入れて inherited env を明示削除する。
+2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
+3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
+   frontend DOM の computed color、launch env の順に切り分ける。

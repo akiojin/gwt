@@ -305,13 +305,24 @@ impl WorkspaceState {
         window
     }
 
+    /// Idempotent "ensure maximized at these bounds" command.
+    ///
+    /// Issue #2757 follow-up: this used to toggle between maximized and
+    /// restored on every call, which created a WebSocket flood when the
+    /// frontend's `syncMaximizedWindowsToViewport()` re-sent the same
+    /// `maximize_window` event after each `workspace_state` broadcast
+    /// (~3000+ frames/sec observed in the wild). The frontend always
+    /// uses `restore_window` to unmaximize, so `maximize_window` is only
+    /// ever meant to assert "set to maximized with this geometry".
+    ///
+    /// Returns `true` only when state actually changed, so the caller
+    /// can suppress the redundant broadcast that fuels the loop.
     pub fn maximize_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
         let Some(index) = self.window_index(id) else {
             return false;
         };
         let group_id = self.persisted.windows[index].tab_group_id.clone();
         let was_maximized = self.persisted.windows[index].maximized;
-        let restore_geometry = self.persisted.windows[index].pre_maximize_geometry.clone();
         let pre_geometry = self.persisted.windows[index].geometry.clone();
         let target_geometry = WindowGeometry {
             x: bounds.x + ARRANGE_PADDING,
@@ -320,23 +331,26 @@ impl WorkspaceState {
             height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
         };
 
+        // No-op fast path: already maximized at the exact target geometry.
+        // Without this, repeated sync events from the frontend turn into a
+        // feedback loop with the backend broadcasting a fresh
+        // `workspace_state` every iteration.
+        if was_maximized && self.persisted.windows[index].geometry == target_geometry {
+            return false;
+        }
+
         let members = self.group_member_indices(group_id.as_deref(), index);
         let geometry_revision = self.next_geometry_revision(&members);
         for member in members {
             let window = &mut self.persisted.windows[member];
-            if was_maximized {
-                if let Some(geometry) = restore_geometry.clone() {
-                    window.geometry = geometry;
-                }
-                window.pre_maximize_geometry = None;
-                window.maximized = false;
-                window.minimized = false;
-            } else {
+            if !was_maximized {
+                // First-time maximize: remember the previous geometry so
+                // `restore_window` can put it back.
                 window.pre_maximize_geometry = Some(pre_geometry.clone());
-                window.geometry = target_geometry.clone();
-                window.minimized = false;
-                window.maximized = true;
             }
+            window.geometry = target_geometry.clone();
+            window.minimized = false;
+            window.maximized = true;
             window.geometry_revision = geometry_revision;
         }
         self.bring_to_front(index);
@@ -1334,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn maximizing_window_toggles_between_viewport_bounds_and_original_geometry() {
+    fn maximizing_window_is_idempotent_and_uses_restore_to_revert() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
@@ -1358,8 +1372,23 @@ mod tests {
             }
         );
 
-        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+        // Issue #2757 follow-up: repeated maximize_window with the same
+        // bounds must be a no-op. The frontend's viewport-sync path used to
+        // trigger this every workspace_state broadcast; the old toggle
+        // behaviour produced a 400+ msg/sec WebSocket flood that starved
+        // resume_workspace and other clicks.
+        assert!(
+            !workspace.maximize_window("claude-1", arrange_bounds()),
+            "re-issuing maximize at identical bounds must be reported as no-op",
+        );
+        let still_maximized = workspace.window("claude-1").expect("claude");
+        assert!(still_maximized.maximized);
+        assert_eq!(
+            still_maximized.pre_maximize_geometry,
+            Some(original.clone())
+        );
 
+        assert!(workspace.restore_window("claude-1"));
         let restored = workspace.window("claude-1").expect("claude");
         assert!(!restored.maximized);
         assert!(!restored.minimized);
@@ -1770,10 +1799,14 @@ mod tests {
             "grouped sibling must share pre_maximize_geometry so restore is symmetric"
         );
 
-        assert!(workspace.maximize_window("codex-1", bounds));
+        // Issue #2757 follow-up: re-issuing maximize at the same bounds is
+        // a no-op. Restoring grouped siblings must go through
+        // `restore_window` instead.
+        assert!(!workspace.maximize_window("codex-1", bounds));
+        assert!(workspace.restore_window("codex-1"));
         let codex = workspace.window("codex-1").expect("codex");
         let claude = workspace.window("claude-1").expect("claude");
-        assert!(!codex.maximized, "second toggle must restore");
+        assert!(!codex.maximized, "restore must clear maximized");
         assert!(!claude.maximized, "grouped sibling must restore together");
         assert_eq!(codex.geometry, pre_geometry);
         assert_eq!(claude.geometry, pre_geometry);

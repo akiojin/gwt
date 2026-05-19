@@ -23,6 +23,55 @@ const FORCE_NEW_INSTANCE_ENV: &str = "GWT_FORCE_NEW_INSTANCE";
 /// "old file" alone is not enough to drop the lock; we only surface the hint.
 const STALE_LOCK_HINT_AGE: Duration = Duration::from_secs(60 * 60);
 
+/// SPEC-1942 US-14 / FR-099: which kind of front-door process holds the
+/// single-instance lock. Each kind gets its own subdirectory under
+/// `~/.gwt/projects/<repo-hash>/runtime/`, so a Gui session and a Headless
+/// `gwt serve` session can co-exist in the same worktree without colliding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LockKind {
+    Gui,
+    Headless,
+}
+
+impl LockKind {
+    fn subdir(self) -> &'static str {
+        match self {
+            LockKind::Gui => "gui",
+            LockKind::Headless => "headless",
+        }
+    }
+
+    fn other(self) -> LockKind {
+        match self {
+            LockKind::Gui => LockKind::Headless,
+            LockKind::Headless => LockKind::Gui,
+        }
+    }
+}
+
+/// Outcome of [`acquire_instance_lock`]. Holds the lock itself plus an
+/// advisory hint when the *other* kind of front-door appears to be running
+/// for the same worktree (FR-099: warn but allow co-existence).
+#[derive(Debug)]
+pub struct InstanceLockOutcome {
+    pub lock: GuiInstanceLock,
+    pub coexists_with: Option<LockKind>,
+}
+
+impl InstanceLockOutcome {
+    /// Convenience accessor mirroring `lock.path()` so callers can keep the
+    /// outcome wrapper around without juggling field projection.
+    pub fn lock_path(&self) -> &Path {
+        &self.lock.path
+    }
+}
+
+impl AsRef<GuiInstanceLock> for InstanceLockOutcome {
+    fn as_ref(&self) -> &GuiInstanceLock {
+        &self.lock
+    }
+}
+
 #[derive(Debug)]
 pub struct GuiInstanceLock {
     path: PathBuf,
@@ -63,6 +112,18 @@ pub fn gui_instance_lock_path(
     gwt_home: &Path,
     project_root: &Path,
 ) -> Result<PathBuf, GuiInstanceLockError> {
+    instance_lock_path(gwt_home, project_root, LockKind::Gui)
+}
+
+/// SPEC-1942 FR-099: resolve the on-disk lock file for a given front-door
+/// `kind`. Both kinds share the same `(repo-hash, worktree-hash)` scope but
+/// live under separate `runtime/<kind>/` subdirectories so a Gui session and
+/// a `gwt serve` session for the same worktree do not contend.
+pub fn instance_lock_path(
+    gwt_home: &Path,
+    project_root: &Path,
+    kind: LockKind,
+) -> Result<PathBuf, GuiInstanceLockError> {
     let repo_hash = gwt_core::paths::project_scope_hash(project_root);
     let worktree_hash =
         gwt_core::worktree_hash::compute_worktree_hash(project_root).map_err(|error| {
@@ -75,7 +136,7 @@ pub fn gui_instance_lock_path(
         .join("projects")
         .join(repo_hash.as_str())
         .join("runtime")
-        .join("gui")
+        .join(kind.subdir())
         .join(format!("{}.lock", worktree_hash.as_str())))
 }
 
@@ -83,7 +144,24 @@ pub fn acquire_gui_instance_lock(
     gwt_home: &Path,
     project_root: &Path,
 ) -> Result<GuiInstanceLock, GuiInstanceLockError> {
-    let lock_path = gui_instance_lock_path(gwt_home, project_root)?;
+    let outcome = acquire_instance_lock(gwt_home, project_root, LockKind::Gui)?;
+    // SPEC-1942 FR-099 backwards-compat: the legacy entry-point returns the
+    // raw lock and drops the coexistence advisory. New callers should use
+    // `acquire_instance_lock` directly so they can surface the warning.
+    Ok(outcome.lock)
+}
+
+/// SPEC-1942 FR-099: acquire the per-kind single-instance lock and report
+/// whether the *other* kind of front-door appears to be running for the same
+/// worktree. The caller may treat `coexists_with = Some(other)` as an
+/// informational notice — the function does not block co-existence, because
+/// the kinds are designed to share the same AppRuntime state intentionally.
+pub fn acquire_instance_lock(
+    gwt_home: &Path,
+    project_root: &Path,
+    kind: LockKind,
+) -> Result<InstanceLockOutcome, GuiInstanceLockError> {
+    let lock_path = instance_lock_path(gwt_home, project_root, kind)?;
     let parent = lock_path
         .parent()
         .ok_or_else(|| GuiInstanceLockError::Scope {
@@ -140,10 +218,27 @@ pub fn acquire_gui_instance_lock(
     };
 
     match file.try_lock_exclusive() {
-        Ok(()) => Ok(GuiInstanceLock {
-            path: lock_path,
-            file,
-        }),
+        Ok(()) => {
+            let coexists_with = detect_other_kind_active(gwt_home, project_root, kind);
+            if let Some(other) = coexists_with {
+                eprintln!(
+                    "gwt {} startup: {} is already running for this worktree (lock: {}). \
+                    Co-existing front doors share the same AppRuntime state, but this is intentional and supported.",
+                    kind.subdir(),
+                    other.subdir(),
+                    instance_lock_path(gwt_home, project_root, other)
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|_| String::from("<unknown>")),
+                );
+            }
+            Ok(InstanceLockOutcome {
+                lock: GuiInstanceLock {
+                    path: lock_path,
+                    file,
+                },
+                coexists_with,
+            })
+        }
         Err(_) => {
             // Phase C6 escape hatch: a previous gwt crash on Windows can
             // leave the OS-level file lock pinned even after the process
@@ -156,9 +251,13 @@ pub fn acquire_gui_instance_lock(
                     lock_path = %lock_path.display(),
                     "GWT_FORCE_NEW_INSTANCE override bypassed the single-instance lock"
                 );
-                return Ok(GuiInstanceLock {
-                    path: lock_path,
-                    file,
+                let coexists_with = detect_other_kind_active(gwt_home, project_root, kind);
+                return Ok(InstanceLockOutcome {
+                    lock: GuiInstanceLock {
+                        path: lock_path,
+                        file,
+                    },
+                    coexists_with,
                 });
             }
             log_stale_lock_hint(&lock_path);
@@ -168,6 +267,35 @@ pub fn acquire_gui_instance_lock(
                 lock_path,
             })
         }
+    }
+}
+
+/// SPEC-1942 FR-099: detect whether the *other* kind of front-door appears
+/// active for the same worktree. We open the other kind's lock file
+/// read-only and try to grab a shared lock — if that fails, an exclusive
+/// lock is currently held, so the other kind is running. The shared lock is
+/// released immediately so it does not interfere with normal acquisitions.
+fn detect_other_kind_active(
+    gwt_home: &Path,
+    project_root: &Path,
+    self_kind: LockKind,
+) -> Option<LockKind> {
+    let other = self_kind.other();
+    let path = instance_lock_path(gwt_home, project_root, other).ok()?;
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let file = OpenOptions::new().read(true).open(&path).ok()?;
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            None
+        }
+        // Failure means an exclusive lock is currently held => other kind is
+        // running. Any other error (EACCES on Windows, ENOLCK on niche FSes)
+        // is treated conservatively as "may be running".
+        Err(_) => Some(other),
     }
 }
 
@@ -300,5 +428,97 @@ mod tests {
             acquire_gui_instance_lock(&gwt_home, &project_root).expect_err("override absent")
         });
         assert!(matches!(error, GuiInstanceLockError::AlreadyRunning { .. }));
+    }
+
+    // ---------------------------------------------------------------
+    // SPEC-1942 US-14 / FR-099: kind-aware instance lock (Gui / Headless)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn gui_lock_path_remains_in_gui_subdir_for_backwards_compatibility() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gwt_home = temp.path().join("gwt-home");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+
+        let path =
+            instance_lock_path(&gwt_home, &project_root, LockKind::Gui).expect("gui lock path");
+        let parent = path.parent().expect("gui lock path parent");
+        assert_eq!(
+            parent.file_name().and_then(|s| s.to_str()),
+            Some("gui"),
+            "Gui lock must continue to live under runtime/gui/ (FR-099 backwards compat)"
+        );
+    }
+
+    #[test]
+    fn headless_lock_path_uses_headless_subdir_distinct_from_gui() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gwt_home = temp.path().join("gwt-home");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+
+        let gui =
+            instance_lock_path(&gwt_home, &project_root, LockKind::Gui).expect("gui lock path");
+        let headless =
+            instance_lock_path(&gwt_home, &project_root, LockKind::Headless).expect("headless");
+        assert_ne!(gui, headless, "Gui / Headless must not share a lock path");
+        let parent = headless.parent().expect("headless lock path parent");
+        assert_eq!(
+            parent.file_name().and_then(|s| s.to_str()),
+            Some("headless"),
+            "Headless lock must live under runtime/headless/"
+        );
+    }
+
+    #[test]
+    fn acquire_instance_lock_for_headless_coexists_with_gui_lock_in_same_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gwt_home = temp.path().join("gwt-home");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+
+        let _gui =
+            acquire_instance_lock(&gwt_home, &project_root, LockKind::Gui).expect("gui acquire");
+
+        let outcome = acquire_instance_lock(&gwt_home, &project_root, LockKind::Headless)
+            .expect("headless acquire must succeed alongside gui");
+        assert_eq!(
+            outcome.coexists_with,
+            Some(LockKind::Gui),
+            "headless acquire must report coexistence with the active gui lock"
+        );
+        drop(outcome);
+    }
+
+    #[test]
+    fn two_headless_processes_in_same_directory_conflict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gwt_home = temp.path().join("gwt-home");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+
+        let _first = acquire_instance_lock(&gwt_home, &project_root, LockKind::Headless)
+            .expect("first headless acquire");
+        let error = with_force_env(None, || {
+            acquire_instance_lock(&gwt_home, &project_root, LockKind::Headless)
+                .expect_err("second headless acquire must fail without override")
+        });
+        assert!(matches!(error, GuiInstanceLockError::AlreadyRunning { .. }));
+    }
+
+    #[test]
+    fn acquire_instance_lock_for_gui_reports_no_coexistence_when_alone() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gwt_home = temp.path().join("gwt-home");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+
+        let outcome =
+            acquire_instance_lock(&gwt_home, &project_root, LockKind::Gui).expect("gui acquire");
+        assert_eq!(
+            outcome.coexists_with, None,
+            "fresh acquire must report no coexisting other-kind lock"
+        );
     }
 }

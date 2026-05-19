@@ -1,3 +1,5 @@
+pub mod agent_backend_dispatch;
+pub mod backend_service;
 pub mod board_audience;
 pub mod branch_cleanup;
 pub mod branch_list;
@@ -10,6 +12,7 @@ pub mod daemon_runtime;
 #[cfg(unix)]
 pub mod daemon_subscriber;
 mod discussion_resume;
+pub mod file_content;
 pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
@@ -20,6 +23,7 @@ pub mod launch_wizard;
 pub mod managed_assets;
 pub mod migration;
 pub mod native_app;
+pub(crate) mod path_filter;
 pub mod persistence;
 pub mod preset;
 pub mod process;
@@ -30,6 +34,7 @@ pub mod start_work;
 pub mod system_settings;
 pub mod window_state;
 pub mod workspace;
+pub mod worktree_inventory;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -50,6 +55,11 @@ pub use custom_agents_service::{
     update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
+pub use file_content::{
+    file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file, BinaryChunk,
+    ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline, TextResult,
+    WriteOutcome,
+};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::{
@@ -75,7 +85,7 @@ pub use launch_wizard::{
     LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
     LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
     LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
-    QuickStartLaunchMode, ShellLaunchConfig,
+    QuickStartLaunchMode, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
@@ -104,9 +114,10 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
-    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView,
-    ProfileSnapshotView, ProjectTabView, RecentProjectView, UiTraceEntry, UiTracePayload,
+    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileContentErrorKind,
+    FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
+    GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
     WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
     WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
     WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,

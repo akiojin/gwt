@@ -123,6 +123,24 @@ impossible.**
    use **FIX** immediately instead of push-only/create. Outside that
    override, PR state (MERGED / CLOSED) is not consulted.
 
+## Pre-PR Verification (mandatory)
+
+Before any push, PR create, or PR update operation, invoke
+`gwt-verify --mode pre-pr` and require `Overall: PASS` in the evidence
+bundle. This guarantees the right test matrix has run for the changed
+surfaces — cargo for Rust crates, `pnpm test:frontend-*` for frontend JS,
+`pnpm test:visual` for WebView/browser UI surfaces only (Playwright is not
+invoked for non-browser surfaces), `pnpm test:release-*` for release-system
+changes, and `pnpm lint:skills` for skill assets.
+
+If `gwt-verify --mode pre-pr` returns `Overall: FAIL` or
+`failed: tooling-missing`, do not push, do not create a PR, and do not
+update an existing PR. Route the failure for repair (back to the TDD loop
+or `gwt-discussion`) and re-run pre-pr verification before retrying.
+
+This applies equally to Create and Fix modes — every code-changing
+re-push must be preceded by a fresh `gwt-verify --mode pre-pr` PASS.
+
 ## Mode: Create
 
 Detailed logic in `references/create-flow.md`.

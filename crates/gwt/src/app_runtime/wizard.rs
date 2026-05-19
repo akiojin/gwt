@@ -168,7 +168,20 @@ impl AppRuntime {
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let worktree_path = None;
         let quick_start_root = project_root.to_path_buf();
-        let quick_start_entries = Vec::new();
+        // SPEC-2359 US-44 (Issue #2757): when this wizard is opened by a
+        // Workspace Resume action, pre-populate Quick Start entries from
+        // prior sessions on this branch so the user can immediately re-launch
+        // the most recent Claude Code / Codex session via the Quick Start
+        // panel (which carries `resume_session_id` and triggers
+        // `--resume <uuid>` at launch time). Other entry points keep the
+        // deferred path (populated during runtime hydration) so Add Agent /
+        // Branches launch flows stay fast on open.
+        let quick_start_entries = if workspace_resume_context.is_some() {
+            self.launch_wizard_cache
+                .quick_start_entries(&quick_start_root, &normalized_branch_name)
+        } else {
+            Vec::new()
+        };
         let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
@@ -273,13 +286,21 @@ impl AppRuntime {
 
     pub(crate) fn resume_workspace_events(
         &mut self,
+        client_id: &str,
         source: gwt::WorkspaceResumeSource,
         journal_id: Option<String>,
     ) -> Vec<OutboundEvent> {
+        // SPEC-2359 / Issue #2757: Resume click failures must surface through
+        // `LaunchWizardOpenError` (a client-scoped reply) instead of the
+        // legacy `ProjectOpenError` broadcast, which the frontend renders only
+        // on the project picker overlay and is therefore invisible while a
+        // project tab is already open.
         let error_event = |message: &str| {
-            vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
-                message: message.to_string(),
-            })]
+            vec![launch_wizard_open_error(
+                client_id,
+                "Resume Workspace",
+                message,
+            )]
         };
 
         let Some(tab_id) = self.active_tab_id.clone() else {
@@ -383,6 +404,241 @@ impl AppRuntime {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
             Err(error) => error_event(&error),
         }
+    }
+
+    // SPEC-2359 US-42: list / resume entries for the Workspace Resume
+    // picker. These bypass the Launch Wizard entirely so the Resume
+    // button can restart a previously-assigned agent in-place.
+
+    pub(crate) fn list_resumable_agents_events(
+        &mut self,
+        client_id: &str,
+        workspace_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let agents = self.collect_resumable_agents();
+        vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::WorkspaceResumableAgents {
+                agents,
+                workspace_id,
+            },
+        )]
+    }
+
+    pub(crate) fn resume_workspace_agent_events(
+        &mut self,
+        client_id: &str,
+        session_id: String,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let reply_error = |message: String| {
+            vec![OutboundEvent::reply(
+                client_id.to_string(),
+                BackendEvent::WorkspaceResumeAgentError {
+                    session_id: session_id.clone(),
+                    message,
+                },
+            )]
+        };
+
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return reply_error("Open a project before resuming an agent".to_string());
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return reply_error("Project tab not found".to_string());
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return reply_error("Resume requires a Git project".to_string());
+        }
+        if tab.migration_pending {
+            return reply_error(
+                "Complete the project migration before resuming an agent".to_string(),
+            );
+        }
+
+        // Reject double-spawn: if this session id is already live in this
+        // tab, surface a visible error so the picker can keep its modal
+        // open and the user can pick a different entry.
+        if self
+            .active_agent_sessions
+            .values()
+            .any(|session| session.session_id == session_id && session.tab_id == tab_id)
+        {
+            return reply_error("That agent is already running".to_string());
+        }
+
+        let sessions_dir = self.sessions_dir.clone();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = match gwt_agent::Session::load_and_migrate(&session_path) {
+            Ok(session) => session,
+            Err(_) => {
+                return reply_error(
+                    "Session metadata is missing; restart via Start Work or Launch Agent."
+                        .to_string(),
+                );
+            }
+        };
+
+        // Build a fresh LaunchConfig from the persisted Session and add the
+        // resume_session_id only when the agent CLI captured a previous
+        // conversation handle (Claude / Codex / opt-in custom agents).
+        let agent_id = session.agent_id.clone();
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
+        builder = builder.working_dir(session.worktree_path.clone());
+        if !session.branch.is_empty() {
+            builder = builder.branch(session.branch.clone());
+        }
+        if let Some(model) = session.model.clone() {
+            builder = builder.model(model);
+        }
+        if let Some(version) = session.tool_version.clone() {
+            builder = builder.version(version);
+        }
+        if let Some(level) = session.reasoning_level.clone() {
+            builder = builder.reasoning_level(level);
+        }
+        if session.skip_permissions {
+            builder = builder.skip_permissions(true);
+        }
+        if session.codex_fast_mode {
+            builder = builder.fast_mode(true);
+        }
+        builder = builder.runtime_target(session.runtime_target);
+        if let Some(service) = session.docker_service.clone() {
+            builder = builder.docker_service(service);
+        }
+        builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
+        if let Some(shell) = session.windows_shell {
+            builder = builder.windows_shell(shell);
+        }
+        if let Some(linked) = session.linked_issue_number {
+            builder = builder.linked_issue_number(linked);
+        }
+
+        if let Some(resume_id) = session
+            .agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder
+                .session_mode(gwt_agent::SessionMode::Resume)
+                .resume_session_id(resume_id.to_string());
+        } else {
+            // Resume picker selected an entry without an agent-side
+            // session id (e.g. Session toml exists but no `--resume`
+            // handle was captured). Fall back to fresh start so the user
+            // still gets a working agent in the Workspace.
+            builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+        }
+
+        let mut config = builder.build();
+        // Preserve persisted tool version + display name so the launcher
+        // does not re-derive them from version cache (mirrors Quick Start
+        // Resume behavior).
+        if let Some(version) = session.tool_version.clone() {
+            config.tool_version = Some(version);
+        }
+        if !session.display_name.is_empty() {
+            config.display_name = session.display_name.clone();
+        }
+        let _ = &mut session; // silence unused-mut warning
+
+        // Build a Workspace Resume context so the spawned window's title
+        // and the Workspace projection summary keep the prior identity
+        // instead of falling back to the agent's default display name.
+        let project_root = tab.project_root.clone();
+        let workspace_resume_context =
+            gwt_core::workspace_projection::load_workspace_projection(&project_root)
+                .ok()
+                .flatten()
+                .map(|projection| workspace_resume_context_from_projection(&projection));
+
+        match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
+            Ok(events) => events,
+            Err(error) => reply_error(error),
+        }
+    }
+
+    /// Build a list of agents that the Workspace Resume picker can offer
+    /// for the currently-active Git project tab. Filters out historical
+    /// entries (`is_assigned == false`), agents that are already live in
+    /// `active_agent_sessions`, and entries whose session_id does not have
+    /// a backing Session toml on disk.
+    fn collect_resumable_agents(&self) -> Vec<gwt::ResumableAgentView> {
+        let Some(tab_id) = self.active_tab_id.as_deref() else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(tab_id) else {
+            return Vec::new();
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return Vec::new();
+        }
+        let live_session_ids: std::collections::HashSet<&str> = self
+            .active_agent_sessions
+            .values()
+            .filter(|session| session.tab_id == tab_id)
+            .map(|session| session.session_id.as_str())
+            .collect();
+
+        let project_root = tab.project_root.clone();
+        let Ok(Some(projection)) =
+            gwt_core::workspace_projection::load_workspace_projection(&project_root)
+        else {
+            return Vec::new();
+        };
+
+        let sessions_dir = self.sessions_dir.clone();
+        // SPEC-2359 US-42 follow-up: real-world projections carry many
+        // agents with `affiliation_status = unassigned` (set when the
+        // agent did not go through an explicit `workspace ensure` /
+        // `workspace join` flow). Resume Picker still wants to surface
+        // them as candidates as long as the agent has a Session toml the
+        // launcher can drive — otherwise the picker reports "No
+        // resumable agents" even when the user can clearly see prior
+        // sessions in the Workspace card. We therefore include every
+        // agent (Assigned + Unassigned) and rely on the Session toml +
+        // `live_session_ids` filters below to keep the list correct.
+        let mut entries: Vec<gwt::ResumableAgentView> = projection
+            .agents
+            .iter()
+            .filter(|agent| !agent.session_id.trim().is_empty())
+            .filter(|agent| !live_session_ids.contains(agent.session_id.as_str()))
+            .filter_map(|agent| {
+                let session_path = sessions_dir.join(format!("{}.toml", agent.session_id));
+                let resume_kind = match gwt_agent::Session::load_and_migrate(&session_path) {
+                    Ok(session) => {
+                        if session
+                            .agent_session_id
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+                        {
+                            gwt::ResumableAgentResumeKind::Session
+                        } else {
+                            gwt::ResumableAgentResumeKind::MetadataOnly
+                        }
+                    }
+                    Err(_) => return None,
+                };
+                Some(gwt::ResumableAgentView {
+                    session_id: agent.session_id.clone(),
+                    agent_id: agent.agent_id.clone(),
+                    display_name: agent.display_name.clone(),
+                    branch: agent.branch.clone(),
+                    worktree_path: agent
+                        .worktree_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    last_activity_at: Some(agent.updated_at.to_rfc3339()),
+                    resume_kind,
+                })
+            })
+            .collect();
+
+        entries.sort_by(|left, right| right.last_activity_at.cmp(&left.last_activity_at));
+        entries
     }
 
     pub(crate) fn open_start_work_for_project(

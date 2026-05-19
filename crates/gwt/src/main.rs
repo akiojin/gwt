@@ -12,14 +12,16 @@ use std::{
 
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use base64::Engine;
+use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
     cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
     list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_agent,
-    resolve_launch_spec, workspace_state_path, BackendEvent, BranchEntriesPhase, BranchListEntry,
-    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState,
-    LiveSessionEntry, ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    load_session_state, migrate_legacy_workspace_state, read_binary_chunk, read_text_file,
+    refresh_managed_gwt_assets_for_agent, resolve_launch_spec, workspace_state_path, BackendEvent,
+    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
+    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -173,6 +175,31 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     GuiFrontDoorLaunchSurface {
         browser_url: server_url,
         webview_url: server_url,
+    }
+}
+
+/// SPEC-1942 US-14 / FR-095: best-effort `--open` implementation. Spawns the
+/// platform-specific browser launcher (`open` on macOS, `xdg-open` on Linux,
+/// `cmd /C start` on Windows) and detaches; failures are logged but never
+/// block the server, matching the acceptance scenario "spawn failure prints
+/// the URL on stderr and the server keeps running".
+fn spawn_open_default_browser(url: &str) {
+    let url_owned = url.to_string();
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url_owned).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url_owned])
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(&url_owned)
+            .spawn()
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "gwt serve: could not auto-open browser ({error}); open this URL manually: {url_owned}"
+        );
     }
 }
 
@@ -879,6 +906,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
+    use gwt::protocol::{FileContentErrorKind, FileContentMode};
     use gwt::{
         empty_workspace_state, AgentOption, ArrangeMode, BackendEvent, BranchCleanupInfo,
         BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
@@ -1310,6 +1338,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_handlers_are_owned_by_runtime_events_module() {
+        let runtime_mod_source = include_str!("app_runtime/mod.rs");
+        let runtime_events_source = include_str!("app_runtime/runtime_events.rs");
+
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_output"),
+            "runtime output handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_status"),
+            "runtime status handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("fn handle_runtime_hook_event"),
+            "runtime hook handling should live in app_runtime/runtime_events.rs"
+        );
+        assert!(
+            runtime_events_source.contains("RuntimeDaemonPublish"),
+            "daemon publish queue should live beside runtime event handlers"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_output"),
+            "app_runtime/mod.rs should not regain runtime output handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_status"),
+            "app_runtime/mod.rs should not regain runtime status handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_hook_event"),
+            "app_runtime/mod.rs should not regain runtime hook handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_daemon_runtime_"),
+            "app_runtime/mod.rs should not regain daemon runtime event handlers"
+        );
+        assert!(
+            !runtime_mod_source.contains("enum RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain the daemon publish queue"
+        );
+        assert!(
+            !runtime_mod_source.contains("RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain daemon publish queue ownership"
+        );
+    }
+
+    #[test]
     fn gui_front_door_launch_surface_reuses_same_server_url_for_browser_and_native_webview() {
         let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
 
@@ -1584,6 +1659,121 @@ mod tests {
         assert!(!hook_forward_authorized(&headers, "other-token"));
     }
 
+    // SPEC-2013 FR-011: `ProjectTabView` の `running_agent_count` /
+    // `running_agents` は agent preset (Agent / Claude / Codex もしくは
+    // `agent_id` 設定済み) かつ `WindowState::Running` の window のみを
+    // 集計し、shell preset の Running 窓や agent の Stopped 窓を含めない。
+    #[test]
+    fn project_tab_view_running_agents_counts_only_agent_preset_running_windows() {
+        fn tab_with_windows(tab_id: &str, windows: Vec<PersistedWindowState>) -> ProjectTabRuntime {
+            let mut persisted = empty_workspace_state();
+            persisted.next_z_index = (windows.len() as u32).saturating_add(1);
+            persisted.windows = windows;
+            ProjectTabRuntime {
+                id: tab_id.to_string(),
+                title: "Repo".to_string(),
+                project_root: PathBuf::from("E:/gwt/test-repo"),
+                kind: gwt::ProjectKind::Git,
+                workspace: WorkspaceState::from_persisted(persisted),
+                migration_pending: false,
+                main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+            }
+        }
+
+        let mut shell_running = sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        shell_running.id = "shell-1".to_string();
+        let mut agent_running = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
+        agent_running.id = "claude-1".to_string();
+        agent_running.dynamic_title = Some("claude (live)".to_string());
+        agent_running.dynamic_title_detail = Some("feature/foo".to_string());
+        let mut agent_stopped = sample_window(WindowPreset::Codex, WindowProcessStatus::Stopped);
+        agent_stopped.id = "codex-1".to_string();
+        let mut tagged_window = sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        tagged_window.id = "shell-with-agent-id".to_string();
+        tagged_window.agent_id = Some("custom-agent".to_string());
+        tagged_window.purpose_title = Some("Custom Pane".to_string());
+
+        let tab_with_agents = tab_with_windows(
+            "tab-with-agents",
+            vec![shell_running, agent_running, agent_stopped, tagged_window],
+        );
+        let mut tab_no_agents_windows =
+            sample_window(WindowPreset::Shell, WindowProcessStatus::Running);
+        tab_no_agents_windows.id = "shell-only".to_string();
+        let tab_no_agents = tab_with_windows("tab-no-agents", vec![tab_no_agents_windows]);
+
+        let view = app_state_view_from_parts(
+            &[tab_with_agents, tab_no_agents],
+            Some("tab-with-agents"),
+            &[],
+        );
+
+        let agent_tab = view
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-with-agents")
+            .expect("agent tab present");
+        assert_eq!(
+            agent_tab.running_agent_count, 2,
+            "agent preset Running + agent_id-tagged Running が 2 件 (shell Running と agent Stopped は除外) であること"
+        );
+        assert_eq!(agent_tab.running_agents.len(), 2);
+        let claude_summary = agent_tab
+            .running_agents
+            .iter()
+            .find(|summary| summary.display_name == "claude (live)")
+            .expect("claude summary uses dynamic_title");
+        assert_eq!(claude_summary.branch.as_deref(), Some("feature/foo"));
+        let custom_summary = agent_tab
+            .running_agents
+            .iter()
+            .find(|summary| summary.display_name == "Custom Pane")
+            .expect("agent_id-tagged summary falls back to purpose_title");
+        assert_eq!(custom_summary.branch, None);
+
+        let bare_tab = view
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-no-agents")
+            .expect("non-agent tab present");
+        assert_eq!(bare_tab.running_agent_count, 0);
+        assert!(bare_tab.running_agents.is_empty());
+    }
+
+    // SPEC-2013 FR-011 wire contract: `ProjectTabView` の serialize 結果は
+    // `running_agent_count` と `running_agents` の 2 フィールドを必ず含む。
+    // frontend は両フィールドの存在を前提に modal 表示判定を行うため、
+    // shape を test で固定する。
+    #[test]
+    fn project_tab_view_serializes_running_agents_fields() {
+        let view = gwt::ProjectTabView {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: "/tmp/repo".to_string(),
+            kind: gwt::ProjectKind::Git,
+            workspace: gwt::WorkspaceView {
+                viewport: CanvasViewport {
+                    x: 0.0,
+                    y: 0.0,
+                    zoom: 1.0,
+                },
+                windows: Vec::new(),
+                work_items: Vec::new(),
+            },
+            running_agent_count: 1,
+            running_agents: vec![gwt::RunningAgentSummary {
+                display_name: "claude".to_string(),
+                branch: Some("feature/x".to_string()),
+            }],
+        };
+        let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(serialized["running_agent_count"], serde_json::json!(1));
+        assert_eq!(
+            serialized["running_agents"],
+            serde_json::json!([{ "display_name": "claude", "branch": "feature/x" }])
+        );
+    }
+
     #[test]
     fn restored_process_window_is_not_auto_started_when_exited() {
         assert!(!should_auto_start_restored_window(&sample_window(
@@ -1717,6 +1907,7 @@ mod tests {
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
             persist_dispatcher,
+            file_tree_worktree_roots: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -1813,6 +2004,7 @@ mod tests {
                     mode_args: None,
                     skip_permissions_args: Vec::new(),
                     env: HashMap::new(),
+                    supports_resume_picker: false,
                 }),
             },
         ]
@@ -2402,6 +2594,212 @@ mod tests {
             BackendEvent::FileTreeEntries { ref entries, .. } if !entries.is_empty()
         ));
 
+        // SPEC-2006 amendment: load_file_content_event covers text, hex, denied,
+        // and window-mismatch paths through the same File Tree window contract.
+        assert!(matches!(
+            runtime.load_file_content_event(
+                "missing",
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::WindowNotFound,
+                ..
+            }
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &branches_id,
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::WindowMismatch,
+                ..
+            }
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &file_tree_id,
+                "README.md",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentText { ref text, .. } if text == "hello"
+        ));
+        assert!(matches!(
+            runtime.load_file_content_event(
+                &file_tree_id,
+                ".git/HEAD",
+                FileContentMode::Text,
+                None,
+                None,
+            ),
+            BackendEvent::FileContentError {
+                error_kind: FileContentErrorKind::Denied,
+                ..
+            }
+        ));
+        let hex_event = runtime.load_file_content_event(
+            &file_tree_id,
+            "README.md",
+            FileContentMode::Hex,
+            Some(0),
+            Some(16),
+        );
+        match hex_event {
+            BackendEvent::FileContentHex {
+                offset, total_size, ..
+            } => {
+                assert_eq!(offset, 0);
+                assert_eq!(total_size, 5);
+            }
+            other => panic!("expected FileContentHex, got {other:?}"),
+        }
+
+        // SPEC-2009 amendment: Worktree Picker handlers must cover window
+        // mismatch, picker enumeration, and explicit selection.
+        assert!(matches!(
+            runtime.list_file_tree_worktrees_event("missing"),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window not found"
+        ));
+        assert!(matches!(
+            runtime.list_file_tree_worktrees_event(&branches_id),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window is not a file tree"
+        ));
+        let worktrees_event = runtime.list_file_tree_worktrees_event(&file_tree_id);
+        let worktree_id = match worktrees_event {
+            BackendEvent::FileTreeWorktrees { entries, .. } => {
+                assert!(
+                    !entries.is_empty(),
+                    "test repo must list at least one worktree"
+                );
+                entries[0].id.clone()
+            }
+            other => panic!("expected FileTreeWorktrees, got {other:?}"),
+        };
+
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, "unknown-id"),
+            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Unknown worktree id"
+        ));
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
+            BackendEvent::FileTreeWorktreeSelected { worktree_id: ref selected, .. } if selected == &worktree_id
+        ));
+
+        // SPEC-2006 Phase 2 amendment: save_file_content_event must cover
+        // WindowNotFound / WindowMismatch / successful text save / Conflict
+        // (mismatched expected_mtime) / OutOfRange (hex offset >= size).
+        let missing_save = runtime.save_file_content_event(
+            "missing",
+            "README.md",
+            gwt::FileContentMode::Text,
+            0,
+            0,
+            Some("ignored".to_string()),
+            Some(gwt::Encoding::Utf8),
+            Some(gwt::Newline::Lf),
+            Some(false),
+            None,
+            None,
+        );
+        assert!(matches!(
+            missing_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::WindowNotFound,
+                ..
+            }
+        ));
+
+        let wrong_save = runtime.save_file_content_event(
+            &branches_id,
+            "README.md",
+            gwt::FileContentMode::Text,
+            0,
+            0,
+            Some("ignored".to_string()),
+            Some(gwt::Encoding::Utf8),
+            Some(gwt::Newline::Lf),
+            Some(false),
+            None,
+            None,
+        );
+        assert!(matches!(
+            wrong_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::WindowMismatch,
+                ..
+            }
+        ));
+
+        // Re-read current README.md metadata to drive a successful save.
+        let read_event = runtime.load_file_content_event(
+            &file_tree_id,
+            "README.md",
+            FileContentMode::Text,
+            None,
+            None,
+        );
+        let (saved_mtime, saved_size, encoding, newline, has_bom) = match read_event {
+            BackendEvent::FileContentText {
+                mtime,
+                total_size,
+                encoding,
+                newline,
+                has_bom,
+                ..
+            } => (mtime, total_size, encoding, newline, has_bom),
+            other => panic!("expected FileContentText, got {other:?}"),
+        };
+
+        let conflict_save = runtime.save_file_content_event(
+            &file_tree_id,
+            "README.md",
+            gwt::FileContentMode::Text,
+            saved_mtime.saturating_add(99),
+            saved_size,
+            Some("conflict".to_string()),
+            Some(encoding),
+            Some(newline),
+            Some(has_bom),
+            None,
+            None,
+        );
+        assert!(matches!(
+            conflict_save,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::Conflict,
+                ..
+            }
+        ));
+
+        let hex_out_of_range = runtime.save_file_content_event(
+            &file_tree_id,
+            "README.md",
+            gwt::FileContentMode::Hex,
+            saved_mtime,
+            saved_size,
+            None,
+            None,
+            None,
+            None,
+            Some(saved_size + 100),
+            Some(0xFF),
+        );
+        assert!(matches!(
+            hex_out_of_range,
+            BackendEvent::FileContentSaveError {
+                error_kind: gwt::FileContentSaveErrorKind::OutOfRange,
+                ..
+            }
+        ));
+
         let missing_branches = runtime.load_branches_events("client-1", "missing");
         assert_eq!(missing_branches.len(), 1);
         assert!(matches!(
@@ -2664,6 +3062,36 @@ mod tests {
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
+    }
+
+    #[test]
+    fn runtime_status_missing_window_cleans_active_agent_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let stale_id = "tab-1::stale-agent".to_string();
+        runtime.active_agent_sessions.insert(
+            stale_id.clone(),
+            sample_active_agent_session("tab-1", &stale_id),
+        );
+        runtime
+            .window_details
+            .insert(stale_id.clone(), "stale detail".to_string());
+
+        let events =
+            runtime.handle_runtime_status(stale_id.clone(), WindowProcessStatus::Exited, None);
+
+        assert!(events.is_empty());
+        assert!(!runtime.active_agent_sessions.contains_key(&stale_id));
+        assert!(!runtime.window_details.contains_key(&stale_id));
     }
 
     #[test]
@@ -3890,7 +4318,10 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
-        assert_eq!(launch.remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            launch.remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -5289,7 +5720,10 @@ mod tests {
             Some("enabled")
         );
         assert!(!effective_env.contains_key("SECRET"));
-        assert_eq!(remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -5368,16 +5802,37 @@ fn main() -> wry::Result<()> {
     gwt_agent::environment::apply_host_path_hydration_to_std_env();
 
     let argv: Vec<String> = std::env::args().collect();
-    if !matches!(
-        front_door_route(&argv),
-        runtime_support::FrontDoorRoute::Gui
-    ) {
+    let route = front_door_route(&argv);
+    if !matches!(route, runtime_support::FrontDoorRoute::Gui) {
+        // SPEC-1942 US-14 follow-up: Windows builds use
+        // `windows_subsystem = "windows"` so stdout/stderr are detached by
+        // default. CLI verbs *and* the headless route both need terminal IO
+        // (CLI for command output, `gwt serve` for the printed browser URL
+        // and access log lines), so attach to the parent console for both.
         attach_parent_console_for_cli();
+    }
+    if !matches!(
+        route,
+        runtime_support::FrontDoorRoute::Gui | runtime_support::FrontDoorRoute::Headless
+    ) {
         if let Err(error) = run_cli(&argv) {
             eprintln!("CLI dispatch failed: {error}");
             std::process::exit(1);
         }
     }
+
+    // SPEC-1942 US-14: parse `gwt serve` / `gwt --headless` argv up front so a
+    // bad flag bundle fails fast before any bootstrap side effects.
+    let serve_args = match route {
+        runtime_support::FrontDoorRoute::Headless => match gwt::cli::serve::parse(&argv[1..]) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                eprintln!("gwt serve: {error}");
+                std::process::exit(2);
+            }
+        },
+        _ => None,
+    };
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
@@ -5390,17 +5845,28 @@ fn main() -> wry::Result<()> {
     }
 
     let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let _gui_instance_lock = match gwt::gui_single_instance::acquire_gui_instance_lock(
+    let lock_kind = if serve_args.is_some() {
+        gwt::gui_single_instance::LockKind::Headless
+    } else {
+        gwt::gui_single_instance::LockKind::Gui
+    };
+    let lock_role_label = if serve_args.is_some() {
+        "headless"
+    } else {
+        "GUI"
+    };
+    let _instance_lock_outcome = match gwt::gui_single_instance::acquire_instance_lock(
         &gwt_core::paths::gwt_home(),
         &startup_dir,
+        lock_kind,
     ) {
-        Ok(lock) => lock,
+        Ok(outcome) => outcome,
         Err(error @ gwt::gui_single_instance::GuiInstanceLockError::AlreadyRunning { .. }) => {
-            eprintln!("gwt GUI startup failed: {error}");
+            eprintln!("gwt {lock_role_label} startup failed: {error}");
             std::process::exit(2);
         }
         Err(error) => {
-            eprintln!("gwt GUI startup failed: {error}");
+            eprintln!("gwt {lock_role_label} startup failed: {error}");
             std::process::exit(1);
         }
     };
@@ -5425,7 +5891,19 @@ fn main() -> wry::Result<()> {
     }
 
     let runtime = Runtime::new().expect("tokio runtime");
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    // SPEC-1942 US-14 / FR-101 注記: macOS で `gwt serve` を起動すると、
+    // 既定では `NSApplication` の Activation Policy が `Regular` のままに
+    // なり、Dock アイコンと "GWT" メニューバーが表示されてしまう。Headless
+    // モードはサービス / daemon 的に動かしたい運用がほとんどなので、
+    // Activation Policy を `Prohibited` (Dock 非表示・menu 非表示・App
+    // Switcher 非表示) に切り替える。GUI route はこれまで通り `Regular`。
+    #[allow(unused_mut)]
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[cfg(target_os = "macos")]
+    if serve_args.is_some() {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
+    }
     let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
@@ -5464,8 +5942,14 @@ fn main() -> wry::Result<()> {
         }
     }
 
-    let mut server = EmbeddedServer::start(
+    let (bind_addr, bind_port) = match serve_args.as_ref() {
+        Some(args) => (args.bind, args.port),
+        None => (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0_u16),
+    };
+    let mut server = EmbeddedServer::start_with_bind(
         &runtime,
+        bind_addr,
+        bind_port,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
         pty_writers,
@@ -5474,6 +5958,9 @@ fn main() -> wry::Result<()> {
     app.set_hook_forward_target(server.hook_forward_target());
     let front_door = gui_front_door_launch_surface(server.url());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
+    if serve_args.is_some() {
+        eprintln!("gwt serve: press Ctrl-C to stop");
+    }
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
     // written to that path so the CI workflow can read it back into
@@ -5491,46 +5978,122 @@ fn main() -> wry::Result<()> {
         app.active_project_root().map(Path::to_path_buf),
     );
 
-    let window = WindowBuilder::new()
-        .with_title(APP_NAME)
-        .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
-        .build(&event_loop)
-        .expect("window");
+    // SPEC-1942 US-14: GUI path builds a wry/tao surface; headless path keeps
+    // the event_loop alive without any native window so the same closure can
+    // process UserEvent::Frontend / RuntimeHook / QuitApp messages from
+    // browser clients and signal handlers alike.
+    let webview_surface: Option<wry::WebView> = if serve_args.is_none() {
+        let window = WindowBuilder::new()
+            .with_title(APP_NAME)
+            .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
+            .build(&event_loop)
+            .expect("window");
+        let builder = WebViewBuilder::new().with_url(front_door.webview_url);
+
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android"
+        ))]
+        let webview = builder.build(&window)?;
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android"
+        )))]
+        let webview = {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+            let vbox = window.default_vbox().unwrap();
+            builder.build_gtk(vbox)?
+        };
+        // Keep the Window alive on the heap for the lifetime of the event
+        // loop. WebView holds the underlying NSWindow / HWND alive via the
+        // platform handle, but Box<Window> would still drop the Rust struct
+        // when this block ends — which is fine because the OS window stays.
+        let _ = window;
+        Some(webview)
+    } else {
+        None
+    };
+
     #[cfg(target_os = "macos")]
-    let native_menu = {
-        let native_menu = gwt::MacosNativeMenu::new();
-        native_menu.init_for_app();
-        native_menu
+    let native_menu = if serve_args.is_none() {
+        let menu = gwt::MacosNativeMenu::new();
+        menu.init_for_app();
+        Some(menu)
+    } else {
+        None
     };
 
-    let builder = WebViewBuilder::new().with_url(front_door.webview_url);
+    // SPEC-1942 US-14 / FR-097: in headless mode, Ctrl-C / SIGTERM are the
+    // only way to ask the server to shut down. Route both through the
+    // existing `UserEvent::QuitApp` path so the event_loop closure can run
+    // the same graceful shutdown sequence as the GUI close button.
+    //
+    // macOS caveat: `tao::EventLoop` without a native `Window` does not
+    // reliably wake the `NSApp.run()` runloop on `EventLoopProxy::send_event`,
+    // so the dispatched `UserEvent::QuitApp` may sit in the queue
+    // indefinitely. We arm a synchronous `std::thread` fallback timer that
+    // calls `std::process::exit(0)` if the graceful path does not complete
+    // within a short grace period. Using `std::thread::sleep` keeps the
+    // backstop independent of the tokio runtime / timer driver, so it fires
+    // even when the event_loop has stalled.
+    if serve_args.is_some() {
+        let graceful_grace = std::time::Duration::from_secs(5);
+        let trigger_shutdown = move |label: &'static str| {
+            eprintln!("gwt serve: {label} received, shutting down...");
+            // Arm the backstop FIRST so a stalled event loop cannot keep the
+            // process alive forever.
+            std::thread::Builder::new()
+                .name("gwt-serve-exit-backstop".to_string())
+                .spawn(move || {
+                    std::thread::sleep(graceful_grace);
+                    eprintln!(
+                        "gwt serve: graceful shutdown timed out after {graceful_grace:?}; exiting now"
+                    );
+                    std::process::exit(0);
+                })
+                .expect("spawn exit backstop thread");
+        };
 
-    #[cfg(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    ))]
-    let webview = builder.build(&window)?;
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    )))]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().unwrap();
-        builder.build_gtk(vbox)?
-    };
+        let proxy_for_int = proxy.clone();
+        let trigger_int = trigger_shutdown;
+        drop(runtime.handle().spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                trigger_int("SIGINT");
+                let _ = proxy_for_int.send_event(UserEvent::QuitApp);
+            }
+        }));
+        #[cfg(unix)]
+        {
+            let proxy_for_term = proxy.clone();
+            let trigger_term = trigger_shutdown;
+            drop(runtime.handle().spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    if sig.recv().await.is_some() {
+                        trigger_term("SIGTERM");
+                        let _ = proxy_for_term.send_event(UserEvent::QuitApp);
+                    }
+                }
+            }));
+        }
+        if let Some(args) = serve_args.as_ref() {
+            if args.open {
+                spawn_open_default_browser(server.url());
+            }
+        }
+    }
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        let _ = &webview;
+        let _ = webview_surface.as_ref();
         let _ = &runtime;
         #[cfg(target_os = "macos")]
-        let _ = &native_menu;
+        let _ = native_menu.as_ref();
 
         match event {
             Event::WindowEvent {
@@ -5917,8 +6480,15 @@ fn main() -> wry::Result<()> {
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
-                            if let Err(error) = webview.reload() {
-                                eprintln!("webview reload failed: {error}");
+                            // SPEC-1942 US-14: headless mode has no native
+                            // WebView; the menu item itself only ships in
+                            // GUI builds, but guard against accidental
+                            // dispatch when the headless path leaves the
+                            // option as `None`.
+                            if let Some(webview) = webview_surface.as_ref() {
+                                if let Err(error) = webview.reload() {
+                                    eprintln!("webview reload failed: {error}");
+                                }
                             }
                         }
                     }

@@ -25,6 +25,11 @@ pub fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
+// SPEC-2013 FR-012: close project tab confirm modal renderer.
+pub fn close_project_tab_confirm_modal_js() -> &'static str {
+    include_str!("../web/close-project-tab-confirm-modal.js")
+}
+
 pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
@@ -45,12 +50,20 @@ pub fn workspace_kanban_surface_js() -> &'static str {
     include_str!("../web/workspace-kanban-surface.js")
 }
 
+pub fn workspace_resume_picker_modal_js() -> &'static str {
+    include_str!("../web/workspace-resume-picker-modal.js")
+}
+
 pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
 
 pub fn terminal_context_menu_js() -> &'static str {
     include_str!("../web/terminal-context-menu.js")
+}
+
+pub fn terminal_wheel_scroll_js() -> &'static str {
+    include_str!("../web/terminal-wheel-scroll.js")
 }
 
 pub fn xterm_js() -> &'static str {
@@ -63,6 +76,17 @@ pub fn xterm_fit_js() -> &'static str {
 
 pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
+}
+
+// SPEC-2009 Phase 2b — syntax highlighting for the File Tree text viewer.
+// highlight.js ES module + a dark GitHub-style theme. Bundled into the gwt
+// binary so the viewer works offline without CDN reach.
+pub fn highlight_js() -> &'static str {
+    include_str!("../web/vendor/highlight/highlight.min.js")
+}
+
+pub fn highlight_css() -> &'static str {
+    include_str!("../web/vendor/highlight/github-dark.min.css")
 }
 
 // SPEC-2356 Operator Design System — module assets.
@@ -169,6 +193,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         marker: "renderBranchCleanupModal",
     },
     RootJsModuleAsset {
+        path: "/close-project-tab-confirm-modal.js",
+        source: close_project_tab_confirm_modal_js,
+        marker: "renderCloseProjectTabConfirmModal",
+    },
+    RootJsModuleAsset {
         path: "/migration-modal.js",
         source: migration_modal_js,
         marker: "renderMigrationModal",
@@ -194,6 +223,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         marker: "createWorkspaceKanbanSurface",
     },
     RootJsModuleAsset {
+        path: "/workspace-resume-picker-modal.js",
+        source: workspace_resume_picker_modal_js,
+        marker: "createWorkspaceResumePickerController",
+    },
+    RootJsModuleAsset {
         path: "/update-cta.js",
         source: update_cta_js,
         marker: "createUpdateCtaController",
@@ -202,6 +236,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-context-menu.js",
         source: terminal_context_menu_js,
         marker: "createTerminalContextMenuController",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-wheel-scroll.js",
+        source: terminal_wheel_scroll_js,
+        marker: "createTerminalWheelScrollController",
     },
     RootJsModuleAsset {
         path: "/theme-manager.js",
@@ -382,6 +421,17 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
+    )
+}
+
+pub async fn highlight_js_handler() -> impl IntoResponse {
+    js_response(highlight_js())
+}
+
+pub async fn highlight_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        highlight_css(),
     )
 }
 
@@ -777,7 +827,7 @@ mod tests {
         // handshake — otherwise a window created hidden never drains
         // its deferred buffer until the user manually resizes.
         let reveal_completes_handshake = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,[\s\S]*?\)\s*\{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?if \(activeRuntime\.isReady === false\) \{\s*completeInitialFitHandshake\(windowId\);"#,
         )
         .expect("valid regex");
         let write_gate = regex::Regex::new(
@@ -1488,7 +1538,7 @@ mod tests {
     fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
         let js = app_js();
         let render_activation = regex::Regex::new(
-            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
+            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false,?[\s\S]*?\}\);"#,
         )
         .expect("valid regex");
         // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
@@ -1504,13 +1554,14 @@ mod tests {
         // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
         // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry: true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
         assert!(
-            js.contains("function scheduleTerminalFocusActivation(windowId)"),
-            "expected a shared xterm activation helper for programmatic window focus",
+            js.contains("function scheduleTerminalFocusActivation(")
+                && js.contains("shouldPersistGeometry = true"),
+            "expected a shared xterm activation helper for programmatic window focus with geometry persistence enabled by default",
         );
         assert!(
             activation_helper.is_match(js),
@@ -1518,7 +1569,7 @@ mod tests {
         );
         assert!(
             render_activation.is_match(js),
-            "expected workspace render to reactivate the topmost terminal for cycle focus, window list, command palette, and tab activation",
+            "expected workspace render to reactivate the topmost terminal without echoing geometry into backend resize broadcasts",
         );
     }
 
@@ -1799,6 +1850,7 @@ mod tests {
 
         for module_path in [
             "/branch-cleanup-modal.js",
+            "/close-project-tab-confirm-modal.js",
             "/migration-modal.js",
             "/window-docking.js",
             "/board-surface.js",
@@ -1809,6 +1861,7 @@ mod tests {
             "/operator-shell.js",
             "/focus-trap.js",
             "/terminal-context-menu.js",
+            "/terminal-wheel-scroll.js",
             "/custom-agent-env-editor.js",
         ] {
             assert!(

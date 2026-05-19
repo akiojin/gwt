@@ -9,7 +9,12 @@ export function createWorkspaceKanbanSurface({
   send,
   windowMap,
   workspaceWindowById,
+  // SPEC-2359 US-42 — opens the Workspace Resume Picker modal. Optional
+  // so legacy callers (smoke tests, fixtures) that do not wire the
+  // picker still render Workspace cards.
+  openWorkspaceResumePicker,
 }) {
+  const workspaceResumePickerOpen = openWorkspaceResumePicker;
   const workspaceKanbanStateMap = new Map();
 
   function ensureWorkspaceKanbanState(windowId) {
@@ -339,15 +344,18 @@ export function createWorkspaceKanbanSurface({
   }
 
   function resumeWorkspaceCard(card) {
-    if (card?.resume_source === "journal" && card?.journal_id) {
-      send({
-        kind: "resume_workspace",
-        source: "journal",
-        journal_id: card.journal_id,
-      });
-      return;
+    // SPEC-2359 US-42: Resume button now opens the Workspace Resume
+    // Picker. The backend enumerates assigned agents and the user picks
+    // which previously-running agent to restart in-place; the Launch
+    // Wizard never opens for this path.
+    const workspaceId = card?.id ?? null;
+    if (typeof workspaceResumePickerOpen === "function") {
+      workspaceResumePickerOpen(workspaceId);
     }
-    send({ kind: "resume_workspace", source: "current" });
+    send({
+      kind: "list_resumable_agents",
+      workspace_id: workspaceId ?? undefined,
+    });
   }
 
   function renderWorkspaceKanbanCard(windowId, state, cardData) {
@@ -687,7 +695,20 @@ export function createWorkspaceKanbanSurface({
         </div>
       </div>
     `;
-    body.addEventListener("mousedown", () => {
+    // Issue #2757: body-level `mousedown` previously fired `focus_window`
+    // unconditionally. Backend responded with a `workspace_state` broadcast
+    // (z_index bump from `bring_to_front`), and that broadcast re-rendered
+    // the Kanban DOM between `mousedown` and `mouseup`. When the original
+    // Resume / Start Work button was replaced under the user's cursor, the
+    // browser silently dropped the trailing `click` event and the action
+    // (`resume_workspace` / `open_start_work`) never reached the backend.
+    // Skip the focus dispatch when `mousedown` targets an interactive
+    // control so the click can complete; non-control whitespace clicks
+    // still focus the window.
+    body.addEventListener("mousedown", (event) => {
+      if (event.target?.closest("button, a, input, select, textarea, [role='button']")) {
+        return;
+      }
       focusWindowLocally(windowData.id);
       sendFocus(windowData.id);
     });

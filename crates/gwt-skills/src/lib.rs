@@ -1,6 +1,7 @@
 //! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
 pub mod assets;
+pub mod codex_home;
 pub mod codex_hook_trust;
 pub mod coordination_guidance;
 pub mod distribute;
@@ -11,6 +12,11 @@ pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
+pub use codex_home::{
+    codex_env_key, codex_home_for_worktree, codex_provider_id,
+    materialize as materialize_codex_home, render_config_toml as render_codex_config_toml,
+    CodexHomeConfig, DEFAULT_WIRE_API, RESERVED_PROVIDER_IDS,
+};
 pub use codex_hook_trust::{
     collect_codex_managed_hook_trust_entries, register_codex_managed_hook_trust,
     CodexHookTrustEntry, CodexHookTrustReport,
@@ -1672,5 +1678,208 @@ mod tests {
                 "AGENTS.md must reference the canonical coordination guidance surface: {needle}"
             );
         }
+    }
+
+    // SPEC-1935 Phase 17 (FR-122..FR-128, SC-056..SC-061):
+    // `gwt-verify` is the canonical verification-time skill that owns
+    // surface→test-matrix selection. These tests assert it is bundled
+    // alongside the other gwt skills and documented in AGENTS.md.
+    #[test]
+    fn claude_skills_contains_gwt_verify_dir() {
+        use crate::assets::CLAUDE_SKILLS;
+        let dirs: Vec<&str> = CLAUDE_SKILLS
+            .dirs()
+            .map(|d| {
+                d.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("")
+            })
+            .collect();
+        assert!(
+            dirs.contains(&"gwt-verify"),
+            "missing gwt-verify skill dir; SPEC-1935 Phase 17 FR-122 requires the canonical skill"
+        );
+    }
+
+    #[test]
+    fn claude_commands_contains_gwt_verify_md() {
+        use crate::assets::CLAUDE_COMMANDS;
+        let files: Vec<&str> = CLAUDE_COMMANDS
+            .files()
+            .map(|f| {
+                f.path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("")
+            })
+            .collect();
+        assert!(
+            files.contains(&"gwt-verify.md"),
+            "missing gwt-verify.md command wrapper; SPEC-1935 Phase 17 FR-122 requires the slash-command entrypoint"
+        );
+    }
+
+    #[test]
+    fn gwt_verify_skill_md_documents_surface_matrix_contract() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                crate::validate::validate_frontmatter(&content).is_ok(),
+                "{relative} must have valid YAML frontmatter"
+            );
+            assert!(
+                content.contains("name: gwt-verify"),
+                "{relative} frontmatter must declare name: gwt-verify"
+            );
+            // FR-123 / FR-124: Playwright limited to WebView/browser UI.
+            assert!(
+                content.contains("Playwright") && content.contains("WebView"),
+                "{relative} must document Playwright as the WebView/browser UI execution path"
+            );
+            // FR-124: Rust/CLI surfaces must not invoke Playwright.
+            assert!(
+                content.contains("not invoke Playwright")
+                    || content.contains("does not invoke Playwright"),
+                "{relative} must state that non-browser surfaces do not invoke Playwright"
+            );
+            // FR-125: Headed/Headless contract.
+            assert!(
+                content.contains("headless") && content.contains("--headed"),
+                "{relative} must document the default-headless + opt-in --headed contract"
+            );
+            // FR-126: Tooling bootstrap with failed: tooling-missing.
+            assert!(
+                content.contains("tooling-missing"),
+                "{relative} must document the failed: tooling-missing fail mode"
+            );
+            // FR-128: Evidence bundle.
+            assert!(
+                content.contains("Verification Report") || content.contains("evidence bundle"),
+                "{relative} must describe the evidence bundle output"
+            );
+            // Modes.
+            assert!(
+                content.contains("--mode quick")
+                    && content.contains("--mode full")
+                    && content.contains("--mode pre-pr"),
+                "{relative} must document the quick / full / pre-pr modes"
+            );
+            // FR-123: Diff baseline.
+            assert!(
+                content.contains("merge-base") && content.contains("origin/develop"),
+                "{relative} must specify the merge-base HEAD..origin/develop baseline"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_verify_references_are_bundled() {
+        use crate::assets::CLAUDE_SKILLS;
+
+        let verify_dir = CLAUDE_SKILLS
+            .get_dir(".claude/skills/gwt-verify")
+            .or_else(|| CLAUDE_SKILLS.get_dir("gwt-verify"))
+            .expect("gwt-verify directory must be bundled in CLAUDE_SKILLS");
+
+        let references = verify_dir
+            .get_dir(
+                verify_dir
+                    .path()
+                    .join("references")
+                    .to_str()
+                    .expect("references path is utf8"),
+            )
+            .expect("gwt-verify must ship a references/ subdir");
+
+        let reference_files: Vec<&str> = references
+            .files()
+            .filter_map(|f| f.path().file_name().and_then(|n| n.to_str()))
+            .collect();
+
+        for required in [
+            "test-matrix.md",
+            "playwright-runbook.md",
+            "tooling-bootstrap.md",
+        ] {
+            assert!(
+                reference_files.contains(&required),
+                "gwt-verify references/ must include {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_spec_delegates_verification_to_gwt_verify() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            // FR-127: Phase 3 must delegate to `gwt-verify --mode full`.
+            assert!(
+                content.contains("gwt-verify --mode full"),
+                "{relative} Phase 3 must delegate verification to gwt-verify --mode full"
+            );
+            // Pre-amendment cargo-only verification recipe must be retired.
+            // We still allow mentioning cargo elsewhere, but the four-command
+            // verbatim recipe in Phase 3 must be gone.
+            let phase_3_marker = "Phase 3";
+            if let Some(phase_3_start) = content.find(phase_3_marker) {
+                let phase_3_window = &content[phase_3_start..];
+                // Find next "## Phase" heading or fall back to end.
+                let phase_3_end = phase_3_window
+                    .find("\n## Phase 4")
+                    .or_else(|| phase_3_window.find("\n## "))
+                    .unwrap_or(phase_3_window.len());
+                let phase_3_body = &phase_3_window[..phase_3_end];
+                assert!(
+                    !phase_3_body.contains("cargo test -p gwt-core -p gwt")
+                        || phase_3_body.contains("gwt-verify"),
+                    "{relative} Phase 3 must not contain the legacy verbatim cargo verification list without gwt-verify delegation context"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manage_pr_requires_gwt_verify_pre_pr() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            // FR-127: manage-pr must require `gwt-verify --mode pre-pr`.
+            assert!(
+                content.contains("gwt-verify --mode pre-pr"),
+                "{relative} must require gwt-verify --mode pre-pr before PR create/update"
+            );
+        }
+    }
+
+    #[test]
+    fn agents_documents_gwt_verify_skill() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        assert!(
+            agents.contains("gwt-verify"),
+            "AGENTS.md must document the gwt-verify skill (SPEC-1935 Phase 17 FR-122)"
+        );
     }
 }

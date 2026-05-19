@@ -1561,8 +1561,16 @@ mod tests {
         config
     }
 
-    fn sample_custom_bunx_launch_config(worktree: &Path) -> LaunchConfig {
-        let mut config = AgentLaunchBuilder::new(AgentId::Custom("claude-code-openai".to_string()))
+    fn sample_claude_code_bunx_launch_config(worktree: &Path) -> LaunchConfig {
+        // SPEC-1921 Phase 63F: FR-091 / FR-092 supersession. The host
+        // package-runner fallback applies to every bunx-launched
+        // built-in Claude Code launch, with or without a Backend Override
+        // profile attached, through the regular AgentLaunchBuilder path.
+        // The original Phase 57 fixture targeted
+        // `AgentId::Custom("claude-code-openai")`; after the 2026-05-18
+        // amendment that special case is gone — the test subject is
+        // simply the built-in agent.
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir(worktree)
             .branch("feature/demo")
             .session_mode(SessionMode::Normal)
@@ -1580,9 +1588,9 @@ mod tests {
     }
 
     #[test]
-    fn host_package_runner_version_spec_uses_runner_args_for_custom_bunx_launch() {
+    fn host_package_runner_version_spec_uses_runner_args_for_claude_code_bunx_launch() {
         let temp = tempdir().expect("tempdir");
-        let config = sample_custom_bunx_launch_config(temp.path());
+        let config = sample_claude_code_bunx_launch_config(temp.path());
 
         assert_eq!(super::package_runner_version_spec(&config), None);
         assert_eq!(
@@ -1690,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_agent_launch_uses_npx_fallback_for_custom_bunx_launch() {
+    fn prepare_agent_launch_uses_npx_fallback_for_claude_code_bunx_launch() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo-feature");
         let sessions_dir = temp.path().join(".gwt").join("sessions");
@@ -1707,7 +1715,7 @@ mod tests {
         let prepared = prepare_agent_launch_with(
             &worktree,
             &sessions_dir,
-            sample_custom_bunx_launch_config(&worktree),
+            sample_claude_code_bunx_launch_config(&worktree),
             None,
             |path| {
                 assert_eq!(path, worktree.as_path());

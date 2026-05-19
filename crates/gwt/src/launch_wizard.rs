@@ -115,6 +115,41 @@ pub struct LaunchWizardQuickStartView {
     pub reuse_action_label: Option<String>,
 }
 
+/// SPEC-2359 US-42 — Workspace Resume Picker entry.
+///
+/// One row in the modal that appears when the user clicks Resume on a
+/// Workspace card. Each entry maps to a previously-assigned agent whose
+/// `session_id` we can spawn with `claude --resume <uuid>` or
+/// `codex resume <uuid>`. We deliberately keep this view backend-driven
+/// so the picker can render without re-deriving runtime metadata from
+/// storage on the client.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ResumableAgentView {
+    pub session_id: String,
+    pub agent_id: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// `"session"` means we found a Session toml on disk with a non-empty
+    /// `agent_session_id`, so the launcher can pass `--resume <uuid>` and
+    /// the agent will pick up the previous conversation. `"metadata_only"`
+    /// means we only have Workspace projection metadata (no Session toml
+    /// for that id), so a fresh agent will be started while preserving
+    /// the Workspace title / owner.
+    pub resume_kind: ResumableAgentResumeKind,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumableAgentResumeKind {
+    Session,
+    MetadataOnly,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardLiveSessionView {
     pub index: usize,
@@ -942,7 +977,9 @@ impl LaunchWizardState {
                 .to_string(),
             version_options: self.version_options_view(),
             selected_version: self.version.clone(),
-            execution_mode_options: execution_mode_options_view(),
+            execution_mode_options: execution_mode_options_view(
+                self.current_agent_supports_resume_picker(),
+            ),
             selected_execution_mode: self.mode.clone(),
             skip_permissions: self.skip_permissions,
             show_agent_settings: show_manual_setup && self.launch_target_is_agent(),
@@ -1217,10 +1254,47 @@ impl LaunchWizardState {
             .cloned()
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
 
-        let agent_id = agent_id_from_key(&selected_agent.id);
-        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
-        if let Some(custom_agent) = selected_agent.custom_agent {
-            builder = builder.custom_agent(custom_agent);
+        // SPEC-1921 FR-090 (2026-05-18 amendment) / T295: when a saved
+        // Quick Start entry recorded `AgentId::Custom("<old-id>")` for a
+        // legacy `ClaudeCodeOpenaiCompat` preset that has since been
+        // migrated to `[builtinAgents.claudeCode.backends.<old-id>]`, the
+        // wizard MUST relaunch through the built-in Claude Code path with
+        // the matching backend profile attached. The remap is transparent
+        // to the caller; no UI prompt is shown.
+        let raw_agent_id = agent_id_from_key(&selected_agent.id);
+        let config_path = gwt_core::paths::gwt_config_path();
+        let remap_backend_id = if let gwt_agent::AgentId::Custom(_) = &raw_agent_id {
+            gwt_agent::resolve_legacy_backend_remap(&raw_agent_id, &config_path)
+        } else {
+            None
+        };
+        let (agent_id, backend_profile) = if let Some(backend_id) = remap_backend_id {
+            let profile = gwt_agent::load_backends_for_agent(
+                &config_path,
+                gwt_agent::BuiltinAgentId::ClaudeCode,
+            )
+            .ok()
+            .and_then(|profiles| profiles.into_iter().find(|p| p.id == backend_id));
+            match profile {
+                Some(profile) => (gwt_agent::AgentId::ClaudeCode, Some(profile)),
+                None => (raw_agent_id, None),
+            }
+        } else {
+            (raw_agent_id, None)
+        };
+
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
+        // FR-090: drop the legacy `selected_agent.custom_agent` when remap
+        // succeeded — the launch is now a built-in Claude Code with backend
+        // profile, not a Custom Coding Agent.
+        match (&backend_profile, selected_agent.custom_agent) {
+            (Some(profile), _) => {
+                builder = builder.backend_profile(profile.clone());
+            }
+            (None, Some(custom_agent)) => {
+                builder = builder.custom_agent(custom_agent);
+            }
+            (None, None) => {}
         }
 
         if !self.is_new_branch {
@@ -1269,12 +1343,22 @@ impl LaunchWizardState {
             builder = builder.docker_service(docker_service.to_string());
         }
         builder = builder.docker_lifecycle_intent(self.docker_lifecycle_intent);
+        // SPEC-2014 2026-05-18 amendment FR-A:
+        // Execution Mode `"resume"` always maps to `SessionMode::Resume`.
+        // - Quick Start Resume (with id)       → SessionMode::Resume + id
+        // - Execution Mode Resume (no id)      → SessionMode::Resume (agent picker)
+        // The earlier silent downgrade to Continue when id was absent has been
+        // removed; UI option filtering and `normalize_execution_mode` already
+        // prevent this state for picker-unsupported agents.
         builder = match self.mode.as_str() {
             "continue" => builder.session_mode(gwt_agent::SessionMode::Continue),
-            "resume" if self.resume_session_id.is_some() => builder
-                .session_mode(gwt_agent::SessionMode::Resume)
-                .resume_session_id(self.resume_session_id.clone().expect("resume session id")),
-            "resume" => builder.session_mode(gwt_agent::SessionMode::Continue),
+            "resume" => {
+                let mut b = builder.session_mode(gwt_agent::SessionMode::Resume);
+                if let Some(id) = self.resume_session_id.clone() {
+                    b = b.resume_session_id(id);
+                }
+                b
+            }
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
 
@@ -1450,7 +1534,8 @@ impl LaunchWizardState {
                 }
             }
             LaunchWizardStep::ExecutionMode => {
-                if let Some(option) = EXECUTION_MODE_OPTIONS.get(self.selected) {
+                let options = self.execution_mode_step_options();
+                if let Some(option) = options.get(self.selected) {
                     self.mode = option.value.to_string();
                 }
             }
@@ -2314,6 +2399,31 @@ impl LaunchWizardState {
         self.launch_target_is_agent() && self.effective_agent_id() == "codex"
     }
 
+    /// SPEC-2014 2026-05-18 amendment FR-D: filtered Execution Mode option
+    /// list seen by both the wizard-step path (`current_options`) and the
+    /// default-selection helper. Mirrors the LaunchWizardView's
+    /// `execution_mode_options`.
+    fn execution_mode_step_options(&self) -> Vec<LaunchWizardOptionView> {
+        execution_mode_options_view(self.current_agent_supports_resume_picker())
+    }
+
+    /// SPEC-2014 2026-05-18 amendment FR-C / FR-D:
+    /// Whether the current Launch target agent supports an interactive resume
+    /// picker. Used by Execution Mode option filtering and `Resume → Continue`
+    /// downgrade in [`Self::normalize_execution_mode`].
+    fn current_agent_supports_resume_picker(&self) -> bool {
+        if !self.launch_target_is_agent() {
+            return false;
+        }
+        if let Some(custom) = self
+            .selected_agent()
+            .and_then(|agent| agent.custom_agent.as_ref())
+        {
+            return custom.supports_resume_picker;
+        }
+        agent_id_from_key(self.effective_agent_id()).supports_resume_picker()
+    }
+
     fn agent_has_models(&self) -> bool {
         self.launch_target_is_agent()
             && matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
@@ -2492,13 +2602,25 @@ impl LaunchWizardState {
     }
 
     fn normalize_execution_mode(&mut self) {
+        // Unknown mode strings always fall back to Normal.
         if !EXECUTION_MODE_OPTIONS
             .iter()
             .any(|option| option.value == self.mode)
         {
             self.mode = "normal".to_string();
             self.resume_session_id = None;
-        } else if self.mode != "resume" {
+            return;
+        }
+        // SPEC-2014 2026-05-18 amendment FR-E:
+        // Downgrade Resume → Continue when the current agent does not support
+        // an interactive picker (e.g. Gemini / OpenCode / OpenClaw / Hermes /
+        // Copilot / custom agents without opt-in capability).
+        if self.mode == "resume" && !self.current_agent_supports_resume_picker() {
+            self.mode = "continue".to_string();
+            self.resume_session_id = None;
+            return;
+        }
+        if self.mode != "resume" {
             self.resume_session_id = None;
         }
     }
@@ -2750,15 +2872,9 @@ impl LaunchWizardState {
                     color: None,
                 })
                 .collect(),
-            LaunchWizardStep::ExecutionMode => EXECUTION_MODE_OPTIONS
-                .iter()
-                .map(|option| LaunchWizardOptionView {
-                    value: option.value.to_string(),
-                    label: option.label.to_string(),
-                    description: Some(option.description.to_string()),
-                    color: None,
-                })
-                .collect(),
+            LaunchWizardStep::ExecutionMode => {
+                execution_mode_options_view(self.current_agent_supports_resume_picker())
+            }
             LaunchWizardStep::SkipPermissions => YES_NO_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
@@ -3030,7 +3146,7 @@ const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
     },
     ExecutionModeOption {
         label: "Resume",
-        description: "Resume the selected session metadata",
+        description: "Open the agent's session picker",
         value: "resume",
     },
 ];
@@ -3447,7 +3563,8 @@ fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizardState) -> 
             .iter()
             .position(|option| option.value == state.version)
             .unwrap_or(0),
-        LaunchWizardStep::ExecutionMode => EXECUTION_MODE_OPTIONS
+        LaunchWizardStep::ExecutionMode => state
+            .execution_mode_step_options()
             .iter()
             .position(|option| option.value == state.mode)
             .unwrap_or(0),
@@ -3616,9 +3733,10 @@ where
     gwt_agent::WindowsShellKind::CommandPrompt
 }
 
-fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
+fn execution_mode_options_view(supports_resume_picker: bool) -> Vec<LaunchWizardOptionView> {
     EXECUTION_MODE_OPTIONS
         .iter()
+        .filter(|option| supports_resume_picker || option.value != "resume")
         .map(|option| LaunchWizardOptionView {
             value: option.value.to_string(),
             label: option.label.to_string(),
@@ -3631,7 +3749,8 @@ fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
 fn execution_mode_value_from_session_mode(mode: gwt_agent::SessionMode) -> &'static str {
     match mode {
         gwt_agent::SessionMode::Normal => "normal",
-        gwt_agent::SessionMode::Continue | gwt_agent::SessionMode::Resume => "continue",
+        gwt_agent::SessionMode::Continue => "continue",
+        gwt_agent::SessionMode::Resume => "resume",
     }
 }
 
@@ -3805,6 +3924,7 @@ mod tests {
             }),
             skip_permissions_args: vec!["--unsafe".to_string()],
             env: HashMap::from([("API_KEY".to_string(), "secret".to_string())]),
+            supports_resume_picker: false,
         }
     }
 
@@ -4470,6 +4590,129 @@ mod tests {
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
         assert!(config.skip_permissions);
         assert!(config.codex_fast_mode);
+    }
+
+    // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:
+    // Execution Mode `Resume` without a resume_session_id (i.e. the picker
+    // path) must reach the agent CLI as SessionMode::Resume without an id.
+    // The earlier silent downgrade to SessionMode::Continue is removed.
+    #[test]
+    fn build_launch_config_resume_without_id_keeps_session_mode_resume_for_codex() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = None;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(config.resume_session_id.is_none());
+        // Codex builder must produce `codex resume` (picker) — no `--last`.
+        assert!(!config.args.contains(&"--last".to_string()));
+        assert!(config.args.iter().any(|arg| arg == "resume"));
+    }
+
+    #[test]
+    fn build_launch_config_resume_without_id_keeps_session_mode_resume_for_claude() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "claude".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = None;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(config.resume_session_id.is_none());
+        // Claude builder pushes `--resume` (no id) which opens its picker.
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(!config.args.iter().any(|arg| arg == "--continue"));
+    }
+
+    // SPEC-2014 2026-05-18 amendment FR-D / SC-C:
+    // execution_mode_options_view filters `resume` for picker-unsupported
+    // agents. The Launch Wizard view must match.
+    #[test]
+    fn execution_mode_options_omit_resume_for_picker_unsupported_agent() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "gemini".to_string();
+
+        let view = state.view();
+        assert!(
+            view.execution_mode_options
+                .iter()
+                .all(|option| option.value != "resume"),
+            "Gemini must not advertise the picker option: {:?}",
+            view.execution_mode_options
+        );
+
+        state.agent_id = "claude".to_string();
+        let view = state.view();
+        assert!(view
+            .execution_mode_options
+            .iter()
+            .any(|option| option.value == "resume"));
+
+        state.agent_id = "codex".to_string();
+        let view = state.view();
+        assert!(view
+            .execution_mode_options
+            .iter()
+            .any(|option| option.value == "resume"));
+    }
+
+    // SPEC-2014 2026-05-18 amendment FR-E / SC-D:
+    // Switching to a picker-unsupported agent while Resume is selected must
+    // downgrade to Continue and clear any stale resume_session_id.
+    #[test]
+    fn normalize_execution_mode_downgrades_resume_when_switching_to_gemini() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "claude".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("stale-id".to_string());
+
+        // Sanity: Claude keeps Resume.
+        state.normalize_execution_mode();
+        assert_eq!(state.mode, "resume");
+
+        // Switch to Gemini → Resume downgrades to Continue.
+        state.agent_id = "gemini".to_string();
+        state.normalize_execution_mode();
+        assert_eq!(state.mode, "continue");
+        assert!(state.resume_session_id.is_none());
+    }
+
+    // SPEC-2014 2026-05-18 amendment FR-F / SC-E:
+    // execution_mode_value_from_session_mode roundtrips Resume → "resume"
+    // instead of collapsing to "continue", so previous-profile Resume can be
+    // restored as picker mode (id intentionally cleared on restore).
+    #[test]
+    fn execution_mode_value_from_session_mode_round_trips_resume() {
+        assert_eq!(
+            execution_mode_value_from_session_mode(gwt_agent::SessionMode::Normal),
+            "normal"
+        );
+        assert_eq!(
+            execution_mode_value_from_session_mode(gwt_agent::SessionMode::Continue),
+            "continue"
+        );
+        assert_eq!(
+            execution_mode_value_from_session_mode(gwt_agent::SessionMode::Resume),
+            "resume"
+        );
     }
 
     #[test]
@@ -6062,13 +6305,26 @@ mod tests {
             .iter()
             .any(|option| option.value == "docker"));
 
-        let execution_modes = execution_mode_options_view();
+        let execution_modes = execution_mode_options_view(true);
         assert!(execution_modes
             .iter()
             .any(|option| option.value == "normal"));
         assert!(execution_modes
             .iter()
             .any(|option| option.value == "resume"));
+
+        // SPEC-2014 2026-05-18 amendment FR-D / SC-C:
+        // picker 非対応 capability では "resume" option を除外する。
+        let modes_without_picker = execution_mode_options_view(false);
+        assert!(modes_without_picker
+            .iter()
+            .all(|option| option.value != "resume"));
+        assert!(modes_without_picker
+            .iter()
+            .any(|option| option.value == "normal"));
+        assert!(modes_without_picker
+            .iter()
+            .any(|option| option.value == "continue"));
 
         assert!(current_model_options("claude").contains(&"sonnet"));
         assert_eq!(

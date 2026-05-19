@@ -297,6 +297,11 @@ pub struct AgentLaunchBuilder {
     /// above, so preset-seeded custom entries win over built-in defaults
     /// but never clobber explicit caller-provided overrides.
     custom_agent_env: HashMap<String, String>,
+    /// Active Backend Override profile (SPEC-1921 FR-100 / FR-103).
+    /// `None` means the agent launches against its default upstream
+    /// (no env override). Set only for built-in agents that support
+    /// Backend Override (Claude Code, Codex).
+    backend_profile: Option<crate::backend::AgentBackendProfile>,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
@@ -323,6 +328,7 @@ impl AgentLaunchBuilder {
             permission_mode: None,
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
+            backend_profile: None,
             extra_args: Vec::new(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
@@ -400,6 +406,16 @@ impl AgentLaunchBuilder {
     /// defaults but never clobber explicit caller overrides.
     pub fn custom_agent_env(mut self, env: HashMap<String, String>) -> Self {
         self.custom_agent_env = env;
+        self
+    }
+
+    /// SPEC-1921 FR-100 / FR-103: attach an Agent Backend Override profile.
+    /// Claude Code launches inject `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`,
+    /// and the four model-role env vars; Codex launches consume the profile
+    /// through the worktree-local `CODEX_HOME` generator (FR-103 / Phase
+    /// 63E). The default upstream is used when no profile is set.
+    pub fn backend_profile(mut self, profile: crate::backend::AgentBackendProfile) -> Self {
+        self.backend_profile = Some(profile);
         self
     }
 
@@ -580,6 +596,42 @@ impl AgentLaunchBuilder {
         env_vars.insert("DISABLE_FEEDBACK_COMMAND".into(), "1".into());
         env_vars.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".into(), "1".into());
 
+        // SPEC-1921 FR-100 (2026-05-18 amendment): Backend Override env
+        // injection. When the launch carries a `[builtinAgents.claudeCode.
+        // backends.<id>]` profile, route Claude Code's Anthropic Messages
+        // API traffic to the upstream proxy by setting `ANTHROPIC_BASE_URL`
+        // plus the four model-role overrides and the OpenAI-compat-friendly
+        // telemetry-off flags. The default path (no profile) leaves the
+        // upstream untouched so the agent talks to Anthropic directly.
+        if let Some(profile) = self.backend_profile.as_ref() {
+            env_vars.insert("ANTHROPIC_BASE_URL".into(), profile.base_url.clone());
+            env_vars.insert("ANTHROPIC_API_KEY".into(), profile.api_key.clone());
+            env_vars.insert(
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+                profile.effective_haiku_model().to_string(),
+            );
+            env_vars.insert(
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+                profile.effective_opus_model().to_string(),
+            );
+            env_vars.insert(
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+                profile.effective_sonnet_model().to_string(),
+            );
+            env_vars.insert(
+                "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+                profile.effective_subagent_model().to_string(),
+            );
+            // Suppress non-essential traffic so a non-Anthropic upstream
+            // does not see unrelated telemetry POSTs (SPEC-1921 Phase 52
+            // preset legacy invariant).
+            env_vars.insert("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into());
+            env_vars.insert(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+                "1".into(),
+            );
+        }
+
         // Permission mode
         if let Some(ref mode) = self.permission_mode {
             args.push("--permission-mode".to_string());
@@ -629,7 +681,44 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
+        // SPEC-1921 FR-103 (2026-05-18 amendment): when a Codex Backend
+        // Override profile is attached, materialize a worktree-local
+        // CODEX_HOME containing a generated
+        // `[model_providers.<gwt-id>]` config.toml and point Codex at
+        // it through the CODEX_HOME env var plus the API key env var
+        // matching the profile's `env_key`. The default path (no profile)
+        // leaves Codex pointing at the user's `~/.codex/`.
+        if let Some(profile) = self.backend_profile.as_ref() {
+            let cfg = gwt_skills::CodexHomeConfig {
+                id: profile.id.clone(),
+                display_name: profile.display_name.clone(),
+                base_url: profile.base_url.clone(),
+                model: profile.model.clone(),
+                wire_api: profile.wire_api.clone(),
+                env_key: profile.env_key.clone(),
+                provider_id: profile.provider_id.clone(),
+            };
+            let codex_home = self
+                .working_dir
+                .as_ref()
+                .map(|root| gwt_skills::codex_home_for_worktree(root))
+                .unwrap_or_else(|| std::env::temp_dir().join(".gwt-codex"));
+            if let Err(err) = gwt_skills::materialize_codex_home(&codex_home, &cfg) {
+                tracing::warn!(
+                    error = %err,
+                    backend_id = %profile.id,
+                    "failed to materialize CODEX_HOME; Codex backend env still set"
+                );
+            }
+            env_vars.insert("CODEX_HOME".to_string(), codex_home.display().to_string());
+            env_vars.insert(cfg.effective_env_key(), profile.api_key.clone());
+        }
+
         args.extend(canonical_launch_args(&AgentId::Codex));
+        // SPEC-2014 2026-05-18 amendment FR-B:
+        // - Continue        → `codex resume --last`  (resume the most recent session)
+        // - Resume + id     → `codex resume <id>`    (Quick Start: replay specific session)
+        // - Resume (no id)  → `codex resume`         (Execution Mode picker; do NOT add `--last`)
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -639,8 +728,6 @@ impl AgentLaunchBuilder {
                 args.push("resume".to_string());
                 if let Some(ref id) = self.resume_session_id {
                     args.push(id.clone());
-                } else {
-                    args.push("--last".to_string());
                 }
             }
             SessionMode::Normal => {}
@@ -836,6 +923,13 @@ mod tests {
     // source of truth for agent-neutral default args across all launch entry
     // points (wizard, preset, session-load migration). Regression guard for
     // the preset-path gap that caused Codex Plan-mode scroll to die.
+
+    fn project_relative_path(relative: &str) -> String {
+        std::path::PathBuf::from("/tmp/project")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned()
+    }
 
     #[test]
     fn canonical_launch_args_for_codex_contains_no_alt_screen() {
@@ -1047,15 +1141,29 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_resume_without_id_uses_last_session() {
+    fn build_codex_resume_without_id_opens_picker() {
+        // SPEC-2014 2026-05-18 amendment FR-B / SC-A:
+        // Codex Execution Mode Resume (no session id) must produce a bare
+        // `codex resume` so the interactive picker opens. `--last` is reserved
+        // for Continue mode only.
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .build();
 
-        assert!(config
+        let resume_index = config
             .args
-            .windows(2)
-            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+            .iter()
+            .position(|arg| arg == "resume")
+            .expect("codex args must contain the `resume` subcommand");
+        assert_ne!(
+            config.args.get(resume_index + 1).map(String::as_str),
+            Some("--last"),
+            "Execution Mode Resume must not append --last; that is Continue's role"
+        );
+        assert!(
+            !config.args.contains(&"--last".to_string()),
+            "no --last anywhere when SessionMode::Resume has no resume_session_id"
+        );
     }
 
     #[test]
@@ -1427,7 +1535,7 @@ mod tests {
             .any(|pair| pair[0] == "--model" && pair[1] == "anthropic/claude-sonnet-4-5"));
         assert_eq!(
             config.env_vars.get("OPENCODE_CONFIG_DIR"),
-            Some(&"/tmp/project/.gwt/opencode".to_string())
+            Some(&project_relative_path(".gwt/opencode"))
         );
     }
 
@@ -1455,7 +1563,7 @@ mod tests {
             .any(|pair| pair[0] == "--thinking" && pair[1] == "high"));
         assert_eq!(
             config.env_vars.get("OPENCLAW_CONFIG_PATH"),
-            Some(&"/tmp/project/.gwt/openclaw/openclaw.json".to_string())
+            Some(&project_relative_path(".gwt/openclaw/openclaw.json"))
         );
     }
 
@@ -1480,7 +1588,7 @@ mod tests {
             .any(|pair| pair[0] == "--model" && pair[1] == "openrouter/anthropic/claude-sonnet-4"));
         assert_eq!(
             config.env_vars.get("HERMES_HOME"),
-            Some(&"/tmp/project/.gwt/hermes".to_string())
+            Some(&project_relative_path(".gwt/hermes"))
         );
         assert_eq!(
             config.env_vars.get("HERMES_ACCEPT_HOOKS"),
@@ -1604,6 +1712,7 @@ mod tests {
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://proxy.local:32768".to_string(),
             )]),
+            supports_resume_picker: false,
         };
 
         let config = AgentLaunchBuilder::new(AgentId::Custom("proxy-agent".into()))
@@ -1734,5 +1843,259 @@ mod tests {
             .custom_agent_env(HashMap::new())
             .build();
         assert_eq!(without.env_vars, with_empty.env_vars);
+    }
+
+    // ---- SPEC-1921 FR-100 (2026-05-18 amendment) Backend Override env injection.
+
+    fn sample_claude_backend() -> crate::backend::AgentBackendProfile {
+        crate::backend::AgentBackendProfile {
+            id: "lmstudio".into(),
+            display_name: "LM Studio".into(),
+            base_url: "http://192.168.100.166:32768".into(),
+            api_key: "sk-test".into(),
+            model: "openai/gpt-oss-20b".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_claude_launch_without_backend_profile_omits_backend_env() {
+        // FR-100 default contract: no backend profile -> upstream stays
+        // at Anthropic's default and gwt does not export any of the
+        // ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / model-role env vars.
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        for key in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ] {
+            assert!(
+                !config.env_vars.contains_key(key),
+                "{key} must not be set when no backend profile is active"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_backend_profile_injects_anthropic_env_and_telemetry_off_flags() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .backend_profile(sample_claude_backend())
+            .build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_BASE_URL")
+                .map(String::as_str),
+            Some("http://192.168.100.166:32768")
+        );
+        assert_eq!(
+            config.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+        // FR-098: `model` fans out to all four role env vars by default.
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .map(String::as_str),
+            Some("openai/gpt-oss-20b")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("openai/gpt-oss-20b")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("openai/gpt-oss-20b")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(String::as_str),
+            Some("openai/gpt-oss-20b")
+        );
+        // Telemetry off when proxying to a non-Anthropic upstream.
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_ATTRIBUTION_HEADER")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn claude_backend_profile_role_overrides_replace_fan_out() {
+        let mut profile = sample_claude_backend();
+        profile.haiku_model = Some("haiku-model".into());
+        profile.opus_model = Some("opus-model".into());
+        profile.sonnet_model = Some("sonnet-model".into());
+        profile.subagent_model = Some("sub-model".into());
+
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .backend_profile(profile)
+            .build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .map(String::as_str),
+            Some("haiku-model")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .map(String::as_str),
+            Some("opus-model")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("sonnet-model")
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(String::as_str),
+            Some("sub-model")
+        );
+    }
+
+    #[test]
+    fn env_override_still_wins_over_backend_profile_env() {
+        // Explicit caller `env()` override remains the most authoritative
+        // layer (FR-063 merge order). Useful for tests and emergency
+        // operator-level rerouting.
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .backend_profile(sample_claude_backend())
+            .env("ANTHROPIC_BASE_URL", "http://emergency-override:80")
+            .build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_BASE_URL")
+                .map(String::as_str),
+            Some("http://emergency-override:80")
+        );
+        // But other backend env vars are still applied.
+        assert_eq!(
+            config.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn backend_profile_does_not_inject_anthropic_env_for_non_claude_agents() {
+        // FR-103 / Phase 63E: Codex backend env is applied via worktree-local
+        // CODEX_HOME generation, not through ANTHROPIC_* env vars. Calling
+        // backend_profile() on a Codex launch must not accidentally export
+        // ANTHROPIC_* env vars (those belong to Claude Code only).
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .backend_profile(sample_claude_backend())
+            .build();
+
+        assert!(!config.env_vars.contains_key("ANTHROPIC_BASE_URL"));
+        assert!(!config.env_vars.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!config.env_vars.contains_key("ANTHROPIC_DEFAULT_OPUS_MODEL"));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
+    }
+
+    // ---- SPEC-1921 FR-103: Codex backend integration tests.
+
+    fn sample_codex_backend(id: &str) -> crate::backend::AgentBackendProfile {
+        crate::backend::AgentBackendProfile {
+            id: id.into(),
+            display_name: "llmlb".into(),
+            base_url: "http://127.0.0.1:8080".into(),
+            api_key: "sk-codex".into(),
+            model: "local/qwen3-coder".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn codex_backend_profile_sets_codex_home_and_api_key_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(tmp.path())
+            .backend_profile(sample_codex_backend("llmlb"))
+            .build();
+
+        let codex_home = config
+            .env_vars
+            .get("CODEX_HOME")
+            .expect("CODEX_HOME must be set when a Codex backend profile is active");
+        assert!(codex_home.ends_with(".gwt/codex"), "got {codex_home}");
+        // API key env defaults to the GWT_CODEX_BACKEND_API_KEY_<UPPER> name.
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_CODEX_BACKEND_API_KEY_LLMLB")
+                .map(String::as_str),
+            Some("sk-codex")
+        );
+
+        // Generated config.toml exists and contains the expected provider id.
+        let body = std::fs::read_to_string(format!("{codex_home}/config.toml")).expect("read");
+        assert!(body.contains("model_provider = \"gwt-llmlb\""));
+        assert!(body.contains("base_url = \"http://127.0.0.1:8080\""));
+    }
+
+    #[test]
+    fn codex_backend_profile_honors_custom_env_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut profile = sample_codex_backend("llmlb");
+        profile.env_key = Some("MY_TEAM_CODEX_KEY".into());
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir(tmp.path())
+            .backend_profile(profile)
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("MY_TEAM_CODEX_KEY").map(String::as_str),
+            Some("sk-codex")
+        );
+        assert!(
+            !config
+                .env_vars
+                .contains_key("GWT_CODEX_BACKEND_API_KEY_LLMLB"),
+            "explicit env_key must replace the default name"
+        );
+    }
+
+    #[test]
+    fn codex_launch_without_backend_profile_does_not_set_codex_home() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+        assert!(!config.env_vars.contains_key("CODEX_HOME"));
+        assert!(!config
+            .env_vars
+            .keys()
+            .any(|k| k.starts_with("GWT_CODEX_BACKEND_API_KEY_")));
     }
 }
