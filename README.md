@@ -119,6 +119,13 @@ keeps the same loopback-trust behaviour as the native GUI. For external
 access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather than
 exposing the port to the public Internet.
 
+Platform note: on Linux, `tao 0.35` still requires a display server (X11 or
+Wayland) at EventLoop creation, so v1 of `gwt serve` inherits the GUI's
+`DISPLAY` dependency. macOS and Windows headless installs need nothing
+special; Linux operators in pure-headless environments (no DISPLAY) should
+either use `Xvfb`/`xvfb-run` or wait for the tao-detach follow-up tracked
+under SPEC-1942.
+
 Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 "gwt_access", ...)` so the operator can see *which* peer is connecting in
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
