@@ -1,19 +1,22 @@
 use std::{
     collections::HashMap,
+    net::{IpAddr, SocketAddr},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     time::Instant,
 };
 
 use axum::{
     extract::{
+        connect_info::ConnectInfo,
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Request, State,
     },
     http::{
-        header::{AUTHORIZATION, HOST, ORIGIN},
+        header::{AUTHORIZATION, HOST, ORIGIN, USER_AGENT},
         HeaderMap, StatusCode,
     },
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -31,6 +34,62 @@ use crate::{embedded_web, AppEventProxy, DispatchTarget, OutboundEvent, UserEven
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
+/// Upper bound on the in-memory access log ring buffer. The canonical sink
+/// for production is `tracing::info!(target: "gwt_access", ...)` which writes
+/// to `~/.gwt/logs/<date>/`; this in-memory ring exists only so tests (and an
+/// eventual operator-visible Live tab) can sample the most recent entries
+/// without parsing log files. Older entries are evicted FIFO once the ring
+/// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
+/// would grow without limit in long-running `gwt serve` sessions.
+const ACCESS_LOG_RING_CAPACITY: usize = 1024;
+
+/// One captured HTTP / WebSocket access event. Emitted both as
+/// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
+/// and into an in-memory [`AccessLogSink`] for test inspection.
+///
+/// SPEC-1942 FR-098: visibility for headless mode — operators need to see
+/// where access comes from when running with `--bind` on a LAN-reachable
+/// address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessLogRecord {
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub peer: Option<String>,
+    pub user_agent: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// In-memory ring of access log entries. Cloning yields a handle to the same
+/// underlying buffer (Arc-wrapped) so the embedded server, middleware and
+/// tests observe the same recordings. The ring is capped at
+/// [`ACCESS_LOG_RING_CAPACITY`] entries; older records are evicted FIFO so
+/// memory stays bounded under long-running `gwt serve`.
+#[derive(Clone, Default)]
+pub struct AccessLogSink {
+    inner: Arc<Mutex<std::collections::VecDeque<AccessLogRecord>>>,
+}
+
+impl AccessLogSink {
+    pub(crate) fn record(&self, rec: AccessLogRecord) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.len() == ACCESS_LOG_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(rec);
+        }
+    }
+
+    /// Returns a snapshot copy of every recorded entry so callers do not have
+    /// to hold the underlying mutex.
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Vec<AccessLogRecord> {
+        self.inner
+            .lock()
+            .map(|guard| guard.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct ClientHub {
@@ -109,25 +168,61 @@ struct ServerState {
     clients: ClientHub,
     hook_forward_token: String,
     pty_writers: PtyWriterRegistry,
+    // Held only so the in-process sink stays alive for the lifetime of the
+    // server. Read directly through [`EmbeddedServer::access_log`] in tests.
+    #[allow(dead_code)]
+    access_log: AccessLogSink,
 }
 
 pub struct EmbeddedServer {
     url: String,
     hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    // Same rationale as `ServerState::access_log`: tests read it via the
+    // `access_log()` accessor; production code (main bootstrap) does not yet
+    // surface the sink to the UI.
+    #[allow(dead_code)]
+    access_log: AccessLogSink,
 }
 
 impl EmbeddedServer {
+    /// Loopback (`127.0.0.1`) on an ephemeral port — the original GUI default.
+    /// Kept as a thin shim so non-headless callers do not have to know about
+    /// the bind/port surface introduced for SPEC-1942 US-14.
+    #[cfg(test)]
     pub(super) fn start(
         runtime: &Runtime,
         proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
     ) -> std::io::Result<Self> {
-        let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
+        Self::start_with_bind(
+            runtime,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            proxy,
+            clients,
+            pty_writers,
+        )
+    }
+
+    /// SPEC-1942 FR-095 / FR-098: bind the embedded server to a caller-chosen
+    /// IP / port and install the access-log middleware. Used by both the GUI
+    /// (loopback + ephemeral) and `gwt serve` (operator-chosen `--bind` /
+    /// `--port`) routes.
+    pub(super) fn start_with_bind(
+        runtime: &Runtime,
+        bind: IpAddr,
+        port: u16,
+        proxy: AppEventProxy,
+        clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
+    ) -> std::io::Result<Self> {
+        let listener = runtime.block_on(TcpListener::bind((bind, port)))?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let hook_forward_token = Uuid::new_v4().to_string();
+        let access_log = AccessLogSink::default();
 
         let app = route_root_js_modules(
             Router::new()
@@ -198,10 +293,19 @@ impl EmbeddedServer {
             clients,
             hook_forward_token: hook_forward_token.clone(),
             pty_writers,
-        });
+            access_log: access_log.clone(),
+        })
+        .layer(middleware::from_fn_with_state(
+            access_log.clone(),
+            access_log_middleware,
+        ));
 
         runtime.spawn(async move {
-            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            let server = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
             });
             if let Err(error) = server.await {
@@ -210,10 +314,18 @@ impl EmbeddedServer {
         });
 
         Ok(Self {
-            url: format!("http://127.0.0.1:{}/", addr.port()),
+            url: format!("http://{}:{}/", display_host(addr.ip()), addr.port()),
             hook_forward_token,
             shutdown_tx: Some(shutdown_tx),
+            access_log,
         })
+    }
+
+    /// Returns the in-memory sink that captures every access log record.
+    /// Used by tests and (eventually) by an operator-visible Live tab.
+    #[cfg(test)]
+    pub(super) fn access_log(&self) -> &AccessLogSink {
+        &self.access_log
     }
 
     pub(super) fn url(&self) -> &str {
@@ -247,6 +359,78 @@ fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState>
 
 pub async fn health_handler() -> &'static str {
     "ok"
+}
+
+/// Format an [`IpAddr`] for embedding in a URL: IPv6 addresses are wrapped in
+/// `[...]` per RFC 3986, IPv4 / hostnames are emitted verbatim.
+fn display_host(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
+/// SPEC-1942 FR-098: access log middleware. Captures every HTTP request (and
+/// the start of every WebSocket upgrade — the upgrade returns a `101 Switching
+/// Protocols` response which is exactly what we record) into both
+/// `tracing::info!(target: "gwt_access", ...)` and an in-memory sink for tests.
+///
+/// `/healthz` is demoted to `tracing::debug!` so periodic health probes do not
+/// dominate the stderr stream when the operator wants to spot real LAN access.
+async fn access_log_middleware(
+    State(sink): State<AccessLogSink>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let user_agent = request
+        .headers()
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let status = response.status().as_u16();
+
+    let record = AccessLogRecord {
+        method,
+        path,
+        status,
+        peer: Some(peer.to_string()),
+        user_agent,
+        elapsed_ms,
+    };
+
+    if record.path == "/healthz" {
+        tracing::debug!(
+            target: "gwt_access",
+            method = %record.method,
+            path = %record.path,
+            status,
+            peer = %peer,
+            user_agent = ?record.user_agent,
+            elapsed_ms,
+            "healthz probe"
+        );
+    } else {
+        tracing::info!(
+            target: "gwt_access",
+            method = %record.method,
+            path = %record.path,
+            status,
+            peer = %peer,
+            user_agent = ?record.user_agent,
+            elapsed_ms,
+            "embedded server access"
+        );
+    }
+    sink.record(record);
+
+    response
 }
 
 async fn websocket_handler(
@@ -493,6 +677,7 @@ mod tests {
                 clients: ClientHub::default(),
                 hook_forward_token: "token".to_string(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
+                access_log: super::AccessLogSink::default(),
             },
             events,
         )
@@ -867,6 +1052,129 @@ mod tests {
                         && recorded_event.agent_session_id.as_deref() == Some("agent-1")
             )
         }));
+
+        server.shutdown();
+    }
+
+    // ---------------------------------------------------------------
+    // SPEC-1942 US-14: bind / port surface + access log middleware
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn embedded_server_start_with_bind_accepts_loopback_and_emits_loopback_url() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start_with_bind(
+            &runtime,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+            proxy,
+            clients,
+            pty_writers,
+        )
+        .expect("loopback bind succeeds");
+
+        assert!(
+            server.url().starts_with("http://127.0.0.1:"),
+            "loopback bind must surface 127.0.0.1 url, got {}",
+            server.url(),
+        );
+        server.shutdown();
+    }
+
+    #[test]
+    fn embedded_server_start_with_bind_accepts_unspecified_v4_and_surfaces_actual_ip() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start_with_bind(
+            &runtime,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            0,
+            proxy,
+            clients,
+            pty_writers,
+        )
+        .expect("0.0.0.0 bind succeeds");
+
+        assert!(
+            server.url().starts_with("http://0.0.0.0:"),
+            "0.0.0.0 bind must surface 0.0.0.0 url, got {}",
+            server.url(),
+        );
+        server.shutdown();
+    }
+
+    #[test]
+    fn access_log_layer_records_http_request_with_method_path_status_and_peer() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("server");
+
+        let url = server.url().to_string();
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .get(format!("{url}app.js"))
+            .header(reqwest::header::USER_AGENT, "build-spec-test/1.0")
+            .send()
+            .expect("app.js request");
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        let records = server.access_log().snapshot();
+        let app_js = records
+            .iter()
+            .find(|r| r.path == "/app.js")
+            .expect("/app.js entry must be recorded by access log middleware");
+        assert_eq!(app_js.method, "GET");
+        assert_eq!(app_js.status, 200);
+        assert_eq!(
+            app_js.user_agent.as_deref(),
+            Some("build-spec-test/1.0"),
+            "user agent must be carried into the record"
+        );
+        let peer = app_js.peer.as_deref().expect("peer addr captured");
+        assert!(
+            peer.starts_with("127.0.0.1:"),
+            "peer must be the loopback client, got {peer}"
+        );
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn access_log_layer_still_records_healthz_and_distinguishes_path() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("server");
+
+        let url = server.url().to_string();
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .get(format!("{url}healthz"))
+            .send()
+            .expect("healthz request");
+        assert_eq!(response.status(), HttpStatusCode::OK);
+
+        // The sink still captures /healthz so an in-process operator panel
+        // can render it, but the tracing layer demotes it to debug — this
+        // distinction is asserted at the path level: /healthz is recorded
+        // but lives separately from real LAN access records.
+        let records = server.access_log().snapshot();
+        let healthz = records
+            .iter()
+            .find(|r| r.path == "/healthz")
+            .expect("healthz still appears in the in-memory sink");
+        assert_eq!(healthz.method, "GET");
+        assert_eq!(healthz.status, 200);
 
         server.shutdown();
     }

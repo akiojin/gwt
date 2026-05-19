@@ -33,6 +33,7 @@ mod issue_spec;
 mod pane;
 mod plan;
 mod pr;
+pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
