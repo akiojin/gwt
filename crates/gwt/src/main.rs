@@ -5878,7 +5878,19 @@ fn main() -> wry::Result<()> {
     }
 
     let runtime = Runtime::new().expect("tokio runtime");
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    // SPEC-1942 US-14 / FR-101 注記: macOS で `gwt serve` を起動すると、
+    // 既定では `NSApplication` の Activation Policy が `Regular` のままに
+    // なり、Dock アイコンと "GWT" メニューバーが表示されてしまう。Headless
+    // モードはサービス / daemon 的に動かしたい運用がほとんどなので、
+    // Activation Policy を `Prohibited` (Dock 非表示・menu 非表示・App
+    // Switcher 非表示) に切り替える。GUI route はこれまで通り `Regular`。
+    #[allow(unused_mut)]
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[cfg(target_os = "macos")]
+    if serve_args.is_some() {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
+    }
     let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
