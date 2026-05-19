@@ -607,6 +607,24 @@
         ></div>
       </div>
 
+      <!-- SPEC-2359 US-42 — Workspace Resume Picker. Surfaces the list of
+           previously-assigned agents for the current Workspace so the
+           user can pick which to restart in-place. Renderer lives in
+           /workspace-resume-picker-modal.js. -->
+      <div
+        class="modal-backdrop"
+        id="workspace-resume-picker-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell workspace-resume-picker-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Workspace Resume Picker"
+          tabindex="-1"
+        ></div>
+      </div>
+
       <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the
            SPEC-2356 .op-drawer / .op-drawer-backdrop pattern (slide-
            over + backdrop + reduced-motion fallback). Body content

@@ -2238,6 +2238,12 @@ impl AppRuntime {
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(&client_id, source, journal_id)
             }
+            FrontendEvent::ListResumableAgents { workspace_id } => {
+                self.list_resumable_agents_events(&client_id, workspace_id)
+            }
+            FrontendEvent::ResumeWorkspaceAgent { session_id, bounds } => {
+                self.resume_workspace_agent_events(&client_id, session_id, bounds)
+            }
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
@@ -9601,6 +9607,300 @@ exit 1
         assert_eq!(
             context.summary.as_deref(),
             Some("Resume the suspended Workspace card.")
+        );
+    }
+
+    // SPEC-2359 US-42 — Workspace Resume Picker tests.
+
+    fn write_resumable_session_for_test(
+        sessions_dir: &Path,
+        session_id: &str,
+        repo: &Path,
+        branch: &str,
+        agent_id: gwt_agent::AgentId,
+        agent_session_id: Option<&str>,
+    ) {
+        let mut session = gwt_agent::Session::new(repo, branch, agent_id);
+        session.id = session_id.to_string();
+        session.display_name = "Codex".to_string();
+        session.tool_version = Some("installed".to_string());
+        session.agent_session_id = agent_session_id.map(str::to_string);
+        std::fs::create_dir_all(sessions_dir).expect("sessions dir");
+        session.save(sessions_dir).expect("session toml");
+    }
+
+    fn projection_with_assigned_agent(
+        repo: &Path,
+        session_id: &str,
+    ) -> gwt_core::workspace_projection::WorkspaceProjection {
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+        projection.title = "Workspace with Resume candidate".to_string();
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection
+            .agents
+            .push(workspace_agent_summary_for_test(session_id, None));
+        projection
+    }
+
+    #[test]
+    fn app_runtime_list_resumable_agents_returns_assigned_with_session_toml() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let session_id = "session-resumable-1";
+        let projection = projection_with_assigned_agent(&repo, session_id);
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let sessions_dir = temp.path().join("sessions");
+        write_resumable_session_for_test(
+            &sessions_dir,
+            session_id,
+            &repo,
+            "work/test",
+            gwt_agent::AgentId::Codex,
+            Some("prior-codex-uuid"),
+        );
+
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ListResumableAgents { workspace_id: None },
+        );
+
+        let event = events
+            .first()
+            .expect("backend should respond to ListResumableAgents");
+        assert!(matches!(
+            &event.target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        ));
+        match &event.event {
+            BackendEvent::WorkspaceResumableAgents { agents, .. } => {
+                assert_eq!(agents.len(), 1, "single assigned agent must surface");
+                assert_eq!(agents[0].session_id, session_id);
+                assert!(matches!(
+                    agents[0].resume_kind,
+                    gwt::ResumableAgentResumeKind::Session
+                ));
+            }
+            other => panic!("unexpected backend event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_runtime_list_resumable_agents_includes_unassigned_agents_with_session_toml() {
+        // SPEC-2359 US-42 follow-up: production projections often store
+        // agents with `affiliation_status = unassigned` (no explicit
+        // `workspace join` step). Resume Picker must still offer them as
+        // candidates when a Session toml is on disk; otherwise users see
+        // "No resumable agents" for every Workspace they did not
+        // manually ensure / join.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let session_id = "session-unassigned-1";
+        let mut projection = projection_with_assigned_agent(&repo, session_id);
+        projection.agents[0].affiliation_status =
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let sessions_dir = temp.path().join("sessions");
+        write_resumable_session_for_test(
+            &sessions_dir,
+            session_id,
+            &repo,
+            "work/test",
+            gwt_agent::AgentId::Codex,
+            Some("agent-session-uuid"),
+        );
+
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ListResumableAgents { workspace_id: None },
+        );
+
+        match events.first().map(|outbound| &outbound.event) {
+            Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+                assert_eq!(
+                    agents.len(),
+                    1,
+                    "Unassigned agent with a backing Session toml must still surface",
+                );
+                assert_eq!(agents[0].session_id, session_id);
+            }
+            other => panic!("unexpected backend event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_runtime_list_resumable_agents_excludes_live_session_ids() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let session_id = "session-live-1";
+        let projection = projection_with_assigned_agent(&repo, session_id);
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let sessions_dir = temp.path().join("sessions");
+        write_resumable_session_for_test(
+            &sessions_dir,
+            session_id,
+            &repo,
+            "work/test",
+            gwt_agent::AgentId::Codex,
+            Some("agent-session-uuid"),
+        );
+
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        // Register the same session id as live so the picker skips it.
+        let mut live = sample_active_agent_session("tab-1", "window-1");
+        live.session_id = session_id.to_string();
+        runtime
+            .active_agent_sessions
+            .insert("window-1".to_string(), live);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ListResumableAgents { workspace_id: None },
+        );
+
+        match events.first().map(|outbound| &outbound.event) {
+            Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+                assert!(
+                    agents.is_empty(),
+                    "live session must not appear in the Resume picker"
+                );
+            }
+            other => panic!("unexpected backend event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_agent_replies_error_when_session_toml_missing() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspaceAgent {
+                session_id: "missing-session".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let event = events
+            .first()
+            .expect("ResumeWorkspaceAgent must reply on missing session");
+        assert!(matches!(
+            &event.target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        ));
+        assert!(matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { session_id, message }
+                if session_id == "missing-session" && !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_journal_populates_quick_start_entries_from_prior_sessions() {
+        // SPEC-2359 US-44 (Issue #2757) follow-on: when the user clicks
+        // `Resume` on a Workspace journal card whose branch already has a
+        // prior session on disk, the Launch Wizard should expose that prior
+        // session through the Quick Start panel immediately. Without this,
+        // the Quick Start panel only fills after the user completes the
+        // runtime resolution step, which forces a multi-click resume path
+        // even though the resumable session metadata is already known.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "work/20260518-resume-qs";
+        run_git(&repo, &["branch", branch]);
+        gwt_core::workspace_projection::save_workspace_projection(
+            &repo,
+            &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+        )
+        .expect("save projection");
+        append_workspace_resume_journal(
+            &repo,
+            "journal-quickstart",
+            temp.path().join("work").join("20260518-resume-qs"),
+            "SPEC-2359",
+            "Resume with prior Codex session available",
+        );
+
+        // Pre-seed a Session toml that matches the resumable branch so the
+        // wizard cache exposes it through Quick Start entries.
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let mut session = gwt_agent::Session::new(&repo, branch, gwt_agent::AgentId::Codex);
+        session.display_name = "Codex".to_string();
+        session.agent_session_id = Some("prior-codex-uuid".to_string());
+        session.tool_version = Some("installed".to_string());
+        session.save(&sessions_dir).expect("save session toml");
+
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Journal,
+                journal_id: Some("journal-quickstart".to_string()),
+            },
+        );
+
+        let session_ref = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard opened");
+        let view = session_ref.wizard.view();
+        assert_eq!(view.branch_name, branch);
+        assert!(
+            !view.quick_start_entries.is_empty(),
+            "Resume must pre-populate Quick Start entries so the prior session is immediately resumable; saw empty Quick Start panel"
+        );
+        assert!(
+            view.quick_start_entries
+                .iter()
+                .any(|entry| entry.resume_session_id.as_deref() == Some("prior-codex-uuid")),
+            "Expected the prior Codex session to appear in Quick Start entries with its resume_session_id surfaced"
         );
     }
 

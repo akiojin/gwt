@@ -50,6 +50,10 @@ pub fn workspace_kanban_surface_js() -> &'static str {
     include_str!("../web/workspace-kanban-surface.js")
 }
 
+pub fn workspace_resume_picker_modal_js() -> &'static str {
+    include_str!("../web/workspace-resume-picker-modal.js")
+}
+
 pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
@@ -217,6 +221,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/workspace-kanban-surface.js",
         source: workspace_kanban_surface_js,
         marker: "createWorkspaceKanbanSurface",
+    },
+    RootJsModuleAsset {
+        path: "/workspace-resume-picker-modal.js",
+        source: workspace_resume_picker_modal_js,
+        marker: "createWorkspaceResumePickerController",
     },
     RootJsModuleAsset {
         path: "/update-cta.js",

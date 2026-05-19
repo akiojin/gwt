@@ -50,6 +50,8 @@ const ROOT_MODULES = new Set([
   "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",
+  // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
+  "workspace-resume-picker-modal.js",
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {

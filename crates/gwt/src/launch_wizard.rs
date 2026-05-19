@@ -115,6 +115,41 @@ pub struct LaunchWizardQuickStartView {
     pub reuse_action_label: Option<String>,
 }
 
+/// SPEC-2359 US-42 — Workspace Resume Picker entry.
+///
+/// One row in the modal that appears when the user clicks Resume on a
+/// Workspace card. Each entry maps to a previously-assigned agent whose
+/// `session_id` we can spawn with `claude --resume <uuid>` or
+/// `codex resume <uuid>`. We deliberately keep this view backend-driven
+/// so the picker can render without re-deriving runtime metadata from
+/// storage on the client.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ResumableAgentView {
+    pub session_id: String,
+    pub agent_id: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// `"session"` means we found a Session toml on disk with a non-empty
+    /// `agent_session_id`, so the launcher can pass `--resume <uuid>` and
+    /// the agent will pick up the previous conversation. `"metadata_only"`
+    /// means we only have Workspace projection metadata (no Session toml
+    /// for that id), so a fresh agent will be started while preserving
+    /// the Workspace title / owner.
+    pub resume_kind: ResumableAgentResumeKind,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumableAgentResumeKind {
+    Session,
+    MetadataOnly,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardLiveSessionView {
     pub index: usize,
