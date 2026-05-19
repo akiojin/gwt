@@ -9278,10 +9278,24 @@
           const addBtn = document.createElement("button");
           addBtn.className = "wizard-button";
           addBtn.style.margin = "8px 0";
-          addBtn.textContent = "＋ Add Claude Code (OpenAI-compat backend)";
+          // SPEC-1921 Phase 63H / T326: the legacy
+          // `+ Add Claude Code (OpenAI-compat backend)` button now points
+          // users at the new `Agent Backends` tab. The underlying
+          // `add_custom_agent_from_preset` dispatch is preserved for
+          // existing callers (Phase 52 contract), but the entry point
+          // visible in Custom Agents redirects to the proper surface so
+          // External CLI rows and Backend Override profiles never get
+          // conflated again.
+          addBtn.textContent = "＋ Add Claude Code backend (moved to Agent Backends)";
           addBtn.addEventListener("click", (e) => {
             e.stopPropagation();
-            startAddClaudeCodeOpenaiCompatFlow();
+            // Switch the Settings window to the Agent Backends tab.
+            const body = scroll.closest(".settings-body")?.parentElement;
+            if (body) switchSettingsTab(body, "agent-backends");
+            setSettingsStatus(
+              "Backend Override moved to Agent Backends. Add your Claude Code / Codex backend there.",
+              "success",
+            );
           });
           scroll.appendChild(addBtn);
 
