@@ -78,23 +78,52 @@ Tests may be skipped ONLY when the change does not alter observable behavior:
 
 When in doubt, write the test. A skipped test is a potential regression.
 
-## Rust-specific guidance
+## Per-environment guidance
 
-### Test placement
+Execution systems are environment-specific. Defer the broad verification
+matrix to `gwt-verify` (see `.codex/skills/gwt-verify/SKILL.md` and
+`references/test-matrix.md`). The TDD inner loop below still belongs to
+`gwt-build-spec` — it owns *writing* the RED test, getting it GREEN, and
+refactoring — while `gwt-verify` owns *which* tests run for the broader
+matrix at Phase 3.
+
+### Rust-specific guidance
+
+#### Test placement
 
 - Unit tests: `#[cfg(test)] mod tests` within the source file
 - Integration tests: `crates/*/tests/` directory
 - Prefer unit tests for internal logic, integration tests for cross-module behavior
 
-### Common test patterns
+#### Common test patterns
 
 - Use `#[test]` for synchronous tests
 - Use `#[tokio::test]` for async tests
 - Use `tempfile` crate for file system tests
 - Use `assert_eq!`, `assert_ne!`, `assert!(matches!(...))` for assertions
 
-### Running tests
+#### Running tests during the TDD inner loop
 
 - Narrow scope first: `cargo test -p gwt-core -- test_name`
 - Module scope: `cargo test -p gwt-core`
-- Full suite: `cargo test -p gwt-core -p gwt`
+- Full suite: defer to `gwt-verify --mode full` (it picks the union of
+  matched crates / frontend suites / Playwright when applicable, instead of
+  hard-coding a static cargo list here).
+
+### Frontend (WebView) guidance
+
+- JS unit / smoke / bundle tests live under `crates/gwt/web/__tests__/` and
+  are run via `pnpm test:frontend-unit` / `-smoke` / `-bundle`.
+- Visual regression / browser-UI verification uses Playwright
+  (`pnpm test:visual`) under `crates/gwt/playwright/`. Playwright is **only**
+  for WebView/browser UI surfaces — never for Rust crates, gwtd CLI, or
+  release scripts.
+- The full per-surface matrix is canonical in
+  `.codex/skills/gwt-verify/references/test-matrix.md`.
+
+### Release-system guidance
+
+- `pnpm test:release-flow` and `pnpm test:release-assets` cover release
+  scripts under `scripts/`. They are invoked only when a release-system
+  file is in the change set (handled automatically by `gwt-verify --mode
+  pre-pr`).

@@ -146,6 +146,16 @@ impl EmbeddedServer {
             "/assets/xterm/xterm.css",
             get(embedded_web::xterm_css_handler),
         )
+        // SPEC-2009 Phase 2b — highlight.js vendored module + dark theme
+        // for the File Tree text viewer syntax highlighting overlay.
+        .route(
+            "/assets/highlight/highlight.min.js",
+            get(embedded_web::highlight_js_handler),
+        )
+        .route(
+            "/assets/highlight/github-dark.min.css",
+            get(embedded_web::highlight_css_handler),
+        )
         // SPEC-2356 Operator Design System — styles + fonts.
         .route(
             "/styles/tokens.css",

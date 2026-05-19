@@ -18,6 +18,7 @@ use crate::{
 const GWT_PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 const GWT_REPO_HASH_ENV: &str = "GWT_REPO_HASH";
 const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
+const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     GWT_BIN_PATH_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
@@ -160,7 +161,7 @@ impl LaunchEnvironment {
         Self {
             base_env: env,
             profile_env: HashMap::new(),
-            remove_env: Vec::new(),
+            remove_env: inherited_terminal_color_suppressor_remove_env(),
             override_env: HashMap::new(),
         }
     }
@@ -197,7 +198,9 @@ impl LaunchEnvironment {
             return Err(format!("active profile not found: {active_name}"));
         };
 
-        let remove_env = normalized_remove_env(&profile.disabled_env);
+        let inherited_remove_env = inherited_terminal_color_suppressor_remove_env();
+        let profile_remove_env = normalized_remove_env(&profile.disabled_env);
+        let remove_env = merged_remove_env(&inherited_remove_env, &profile_remove_env);
         let mut base_env: HashMap<String, String> = base_env.into_iter().collect();
         for key in &remove_env {
             base_env.remove(key);
@@ -278,6 +281,9 @@ impl LaunchEnvironment {
 }
 
 fn apply_required_terminal_defaults(env: &mut HashMap<String, String>) {
+    for key in INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS {
+        env.remove(*key);
+    }
     let replace_term = env
         .get("TERM")
         .map(|value| value.trim().is_empty() || value.eq_ignore_ascii_case("dumb"))
@@ -292,6 +298,13 @@ fn apply_required_terminal_defaults(env: &mut HashMap<String, String>) {
     if replace_colorterm {
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
     }
+}
+
+fn inherited_terminal_color_suppressor_remove_env() -> Vec<String> {
+    INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect()
 }
 
 fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
@@ -444,7 +457,10 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -470,7 +486,10 @@ mod tests {
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(!env.contains_key("HOST_ONLY"));
         assert!(!env.contains_key("SECRET"));
-        assert_eq!(remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -509,7 +528,11 @@ mod tests {
         assert!(!env_vars.contains_key("SECRET"));
         assert_eq!(
             remove_env,
-            vec!["EXPLICIT_REMOVE".to_string(), "SECRET".to_string()]
+            vec![
+                "EXPLICIT_REMOVE".to_string(),
+                "NO_COLOR".to_string(),
+                "SECRET".to_string()
+            ]
         );
     }
 
@@ -532,7 +555,14 @@ mod tests {
             Some("/profile/bin")
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
-        assert_eq!(remove_env, vec!["PATH".to_string(), "SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec![
+                "NO_COLOR".to_string(),
+                "PATH".to_string(),
+                "SECRET".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -544,21 +574,56 @@ mod tests {
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
-        assert!(remove_env.is_empty());
+        assert_eq!(remove_env, vec!["NO_COLOR".to_string()]);
     }
 
     #[test]
-    fn from_base_env_replaces_dumb_terminal_type() {
+    fn from_base_env_replaces_dumb_terminal_type_and_suppresses_inherited_no_color() {
         let base_env = vec![
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("TERM".to_string(), "dumb".to_string()),
             ("COLORTERM".to_string(), String::new()),
+            ("NO_COLOR".to_string(), "1".to_string()),
         ];
 
-        let (env, _) = LaunchEnvironment::from_base_env(base_env).into_parts();
+        let (env, remove_env) = LaunchEnvironment::from_base_env(base_env).into_parts();
 
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert!(
+            !env.contains_key("NO_COLOR"),
+            "inherited NO_COLOR must not suppress colors in gwt terminal panes"
+        );
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string()],
+            "NO_COLOR must be removed from inherited process env, not only omitted from explicit env_vars"
+        );
+    }
+
+    #[test]
+    fn profile_env_can_explicitly_disable_terminal_colors() {
+        let mut profile = dev_profile();
+        profile
+            .env_vars
+            .insert("NO_COLOR".to_string(), "1".to_string());
+        let (_dir, config_path) = write_profile_config(profile);
+        let base_env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("NO_COLOR".to_string(), "1".to_string()),
+        ];
+
+        let (env, remove_env) =
+            LaunchEnvironment::from_active_profile_with_base(&config_path, base_env)
+                .unwrap()
+                .into_parts();
+
+        assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()],
+            "profile NO_COLOR is explicit env and should be re-applied after inherited env removal"
+        );
     }
 
     #[cfg(not(windows))]

@@ -201,8 +201,9 @@ impl WorktreeManager {
 
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
+        let path_arg = path_arg_for_git(path);
         let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "add", path.to_str().unwrap_or(""), branch])
+            .args(["worktree", "add", path_arg.as_str(), branch])
             .current_dir(&self.repo_path)
             .output()
             .map_err(|e| GwtError::Git(format!("worktree add: {e}")))?;
@@ -224,13 +225,14 @@ impl WorktreeManager {
             )));
         }
 
+        let path_arg = path_arg_for_git(path);
         let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
                 "-b",
                 new_branch,
-                path.to_str().unwrap_or(""),
+                path_arg.as_str(),
                 base_branch,
             ])
             .current_dir(&self.repo_path)
@@ -322,13 +324,14 @@ impl WorktreeManager {
         path: &Path,
     ) -> Result<()> {
         let remote_ref = normalize_remote_ref(remote_ref);
+        let path_arg = path_arg_for_git(path);
         let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
                 "-b",
                 local_branch,
-                path.to_str().unwrap_or(""),
+                path_arg.as_str(),
                 &remote_ref,
             ])
             .current_dir(&self.repo_path)
@@ -355,8 +358,9 @@ impl WorktreeManager {
 
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
+        let path_arg = path_arg_for_git(path);
         let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "remove", path.to_str().unwrap_or("")])
+            .args(["worktree", "remove", path_arg.as_str()])
             .current_dir(&self.repo_path)
             .output()
             .map_err(|e| GwtError::Git(format!("worktree remove: {e}")))?;
@@ -373,8 +377,9 @@ impl WorktreeManager {
     /// `git worktree remove --force` so worktrees with uncommitted or
     /// untracked files can also be deleted by Branch Cleanup.
     pub fn remove_force(&self, path: &Path) -> Result<()> {
+        let path_arg = path_arg_for_git(path);
         let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "remove", "--force", path.to_str().unwrap_or("")])
+            .args(["worktree", "remove", "--force", path_arg.as_str()])
             .current_dir(&self.repo_path)
             .output()
             .map_err(|e| GwtError::Git(format!("worktree remove --force: {e}")))?;
@@ -676,6 +681,25 @@ pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
     path
 }
 
+fn path_arg_for_git(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+        raw.into_owned()
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
 fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
     let mut worktrees = Vec::new();
@@ -736,6 +760,19 @@ mod tests {
         path.to_string_lossy()
             .trim_start_matches(r"\\?\")
             .replace('\\', "/")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_arg_for_git_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            path_arg_for_git(Path::new(r"\\?\C:\tmp\repo\work")),
+            r"C:\tmp\repo\work"
+        );
+        assert_eq!(
+            path_arg_for_git(Path::new(r"\\?\UNC\server\share\work")),
+            r"\\server\share\work"
+        );
     }
 
     fn init_git_repo(path: &Path) {

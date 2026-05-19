@@ -145,6 +145,7 @@ mod board;
 mod migration;
 pub(crate) mod persist_dispatcher;
 mod profile;
+mod runtime_events;
 mod title_sync;
 mod ui_trace;
 mod window;
@@ -2053,6 +2054,34 @@ impl AppRuntime {
                 client_id,
                 self.load_file_content_event(&id, &path, mode, hex_offset, hex_length),
             )],
+            FrontendEvent::SaveFileContent {
+                id,
+                path,
+                mode,
+                expected_mtime,
+                expected_size,
+                text,
+                encoding,
+                newline,
+                has_bom,
+                hex_offset,
+                hex_byte,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                self.save_file_content_event(
+                    &id,
+                    &path,
+                    mode,
+                    expected_mtime,
+                    expected_size,
+                    text,
+                    encoding,
+                    newline,
+                    has_bom,
+                    hex_offset,
+                    hex_byte,
+                ),
+            )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
@@ -3462,68 +3491,170 @@ impl AppRuntime {
                 }
             };
 
-        let Some(address) = self.window_lookup.get(id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Window not found".to_string(),
-                None,
-                None,
-            );
+        let root = match self.resolve_file_tree_root(id) {
+            Ok(root) => root,
+            Err(message) => {
+                let kind = if message == "Window is not a file tree" {
+                    FileContentErrorKind::WindowMismatch
+                } else {
+                    FileContentErrorKind::WindowNotFound
+                };
+                return make_error(kind, message, None, None);
+            }
         };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Project tab not found".to_string(),
-                None,
-                None,
-            );
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return make_error(
-                FileContentErrorKind::WindowNotFound,
-                "Window not found".to_string(),
-                None,
-                None,
-            );
-        };
-
-        if window.preset != WindowPreset::FileTree {
-            return make_error(
-                FileContentErrorKind::WindowMismatch,
-                "Window is not a file tree".to_string(),
-                None,
-                None,
-            );
-        }
 
         let relative_path = Path::new(path);
         let limits = ContentLimits::default();
 
         match mode {
-            FileContentMode::Text => {
-                match read_text_file(&tab.project_root, relative_path, &limits) {
-                    Ok(result) => BackendEvent::FileContentText {
-                        id: id.to_string(),
-                        path: path.to_string(),
-                        encoding: result.encoding,
-                        text: result.text,
-                        total_size: result.total_size,
-                    },
-                    Err(err) => file_content_error_to_event(id, path, err),
-                }
-            }
+            FileContentMode::Text => match read_text_file(&root, relative_path, &limits) {
+                Ok(result) => BackendEvent::FileContentText {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    encoding: result.encoding,
+                    text: result.text,
+                    total_size: result.total_size,
+                    mtime: result.mtime,
+                    has_bom: result.has_bom,
+                    newline: result.newline,
+                    read_only: result.read_only,
+                },
+                Err(err) => file_content_error_to_event(id, path, err),
+            },
             FileContentMode::Hex => {
                 let offset = hex_offset.unwrap_or(0);
                 let length = hex_length.unwrap_or(64 * 16);
-                match read_binary_chunk(&tab.project_root, relative_path, offset, length, &limits) {
+                match read_binary_chunk(&root, relative_path, offset, length, &limits) {
                     Ok(chunk) => BackendEvent::FileContentHex {
                         id: id.to_string(),
                         path: path.to_string(),
                         offset: chunk.offset,
                         bytes_b64: base64::engine::general_purpose::STANDARD.encode(chunk.bytes),
                         total_size: chunk.total_size,
+                        mtime: chunk.mtime,
+                        read_only: chunk.read_only,
                     },
                     Err(err) => file_content_error_to_event(id, path, err),
+                }
+            }
+        }
+    }
+
+    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
+    /// byte back to disk, mapping every domain error to the structured
+    /// `FileContentSaveErrorKind` variant the GUI listens for.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn save_file_content_event(
+        &self,
+        id: &str,
+        path: &str,
+        mode: FileContentMode,
+        expected_mtime: u64,
+        expected_size: u64,
+        text: Option<String>,
+        encoding: Option<gwt::Encoding>,
+        newline: Option<gwt::Newline>,
+        has_bom: Option<bool>,
+        hex_offset: Option<u64>,
+        hex_byte: Option<u8>,
+    ) -> BackendEvent {
+        let root = match self.resolve_file_tree_root(id) {
+            Ok(root) => root,
+            Err(message) => {
+                let kind = if message == "Window is not a file tree" {
+                    gwt::FileContentSaveErrorKind::WindowMismatch
+                } else {
+                    gwt::FileContentSaveErrorKind::WindowNotFound
+                };
+                return BackendEvent::FileContentSaveError {
+                    id: id.to_string(),
+                    path: path.to_string(),
+                    mode,
+                    error_kind: kind,
+                    message,
+                    current_mtime: None,
+                    current_size: None,
+                };
+            }
+        };
+
+        let relative_path = Path::new(path);
+        let limits = ContentLimits::default();
+        let expected = gwt::ExpectedMetadata {
+            mtime: expected_mtime,
+            size: expected_size,
+        };
+
+        match mode {
+            FileContentMode::Text => {
+                let Some(text) = text else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(text) missing text payload".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                let encoding = encoding.unwrap_or(gwt::Encoding::Utf8);
+                let newline = newline.unwrap_or(gwt::Newline::Lf);
+                let has_bom = has_bom.unwrap_or(false);
+                match gwt::write_text_file(
+                    &root,
+                    relative_path,
+                    &text,
+                    encoding,
+                    newline,
+                    has_bom,
+                    expected,
+                    &limits,
+                ) {
+                    Ok(outcome) => BackendEvent::FileContentSaved {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        mode,
+                        new_mtime: outcome.new_mtime,
+                        new_size: outcome.new_size,
+                        encoding_fallback: outcome.encoding_fallback,
+                    },
+                    Err(err) => write_error_to_event(id, path, mode, err),
+                }
+            }
+            FileContentMode::Hex => {
+                let Some(offset) = hex_offset else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(hex) missing hex_offset".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                let Some(byte) = hex_byte else {
+                    return file_content_save_error(
+                        id,
+                        path,
+                        mode,
+                        gwt::FileContentSaveErrorKind::IoError,
+                        "save_file_content(hex) missing hex_byte".to_string(),
+                        None,
+                        None,
+                    );
+                };
+                match gwt::write_binary_byte(&root, relative_path, offset, byte, expected) {
+                    Ok(outcome) => BackendEvent::FileContentSaved {
+                        id: id.to_string(),
+                        path: path.to_string(),
+                        mode,
+                        new_mtime: outcome.new_mtime,
+                        new_size: outcome.new_size,
+                        encoding_fallback: outcome.encoding_fallback,
+                    },
+                    Err(err) => write_error_to_event(id, path, mode, err),
                 }
             }
         }
@@ -4689,209 +4820,6 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn handle_runtime_output(
-        &mut self,
-        id: String,
-        data: Vec<u8>,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, true)
-    }
-
-    pub(crate) fn handle_daemon_runtime_output(
-        &mut self,
-        id: String,
-        data: Vec<u8>,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, false)
-    }
-
-    fn handle_runtime_output_inner(
-        &mut self,
-        id: String,
-        data: Vec<u8>,
-        publish_to_daemon: bool,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
-            return Vec::new();
-        };
-        if publish_to_daemon {
-            if let Some(tab) = self.tab(&address.tab_id) {
-                publish_runtime_output_change(&tab.project_root, &id, &data);
-            }
-        }
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
-            id,
-            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        })]
-    }
-
-    pub(crate) fn handle_runtime_status(
-        &mut self,
-        id: String,
-        status: WindowProcessStatus,
-        detail: Option<String>,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, true)
-    }
-
-    pub(crate) fn handle_daemon_runtime_status(
-        &mut self,
-        id: String,
-        status: WindowProcessStatus,
-        detail: Option<String>,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_status_inner(id, status, detail, false)
-    }
-
-    fn handle_runtime_status_inner(
-        &mut self,
-        id: String,
-        status: WindowProcessStatus,
-        detail: Option<String>,
-        publish_to_daemon: bool,
-    ) -> Vec<OutboundEvent> {
-        let Some(_address) = self.window_lookup.get(&id).cloned() else {
-            self.remove_window_state_tracking(&id);
-            self.deregister_pty_writer(&id);
-            self.runtimes.remove(&id);
-            self.window_details.remove(&id);
-            return Vec::new();
-        };
-        if publish_to_daemon {
-            if let Some(address) = self.window_lookup.get(&id) {
-                if let Some(tab) = self.tab(&address.tab_id) {
-                    publish_runtime_status_change(&tab.project_root, &id, status, detail.clone());
-                }
-            }
-        }
-
-        self.window_pty_statuses.insert(id.clone(), status);
-        let composed_status = self.recompute_window_state(&id).unwrap_or(status);
-        let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
-        match detail.as_ref() {
-            Some(detail) if !detail.is_empty() => {
-                self.window_details.insert(id.clone(), detail.clone());
-            }
-            _ => {
-                self.window_details.remove(&id);
-            }
-        }
-        if should_auto_close {
-            self.stop_window_runtime(&id);
-            self.remove_window_state_tracking(&id);
-            if !close_window_from_workspace(
-                &mut self.tabs,
-                &mut self.window_lookup,
-                &mut self.window_details,
-                &id,
-            ) {
-                return Vec::new();
-            }
-            let _ = self.persist();
-            let mut events = vec![self.workspace_state_broadcast()];
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
-            }
-            return events;
-        }
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
-            self.runtimes.remove(&id);
-            self.remove_window_state_tracking(&id);
-            self.mark_agent_session_stopped(&id);
-        }
-        let _ = self.persist();
-
-        let mut events = Vec::new();
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
-            }
-        }
-        events.extend(Self::status_events(id, composed_status, detail));
-        events
-    }
-
-    pub(crate) fn handle_runtime_hook_event(
-        &mut self,
-        event: gwt::RuntimeHookEvent,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_hook_event_inner(event, true)
-    }
-
-    pub(crate) fn handle_daemon_runtime_hook_event(
-        &mut self,
-        event: gwt::RuntimeHookEvent,
-    ) -> Vec<OutboundEvent> {
-        self.handle_runtime_hook_event_inner(event, false)
-    }
-
-    fn handle_runtime_hook_event_inner(
-        &mut self,
-        event: gwt::RuntimeHookEvent,
-        publish_to_daemon: bool,
-    ) -> Vec<OutboundEvent> {
-        if publish_to_daemon {
-            if let Some(project_root) = event.project_root.as_deref().map(PathBuf::from) {
-                publish_runtime_hook_change(&project_root, &event);
-            }
-        }
-        let mut events = vec![OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
-            event: event.clone(),
-        })];
-        let Some(window_id) = self.active_window_for_runtime_event(&event) else {
-            return events;
-        };
-        let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
-            return events;
-        };
-        self.window_hook_states
-            .insert(window_id.clone(), hook_state);
-        let Some(composed_state) = self.recompute_window_state(&window_id) else {
-            return events;
-        };
-        let should_auto_close = should_auto_close_agent_window(
-            &self.active_agent_sessions,
-            &window_id,
-            &composed_state,
-        );
-        let detail = self.window_details.get(&window_id).cloned();
-        if should_auto_close {
-            self.stop_window_runtime(&window_id);
-            self.remove_window_state_tracking(&window_id);
-            if close_window_from_workspace(
-                &mut self.tabs,
-                &mut self.window_lookup,
-                &mut self.window_details,
-                &window_id,
-            ) {
-                let _ = self.persist();
-                events.push(self.workspace_state_broadcast());
-                if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                    events.push(event);
-                }
-            }
-            return events;
-        }
-        let _ = self.persist();
-        if matches!(
-            composed_state,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
-            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
-                events.push(event);
-            }
-        }
-        events.extend(Self::status_events(window_id, composed_state, detail));
-        events
-    }
-
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
@@ -5766,6 +5694,16 @@ impl AppRuntime {
         })
     }
 
+    pub(crate) fn push_workspace_and_active_work_projection_broadcasts(
+        &self,
+        events: &mut Vec<OutboundEvent>,
+    ) {
+        events.push(self.workspace_state_broadcast());
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+    }
+
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
         let pty_state = self
             .window_pty_statuses
@@ -6266,209 +6204,6 @@ fn update_issue_branch_link_with_cache_dir(
         .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
-#[cfg(unix)]
-const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
-
-#[cfg(unix)]
-enum RuntimeDaemonPublish {
-    Output {
-        project_root: PathBuf,
-        id: String,
-        data: Vec<u8>,
-    },
-    Status {
-        project_root: PathBuf,
-        id: String,
-        status: WindowProcessStatus,
-        detail: Option<String>,
-    },
-    Hook {
-        project_root: PathBuf,
-        event: gwt::RuntimeHookEvent,
-    },
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeDaemonPublishEnqueueError {
-    Full,
-    Disconnected,
-}
-
-#[cfg(unix)]
-static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
-    Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>,
-> = std::sync::OnceLock::new();
-
-#[cfg(unix)]
-fn runtime_daemon_publish_sender() -> Option<&'static std_mpsc::SyncSender<RuntimeDaemonPublish>> {
-    RUNTIME_DAEMON_PUBLISH_QUEUE
-        .get_or_init(|| {
-            let (sender, receiver) = std_mpsc::sync_channel(RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY);
-            match std::thread::Builder::new()
-                .name("gwt-runtime-daemon-publish-worker".to_string())
-                .spawn(move || run_runtime_daemon_publish_worker(receiver))
-            {
-                Ok(_handle) => Some(sender),
-                Err(err) => {
-                    tracing::debug!(error = %err, "runtime daemon publish worker spawn failed");
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
-
-#[cfg(unix)]
-fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
-    for publish in receiver {
-        publish_runtime_daemon_event(publish);
-    }
-}
-
-#[cfg(unix)]
-fn try_enqueue_runtime_daemon_publish(
-    sender: &std_mpsc::SyncSender<RuntimeDaemonPublish>,
-    publish: RuntimeDaemonPublish,
-) -> Result<(), RuntimeDaemonPublishEnqueueError> {
-    sender.try_send(publish).map_err(|err| match err {
-        std_mpsc::TrySendError::Full(_) => RuntimeDaemonPublishEnqueueError::Full,
-        std_mpsc::TrySendError::Disconnected(_) => RuntimeDaemonPublishEnqueueError::Disconnected,
-    })
-}
-
-#[cfg(unix)]
-fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
-    let Some(sender) = runtime_daemon_publish_sender() else {
-        return;
-    };
-    if let Err(err) = try_enqueue_runtime_daemon_publish(sender, publish) {
-        tracing::debug!(
-            ?err,
-            "runtime daemon publish queue rejected event (non-fatal)"
-        );
-    }
-}
-
-#[cfg(unix)]
-fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
-    match publish {
-        RuntimeDaemonPublish::Output {
-            project_root,
-            id,
-            data,
-        } => {
-            let payload =
-                gwt::runtime_daemon_events::runtime_output_payload(&id, &data, std::process::id());
-            let result = gwt::daemon_publisher::publish_event(
-                &project_root,
-                gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root.display(),
-                    window_id = %id,
-                    "runtime output daemon publish failed (non-fatal)"
-                );
-            }
-        }
-        RuntimeDaemonPublish::Status {
-            project_root,
-            id,
-            status,
-            detail,
-        } => {
-            let payload = gwt::runtime_daemon_events::runtime_status_payload(
-                &id,
-                status,
-                detail,
-                std::process::id(),
-            );
-            let result = gwt::daemon_publisher::publish_event(
-                &project_root,
-                gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root.display(),
-                    window_id = %id,
-                    "runtime status daemon publish failed (non-fatal)"
-                );
-            }
-        }
-        RuntimeDaemonPublish::Hook {
-            project_root,
-            event,
-        } => {
-            let payload =
-                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
-            let result = gwt::daemon_publisher::publish_event(
-                &project_root,
-                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root.display(),
-                    "runtime hook daemon publish failed (non-fatal)"
-                );
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
-        project_root: project_root.to_path_buf(),
-        id: id.to_string(),
-        data: data.to_vec(),
-    });
-}
-
-#[cfg(not(unix))]
-fn publish_runtime_output_change(_project_root: &Path, _id: &str, _data: &[u8]) {}
-
-#[cfg(unix)]
-fn publish_runtime_status_change(
-    project_root: &Path,
-    id: &str,
-    status: WindowProcessStatus,
-    detail: Option<String>,
-) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Status {
-        project_root: project_root.to_path_buf(),
-        id: id.to_string(),
-        status,
-        detail,
-    });
-}
-
-#[cfg(not(unix))]
-fn publish_runtime_status_change(
-    _project_root: &Path,
-    _id: &str,
-    _status: WindowProcessStatus,
-    _detail: Option<String>,
-) {
-}
-
-#[cfg(unix)]
-fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
-        project_root: project_root.to_path_buf(),
-        event: event.clone(),
-    });
-}
-
-#[cfg(not(unix))]
-fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
-
 fn maybe_register_codex_managed_hook_trust_for_launch(
     profile_config_path: &Path,
     worktree_path: &Path,
@@ -6546,6 +6281,69 @@ fn codex_config_path_for_profile_config(profile_config_path: &Path) -> Option<Pa
     Some(gwt_config_dir.parent()?.join(".codex").join("config.toml"))
 }
 
+fn file_content_save_error(
+    id: &str,
+    path: &str,
+    mode: FileContentMode,
+    kind: gwt::FileContentSaveErrorKind,
+    message: String,
+    current_mtime: Option<u64>,
+    current_size: Option<u64>,
+) -> BackendEvent {
+    BackendEvent::FileContentSaveError {
+        id: id.to_string(),
+        path: path.to_string(),
+        mode,
+        error_kind: kind,
+        message,
+        current_mtime,
+        current_size,
+    }
+}
+
+fn write_error_to_event(
+    id: &str,
+    path: &str,
+    mode: FileContentMode,
+    err: FileContentError,
+) -> BackendEvent {
+    use gwt::FileContentSaveErrorKind as Kind;
+    let (kind, message, current_mtime, current_size) = match err {
+        FileContentError::Denied => (Kind::Denied, "Access denied".to_string(), None, None),
+        FileContentError::TooLarge { size, limit } => (
+            Kind::TooLarge,
+            format!("File too large ({} bytes, limit {})", size, limit),
+            None,
+            None,
+        ),
+        FileContentError::IoError(message) => (Kind::IoError, message, None, None),
+        FileContentError::NotAFile => (Kind::NotAFile, "Not a file".to_string(), None, None),
+        FileContentError::BinaryNotText => (
+            Kind::IoError,
+            "Cannot decode as text".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::Conflict {
+            current_mtime,
+            current_size,
+        } => (
+            Kind::Conflict,
+            format!("File changed externally (current mtime={current_mtime}, size={current_size})"),
+            Some(current_mtime),
+            Some(current_size),
+        ),
+        FileContentError::ReadOnly => (Kind::ReadOnly, "File is read-only".to_string(), None, None),
+        FileContentError::OutOfRange { offset, size } => (
+            Kind::OutOfRange,
+            format!("Offset {offset} is outside file (size {size})"),
+            None,
+            Some(size),
+        ),
+    };
+    file_content_save_error(id, path, mode, kind, message, current_mtime, current_size)
+}
+
 fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> BackendEvent {
     let (kind, message, size, limit) = match err {
         FileContentError::Denied => (
@@ -6573,6 +6371,31 @@ fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> B
             None,
             None,
         ),
+        // SPEC-2006 Phase 2 variants are write-only and should never reach
+        // the read-path mapping. Map defensively to IoError so the read
+        // surface keeps working if a future caller funnels them here by
+        // mistake; the write surface owns the structured Save error variant.
+        FileContentError::Conflict {
+            current_mtime,
+            current_size,
+        } => (
+            FileContentErrorKind::IoError,
+            format!("Unexpected Conflict in read path (mtime={current_mtime} size={current_size})"),
+            Some(current_size),
+            None,
+        ),
+        FileContentError::ReadOnly => (
+            FileContentErrorKind::IoError,
+            "Unexpected ReadOnly in read path".to_string(),
+            None,
+            None,
+        ),
+        FileContentError::OutOfRange { offset, size } => (
+            FileContentErrorKind::IoError,
+            format!("Unexpected OutOfRange in read path (offset={offset} size={size})"),
+            Some(size),
+            None,
+        ),
     };
     BackendEvent::FileContentError {
         id: id.to_string(),
@@ -6590,6 +6413,7 @@ mod tests {
         collections::HashMap,
         ffi::OsString,
         fs,
+        io::Write,
         path::{Path, PathBuf},
         sync::{mpsc, Arc, Mutex, RwLock},
         thread,
@@ -6608,8 +6432,8 @@ mod tests {
     use gwt_config::{Profile, Settings};
     use gwt_core::{
         coordination::{
-            load_snapshot, post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind,
-            BoardMention, BoardMentionTargetKind,
+            coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
+            BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
         },
         logging::{current_log_file, LogEvent, LogLevel},
         paths::gwt_cache_dir,
@@ -6631,35 +6455,6 @@ mod tests {
         ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
     };
     use crate::{combined_window_id, geometry_to_pty_size, same_worktree_path, PtyWriterRegistry};
-
-    #[cfg(unix)]
-    #[test]
-    fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
-        let (sender, _receiver) = mpsc::sync_channel(1);
-        let project_root = PathBuf::from("/tmp/gwt-project");
-
-        assert!(super::try_enqueue_runtime_daemon_publish(
-            &sender,
-            super::RuntimeDaemonPublish::Output {
-                project_root: project_root.clone(),
-                id: "tab-1::shell-1".to_string(),
-                data: b"first".to_vec(),
-            },
-        )
-        .is_ok());
-        assert!(matches!(
-            super::try_enqueue_runtime_daemon_publish(
-                &sender,
-                super::RuntimeDaemonPublish::Status {
-                    project_root,
-                    id: "tab-1::shell-1".to_string(),
-                    status: WindowProcessStatus::Running,
-                    detail: None,
-                },
-            ),
-            Err(super::RuntimeDaemonPublishEnqueueError::Full)
-        ));
-    }
 
     #[derive(Debug, Clone)]
     struct CapturedTracingEvent {
@@ -10612,6 +10407,36 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_events() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let mut events = Vec::new();
+        runtime.push_workspace_and_active_work_projection_broadcasts(&mut events);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
+    }
+
+    #[test]
     fn app_runtime_runtime_hook_stopped_without_active_session_keeps_window_open() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
@@ -12080,6 +11905,14 @@ exit 1
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let parent_id = "history-parent".to_string();
+        let events_path = coordination_events_path(&repo);
+        fs::create_dir_all(
+            events_path
+                .parent()
+                .expect("coordination event log has parent"),
+        )
+        .expect("create coordination dir");
+        let mut events = fs::File::create(&events_path).expect("create legacy event log");
         for idx in 0..505 {
             let mut entry = BoardEntry::new(
                 AuthorKind::Agent,
@@ -12094,8 +11927,11 @@ exit 1
             if idx == 0 {
                 entry.id = parent_id.clone();
             }
-            post_entry(&repo, entry).expect("seed board entry");
+            serde_json::to_writer(&mut events, &CoordinationEvent::MessageAppended { entry })
+                .expect("write board seed event");
+            events.write_all(b"\n").expect("write board seed newline");
         }
+        events.flush().expect("flush board seed events");
         let snapshot = load_snapshot(&repo).expect("load board snapshot");
         assert!(!snapshot
             .board

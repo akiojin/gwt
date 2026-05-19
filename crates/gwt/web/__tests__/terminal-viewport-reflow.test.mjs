@@ -332,4 +332,9 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /runTerminalActivationSequence\(\{/,
     "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
   );
+  assert.match(
+    appSource,
+    /scheduleTerminalFocusActivation\(topmostId,\s*\{\s*shouldPersistGeometry:\s*false,?\s*\}\)/,
+    "topmost focus activation must not persist geometry on every workspace render",
+  );
 });

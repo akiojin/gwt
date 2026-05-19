@@ -210,6 +210,7 @@ fn default_cli_env_construction_does_not_touch_issue_client_factory() {
 
 #[test]
 fn new_for_hooks_keeps_detached_cache_root() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
     let env = DefaultCliEnv::new_for_hooks();
 
     assert_eq!(

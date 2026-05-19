@@ -1535,7 +1535,7 @@ test("Launch wizard renders centered split flow without backdrop dismissal", () 
 test("Launch wizard selected quick start hover preserves selected styling", () => {
   assert.match(
     inlineStyle,
-    /\.quick-start-card:hover:not\(\.selected\),\n\.live-session-button:hover:not\(\.selected\)/,
+    /\.quick-start-card:hover:not\(\.selected\),\r?\n\.live-session-button:hover:not\(\.selected\)/,
     "selected quick start and live session rows must not use the unselected hover background",
   );
 });

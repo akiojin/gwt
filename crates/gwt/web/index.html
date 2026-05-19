@@ -29,6 +29,8 @@
     <link rel="stylesheet" href="/styles/typography.css" />
     <link rel="stylesheet" href="/styles/components.css" />
     <link rel="stylesheet" href="/assets/xterm/xterm.css" />
+    <!-- SPEC-2009 Phase 2b: dark syntax highlighting theme for File Tree text viewer. -->
+    <link rel="stylesheet" href="/assets/highlight/github-dark.min.css" />
     <link rel="preload" as="style" href="/styles/app.css" />
     <link rel="stylesheet" href="/styles/app.css" />
   </head>
@@ -520,6 +522,23 @@
           tabindex="-1"
         ></div>
       </div>
+      <!-- SPEC-2013 FR-012: confirm modal shown when the project tab
+           close (`×`) is invoked while one or more agent panes are still
+           running. Renderer lives in /close-project-tab-confirm-modal.js
+           and the wiring lives in /app.js. -->
+      <div
+        class="modal-backdrop"
+        id="close-project-tab-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell close-project-tab-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close project tab"
+          tabindex="-1"
+        ></div>
+      </div>
       <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
            window. Renderer lives in /app.js (frontendUnits.worktreePicker).
            Opens once per File Tree window open; selection routes the tree
@@ -534,6 +553,36 @@
           role="dialog"
           aria-modal="true"
           aria-label="Select worktree for File Tree"
+          tabindex="-1"
+        ></div>
+      </div>
+      <!-- SPEC-2009 amendment Phase 2: Discard / Conflict modal landing
+           pads for the File Tree editor. Renderers live in /app.js and
+           reuse the shared `.modal-shell` primitive without overriding the
+           canonical declaration that the embedded contract test checks. -->
+      <div
+        class="modal-backdrop"
+        id="file-tree-discard-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell discard-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Discard unsaved changes"
+          tabindex="-1"
+        ></div>
+      </div>
+      <div
+        class="modal-backdrop"
+        id="file-tree-conflict-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell conflict-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Resolve external change conflict"
           tabindex="-1"
         ></div>
       </div>

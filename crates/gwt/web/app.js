@@ -28,11 +28,13 @@
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -1174,7 +1176,82 @@
           indexStatusByProjectRoot,
           aggregateProjectTabDotState,
           send,
+          requestCloseProjectTab,
         });
+      }
+
+      // SPEC-2013 FR-012: the frontend decides whether the close request
+      // needs confirmation. When running_agent_count is 0 we send the
+      // existing close_project_tab message immediately; otherwise we open
+      // the confirm modal and only emit the message once Close anyway is
+      // pressed. Cancel never emits a message.
+      const closeProjectTabModalEl = document.getElementById(
+        "close-project-tab-modal",
+      );
+      const closeProjectTabModalDialogEl = closeProjectTabModalEl
+        ? closeProjectTabModalEl.querySelector(".modal-shell")
+        : null;
+      let closeProjectTabModalState = {
+        open: false,
+        tabId: null,
+        tabTitle: null,
+        runningAgents: [],
+      };
+
+      function renderCloseProjectTabModal() {
+        if (!closeProjectTabModalEl || !closeProjectTabModalDialogEl) {
+          return;
+        }
+        renderCloseProjectTabConfirmModal({
+          modalEl: closeProjectTabModalEl,
+          dialogEl: closeProjectTabModalDialogEl,
+          state: closeProjectTabModalState,
+          createNode,
+          onCancel: () => {
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+          },
+          onConfirm: () => {
+            const targetId = closeProjectTabModalState.tabId;
+            closeProjectTabModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseProjectTabModal();
+            if (targetId) {
+              send({ kind: "close_project_tab", tab_id: targetId });
+            }
+          },
+        });
+      }
+
+      function requestCloseProjectTab(tabId) {
+        const tabs = appState.tabs || [];
+        const tab = tabs.find((entry) => entry.id === tabId);
+        const runningAgents = Array.isArray(tab && tab.running_agents)
+          ? tab.running_agents
+          : [];
+        const count = Number.isFinite(tab && tab.running_agent_count)
+          ? tab.running_agent_count
+          : runningAgents.length;
+        if (count <= 0) {
+          send({ kind: "close_project_tab", tab_id: tabId });
+          return;
+        }
+        closeProjectTabModalState = {
+          open: true,
+          tabId,
+          tabTitle: (tab && tab.title) || null,
+          runningAgents,
+        };
+        renderCloseProjectTabModal();
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
@@ -2034,7 +2111,10 @@
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
-      function scheduleTerminalFocusActivation(windowId) {
+      function scheduleTerminalFocusActivation(
+        windowId,
+        { shouldPersistGeometry = true } = {},
+      ) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.activationFrame !== null) {
           return;
@@ -2049,8 +2129,9 @@
           // step when a modal is open or a text input owns focus, so the
           // Clone Project URL/Search field (and other modal inputs) keep
           // keyboard focus while the background terminal keeps streaming
-          // `workspace_state` events. Geometry sync still runs every
-          // cycle so xterm reflows are unaffected.
+          // `workspace_state` events. Geometry persistence is controlled
+          // by the caller so routine workspace renders do not echo
+          // backend resize broadcasts back into another workspace render.
           const shouldFocus = !shouldSkipTerminalFocusActivation({
             doc: document,
             modalElements: [
@@ -2061,18 +2142,17 @@
               migrationModal,
             ],
           });
-          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit + persist
-          // geometry so xterm's cell metrics are populated by the time
-          // proposeDimensions runs. The previous order (fit-then-refresh)
-          // silently no-op'd whenever the terminal had been display:none —
-          // proposeDimensions returns undefined when cell.width === 0,
-          // leaving the viewport stuck on the pre-hidden cols/rows until
-          // the next OS resize.
+          // SPEC-2008 Phase 26.B / FR-056: render BEFORE fit so xterm's
+          // cell metrics are populated by the time proposeDimensions
+          // runs. The previous order (fit-then-refresh) silently no-op'd
+          // whenever the terminal had been display:none — proposeDimensions
+          // returns undefined when cell.width === 0, leaving the viewport
+          // stuck on the pre-hidden cols/rows until the next OS resize.
           runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
             shouldFocus,
-            shouldPersistGeometry: true,
+            shouldPersistGeometry,
             sendGeometry,
           });
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
@@ -3115,11 +3195,17 @@
           terminalContainer,
           terminal,
         );
+        const wheelScrollCleanup = createTerminalWheelScrollController({
+          terminalRoot: terminalContainer,
+          terminal,
+          window,
+        });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
           contextMenuCleanup();
+          wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
@@ -3393,6 +3479,32 @@
               hexOffset: 0,
               hexBytes: "",
               error: { kind: "", message: "", size: null, limit: null },
+              // SPEC-2009 amendment Phase 2: dirty / edit / save state.
+              dirty: false,
+              originalText: "",
+              originalBytes: null, // Uint8Array
+              originalEncoding: "",
+              originalNewline: "lf",
+              originalHasBom: false,
+              originalMtime: 0,
+              originalSize: 0,
+              readOnly: false,
+              savedAt: 0,
+              saveInFlight: false,
+              undoStack: [],
+              redoStack: [],
+            },
+            // Pending navigation queued behind the Discard modal so we can
+            // continue or abort after the user resolves the unsaved edit.
+            discardModal: {
+              open: false,
+              pendingAction: null, // { kind: 'switch_file'|'open_picker'|'close_window'|'switch_worktree', payload }
+            },
+            conflictModal: {
+              open: false,
+              currentMtime: 0,
+              currentSize: 0,
+              pendingPayload: null, // SaveFileContent payload that triggered the conflict
             },
           });
         }
@@ -3619,10 +3731,382 @@
           ?.addEventListener("click", () => closeWorktreePicker(windowId));
       }
 
+      // SPEC-2009 amendment Phase 2b: lazy-load highlight.js once on first
+      // text viewer use. Bundled module sits at /assets/highlight/.
+      let highlightModulePromise = null;
+      function loadHighlightModule() {
+        if (!highlightModulePromise) {
+          highlightModulePromise = import("/assets/highlight/highlight.min.js")
+            .then((mod) => mod.default || mod)
+            .catch((err) => {
+              console.warn("highlight.js failed to load", err);
+              return null;
+            });
+        }
+        return highlightModulePromise;
+      }
+
+      const FILE_EXT_TO_LANGUAGE = {
+        js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+        ts: "typescript", tsx: "typescript",
+        rs: "rust", py: "python", rb: "ruby", go: "go", java: "java",
+        c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp",
+        sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
+        json: "json", yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini",
+        md: "markdown", markdown: "markdown",
+        html: "xml", htm: "xml", xml: "xml", svg: "xml",
+        css: "css", scss: "scss", less: "less",
+        sql: "sql", dockerfile: "dockerfile",
+        kt: "kotlin", swift: "swift", php: "php", lua: "lua",
+        vue: "xml", graphql: "graphql", gql: "graphql",
+      };
+
+      function detectLanguageByExtension(path) {
+        if (!path) return "";
+        const base = String(path).split("/").pop() || "";
+        if (/^Dockerfile/i.test(base)) return "dockerfile";
+        if (/^Makefile/i.test(base)) return "makefile";
+        const dot = base.lastIndexOf(".");
+        if (dot < 0) return "";
+        const ext = base.slice(dot + 1).toLowerCase();
+        return FILE_EXT_TO_LANGUAGE[ext] || "";
+      }
+
+      function applySyntaxHighlight(codeEl, text, language) {
+        if (!codeEl) return;
+        // Always set raw text first so the viewer renders something even
+        // before highlight.js loads (or if it fails to load entirely).
+        codeEl.textContent = text || "";
+        codeEl.className = language ? `hljs language-${language}` : "hljs";
+        loadHighlightModule().then((hljs) => {
+          if (!hljs) return;
+          try {
+            if (language && hljs.getLanguage && hljs.getLanguage(language)) {
+              const html = hljs.highlight(text || "", { language, ignoreIllegals: true }).value;
+              codeEl.innerHTML = html;
+              codeEl.className = `hljs language-${language}`;
+            } else {
+              const result = hljs.highlightAuto(text || "");
+              codeEl.innerHTML = result.value;
+              codeEl.className = `hljs language-${result.language || "plaintext"}`;
+            }
+          } catch (e) {
+            // Fall back to plain text on highlight failure.
+            codeEl.textContent = text || "";
+          }
+        });
+      }
+
+      // SPEC-2009 amendment Phase 2: helper to decode the binary chunk sent
+      // by the backend over base64 so the hex viewer can mutate single
+      // bytes locally before issuing a save_file_content(mode=hex).
+      function decodeBase64ToBytes(b64) {
+        let binary;
+        try {
+          binary = atob(b64 || "");
+        } catch (_e) {
+          return new Uint8Array();
+        }
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      function encodeBytesToBase64(bytes) {
+        if (!bytes || bytes.length === 0) return "";
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 1) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      }
+
+      function recomputeHexDirty(state) {
+        const v = state.viewer;
+        if (v.mode !== "hex" || !v.originalBytes) {
+          return;
+        }
+        const current = decodeBase64ToBytes(v.hexBytes || "");
+        if (current.length !== v.originalBytes.length) {
+          v.dirty = true;
+          return;
+        }
+        for (let i = 0; i < current.length; i += 1) {
+          if (current[i] !== v.originalBytes[i]) {
+            v.dirty = true;
+            return;
+          }
+        }
+        v.dirty = false;
+      }
+
+      function requestSaveFileContent(windowId) {
+        const state = ensureFileTreeState(windowId);
+        const v = state.viewer;
+        if (v.saveInFlight || v.readOnly || !v.dirty) {
+          return;
+        }
+        const payload = {
+          kind: "save_file_content",
+          id: windowId,
+          path: v.path,
+          mode: v.mode,
+          expected_mtime: v.originalMtime,
+          expected_size: v.originalSize,
+        };
+        if (v.mode === "text") {
+          payload.text = v.text;
+          payload.encoding = (v.originalEncoding || "utf-8").toLowerCase();
+          payload.newline = (v.originalNewline || "lf").toLowerCase();
+          payload.has_bom = v.originalHasBom;
+        } else if (v.mode === "hex") {
+          // Hex save sends a single byte at a single offset (replace-only).
+          // We pull the dirty byte by diffing against originalBytes.
+          const current = decodeBase64ToBytes(v.hexBytes || "");
+          let dirtyOffset = -1;
+          for (let i = 0; i < current.length; i += 1) {
+            if (current[i] !== (v.originalBytes ? v.originalBytes[i] : -1)) {
+              dirtyOffset = i;
+              break;
+            }
+          }
+          if (dirtyOffset < 0) {
+            return;
+          }
+          payload.hex_offset = v.hexOffset + dirtyOffset;
+          payload.hex_byte = current[dirtyOffset];
+        } else {
+          return;
+        }
+        v.saveInFlight = true;
+        state.lastSavePayload = payload;
+        send(payload);
+        renderFileTreeViewer(windowId);
+      }
+
+      function applyAfterSaveContinuation(windowId) {
+        const state = ensureFileTreeState(windowId);
+        const pending = state.discardModal && state.discardModal.pendingAction;
+        if (!pending || !pending.queuedFromDiscard) return;
+        state.discardModal.pendingAction = null;
+        runPendingNavigation(windowId, pending);
+      }
+
+      function runPendingNavigation(windowId, pending) {
+        if (!pending) return;
+        switch (pending.kind) {
+          case "switch_file":
+            beginViewerForFile(windowId, pending.path);
+            break;
+          case "open_picker":
+            openWorktreePicker(windowId);
+            break;
+          case "switch_worktree":
+            // Re-emit the worktree selection that was queued behind the modal.
+            selectFileTreeWorktree(windowId, pending.worktreeId);
+            break;
+          case "close_window":
+            // Forward to the backend close path so persistence stays in sync.
+            send({ kind: "close_window", id: windowId });
+            break;
+          default:
+            break;
+        }
+      }
+
+      function beginViewerForFile(windowId, path) {
+        const state = ensureFileTreeState(windowId);
+        state.viewer = {
+          ...state.viewer,
+          path,
+          mode: "loading",
+          text: "",
+          encoding: "",
+          totalSize: 0,
+          hexOffset: 0,
+          hexBytes: "",
+          error: { kind: "", message: "", size: null, limit: null },
+          dirty: false,
+          originalText: "",
+          originalBytes: null,
+          originalEncoding: "",
+          originalNewline: "lf",
+          originalHasBom: false,
+          originalMtime: 0,
+          originalSize: 0,
+          readOnly: false,
+          savedAt: 0,
+          saveInFlight: false,
+          undoStack: [],
+          redoStack: [],
+        };
+        renderFileTreeViewer(windowId);
+        requestFileContent(windowId, path, "text");
+      }
+
+      function queueNavigationGuardedByDirty(windowId, pendingAction) {
+        const state = ensureFileTreeState(windowId);
+        if (state.viewer.dirty) {
+          state.discardModal = {
+            open: true,
+            pendingAction: { ...pendingAction, queuedFromDiscard: true },
+          };
+          renderDiscardModal(windowId);
+          return true;
+        }
+        return false;
+      }
+
+      function closeDiscardModal(windowId) {
+        const state = ensureFileTreeState(windowId);
+        state.discardModal = { open: false, pendingAction: null };
+        renderDiscardModal(windowId);
+      }
+
+      function renderDiscardModal(windowId) {
+        const modal = document.getElementById("file-tree-discard-modal");
+        if (!modal) return;
+        const shell = modal.querySelector(".modal-shell");
+        if (!shell) return;
+        const state = ensureFileTreeState(windowId);
+        clearChildren(shell);
+        if (!state.discardModal.open) {
+          modal.setAttribute("aria-hidden", "true");
+          modal.dataset.windowId = "";
+          return;
+        }
+        modal.dataset.windowId = windowId;
+        modal.setAttribute("aria-hidden", "false");
+        const header = makeEl("header", { className: "discard-modal-header" }, [
+          makeEl("h2", { text: "Unsaved changes" }),
+        ]);
+        const bodyText = makeEl("div", { className: "discard-modal-body" }, [
+          makeEl("p", {
+            text: `${state.viewer.path} has unsaved changes. Save them or discard before continuing.`,
+          }),
+        ]);
+        const footer = makeEl("footer", { className: "discard-modal-footer" });
+        const saveBtn = makeEl("button", {
+          className: "wizard-button primary",
+          attrs: { type: "button" },
+          text: "Save",
+        });
+        const discardBtn = makeEl("button", {
+          className: "wizard-button",
+          attrs: { type: "button" },
+          text: "Discard",
+        });
+        const cancelBtn = makeEl("button", {
+          className: "wizard-button",
+          attrs: { type: "button" },
+          text: "Cancel",
+        });
+        saveBtn.addEventListener("click", () => {
+          requestSaveFileContent(windowId);
+          // Close modal but keep pending action; resume after file_content_saved.
+          state.discardModal.open = false;
+          renderDiscardModal(windowId);
+        });
+        discardBtn.addEventListener("click", () => {
+          // Roll back to the original baseline and run the pending action.
+          const v = state.viewer;
+          if (v.mode === "text") {
+            v.text = v.originalText;
+          } else if (v.mode === "hex") {
+            v.hexBytes = encodeBytesToBase64(v.originalBytes || new Uint8Array());
+          }
+          v.dirty = false;
+          const pending = state.discardModal.pendingAction;
+          state.discardModal = { open: false, pendingAction: null };
+          renderDiscardModal(windowId);
+          runPendingNavigation(windowId, pending);
+        });
+        cancelBtn.addEventListener("click", () => closeDiscardModal(windowId));
+        footer.appendChild(saveBtn);
+        footer.appendChild(discardBtn);
+        footer.appendChild(cancelBtn);
+        shell.appendChild(header);
+        shell.appendChild(bodyText);
+        shell.appendChild(footer);
+      }
+
+      function renderConflictModal(windowId) {
+        const modal = document.getElementById("file-tree-conflict-modal");
+        if (!modal) return;
+        const shell = modal.querySelector(".modal-shell");
+        if (!shell) return;
+        const state = ensureFileTreeState(windowId);
+        clearChildren(shell);
+        if (!state.conflictModal.open) {
+          modal.setAttribute("aria-hidden", "true");
+          modal.dataset.windowId = "";
+          return;
+        }
+        modal.dataset.windowId = windowId;
+        modal.setAttribute("aria-hidden", "false");
+        const header = makeEl("header", { className: "conflict-modal-header" }, [
+          makeEl("h2", { text: "File changed externally" }),
+        ]);
+        const bodyText = makeEl("div", { className: "conflict-modal-body" }, [
+          makeEl("p", {
+            text: `${state.viewer.path} was modified outside the editor. Choose how to proceed.`,
+          }),
+        ]);
+        const footer = makeEl("footer", { className: "conflict-modal-footer" });
+        const overwriteBtn = makeEl("button", {
+          className: "wizard-button primary",
+          attrs: { type: "button" },
+          text: "Overwrite",
+        });
+        const reloadBtn = makeEl("button", {
+          className: "wizard-button",
+          attrs: { type: "button" },
+          text: "Reload from disk",
+        });
+        const cancelBtn = makeEl("button", {
+          className: "wizard-button",
+          attrs: { type: "button" },
+          text: "Cancel",
+        });
+        overwriteBtn.addEventListener("click", () => {
+          // Re-issue the save with the latest expected_metadata so the
+          // domain layer skips its conflict gate this time.
+          const v = state.viewer;
+          v.originalMtime = state.conflictModal.currentMtime;
+          v.originalSize = state.conflictModal.currentSize;
+          state.conflictModal = { open: false, currentMtime: 0, currentSize: 0, pendingPayload: null };
+          renderConflictModal(windowId);
+          requestSaveFileContent(windowId);
+        });
+        reloadBtn.addEventListener("click", () => {
+          const v = state.viewer;
+          state.conflictModal = { open: false, currentMtime: 0, currentSize: 0, pendingPayload: null };
+          renderConflictModal(windowId);
+          // Throw away the unsaved edit and re-read from disk.
+          beginViewerForFile(windowId, v.path);
+        });
+        cancelBtn.addEventListener("click", () => {
+          state.conflictModal = { open: false, currentMtime: 0, currentSize: 0, pendingPayload: null };
+          renderConflictModal(windowId);
+        });
+        footer.appendChild(overwriteBtn);
+        footer.appendChild(reloadBtn);
+        footer.appendChild(cancelBtn);
+        shell.appendChild(header);
+        shell.appendChild(bodyText);
+        shell.appendChild(footer);
+      }
+
       function renderFileTreeViewer(windowId) {
         const state = ensureFileTreeState(windowId);
+        // The workspace window element exposes its id via `data-id`
+        // (see `ensureWindow`), not `data-window-id`. Using the right
+        // attribute is required for the viewer DOM lookup to resolve in
+        // both production and Playwright fixtures.
         const surface = document.querySelector(
-          `[data-window-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
+          `[data-id='${CSS.escape(windowId)}'] .file-tree-viewer`,
         );
         if (!surface) return;
         const header = surface.querySelector(".file-tree-viewer-header");
@@ -3632,6 +4116,11 @@
         clearChildren(body);
         const v = state.viewer;
         const sizeLabel = v.totalSize ? formatBytes(v.totalSize) : "";
+        const headerPath = makeEl("span", { className: "file-tree-viewer-path", text: v.path || "" });
+        const dirtyMarker = makeEl("span", {
+          className: "file-tree-viewer-dirty",
+          text: "●",
+        });
         switch (v.mode) {
           case "empty":
             header.appendChild(
@@ -3648,32 +4137,115 @@
             );
             break;
           case "loading":
-            header.appendChild(
-              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
-            );
+            header.appendChild(headerPath);
             body.appendChild(
               makeEl("div", { className: "file-tree-viewer-empty", text: "Loading…" }),
             );
             break;
-          case "text":
-            header.appendChild(
-              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
-            );
+          case "text": {
+            header.appendChild(headerPath);
+            // SPEC-2009 Phase 2b: dirty marker / Saved badge live in the
+            // header as toggleable elements so the input handler can flip
+            // their visibility without a full re-render. Keeping the
+            // textarea alive across keystrokes is what stops focus loss
+            // mid-typing (Phase 2 had a re-render-on-input loop that
+            // recreated the textarea each character — visible in headed
+            // Playwright but masked by fill() in the headless smoke).
+            dirtyMarker.style.display = v.dirty ? "" : "none";
+            header.appendChild(dirtyMarker);
+            const langBadge = makeEl("span", {
+              className: "file-tree-viewer-lang",
+              text: detectLanguageByExtension(v.path).toUpperCase() || "PLAIN",
+            });
+            header.appendChild(langBadge);
             header.appendChild(
               makeEl("span", {
                 className: "file-tree-viewer-meta",
-                text: (v.encoding || "") + " · " + sizeLabel,
+                text: (v.encoding || "") + " · " + (v.originalNewline || "lf").toUpperCase() + " · " + sizeLabel,
               }),
             );
-            body.appendChild(makeEl("pre", { className: "file-tree-viewer-text", text: v.text }));
+            if (v.readOnly) {
+              header.appendChild(
+                makeEl("span", {
+                  className: "file-tree-viewer-readonly",
+                  text: "read-only",
+                }),
+              );
+            }
+            const saveBtn = makeEl("button", {
+              className: "wizard-button file-tree-viewer-save",
+              attrs: { type: "button" },
+              text: v.saveInFlight ? "Saving…" : "Save",
+            });
+            const updateSaveBtn = () => {
+              saveBtn.textContent = v.saveInFlight ? "Saving…" : "Save";
+              if (!v.dirty || v.readOnly || v.saveInFlight) {
+                saveBtn.setAttribute("disabled", "");
+              } else {
+                saveBtn.removeAttribute("disabled");
+              }
+            };
+            updateSaveBtn();
+            saveBtn.addEventListener("click", () => requestSaveFileContent(windowId));
+            header.appendChild(saveBtn);
+            const savedBadge = makeEl("span", {
+              className: "file-tree-viewer-saved",
+              text: "Saved",
+            });
+            savedBadge.style.display = v.savedAt && Date.now() - v.savedAt < 2000 ? "" : "none";
+            header.appendChild(savedBadge);
+
+            // Overlay editor: highlighted <pre> sits behind a transparent
+            // <textarea>. Both share the same monospace metrics so the
+            // overlay aligns character-for-character. Scroll syncs in
+            // both directions so the highlight follows the caret.
+            const wrap = makeEl("div", { className: "file-tree-viewer-editor-wrap" });
+            const language = detectLanguageByExtension(v.path);
+            const hlPre = makeEl("pre", { className: "file-tree-viewer-hl" });
+            const hlCode = makeEl("code", {
+              className: language ? `hljs language-${language}` : "hljs",
+            });
+            hlPre.appendChild(hlCode);
+            const textarea = makeEl("textarea", {
+              className: "file-tree-viewer-text file-tree-viewer-editor",
+              attrs: { spellcheck: "false", wrap: "off" },
+            });
+            textarea.value = v.text;
+            if (v.readOnly || v.saveInFlight) {
+              textarea.setAttribute("disabled", "");
+            }
+            applySyntaxHighlight(hlCode, v.text, language);
+            const syncScroll = () => {
+              hlPre.scrollTop = textarea.scrollTop;
+              hlPre.scrollLeft = textarea.scrollLeft;
+            };
+            textarea.addEventListener("scroll", syncScroll);
+            textarea.addEventListener("input", () => {
+              v.text = textarea.value;
+              v.dirty = v.text !== v.originalText;
+              dirtyMarker.style.display = v.dirty ? "" : "none";
+              updateSaveBtn();
+              applySyntaxHighlight(hlCode, v.text, language);
+              syncScroll();
+            });
+            wrap.appendChild(hlPre);
+            wrap.appendChild(textarea);
+            body.appendChild(wrap);
             break;
+          }
           case "binary": {
-            header.appendChild(
-              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
-            );
+            header.appendChild(headerPath);
             header.appendChild(
               makeEl("span", { className: "file-tree-viewer-meta", text: "binary · " + sizeLabel }),
             );
+            if (v.readOnly) {
+              header.appendChild(
+                makeEl("span", {
+                  className: "file-tree-viewer-readonly",
+                  text: "read-only",
+                }),
+              );
+            }
             const btn = makeEl("button", {
               className: "wizard-button",
               text: "View as hex",
@@ -3697,24 +4269,105 @@
             );
             break;
           }
-          case "hex":
-            header.appendChild(
-              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
-            );
+          case "hex": {
+            header.appendChild(headerPath);
+            if (v.dirty) header.appendChild(dirtyMarker);
             header.appendChild(
               makeEl("span", { className: "file-tree-viewer-meta", text: "hex · " + sizeLabel }),
             );
-            body.appendChild(
-              makeEl("pre", {
-                className: "file-tree-viewer-hex",
-                text: formatHexDump(v.hexOffset, v.hexBytes),
-              }),
-            );
+            if (v.readOnly) {
+              header.appendChild(
+                makeEl("span", {
+                  className: "file-tree-viewer-readonly",
+                  text: "read-only",
+                }),
+              );
+            }
+            const saveBtn = makeEl("button", {
+              className: "wizard-button file-tree-viewer-save",
+              attrs: { type: "button" },
+              text: v.saveInFlight ? "Saving…" : "Save",
+            });
+            if (!v.dirty || v.readOnly || v.saveInFlight) {
+              saveBtn.setAttribute("disabled", "");
+            }
+            saveBtn.addEventListener("click", () => requestSaveFileContent(windowId));
+            header.appendChild(saveBtn);
+            if (v.savedAt && Date.now() - v.savedAt < 2000) {
+              header.appendChild(
+                makeEl("span", {
+                  className: "file-tree-viewer-saved",
+                  text: "Saved",
+                }),
+              );
+            }
+            // Render hex byte cells inline so we can attach click handlers
+            // for single-byte replace edits.
+            const container = makeEl("div", { className: "file-tree-viewer-hex" });
+            const bytes = decodeBase64ToBytes(v.hexBytes || "");
+            const BYTES_PER_LINE = 16;
+            for (let line = 0; line < bytes.length; line += BYTES_PER_LINE) {
+              const row = makeEl("div", { className: "file-tree-hex-row" });
+              const offsetLabel = (v.hexOffset + line)
+                .toString(16)
+                .padStart(8, "0")
+                .toUpperCase();
+              row.appendChild(makeEl("span", { className: "file-tree-hex-offset", text: offsetLabel }));
+              const bytesContainer = makeEl("span", { className: "file-tree-hex-bytes" });
+              const asciiContainer = makeEl("span", { className: "file-tree-hex-ascii" });
+              for (let j = 0; j < BYTES_PER_LINE; j += 1) {
+                const idx = line + j;
+                if (idx < bytes.length) {
+                  const b = bytes[idx];
+                  const cell = makeEl("button", {
+                    className: "file-tree-hex-cell",
+                    attrs: { type: "button" },
+                    text: b.toString(16).padStart(2, "0").toUpperCase(),
+                    dataset: { hexOffset: String(v.hexOffset + idx) },
+                  });
+                  if (v.readOnly) {
+                    cell.setAttribute("disabled", "");
+                  } else {
+                    cell.addEventListener("click", () => {
+                      const input = window.prompt("Replace byte (2 hex digits)", cell.textContent);
+                      if (input == null) return;
+                      const normalised = input.trim();
+                      if (!/^[0-9a-fA-F]{1,2}$/.test(normalised)) {
+                        window.alert("Enter 1 or 2 hex digits (0-9, A-F).");
+                        return;
+                      }
+                      const newByte = parseInt(normalised, 16);
+                      const prev = bytes[idx];
+                      if (prev === newByte) return;
+                      bytes[idx] = newByte;
+                      v.undoStack.push({ offset: idx, prev });
+                      v.redoStack = [];
+                      v.hexBytes = encodeBytesToBase64(bytes);
+                      recomputeHexDirty(state);
+                      renderFileTreeViewer(windowId);
+                    });
+                  }
+                  bytesContainer.appendChild(cell);
+                  bytesContainer.appendChild(document.createTextNode(" "));
+                  asciiContainer.appendChild(
+                    document.createTextNode(b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."),
+                  );
+                } else {
+                  bytesContainer.appendChild(document.createTextNode("   "));
+                  asciiContainer.appendChild(document.createTextNode(" "));
+                }
+              }
+              row.appendChild(bytesContainer);
+              row.appendChild(makeEl("span", { className: "file-tree-hex-divider", text: "|" }));
+              row.appendChild(asciiContainer);
+              row.appendChild(makeEl("span", { className: "file-tree-hex-divider", text: "|" }));
+              container.appendChild(row);
+            }
+            body.appendChild(container);
             break;
+          }
           case "error":
-            header.appendChild(
-              makeEl("span", { className: "file-tree-viewer-path", text: v.path }),
-            );
+            header.appendChild(headerPath);
             body.appendChild(
               makeEl("div", {
                 className: "file-tree-viewer-error",
@@ -6398,20 +7051,17 @@
                   }
                 }
               } else {
-                // SPEC-2009 amendment: file row activation routes to viewer.
-                state.viewer = {
-                  ...state.viewer,
-                  path: entry.path,
-                  mode: "loading",
-                  text: "",
-                  encoding: "",
-                  totalSize: 0,
-                  hexOffset: 0,
-                  hexBytes: "",
-                  error: { kind: "", message: "", size: null, limit: null },
-                };
-                renderFileTreeViewer(windowId);
-                requestFileContent(windowId, entry.path, "text");
+                // SPEC-2009 amendment Phase 2: gate navigation behind the
+                // Discard modal when the viewer has unsaved edits.
+                if (
+                  queueNavigationGuardedByDirty(windowId, {
+                    kind: "switch_file",
+                    path: entry.path,
+                  })
+                ) {
+                  return;
+                }
+                beginViewerForFile(windowId, entry.path);
               }
               renderFileTree(windowId);
             };
@@ -7719,6 +8369,18 @@
           }
           frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
           frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(windowData.id);
+
+          // SPEC-2009 amendment Phase 2 FR-033/041: Ctrl+S / Cmd+S triggers
+          // a save when focus is inside this File Tree window so other
+          // windows' inputs are not stolen. Bound on the window body element
+          // because keydown bubbles up from the textarea / hex cells.
+          body.addEventListener("keydown", (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+              if (event.shiftKey) return; // leave Save-As (future) alone
+              event.preventDefault();
+              frontendUnits.branchesFileTreeSurface.requestSaveFileContent(windowData.id);
+            }
+          });
           return;
         }
 
@@ -9022,7 +9684,9 @@
             const topmostId = topmostWindowId(workspace);
             if (topmostId && ids.has(topmostId)) {
               focusWindowLocally(topmostId);
-              scheduleTerminalFocusActivation(topmostId);
+              scheduleTerminalFocusActivation(topmostId, {
+                shouldPersistGeometry: false,
+              });
             } else {
               focusedId = null;
             }
@@ -9098,6 +9762,13 @@
         renderWorktreePicker,
         renderFileTreeViewer,
         requestFileContent,
+        // SPEC-2009 amendment Phase 2: edit affordance.
+        requestSaveFileContent,
+        renderDiscardModal,
+        renderConflictModal,
+        queueNavigationGuardedByDirty,
+        beginViewerForFile,
+        applyAfterSaveContinuation,
       });
 
       const profileSurface = Object.freeze({
@@ -9316,16 +9987,31 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
               event.id,
             );
+            const text = event.text || "";
+            const newline = (event.newline || "lf").toString();
             state.viewer = {
               ...state.viewer,
               path: event.path,
               mode: "text",
-              text: event.text || "",
+              text,
               encoding: (event.encoding || "").toString().toUpperCase(),
               totalSize: event.total_size || 0,
               hexOffset: 0,
               hexBytes: "",
               error: { kind: "", message: "", size: null, limit: null },
+              dirty: false,
+              originalText: text,
+              originalBytes: null,
+              originalEncoding: (event.encoding || "utf-8").toString(),
+              originalNewline: newline,
+              originalHasBom: Boolean(event.has_bom),
+              originalMtime: Number(event.mtime || 0),
+              originalSize: Number(event.total_size || 0),
+              readOnly: Boolean(event.read_only),
+              savedAt: 0,
+              saveInFlight: false,
+              undoStack: [],
+              redoStack: [],
             };
             frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
             break;
@@ -9334,6 +10020,7 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
               event.id,
             );
+            const bytes = decodeBase64ToBytes(event.bytes_b64 || "");
             state.viewer = {
               ...state.viewer,
               path: event.path,
@@ -9344,8 +10031,74 @@
               hexOffset: event.offset || 0,
               hexBytes: event.bytes_b64 || "",
               error: { kind: "", message: "", size: null, limit: null },
+              dirty: false,
+              originalText: "",
+              originalBytes: bytes,
+              originalEncoding: "",
+              originalNewline: "lf",
+              originalHasBom: false,
+              originalMtime: Number(event.mtime || 0),
+              originalSize: Number(event.total_size || 0),
+              readOnly: Boolean(event.read_only),
+              savedAt: 0,
+              saveInFlight: false,
+              undoStack: [],
+              redoStack: [],
             };
             frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
+            break;
+          }
+          case "file_content_saved": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            const v = state.viewer;
+            v.dirty = false;
+            v.saveInFlight = false;
+            v.savedAt = Date.now();
+            v.originalMtime = Number(event.new_mtime || 0);
+            v.originalSize = Number(event.new_size || 0);
+            // Snapshot current edit as the new baseline.
+            if (v.mode === "text") {
+              v.originalText = v.text;
+            } else if (v.mode === "hex") {
+              v.originalBytes = decodeBase64ToBytes(v.hexBytes || "");
+            }
+            // Resume any pending navigation queued behind the Discard modal.
+            frontendUnits.branchesFileTreeSurface.applyAfterSaveContinuation(event.id);
+            frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
+            break;
+          }
+          case "file_content_save_error": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
+            const v = state.viewer;
+            v.saveInFlight = false;
+            const kind = (event.error_kind || "").toString();
+            if (kind === "conflict") {
+              state.conflictModal = {
+                open: true,
+                currentMtime: Number(event.current_mtime || 0),
+                currentSize: Number(event.current_size || 0),
+                pendingPayload: state.lastSavePayload || null,
+              };
+              frontendUnits.branchesFileTreeSurface.renderConflictModal(event.id);
+            } else {
+              v.error = {
+                kind,
+                message: event.message || "",
+                size: event.current_size || null,
+                limit: null,
+              };
+              frontendUnits.branchesFileTreeSurface.renderFileTreeViewer(event.id);
+            }
+            // Either way the queued navigation should not silently proceed
+            // on failure; we keep the dirty edit and let the user retry.
+            const pending = state.discardModal && state.discardModal.pendingAction;
+            if (pending && pending.queuedFromDiscard) {
+              state.discardModal.pendingAction = null;
+            }
             break;
           }
           case "file_content_error": {
