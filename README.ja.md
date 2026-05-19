@@ -103,11 +103,16 @@ gwt
 オペレーターは出力された URL を任意のブラウザで開いて操作します。
 
 ```bash
-gwt serve                              # 127.0.0.1、ランダムポート、手動オープン
-gwt serve --port 8787 --open           # 固定ポート + システムブラウザ自動起動
-gwt serve --bind 0.0.0.0 --port 8787   # LAN (VPN 越し含む) へ公開
+gwt serve                              # 127.0.0.1、ランダムポート、ブラウザ自動起動
+gwt serve --no-open                    # 同じ動作だがブラウザ自動起動を抑制 (CI / スクリプト用)
+gwt serve --port 8787                  # 固定ポート + ブラウザ自動起動
+gwt serve --bind 0.0.0.0 --port 8787   # LAN (VPN 越し含む) へ公開 + ブラウザ自動起動
 gwt --headless --port 8787             # `gwt serve --port 8787` と同じ
 ```
+
+既定でシステムブラウザが自動起動します。CI / 自動化で server だけ立ち上げ
+たい場合は `--no-open` を指定してください。`--open` は既存スクリプト互換性
+維持のため no-op flag として残しています。
 
 信頼境界は **LAN のみ** (VPN-extended LAN を含む) です。`gwt serve` には
 TLS 終端、認証ゲート、レート制限は組み込まれていません。`--bind` で

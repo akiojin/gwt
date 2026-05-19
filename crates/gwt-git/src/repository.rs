@@ -46,9 +46,8 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
     }
     // Check if path itself is a bare repo (has HEAD + objects + refs)
     if path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists() {
-        let develop = find_develop_worktree(path.parent().unwrap_or(path));
         return RepoType::Bare {
-            develop_worktree: develop,
+            develop_worktree: None,
         };
     }
     // Check child directories for bare repos, worktrees, or normal repos
@@ -76,9 +75,12 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             }
         }
         if found_bare {
-            let develop = find_develop_worktree(path);
+            // SPEC-1934 2026-05-20 Update FR-050: child scan で bare layout を
+            // 検出した場合、`develop` / `main` 等の worktree を auto-select しない。
+            // 呼び出し側 (`resolve_project_target`) が workspace home を返し、
+            // 実際の worktree 選択は Workspace Overview に委ねる。
             return RepoType::Bare {
-                develop_worktree: develop,
+                develop_worktree: None,
             };
         }
     }
@@ -96,6 +98,9 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             };
         }
         if dot_git.is_file() {
+            // Subdir inside a linked worktree: resolve to the worktree root so
+            // a path like `<worktree>/src/foo` opens the worktree, not the
+            // workspace home (preserves SC-035 direct-pick semantics).
             return RepoType::Bare {
                 develop_worktree: Some(parent.to_path_buf()),
             };
@@ -104,31 +109,13 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             && parent.join("objects").exists()
             && parent.join("refs").exists()
         {
-            let develop = find_develop_worktree(parent.parent().unwrap_or(parent));
             return RepoType::Bare {
-                develop_worktree: develop,
+                develop_worktree: None,
             };
         }
         current = parent.to_path_buf();
     }
     RepoType::NonRepo
-}
-
-/// Find a develop worktree in the given directory.
-/// Looks for a child directory named "develop" that has a .git worktree marker.
-fn find_develop_worktree(parent: &Path) -> Option<PathBuf> {
-    let develop = parent.join("develop");
-    if develop.is_dir() && develop.join(".git").exists() {
-        return Some(develop);
-    }
-    let mut worktrees = fs::read_dir(parent)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join(".git").is_file())
-        .collect::<Vec<_>>();
-    worktrees.sort();
-    worktrees.into_iter().next()
 }
 
 /// Derived filesystem target for creating a gwt project from a GitHub repo URL.
@@ -685,26 +672,37 @@ mod tests {
     }
 
     #[test]
-    fn detect_repo_type_prefers_any_child_worktree_when_develop_is_absent() {
+    fn detect_repo_type_returns_bare_with_none_for_child_scan() {
+        // SPEC-1934 2026-05-20 Update (FR-050): child scan で bare layout を
+        // 検出した場合、`develop` / `main` / 任意の worktree を auto-select する
+        // ロジックは撤回される。`Bare { develop_worktree: None }` を返し、
+        // routing 先は呼び出し側 (`resolve_project_target`) に委ねる。
         let tmp = tempfile::tempdir().unwrap();
         let bare_dir = tmp.path().join("repo.git");
         let main_worktree = tmp.path().join("main");
+        let develop_worktree = tmp.path().join("develop");
         gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
             .output()
             .unwrap();
-        std::fs::create_dir_all(&main_worktree).unwrap();
-        std::fs::write(
-            main_worktree.join(".git"),
-            "gitdir: ../repo.git/worktrees/main\n",
-        )
-        .unwrap();
+        for wt in [&main_worktree, &develop_worktree] {
+            std::fs::create_dir_all(wt).unwrap();
+            std::fs::write(
+                wt.join(".git"),
+                format!(
+                    "gitdir: ../repo.git/worktrees/{}\n",
+                    wt.file_name().unwrap().to_string_lossy()
+                ),
+            )
+            .unwrap();
+        }
 
         assert_eq!(
             detect_repo_type(tmp.path()),
             RepoType::Bare {
-                develop_worktree: Some(main_worktree)
-            }
+                develop_worktree: None
+            },
+            "child scan must not auto-select develop or main worktrees (SPEC-1934 FR-050)"
         );
     }
 

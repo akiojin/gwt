@@ -22,7 +22,11 @@ use std::net::{IpAddr, Ipv4Addr};
 ///   GUI behaviour at `crates/gwt/src/embedded_server.rs`). User-provided
 ///   values are kept verbatim.
 /// - `open`: whether to spawn the system default browser at the served URL
-///   after the server is up.
+///   after the server is up. SPEC-1942 2026-05-20 Amendment (FR-095): the
+///   default is `true`, matching the common headless user journey of "start
+///   server, then open browser." `--no-open` is the explicit opt-out for
+///   CI / automation; `--open` is preserved as a no-op for backward
+///   compatibility with existing scripts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeArgs {
     pub bind: IpAddr,
@@ -35,7 +39,7 @@ impl Default for ServeArgs {
         Self {
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 0,
-            open: false,
+            open: true,
         }
     }
 }
@@ -117,7 +121,13 @@ pub fn parse(args: &[String]) -> Result<ServeArgs, ServeParseError> {
                     .map_err(|_| ServeParseError::InvalidPort(value.clone()))?;
             }
             "--open" => {
+                // SPEC-1942 2026-05-20 Amendment: `--open` is now the default
+                // and kept as a no-op flag for backward compatibility so
+                // existing CI scripts that pass it explicitly keep working.
                 out.open = true;
+            }
+            "--no-open" => {
+                out.open = false;
             }
             other => return Err(ServeParseError::UnknownFlag(other.to_string())),
         }
@@ -133,12 +143,52 @@ mod tests {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
+    // SPEC-1942 2026-05-20 Amendment: `--open` is now the default, so bare
+    // `gwt serve` should set `open: true`.
     #[test]
-    fn parse_serve_defaults_bind_to_loopback_and_port_to_zero_and_open_false() {
+    fn parse_serve_defaults_bind_to_loopback_and_port_to_zero_and_open_true() {
         let parsed = parse(&argv(&["serve"])).expect("serve parses with defaults");
         assert_eq!(parsed.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(parsed.port, 0);
-        assert!(!parsed.open);
+        assert!(
+            parsed.open,
+            "SPEC-1942 2026-05-20 Amendment: --open is now the default"
+        );
+    }
+
+    #[test]
+    fn parse_serve_no_open_overrides_default() {
+        let parsed =
+            parse(&argv(&["serve", "--no-open"])).expect("serve accepts --no-open as opt-out");
+        assert!(
+            !parsed.open,
+            "--no-open must suppress the new default browser auto-open"
+        );
+    }
+
+    // Backward compatibility: scripts that already pass `--open` continue to
+    // work. The flag is now a no-op but parsing must still succeed.
+    #[test]
+    fn parse_serve_open_flag_is_still_accepted_as_noop() {
+        let parsed =
+            parse(&argv(&["serve", "--open"])).expect("explicit --open must still be accepted");
+        assert!(
+            parsed.open,
+            "--open is now redundant with the default, but must remain accepted"
+        );
+    }
+
+    // `--open` and `--no-open` together: rightmost flag wins (matches
+    // SPEC-1942 2026-05-20 Amendment scenario 3').
+    #[test]
+    fn parse_serve_last_open_flag_wins() {
+        let no_then_yes = parse(&argv(&["serve", "--no-open", "--open"]))
+            .expect("--no-open then --open should parse");
+        assert!(no_then_yes.open, "rightmost --open should win");
+
+        let yes_then_no = parse(&argv(&["serve", "--open", "--no-open"]))
+            .expect("--open then --no-open should parse");
+        assert!(!yes_then_no.open, "rightmost --no-open should win");
     }
 
     #[test]
