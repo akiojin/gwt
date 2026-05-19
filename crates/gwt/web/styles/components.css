@@ -3324,3 +3324,138 @@ kbd.op-kbd {
   text-align: center;
   color: var(--color-text-subtle);
 }
+
+/* SPEC-2359 US-42 — Workspace Resume Picker modal. Sized to comfortably
+   list previously-assigned agents without forcing the user to scroll
+   horizontally; tagged with explicit `text-transform: none` so the row
+   does not inherit the operator chrome uppercase styling. The shell
+   uses a modifier class (`.workspace-resume-picker-shell`) instead of
+   re-declaring `.modal-shell` so the bundled CSS keeps the canonical
+   `.modal-shell` primitive contract enforced by
+   `embedded_web_modal_frame_primitives_define_shared_contracts`. */
+:root[data-theme] .workspace-resume-picker-shell {
+  width: min(560px, calc(100vw - 32px));
+  gap: var(--space-3);
+}
+
+:root[data-theme] .workspace-resume-picker-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+  letter-spacing: 0.04em;
+  color: var(--color-text);
+}
+
+:root[data-theme] .workspace-resume-picker-subtitle {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .workspace-resume-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 60vh;
+  overflow: auto;
+}
+
+:root[data-theme] .workspace-resume-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  text-align: left;
+  font: inherit;
+  text-transform: none;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+:root[data-theme] .workspace-resume-picker-row:hover,
+:root[data-theme] .workspace-resume-picker-row:focus-visible {
+  border-color: var(--color-accent, var(--color-border-strong));
+  background: var(--color-surface-elevated);
+  outline: none;
+}
+
+:root[data-theme] .workspace-resume-picker-row-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .workspace-resume-picker-row-name {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+:root[data-theme] .workspace-resume-picker-row-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill, 999px);
+  font-size: var(--type-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+:root[data-theme] .workspace-resume-picker-row-tag.is-conversation {
+  background: rgba(56, 189, 248, 0.12);
+  color: rgb(125, 211, 252);
+}
+
+:root[data-theme] .workspace-resume-picker-row-tag.is-fresh {
+  background: rgba(148, 163, 184, 0.16);
+  color: rgb(203, 213, 225);
+}
+
+:root[data-theme] .workspace-resume-picker-row-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px var(--space-2);
+  font-size: var(--type-2xs);
+  color: var(--color-text-subtle);
+  font-family: var(--font-mono);
+}
+
+:root[data-theme] .workspace-resume-picker-row-meta-line {
+  display: contents;
+}
+
+:root[data-theme] .workspace-resume-picker-row-meta-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-subtle);
+}
+
+:root[data-theme] .workspace-resume-picker-row-meta-value {
+  word-break: break-word;
+  color: var(--color-text);
+}
+
+:root[data-theme] .workspace-resume-picker-empty {
+  padding: var(--space-3);
+  text-align: center;
+  color: var(--color-text-subtle);
+}
+
+:root[data-theme] .workspace-resume-picker-error {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: rgba(248, 113, 113, 0.12);
+  color: rgb(252, 165, 165);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .workspace-resume-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}

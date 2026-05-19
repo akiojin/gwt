@@ -590,10 +590,19 @@ impl AppRuntime {
         };
 
         let sessions_dir = self.sessions_dir.clone();
+        // SPEC-2359 US-42 follow-up: real-world projections carry many
+        // agents with `affiliation_status = unassigned` (set when the
+        // agent did not go through an explicit `workspace ensure` /
+        // `workspace join` flow). Resume Picker still wants to surface
+        // them as candidates as long as the agent has a Session toml the
+        // launcher can drive — otherwise the picker reports "No
+        // resumable agents" even when the user can clearly see prior
+        // sessions in the Workspace card. We therefore include every
+        // agent (Assigned + Unassigned) and rely on the Session toml +
+        // `live_session_ids` filters below to keep the list correct.
         let mut entries: Vec<gwt::ResumableAgentView> = projection
             .agents
             .iter()
-            .filter(|agent| agent.is_assigned())
             .filter(|agent| !agent.session_id.trim().is_empty())
             .filter(|agent| !live_session_ids.contains(agent.session_id.as_str()))
             .filter_map(|agent| {

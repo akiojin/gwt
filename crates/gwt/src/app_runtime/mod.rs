@@ -9878,6 +9878,59 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_list_resumable_agents_includes_unassigned_agents_with_session_toml() {
+        // SPEC-2359 US-42 follow-up: production projections often store
+        // agents with `affiliation_status = unassigned` (no explicit
+        // `workspace join` step). Resume Picker must still offer them as
+        // candidates when a Session toml is on disk; otherwise users see
+        // "No resumable agents" for every Workspace they did not
+        // manually ensure / join.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let session_id = "session-unassigned-1";
+        let mut projection = projection_with_assigned_agent(&repo, session_id);
+        projection.agents[0].affiliation_status =
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let sessions_dir = temp.path().join("sessions");
+        write_resumable_session_for_test(
+            &sessions_dir,
+            session_id,
+            &repo,
+            "work/test",
+            gwt_agent::AgentId::Codex,
+            Some("agent-session-uuid"),
+        );
+
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ListResumableAgents { workspace_id: None },
+        );
+
+        match events.first().map(|outbound| &outbound.event) {
+            Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+                assert_eq!(
+                    agents.len(),
+                    1,
+                    "Unassigned agent with a backing Session toml must still surface",
+                );
+                assert_eq!(agents[0].session_id, session_id);
+            }
+            other => panic!("unexpected backend event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn app_runtime_list_resumable_agents_excludes_live_session_ids() {
         let _env_lock = env_test_lock()
             .lock()

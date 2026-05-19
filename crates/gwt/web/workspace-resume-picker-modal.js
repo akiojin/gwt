@@ -8,6 +8,40 @@
 
 import { createFocusTrap } from "./focus-trap.js";
 
+// Trim a full worktree path down to the last two segments so the picker
+// row stays scannable on small modals. e.g.
+// `/Users/akiojin/Workbench/gwt/work/20260518-0818` becomes
+// `gwt / work/20260518-0818`. Leading-slash paths drop the absolute
+// prefix so the user sees "what" not "where".
+function shortenWorktreePath(path) {
+  if (typeof path !== "string" || !path) return "";
+  const trimmed = path.replace(/\\+/g, "/").replace(/\/+$/, "");
+  const parts = trimmed.split("/").filter(Boolean);
+  if (parts.length <= 2) return trimmed;
+  return `${parts[parts.length - 2]} / ${parts[parts.length - 1]}`;
+}
+
+// Convert an ISO 8601 timestamp into a compact relative string ("3m ago"
+// / "2h ago" / "yesterday") so the row sticks to one line instead of
+// showing the full RFC-3339 form. Falls back to the raw value when
+// parsing fails so the picker never silently drops a timestamp.
+function formatRelativeTime(iso) {
+  if (typeof iso !== "string" || !iso) return "";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return iso;
+  const diff = Date.now() - ms;
+  if (diff < 0) return new Date(ms).toLocaleString();
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
 // SPEC-2356 — preserve the focus return target and focus trap release
 // between successive `renderWorkspaceResumePicker` calls without leaking
 // when the modal element is detached.
@@ -83,28 +117,57 @@ export function renderWorkspaceResumePicker({
   } else {
     const list = createNode("div", "workspace-resume-picker-list");
     for (const agent of agents) {
-      const row = createNode("button", "workspace-resume-picker-row wizard-button");
+      const row = createNode("button", "workspace-resume-picker-row");
       row.type = "button";
       row.dataset.sessionId = agent.session_id;
       const heading = createNode("div", "workspace-resume-picker-row-heading");
       heading.appendChild(
-        createNode("span", "workspace-resume-picker-row-name", agent.display_name || agent.agent_id),
+        createNode(
+          "span",
+          "workspace-resume-picker-row-name",
+          agent.display_name || agent.agent_id,
+        ),
       );
-      if (agent.resume_kind === "metadata_only") {
-        heading.appendChild(
-          createNode("span", "workspace-resume-picker-row-tag", "Fresh start"),
-        );
-      } else {
-        heading.appendChild(
-          createNode("span", "workspace-resume-picker-row-tag", "Conversation"),
-        );
-      }
+      const tagClass = agent.resume_kind === "metadata_only"
+        ? "workspace-resume-picker-row-tag is-fresh"
+        : "workspace-resume-picker-row-tag is-conversation";
+      heading.appendChild(
+        createNode(
+          "span",
+          tagClass,
+          agent.resume_kind === "metadata_only" ? "Fresh start" : "Conversation",
+        ),
+      );
       row.appendChild(heading);
+
+      // Pretty-print metadata: branch / shortened worktree / readable
+      // timestamp on their own rows. Long paths are trimmed to the last
+      // two path segments so the row stays scannable.
       const meta = createNode("div", "workspace-resume-picker-row-meta");
-      if (agent.branch) meta.appendChild(createNode("span", "", agent.branch));
-      if (agent.worktree_path) meta.appendChild(createNode("span", "", agent.worktree_path));
+      if (agent.branch) {
+        const branchRow = createNode("div", "workspace-resume-picker-row-meta-line");
+        branchRow.appendChild(createNode("span", "workspace-resume-picker-row-meta-label", "Branch"));
+        branchRow.appendChild(createNode("span", "workspace-resume-picker-row-meta-value", agent.branch));
+        meta.appendChild(branchRow);
+      }
+      if (agent.worktree_path) {
+        const shortPath = shortenWorktreePath(agent.worktree_path);
+        const pathRow = createNode("div", "workspace-resume-picker-row-meta-line");
+        pathRow.appendChild(createNode("span", "workspace-resume-picker-row-meta-label", "Worktree"));
+        pathRow.appendChild(createNode("span", "workspace-resume-picker-row-meta-value", shortPath));
+        meta.appendChild(pathRow);
+      }
       if (agent.last_activity_at) {
-        meta.appendChild(createNode("span", "", agent.last_activity_at));
+        const whenRow = createNode("div", "workspace-resume-picker-row-meta-line");
+        whenRow.appendChild(createNode("span", "workspace-resume-picker-row-meta-label", "Last"));
+        whenRow.appendChild(
+          createNode(
+            "span",
+            "workspace-resume-picker-row-meta-value",
+            formatRelativeTime(agent.last_activity_at),
+          ),
+        );
+        meta.appendChild(whenRow);
       }
       if (meta.childElementCount > 0) row.appendChild(meta);
       row.addEventListener("click", (event) => {
