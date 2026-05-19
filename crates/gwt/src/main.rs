@@ -27,7 +27,7 @@ use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    window::WindowBuilder,
+    window::{Window, WindowBuilder},
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -1381,6 +1381,37 @@ mod tests {
         assert!(
             !runtime_mod_source.contains("RuntimeDaemonPublish"),
             "app_runtime/mod.rs should not regain daemon publish queue ownership"
+        );
+    }
+
+    // SPEC-1942 US-14 / 2026-05-20 Amendment Bug A: the GUI bootstrap must keep
+    // the `tao::Window` alive alongside the `wry::WebView` until `event_loop.run`
+    // terminates. On Windows the `tao::Window::Drop` impl calls
+    // `DestroyWindow(hwnd)`, which invalidates WebView2's parent HWND and
+    // leaves the process running an invisible window. Binding both into a
+    // tuple captured by the run-closure prevents that destruction.
+    #[test]
+    fn webview_surface_pairs_window_with_webview_for_event_loop_lifetime() {
+        let main_source = include_str!("main.rs");
+        // SPEC-1942 2026-05-20 Amendment Bug A: assemble the buggy pattern
+        // from substrings so the test's own assert message does not match
+        // the search and report a false positive.
+        let buggy_drop: String = ["let _ = ", "window", ";"].concat();
+        assert!(
+            main_source.contains("Option<(Window, wry::WebView)>"),
+            "webview_surface must hold the tao::Window alongside the wry::WebView so the OS window survives until event_loop.run terminates"
+        );
+        assert!(
+            main_source.contains("Some((window, webview))"),
+            "the GUI bootstrap must move the freshly built Window into webview_surface (do not drop it at the end of the inner block)"
+        );
+        assert!(
+            !main_source.contains(buggy_drop.as_str()),
+            "the bare `let _ = window` discards the Window at block end and on Windows triggers DestroyWindow before event_loop.run runs"
+        );
+        assert!(
+            main_source.contains("if let Some((_, webview)) = webview_surface.as_ref()"),
+            "ReloadWebView dispatch must destructure webview_surface as a (Window, WebView) tuple"
         );
     }
 
@@ -5978,11 +6009,18 @@ fn main() -> wry::Result<()> {
         app.active_project_root().map(Path::to_path_buf),
     );
 
-    // SPEC-1942 US-14: GUI path builds a wry/tao surface; headless path keeps
-    // the event_loop alive without any native window so the same closure can
-    // process UserEvent::Frontend / RuntimeHook / QuitApp messages from
-    // browser clients and signal handlers alike.
-    let webview_surface: Option<wry::WebView> = if serve_args.is_none() {
+    // SPEC-1942 US-14 / 2026-05-20 Amendment (Bug A): GUI path builds a wry/tao
+    // surface; headless path keeps the event_loop alive without any native
+    // window so the same closure can process UserEvent::Frontend / RuntimeHook
+    // / QuitApp messages from browser clients and signal handlers alike.
+    //
+    // The Window must live alongside the WebView until `event_loop.run`
+    // terminates: wry only borrows the Window (`&Window`) when attaching the
+    // WebView2 / WKWebView, and on Windows `tao::Window::Drop` calls
+    // `DestroyWindow(hwnd)` which invalidates the parent HWND that WebView2
+    // renders into. Binding the pair in a tuple keeps the Rust ownership of
+    // `Window` until the closure (and therefore the process) ends.
+    let webview_surface: Option<(Window, wry::WebView)> = if serve_args.is_none() {
         let window = WindowBuilder::new()
             .with_title(APP_NAME)
             .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
@@ -6009,12 +6047,7 @@ fn main() -> wry::Result<()> {
             let vbox = window.default_vbox().unwrap();
             builder.build_gtk(vbox)?
         };
-        // Keep the Window alive on the heap for the lifetime of the event
-        // loop. WebView holds the underlying NSWindow / HWND alive via the
-        // platform handle, but Box<Window> would still drop the Rust struct
-        // when this block ends — which is fine because the OS window stays.
-        let _ = window;
-        Some(webview)
+        Some((window, webview))
     } else {
         None
     };
@@ -6485,7 +6518,7 @@ fn main() -> wry::Result<()> {
                             // GUI builds, but guard against accidental
                             // dispatch when the headless path leaves the
                             // option as `None`.
-                            if let Some(webview) = webview_surface.as_ref() {
+                            if let Some((_, webview)) = webview_surface.as_ref() {
                                 if let Err(error) = webview.reload() {
                                     eprintln!("webview reload failed: {error}");
                                 }
