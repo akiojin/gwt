@@ -56,10 +56,14 @@ fn serve_mode_starts_server_without_opening_webview() {
     // GUI session on the same machine.
     let temp_cwd = tempfile::tempdir().expect("temp cwd");
 
+    // SPEC-1942 2026-05-20 Amendment: `gwt serve` now auto-opens the system
+    // browser by default. Pass `--no-open` so the regression test does not
+    // pop a browser window on the developer's machine.
     let mut child = Command::new(env!("CARGO_BIN_EXE_gwt"))
         .arg("serve")
         .arg("--port")
         .arg("0")
+        .arg("--no-open")
         .env("GWT_FORCE_NEW_INSTANCE", "1")
         .current_dir(temp_cwd.path())
         .stdin(Stdio::null())

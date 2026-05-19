@@ -43,11 +43,19 @@
   <Fragment>
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="GwtExecutableComponent">
-        <File Id="GwtExecutable" Source="!(bindpath.gwt)gwt.exe" KeyPath="yes" />
+        <!--
+          SPEC-1942 2026-05-20 Amendment Bug B: WiX v4 defaults the installed
+          File Name to the literal Source string when Name is omitted, so the
+          bindpath binder variable leaks into the on-disk file name (observed
+          in v9.37.0 as `!(bindpath.gwt)gwt.exe`). Pin the Name explicitly so
+          the installed file is always `gwt.exe` regardless of how bindpath
+          resolves at build time.
+        -->
+        <File Id="GwtExecutable" Source="!(bindpath.gwt)gwt.exe" Name="gwt.exe" KeyPath="yes" />
         <Environment Id="GwtUserPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" />
       </Component>
       <Component Id="GwtdExecutableComponent">
-        <File Id="GwtdExecutable" Source="!(bindpath.gwt)gwtd.exe" KeyPath="yes" />
+        <File Id="GwtdExecutable" Source="!(bindpath.gwt)gwtd.exe" Name="gwtd.exe" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
