@@ -34,6 +34,14 @@ use crate::{embedded_web, AppEventProxy, DispatchTarget, OutboundEvent, UserEven
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
+/// Upper bound on the in-memory access log ring buffer. The canonical sink
+/// for production is `tracing::info!(target: "gwt_access", ...)` which writes
+/// to `~/.gwt/logs/<date>/`; this in-memory ring exists only so tests (and an
+/// eventual operator-visible Live tab) can sample the most recent entries
+/// without parsing log files. Older entries are evicted FIFO once the ring
+/// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
+/// would grow without limit in long-running `gwt serve` sessions.
+const ACCESS_LOG_RING_CAPACITY: usize = 1024;
 
 /// One captured HTTP / WebSocket access event. Emitted both as
 /// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
@@ -54,16 +62,21 @@ pub struct AccessLogRecord {
 
 /// In-memory ring of access log entries. Cloning yields a handle to the same
 /// underlying buffer (Arc-wrapped) so the embedded server, middleware and
-/// tests observe the same recordings.
+/// tests observe the same recordings. The ring is capped at
+/// [`ACCESS_LOG_RING_CAPACITY`] entries; older records are evicted FIFO so
+/// memory stays bounded under long-running `gwt serve`.
 #[derive(Clone, Default)]
 pub struct AccessLogSink {
-    inner: Arc<Mutex<Vec<AccessLogRecord>>>,
+    inner: Arc<Mutex<std::collections::VecDeque<AccessLogRecord>>>,
 }
 
 impl AccessLogSink {
     pub(crate) fn record(&self, rec: AccessLogRecord) {
         if let Ok(mut guard) = self.inner.lock() {
-            guard.push(rec);
+            if guard.len() == ACCESS_LOG_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(rec);
         }
     }
 
@@ -73,7 +86,7 @@ impl AccessLogSink {
     pub fn snapshot(&self) -> Vec<AccessLogRecord> {
         self.inner
             .lock()
-            .map(|guard| guard.clone())
+            .map(|guard| guard.iter().cloned().collect())
             .unwrap_or_default()
     }
 }

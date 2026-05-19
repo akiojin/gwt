@@ -5797,11 +5797,18 @@ fn main() -> wry::Result<()> {
 
     let argv: Vec<String> = std::env::args().collect();
     let route = front_door_route(&argv);
+    if !matches!(route, runtime_support::FrontDoorRoute::Gui) {
+        // SPEC-1942 US-14 follow-up: Windows builds use
+        // `windows_subsystem = "windows"` so stdout/stderr are detached by
+        // default. CLI verbs *and* the headless route both need terminal IO
+        // (CLI for command output, `gwt serve` for the printed browser URL
+        // and access log lines), so attach to the parent console for both.
+        attach_parent_console_for_cli();
+    }
     if !matches!(
         route,
         runtime_support::FrontDoorRoute::Gui | runtime_support::FrontDoorRoute::Headless
     ) {
-        attach_parent_console_for_cli();
         if let Err(error) = run_cli(&argv) {
             eprintln!("CLI dispatch failed: {error}");
             std::process::exit(1);

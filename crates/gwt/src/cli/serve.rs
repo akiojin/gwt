@@ -2,12 +2,13 @@
 //! equivalent `gwt --headless` alias.
 //!
 //! Unlike the other `cli/<family>.rs` modules, `serve` is **not** dispatched
-//! through `run_cli` / `CliCommand`. Instead, [`crate::runtime_support::FrontDoorRoute::Headless`]
-//! is detected by [`crate::runtime_support::front_door_route`] and `main()`
-//! calls [`parse`] on the same argv slice to obtain [`ServeArgs`] before
-//! handing off to the headless boot path. `should_dispatch_cli` is intentionally
-//! left unaware of `serve` so the GUI/CLI dual-mode contract from SPEC-1942 US-1
-//! stays untouched (FR-101).
+//! through `run_cli` / `CliCommand`. Instead, `FrontDoorRoute::Headless` is
+//! detected by `front_door_route` (both defined in the binary-only
+//! `runtime_support` module) and `main()` calls [`parse`] on the same argv
+//! slice to obtain [`ServeArgs`] before handing off to the headless boot
+//! path. `should_dispatch_cli` is intentionally left unaware of `serve` so
+//! the GUI/CLI dual-mode contract from SPEC-1942 US-1 stays untouched
+//! (FR-101).
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};

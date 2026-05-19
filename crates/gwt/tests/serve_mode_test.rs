@@ -7,6 +7,8 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Spawn `gwt serve --port 0`, wait for the URL line on stderr, hit
@@ -37,22 +39,49 @@ fn serve_mode_starts_server_without_opening_webview() {
         .expect("spawn gwt serve");
 
     let stderr = child.stderr.take().expect("stderr handle");
-    let reader = BufReader::new(stderr);
 
-    // Wait up to 30 seconds for the URL line. The first launch in CI builds
-    // the project-index runtime on demand, which is slow.
+    // SPEC-1942 US-14 follow-up: the prior in-loop `started.elapsed() >
+    // timeout` check was ineffective because `reader.lines()` blocks until
+    // a newline arrives. Move the read into a dedicated thread and use an
+    // `mpsc` channel so the parent can enforce a wall-clock deadline.
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader_handle = thread::Builder::new()
+        .name("gwt-serve-stderr-reader".to_string())
+        .spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn stderr reader thread");
+
+    // First-time launches build the project-index runtime on demand, which
+    // is slow on CI runners (Linux + cold cache routinely exceeds 60s
+    // before the URL line lands). Use a generous budget; the test still
+    // exits early as soon as the URL appears.
     let started = Instant::now();
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(180);
     let mut url: Option<String> = None;
     let mut transcript: Vec<String> = Vec::new();
-    for line in reader.lines().map_while(Result::ok) {
-        transcript.push(line.clone());
-        if let Some(rest) = line.strip_prefix("gwt browser URL: ") {
-            url = Some(rest.trim().to_string());
-            break;
-        }
-        if started.elapsed() > timeout {
-            break;
+    loop {
+        let remaining = match timeout.checked_sub(started.elapsed()) {
+            Some(remaining) if !remaining.is_zero() => remaining,
+            _ => break,
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(line) => {
+                transcript.push(line.clone());
+                if let Some(rest) = line.strip_prefix("gwt browser URL: ") {
+                    url = Some(rest.trim().to_string());
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // poll again, the outer deadline check will break the loop
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -61,6 +90,7 @@ fn serve_mode_starts_server_without_opening_webview() {
         None => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = reader_handle.join();
             panic!(
                 "did not observe 'gwt browser URL:' on stderr within {timeout:?}. transcript:\n{}",
                 transcript.join("\n")
@@ -83,6 +113,7 @@ fn serve_mode_starts_server_without_opening_webview() {
 
     let _ = child.kill();
     let status = child.wait().expect("wait for child");
+    let _ = reader_handle.join();
     // Killed subprocess on Unix yields a None code; the assertion here only
     // verifies that the wait completed successfully — that is, we did not
     // leak the child process.
