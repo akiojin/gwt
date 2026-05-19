@@ -1338,8 +1338,24 @@ mod tests {
             "app_runtime/mod.rs should not regain runtime output handling"
         );
         assert!(
+            !runtime_mod_source.contains("fn handle_runtime_status"),
+            "app_runtime/mod.rs should not regain runtime status handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_runtime_hook_event"),
+            "app_runtime/mod.rs should not regain runtime hook handling"
+        );
+        assert!(
+            !runtime_mod_source.contains("fn handle_daemon_runtime_"),
+            "app_runtime/mod.rs should not regain daemon runtime event handlers"
+        );
+        assert!(
             !runtime_mod_source.contains("enum RuntimeDaemonPublish"),
             "app_runtime/mod.rs should not regain the daemon publish queue"
+        );
+        assert!(
+            !runtime_mod_source.contains("RuntimeDaemonPublish"),
+            "app_runtime/mod.rs should not regain daemon publish queue ownership"
         );
     }
 
@@ -3024,6 +3040,36 @@ mod tests {
     }
 
     #[test]
+    fn runtime_status_missing_window_cleans_active_agent_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let stale_id = "tab-1::stale-agent".to_string();
+        runtime.active_agent_sessions.insert(
+            stale_id.clone(),
+            sample_active_agent_session("tab-1", &stale_id),
+        );
+        runtime
+            .window_details
+            .insert(stale_id.clone(), "stale detail".to_string());
+
+        let events =
+            runtime.handle_runtime_status(stale_id.clone(), WindowProcessStatus::Exited, None);
+
+        assert!(events.is_empty());
+        assert!(!runtime.active_agent_sessions.contains_key(&stale_id));
+        assert!(!runtime.window_details.contains_key(&stale_id));
+    }
+
+    #[test]
     fn app_runtime_window_helpers_cover_lookup_status_and_seeded_details() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -4247,7 +4293,10 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
-        assert_eq!(launch.remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            launch.remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
     }
 
     #[test]
@@ -5646,7 +5695,10 @@ mod tests {
             Some("enabled")
         );
         assert!(!effective_env.contains_key("SECRET"));
-        assert_eq!(remove_env, vec!["SECRET".to_string()]);
+        assert_eq!(
+            remove_env,
+            vec!["NO_COLOR".to_string(), "SECRET".to_string()]
+        );
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
