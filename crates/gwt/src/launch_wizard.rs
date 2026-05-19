@@ -1219,10 +1219,47 @@ impl LaunchWizardState {
             .cloned()
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
 
-        let agent_id = agent_id_from_key(&selected_agent.id);
-        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
-        if let Some(custom_agent) = selected_agent.custom_agent {
-            builder = builder.custom_agent(custom_agent);
+        // SPEC-1921 FR-090 (2026-05-18 amendment) / T295: when a saved
+        // Quick Start entry recorded `AgentId::Custom("<old-id>")` for a
+        // legacy `ClaudeCodeOpenaiCompat` preset that has since been
+        // migrated to `[builtinAgents.claudeCode.backends.<old-id>]`, the
+        // wizard MUST relaunch through the built-in Claude Code path with
+        // the matching backend profile attached. The remap is transparent
+        // to the caller; no UI prompt is shown.
+        let raw_agent_id = agent_id_from_key(&selected_agent.id);
+        let config_path = gwt_core::paths::gwt_config_path();
+        let remap_backend_id = if let gwt_agent::AgentId::Custom(_) = &raw_agent_id {
+            gwt_agent::resolve_legacy_backend_remap(&raw_agent_id, &config_path)
+        } else {
+            None
+        };
+        let (agent_id, backend_profile) = if let Some(backend_id) = remap_backend_id {
+            let profile = gwt_agent::load_backends_for_agent(
+                &config_path,
+                gwt_agent::BuiltinAgentId::ClaudeCode,
+            )
+            .ok()
+            .and_then(|profiles| profiles.into_iter().find(|p| p.id == backend_id));
+            match profile {
+                Some(profile) => (gwt_agent::AgentId::ClaudeCode, Some(profile)),
+                None => (raw_agent_id, None),
+            }
+        } else {
+            (raw_agent_id, None)
+        };
+
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
+        // FR-090: drop the legacy `selected_agent.custom_agent` when remap
+        // succeeded — the launch is now a built-in Claude Code with backend
+        // profile, not a Custom Coding Agent.
+        match (&backend_profile, selected_agent.custom_agent) {
+            (Some(profile), _) => {
+                builder = builder.backend_profile(profile.clone());
+            }
+            (None, Some(custom_agent)) => {
+                builder = builder.custom_agent(custom_agent);
+            }
+            (None, None) => {}
         }
 
         if !self.is_new_branch {

@@ -69,6 +69,12 @@ pub struct Session {
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
+    /// Active backend override id, if any (SPEC-1921 FR-102).
+    /// `None` means the agent launched against its default upstream
+    /// (no env override). Set only for built-in agents that support
+    /// Backend Override (Claude Code / Codex in the 2026-05-18 amendment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
     #[serde(default)]
     pub windows_shell: Option<WindowsShellKind>,
     /// Schema version of this persisted session. SPEC-1921 Phase 53 / FR-066:
@@ -141,6 +147,7 @@ impl Session {
             workflow_bypass: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
+            backend_id: None,
             windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             created_at: now,
@@ -458,6 +465,49 @@ mod tests {
             DockerLifecycleIntent::Connect
         );
         assert!(session.workflow_bypass.is_none());
+        // SPEC-1921 FR-102: new sessions default to no backend override.
+        assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn legacy_session_toml_without_backend_id_deserializes_with_none() {
+        // FR-102 backwards compatibility: sessions saved before the
+        // 2026-05-18 amendment carry no `backend_id` field.
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-666666666666"
+worktree_path = "/tmp/wt"
+branch = "main"
+agent_id = { type = "ClaudeCode" }
+agent_session_id = "abc"
+status = "Unknown"
+launch_command = ""
+launch_args = []
+created_at = "2026-05-18T00:00:00Z"
+updated_at = "2026-05-18T00:00:00Z"
+last_activity_at = "2026-05-18T00:00:00Z"
+display_name = "Claude Code"
+"#;
+        let session: Session = toml::from_str(legacy).expect("deserialize legacy");
+        assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn session_with_backend_id_round_trips() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        session.backend_id = Some("lmstudio".to_string());
+        let serialized = toml::to_string(&session).expect("serialize");
+        // FR-102: when present, persists under the canonical `backend_id` key.
+        assert!(serialized.contains("backend_id = \"lmstudio\""));
+        let parsed: Session = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(parsed.backend_id.as_deref(), Some("lmstudio"));
+    }
+
+    #[test]
+    fn session_with_no_backend_id_omits_field_on_serialize() {
+        let session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
+        let serialized = toml::to_string(&session).expect("serialize");
+        // skip_serializing_if keeps the field out of clean session files.
+        assert!(!serialized.contains("backend_id"));
     }
 
     #[test]

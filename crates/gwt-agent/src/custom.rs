@@ -27,6 +27,51 @@ pub struct ModeArgs {
     pub resume: Vec<String>,
 }
 
+/// Error variant emitted by [`CustomCodingAgent::validate_external_only`]
+/// when an entry fails the SPEC-1921 SC-023 impersonation safety check.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExternalAgentValidationError {
+    /// Basic field validation failed (empty id / display_name / command,
+    /// or id contains invalid characters). The detail is left intentionally
+    /// generic; callers translate to the existing custom-agents
+    /// `invalid_input` error path.
+    #[error("invalid external agent fields")]
+    InvalidFields,
+    /// The agent's `command` matches a built-in agent's package name.
+    /// Routes the Settings UI message toward `Agent Backends`.
+    #[error(
+        "command `{command}` impersonates the built-in {builtin_display_name} package; \
+         use Agent Backends to redirect that agent's LLM traffic instead"
+    )]
+    BuiltInImpersonation {
+        builtin_display_name: String,
+        command: String,
+    },
+}
+
+/// SPEC-1921 SC-023 helper: return the built-in display name whose
+/// `package_name` matches the given command, or `None` when no built-in
+/// is impersonated. Matching is exact and case-insensitive. The latest
+/// `@latest` suffix is normalized off so `@anthropic-ai/claude-code@latest`
+/// matches the registered `@anthropic-ai/claude-code` package.
+pub fn impersonated_builtin(command: &str) -> Option<String> {
+    // Lower-case first so we can strip `@latest` regardless of the user's
+    // typing case (`@LATEST`, `@Latest`, etc.).
+    let lower = command.trim().to_ascii_lowercase();
+    let normalized = lower.trim_end_matches("@latest").trim_end_matches('@');
+    if normalized.is_empty() {
+        return None;
+    }
+    for descriptor in crate::types::builtin_agent_descriptors() {
+        if let Some(pkg) = descriptor.package_name {
+            if pkg.to_ascii_lowercase() == normalized {
+                return Some(descriptor.display_name.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// A user-defined coding agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomCodingAgent {
@@ -59,6 +104,25 @@ impl CustomCodingAgent {
             return false;
         }
         self.id.chars().all(|c| c.is_alphanumeric() || c == '-')
+    }
+
+    /// SPEC-1921 SC-023 (2026-05-18 amendment): External Agent entries
+    /// MUST NOT impersonate a built-in agent's package. This safety check
+    /// runs at save time in the External Agent service and rejects rows
+    /// whose `command` matches any built-in `package_name`, routing the
+    /// user toward the `Agent Backends` surface where Claude Code / Codex
+    /// LLM redirection actually belongs.
+    pub fn validate_external_only(&self) -> Result<(), ExternalAgentValidationError> {
+        if !self.validate() {
+            return Err(ExternalAgentValidationError::InvalidFields);
+        }
+        if let Some(builtin) = impersonated_builtin(&self.command) {
+            return Err(ExternalAgentValidationError::BuiltInImpersonation {
+                builtin_display_name: builtin,
+                command: self.command.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Build the command and args for a given session mode.
@@ -122,6 +186,60 @@ mod tests {
         let mut a = sample_agent();
         a.command = String::new();
         assert!(!a.validate());
+    }
+
+    #[test]
+    fn validate_external_only_accepts_unrelated_command() {
+        let a = sample_agent();
+        a.validate_external_only().expect("plain agent ok");
+    }
+
+    #[test]
+    fn validate_external_only_rejects_claude_code_package_impersonation() {
+        for command in [
+            "@anthropic-ai/claude-code",
+            "@anthropic-ai/claude-code@latest",
+            "@ANTHROPIC-AI/Claude-Code@LATEST",
+        ] {
+            let mut a = sample_agent();
+            a.command = command.to_string();
+            let err = a.validate_external_only().unwrap_err();
+            match err {
+                ExternalAgentValidationError::BuiltInImpersonation {
+                    builtin_display_name,
+                    ..
+                } => {
+                    assert_eq!(builtin_display_name, "Claude Code");
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validate_external_only_rejects_codex_package_impersonation() {
+        let mut a = sample_agent();
+        a.command = "@openai/codex".to_string();
+        let err = a.validate_external_only().unwrap_err();
+        assert!(matches!(
+            err,
+            ExternalAgentValidationError::BuiltInImpersonation { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_external_only_translates_basic_field_failures() {
+        let mut a = sample_agent();
+        a.id = String::new();
+        let err = a.validate_external_only().unwrap_err();
+        assert!(matches!(err, ExternalAgentValidationError::InvalidFields));
+    }
+
+    #[test]
+    fn impersonated_builtin_returns_none_for_unrelated_command() {
+        assert!(impersonated_builtin("aider").is_none());
+        assert!(impersonated_builtin("cursor-agent").is_none());
+        assert!(impersonated_builtin("").is_none());
     }
 
     #[test]

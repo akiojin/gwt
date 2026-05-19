@@ -2288,6 +2288,30 @@ impl AppRuntime {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
+            FrontendEvent::ListAgentBackends { agent } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::agent_backend_dispatch::list_event(agent),
+            )],
+            FrontendEvent::AddAgentBackend { agent, profile } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::agent_backend_dispatch::add_event(agent, *profile),
+            )],
+            FrontendEvent::UpdateAgentBackend { agent, id, profile } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::agent_backend_dispatch::update_event(agent, id, *profile),
+            )],
+            FrontendEvent::DeleteAgentBackend { agent, id } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::agent_backend_dispatch::delete_event(agent, id),
+            )],
+            FrontendEvent::TestAgentBackendConnection {
+                agent,
+                base_url,
+                api_key,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::agent_backend_dispatch::test_connection_event(agent, &base_url, &api_key),
+            )],
             FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),

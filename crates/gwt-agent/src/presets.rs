@@ -13,11 +13,26 @@ use serde_json::Value;
 
 /// Stable identifier for a built-in Custom Agent preset. Keep this set small:
 /// every id is a frontend-visible contract.
+///
+/// **SPEC-1921 Phase 63H / T325 (2026-05-18 amendment): legacy path.**
+/// The `ClaudeCodeOpenaiCompat` preset predates the Backend Override
+/// schema (`[builtinAgents.<agent>.backends.<id>]`). New callers should
+/// use `crates/gwt/src/backend_service.rs::add_agent_backend` instead;
+/// FR-101 silent migration moves any rows still seeded through this preset
+/// into the new section on next gwt startup. The preset is preserved for
+/// backwards compatibility with persisted user configs and is scheduled
+/// for removal in a future major version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresetId {
     /// Claude Code routed through an Anthropic Messages API compatible proxy
     /// that speaks `/v1/models`. SPEC-1921 FR-062.
+    ///
+    /// Superseded by [`crate::backend::AgentBackendProfile`] +
+    /// `backend_store::add_backend(_, BuiltinAgentId::ClaudeCode, ...)`.
+    /// Use the new path for any new Settings UI dispatch; this variant is
+    /// kept only so older clients can still seed rows that the next
+    /// `gwt_agent::migrate_legacy_backend_rows` scan migrates forward.
     ClaudeCodeOpenaiCompat,
 }
 

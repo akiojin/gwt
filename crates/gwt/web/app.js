@@ -8855,6 +8855,17 @@
         statusMessage: "",
         statusKind: "",
       };
+      // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
+      // per-built-in backend profile state. `backends` is keyed by
+      // BuiltinAgentId string ("claudeCode" / "codex"). Mirrors
+      // customAgentsState shape so dispatch + status messages can share
+      // helpers like setSettingsStatus.
+      const agentBackendsState = {
+        backends: { claudeCode: [], codex: [] },
+        loadingAgent: null,
+        statusMessage: "",
+        statusKind: "",
+      };
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsState = {
@@ -8903,6 +8914,11 @@
         tabs.setAttribute("role", "tablist");
         tabs.appendChild(buildSettingsTab("system", "System", true));
         tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+        // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends tab is the
+        // dedicated surface for Claude Code / Codex Backend Override profiles.
+        // Kept distinct from `custom-agents` so External CLI rows and
+        // built-in LLM redirection have separate physical UI.
+        tabs.appendChild(buildSettingsTab("agent-backends", "Agent Backends", false));
         tabs.appendChild(buildSettingsTab("index", "Index", false));
 
         toolbar.appendChild(heading);
@@ -8923,6 +8939,12 @@
         // the Add button and agent rows.
         panelAgents.dataset.role = "settings-scroll";
 
+        const panelBackends = document.createElement("section");
+        panelBackends.className = "settings-panel hidden";
+        panelBackends.setAttribute("role", "tabpanel");
+        panelBackends.dataset.settingsPanel = "agent-backends";
+        panelBackends.dataset.role = "settings-scroll";
+
         const panelIndex = document.createElement("section");
         panelIndex.className = "settings-panel hidden";
         panelIndex.setAttribute("role", "tabpanel");
@@ -8931,6 +8953,7 @@
 
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
+        bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelIndex);
 
         root.appendChild(toolbar);
@@ -8968,6 +8991,15 @@
           send({ kind: "list_custom_agents" });
         }
 
+        // SPEC-1921 2026-05-18 amendment / FR-099: hydrate the Agent
+        // Backends panel for both built-in agents that support Backend
+        // Override (Claude Code, Codex). The backend returns the redacted
+        // list (api_key replaced with `***REDACTED***`).
+        renderAgentBackendsPanel(panelBackends);
+        for (const agent of ["claudeCode", "codex"]) {
+          send({ kind: "list_agent_backends", agent });
+        }
+
         // SPEC-1939 T-IDX-106: render the Project Index health table.
         renderIndexPanel(panelIndex);
 
@@ -8991,6 +9023,81 @@
           projectRoot: activeProjectRoot,
           send,
         });
+      }
+
+      // SPEC-1921 2026-05-18 amendment / FR-099: render the `Agent Backends`
+      // Settings tab body. Two `[data-agent]` sections (`claudeCode` /
+      // `codex`) host the per-built-in backend lists; each saved backend
+      // renders as a row with the redacted profile shape. The Add /
+      // Edit / Delete affordances will land alongside the protocol
+      // dispatch when the inline forms move out of the legacy
+      // `Custom Agents` tab (T308 follow-up). Today the panel exposes a
+      // read-only mirror that confirms FR-101 silent migration produced
+      // the expected `[builtinAgents.claudeCode.backends.*]` rows.
+      function renderAgentBackendsPanel(panel) {
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+        for (const agent of ["claudeCode", "codex"]) {
+          const section = createDiv("settings-section");
+          section.dataset.agent = agent;
+
+          const heading = document.createElement("h3");
+          heading.className = "settings-section-heading";
+          heading.textContent =
+            agent === "claudeCode" ? "Claude Code" : "Codex";
+          section.appendChild(heading);
+
+          const list = createDiv("agent-backends-list");
+          list.dataset.role = "agent-backends-list";
+          list.dataset.agent = agent;
+          renderAgentBackendsList(list, agent);
+          section.appendChild(list);
+
+          panel.appendChild(section);
+        }
+      }
+
+      function renderAgentBackendsList(container, agent) {
+        while (container.firstChild) container.removeChild(container.firstChild);
+        const profiles = agentBackendsState.backends[agent] || [];
+        if (profiles.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "settings-help";
+          empty.textContent =
+            agent === "claudeCode"
+              ? "No Claude Code backend profiles saved. Default Anthropic upstream is used."
+              : "No Codex backend profiles saved. Default OpenAI upstream is used.";
+          container.appendChild(empty);
+          return;
+        }
+        for (const profile of profiles) {
+          const row = createDiv("agent-backend-row");
+          row.dataset.backendId = profile.id;
+          const title = document.createElement("strong");
+          title.textContent =
+            profile.display_name || profile.displayName || profile.id;
+          row.appendChild(title);
+          const detail = document.createElement("span");
+          detail.className = "settings-help";
+          const baseUrl = profile.base_url || profile.baseUrl || "";
+          const model = profile.model || "";
+          detail.textContent = ` · ${baseUrl} · ${model}`;
+          row.appendChild(detail);
+          container.appendChild(row);
+        }
+      }
+
+      function renderAgentBackendsPanelInAllSettingsWindows() {
+        for (const settingsBody of Array.from(settingsWindowBodies)) {
+          if (!settingsBody.isConnected) {
+            settingsWindowBodies.delete(settingsBody);
+            continue;
+          }
+          const panel = settingsBody.querySelector(
+            "[data-settings-panel='agent-backends']",
+          );
+          if (panel) renderAgentBackendsPanel(panel);
+        }
       }
 
       function renderIndexPanelInAllSettingsWindows() {
@@ -9181,10 +9288,24 @@
           const addBtn = document.createElement("button");
           addBtn.className = "wizard-button";
           addBtn.style.margin = "8px 0";
-          addBtn.textContent = "＋ Add Claude Code (OpenAI-compat backend)";
+          // SPEC-1921 Phase 63H / T326: the legacy
+          // `+ Add Claude Code (OpenAI-compat backend)` button now points
+          // users at the new `Agent Backends` tab. The underlying
+          // `add_custom_agent_from_preset` dispatch is preserved for
+          // existing callers (Phase 52 contract), but the entry point
+          // visible in Custom Agents redirects to the proper surface so
+          // External CLI rows and Backend Override profiles never get
+          // conflated again.
+          addBtn.textContent = "＋ Add Claude Code backend (moved to Agent Backends)";
           addBtn.addEventListener("click", (e) => {
             e.stopPropagation();
-            startAddClaudeCodeOpenaiCompatFlow();
+            // Switch the Settings window to the Agent Backends tab.
+            const body = scroll.closest(".settings-body")?.parentElement;
+            if (body) switchSettingsTab(body, "agent-backends");
+            setSettingsStatus(
+              "Backend Override moved to Agent Backends. Add your Claude Code / Codex backend there.",
+              "success",
+            );
           });
           scroll.appendChild(addBtn);
 
@@ -9793,6 +9914,8 @@
         renderKnowledgeBridge,
         renderSettingsWindow,
         renderSettingsAgentList,
+        renderAgentBackendsPanel,
+        renderAgentBackendsPanelInAllSettingsWindows,
         setSettingsStatus,
         completeAddFromPreset,
         persistKanbanHideDone: writeKanbanHideDonePreference,
@@ -10681,6 +10804,53 @@
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;
             frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+            break;
+          // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
+          // events. `agent_backend_list` is a snapshot reply per
+          // BuiltinAgentId; `agent_backend_saved` / `agent_backend_deleted`
+          // are ephemeral mutations; `agent_backend_error` carries a stable
+          // CustomAgentErrorCode tag.
+          case "agent_backend_list":
+            if (event.agent) {
+              const key = event.agent;
+              agentBackendsState.backends[key] = event.backends || [];
+              agentBackendsState.loadingAgent = null;
+              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
+            }
+            break;
+          case "agent_backend_saved":
+            if (event.agent && event.profile) {
+              const key = event.agent;
+              const list = agentBackendsState.backends[key] || [];
+              const idx = list.findIndex((p) => p.id === event.profile.id);
+              if (idx >= 0) list[idx] = event.profile;
+              else list.push(event.profile);
+              agentBackendsState.backends[key] = list;
+              setSettingsStatus(
+                `Saved backend "${event.profile.id}" for ${key}.`,
+                "success",
+              );
+              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
+            }
+            break;
+          case "agent_backend_deleted":
+            if (event.agent && event.id) {
+              const key = event.agent;
+              agentBackendsState.backends[key] = (
+                agentBackendsState.backends[key] || []
+              ).filter((p) => p.id !== event.id);
+              setSettingsStatus(
+                `Deleted backend "${event.id}" for ${key}.`,
+                "success",
+              );
+              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
+            }
+            break;
+          case "agent_backend_error":
+            setSettingsStatus(
+              event.message || "Agent backend error.",
+              "error",
+            );
             break;
           case "custom_agent_saved":
             if (event.agent) {

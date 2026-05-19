@@ -418,6 +418,41 @@ pub enum FrontendEvent {
         base_url: String,
         api_key: String,
     },
+    /// Settings > Agent Backends (SPEC-1921 2026-05-18 amendment / FR-099):
+    /// list every saved Backend Override profile for the given built-in
+    /// agent. Response is [`BackendEvent::AgentBackendList`].
+    ListAgentBackends {
+        agent: gwt_agent::BuiltinAgentId,
+    },
+    /// Settings > Agent Backends > Add: persist a new Backend Override
+    /// profile under `[builtinAgents.<agent>.backends.<id>]`. Response is
+    /// [`BackendEvent::AgentBackendSaved`] on success or
+    /// [`BackendEvent::AgentBackendError`] on failure.
+    AddAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Settings > Agent Backends > Edit: replace an existing profile in
+    /// place. The patch id must match an existing entry.
+    UpdateAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Settings > Agent Backends > Delete: remove the profile with the
+    /// given id.
+    DeleteAgentBackend {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+    },
+    /// Settings > Agent Backends > Test connection: same `/v1/models` probe
+    /// as [`FrontendEvent::TestBackendConnection`], scoped to the chosen
+    /// built-in agent for future per-agent probe variation.
+    TestAgentBackendConnection {
+        agent: gwt_agent::BuiltinAgentId,
+        base_url: String,
+        api_key: String,
+    },
     /// SPEC-1934 US-6: user accepted the Migration confirmation modal for
     /// `tab_id`. Backend runs `gwt::migration::execute_migration` and streams
     /// progress as [`BackendEvent::MigrationProgress`] / [`BackendEvent::MigrationDone`]
@@ -1061,6 +1096,28 @@ pub enum BackendEvent {
         code: CustomAgentErrorCode,
         message: String,
     },
+    /// Response to [`FrontendEvent::ListAgentBackends`].
+    AgentBackendList {
+        agent: gwt_agent::BuiltinAgentId,
+        backends: Vec<gwt_agent::AgentBackendProfile>,
+    },
+    /// Response to [`FrontendEvent::AddAgentBackend`] /
+    /// [`FrontendEvent::UpdateAgentBackend`] (save success).
+    AgentBackendSaved {
+        agent: gwt_agent::BuiltinAgentId,
+        profile: Box<gwt_agent::AgentBackendProfile>,
+    },
+    /// Response to [`FrontendEvent::DeleteAgentBackend`].
+    AgentBackendDeleted {
+        agent: gwt_agent::BuiltinAgentId,
+        id: String,
+    },
+    /// Error reply for any agent-backend mutation or probe request.
+    AgentBackendError {
+        agent: gwt_agent::BuiltinAgentId,
+        code: CustomAgentErrorCode,
+        message: String,
+    },
     /// SPEC-1934 US-6.1: a project tab was opened on a Normal Git layout.
     /// The frontend should present the migration confirmation modal.
     MigrationDetected {
@@ -1473,6 +1530,26 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "agent_backend_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_saved",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_deleted",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "agent_backend_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "migration_detected",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -1597,6 +1674,10 @@ impl BackendEvent {
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
             BackendEvent::BackendConnectionResult { .. } => "backend_connection_result",
             BackendEvent::CustomAgentError { .. } => "custom_agent_error",
+            BackendEvent::AgentBackendList { .. } => "agent_backend_list",
+            BackendEvent::AgentBackendSaved { .. } => "agent_backend_saved",
+            BackendEvent::AgentBackendDeleted { .. } => "agent_backend_deleted",
+            BackendEvent::AgentBackendError { .. } => "agent_backend_error",
             BackendEvent::MigrationDetected { .. } => "migration_detected",
             BackendEvent::MigrationProgress { .. } => "migration_progress",
             BackendEvent::MigrationDone { .. } => "migration_done",

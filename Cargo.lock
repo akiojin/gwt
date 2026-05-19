@@ -1387,6 +1387,7 @@ dependencies = [
  "gwt-core",
  "gwt-docker",
  "gwt-git",
+ "gwt-skills",
  "reqwest",
  "semver",
  "serde",
