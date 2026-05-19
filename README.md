@@ -105,11 +105,16 @@ opening a native window. The embedded HTTP / WebSocket server stays up and
 the operator opens the printed URL in any browser instead.
 
 ```bash
-gwt serve                              # 127.0.0.1, random port, manual open
-gwt serve --port 8787 --open           # fixed port + system browser
-gwt serve --bind 0.0.0.0 --port 8787   # share with the LAN (VPN-extended)
+gwt serve                              # 127.0.0.1, random port, auto-open browser
+gwt serve --no-open                    # same, but suppress the browser launch (CI / scripts)
+gwt serve --port 8787                  # fixed port + auto-open browser
+gwt serve --bind 0.0.0.0 --port 8787   # share with the LAN (VPN-extended), auto-open browser
 gwt --headless --port 8787             # same as `gwt serve --port 8787`
 ```
+
+The system browser is opened automatically by default. Pass `--no-open` for
+CI / automation use cases that only need the server running. `--open` is kept
+as a no-op flag for backward compatibility with existing scripts.
 
 Trust boundary: **LAN only** (including VPN-extended LAN). `gwt serve` does
 not ship TLS termination, an authentication gate, or rate limiting. Anyone
