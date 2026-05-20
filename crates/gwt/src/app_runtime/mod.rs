@@ -479,61 +479,40 @@ impl OutboundEvent {
     }
 }
 
-// SPEC-2809 — Agent PTY → ProcessConsoleHub bridge helpers. Used by
-// `spawn_output_thread` when the pane belongs to an agent session so the
-// Console window's `agent` tab shows live PTY output alongside the xterm.js
-// pane in the workspace.
-static AGENT_PTY_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+// SPEC-2809 — per-spawn correlation id for Launch Wizard stages so the
+// Console window's `agent` tab can group multiple stage events (binary
+// resolve / env prep / worktree create / PTY handoff) under one
+// invocation header. Atomic so parallel wizard sessions do not collide.
+static AGENT_LAUNCH_STAGE_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
-fn agent_pty_spawn_id() -> u64 {
-    AGENT_PTY_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+pub(crate) fn next_agent_launch_stage_id() -> u64 {
+    AGENT_LAUNCH_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn forward_agent_chunk_to_hub(
-    kind: gwt_core::process_console::ProcessKind,
-    hub: &gwt_core::process_console::ProcessConsoleHub,
-    spawn_id: u64,
-    carry: &mut String,
-    chunk: &[u8],
-) {
-    // Append the new bytes to whatever partial line we held back from the
-    // previous chunk. Lossy decode is acceptable because we already strip
-    // ANSI and the hub buffer is presentation-only.
-    carry.push_str(&String::from_utf8_lossy(chunk));
-    // Drain whole rows (terminated by '\n' or '\r') and keep the trailing
-    // partial fragment in `carry` for the next chunk. Splitting on both
-    // separators handles `docker pull`-style CR progress lines and Codex
-    // box-drawing redraws gracefully.
-    loop {
-        let Some(boundary) = carry.find(['\n', '\r']) else {
-            break;
-        };
-        let line: String = carry.drain(..boundary).collect();
-        // Drop the boundary character itself.
-        carry.drain(..1);
-        if line.is_empty() {
-            continue;
-        }
-        push_agent_line(kind, hub, spawn_id, &line);
-    }
-}
-
-fn push_agent_line(
-    kind: gwt_core::process_console::ProcessKind,
-    hub: &gwt_core::process_console::ProcessConsoleHub,
-    spawn_id: u64,
-    line: &str,
-) {
-    let sanitized =
-        gwt_core::process_console::redact_line(&gwt_core::process_console::strip_ansi(line));
-    if sanitized.is_empty() {
-        return;
-    }
+/// Emit a `gwt.process.summary` event for one Launch Wizard stage so the
+/// Console window's `agent` tab surfaces the pipeline that ends in the
+/// PTY spawn. Stage semantics (`start`, `done`, `error`) follow the same
+/// vocabulary as the `spawn_logged` summary contract.
+pub(crate) fn emit_agent_launch_stage(spawn_id: u64, stage: &str, detail: &str) {
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "agent",
+        spawn_id = spawn_id,
+        stage = stage,
+        detail = detail,
+        "agent launch stage",
+    );
+    // Also push a synthetic line into the hub so the agent tab shows the
+    // stage banner in real time (the summary event alone lives in
+    // canonical log + Logs window only).
+    let hub = gwt_core::process_console::global();
+    let label = format!("[{stage}] {detail}");
     hub.push(gwt_core::process_console::ProcessLine::new(
-        kind,
+        gwt_core::process_console::ProcessKind::AgentBootstrap,
         spawn_id,
         gwt_core::process_console::ProcessStream::Stdout,
-        sanitized,
+        label,
     ));
 }
 
@@ -5088,9 +5067,25 @@ impl AppRuntime {
                 self.refresh_launch_wizard_session_cache(&window_id);
 
                 // SPEC-2809 — Launch Wizard always spawns an AI agent
-                // session, so route the PTY byte stream into the
-                // Console window's `agent` tab as well as the workspace
-                // terminal pane.
+                // launch sequence (binary resolve / env prep / PTY
+                // spawn) so the Console window's `agent` tab shows the
+                // wizard pipeline up to the moment xterm.js takes over.
+                let stage_id = next_agent_launch_stage_id();
+                emit_agent_launch_stage(
+                    stage_id,
+                    "resolve_binary",
+                    &format!("wizard launch {}", process_launch.command),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "prepare_env",
+                    &format!("worktree={}", worktree_path.display()),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "spawn_pty",
+                    &format!("argv=[{}]", process_launch.args.join(" ")),
+                );
                 match self.spawn_process_window_with_console_kind(
                     &window_id,
                     geometry,
@@ -5098,6 +5093,7 @@ impl AppRuntime {
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
                     Ok(()) => {
+                        emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let linkage_result = match linked_issue_number {
                             Some(issue_number) => record_issue_branch_link_with_cache_dir(
                                 &worktree_path,
@@ -5213,8 +5209,22 @@ impl AppRuntime {
                 };
                 let geometry = window.geometry.clone();
 
-                // SPEC-2809 — second Launch Wizard exit path; same agent
-                // PTY routing rule as the primary handler above.
+                // SPEC-2809 (revised) — second Launch Wizard exit path
+                // emits the same launch banner sequence as the primary
+                // handler so the Console window's `agent` tab is
+                // consistent regardless of which wizard outcome the user
+                // came in through.
+                let stage_id = next_agent_launch_stage_id();
+                emit_agent_launch_stage(
+                    stage_id,
+                    "resolve_binary",
+                    &format!("wizard launch {}", process_launch.command),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "prepare_env",
+                    &format!("argv=[{}]", process_launch.args.join(" ")),
+                );
                 match self.spawn_process_window_with_console_kind(
                     &window_id,
                     geometry,
@@ -5222,6 +5232,7 @@ impl AppRuntime {
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
                     Ok(()) => {
+                        emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let mut events = vec![self.workspace_state_broadcast()];
                         events.extend(Self::status_events(
                             window_id,
@@ -5230,7 +5241,10 @@ impl AppRuntime {
                         ));
                         events
                     }
-                    Err(error) => self.launch_error_events(window_id, error),
+                    Err(error) => {
+                        emit_agent_launch_stage(stage_id, "error", &error);
+                        self.launch_error_events(window_id, error)
+                    }
                 }
             }
             Err(error) => self.launch_error_events(window_id, error),
@@ -5289,18 +5303,35 @@ impl AppRuntime {
         .with_project_root(&project_root);
         let (env, remove_env) = effective_env.into_parts();
 
-        // SPEC-2809 — When the preset is an AI agent (Codex / Claude /
-        // Gemini / Agent), route the PTY byte stream into the Console
-        // window's `agent` tab. Plain `Shell` panes are not consumer of
-        // the Console hub — those would only generate noise (cd
-        // prompts, ls output, etc.) under the `agent` kind which would
-        // be misleading.
-        let console_kind = match preset {
-            WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent => {
-                Some(gwt_core::process_console::ProcessKind::AgentBootstrap)
-            }
-            _ => None,
-        };
+        // SPEC-2809 (revised) — Surface the launch pipeline for AI
+        // agent presets (Codex / Claude / Gemini / Agent) so the Console
+        // window's `agent` tab shows what gwt is doing leading up to the
+        // PTY spawn. Plain `Shell` panes do not emit launch banners
+        // because nothing distinguishes them from arbitrary terminals.
+        let is_agent_preset = matches!(
+            preset,
+            WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent
+        );
+        let console_kind =
+            is_agent_preset.then_some(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        let stage_id = is_agent_preset.then(next_agent_launch_stage_id);
+        if let Some(id) = stage_id {
+            emit_agent_launch_stage(
+                id,
+                "resolve_binary",
+                &format!("{} ({})", preset.title(), launch.command),
+            );
+            emit_agent_launch_stage(
+                id,
+                "prepare_env",
+                &format!("project_root={}", project_root.display()),
+            );
+            emit_agent_launch_stage(
+                id,
+                "spawn_pty",
+                &format!("argv=[{}]", launch.args.join(" ")),
+            );
+        }
         match self.spawn_process_window_with_console_kind(
             &window_id,
             geometry,
@@ -5313,8 +5344,16 @@ impl AppRuntime {
             },
             console_kind,
         ) {
-            Ok(()) => Self::status_events(window_id, WindowProcessStatus::Running, None),
+            Ok(()) => {
+                if let Some(id) = stage_id {
+                    emit_agent_launch_stage(id, "ready", "PTY handoff complete");
+                }
+                Self::status_events(window_id, WindowProcessStatus::Running, None)
+            }
             Err(error) => {
+                if let Some(id) = stage_id {
+                    emit_agent_launch_stage(id, "error", &error);
+                }
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
                 Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
@@ -5795,8 +5834,19 @@ impl AppRuntime {
         &self,
         id: String,
         pane: Arc<Mutex<Pane>>,
-        console_kind: Option<gwt_core::process_console::ProcessKind>,
+        _console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> JoinHandle<()> {
+        // SPEC-2809 (revised) — the Console window is the gwt-side
+        // equivalent of VS Code's Output panel. It surfaces what gwt
+        // itself spawns in the background (gh / git / docker / agent
+        // bootstrap stages / Python index runner) per kind. The agent
+        // tab is for the **Launch Wizard pipeline** that culminates in
+        // the PTY spawn — not the agent's own runtime stdout. That
+        // runtime stdout already lives in the workspace terminal pane
+        // (xterm.js) and would only duplicate noise here. `_console_kind`
+        // is retained on the API for forward compatibility with future
+        // kind-aware hooks (e.g. recording the PTY exit code as a
+        // summary at thread end).
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let reader = match pane
@@ -5815,25 +5865,8 @@ impl AppRuntime {
                 }
             };
 
-            // SPEC-2809 — when the pane belongs to an agent session
-            // (Codex / Claude / Gemini / custom agent), fork the PTY
-            // byte stream into the ProcessConsoleHub after stripping
-            // ANSI and redacting secrets. Lines are reassembled across
-            // chunk boundaries via a small carry-over buffer so the
-            // Console window shows whole rows rather than mid-line
-            // fragments.
-            let hub_handle = console_kind.map(|kind| {
-                (
-                    kind,
-                    gwt_core::process_console::global(),
-                    agent_pty_spawn_id(),
-                    String::new(),
-                )
-            });
-
             let mut reader = reader;
             let mut buffer = [0u8; 4096];
-            let mut hub_state = hub_handle;
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
@@ -5862,9 +5895,6 @@ impl AppRuntime {
                                 );
                             }
                         }
-                        if let Some((kind, hub, spawn_id, carry)) = hub_state.as_mut() {
-                            forward_agent_chunk_to_hub(*kind, hub, *spawn_id, carry, &chunk);
-                        }
                         proxy.send(UserEvent::RuntimeOutput {
                             id: id.clone(),
                             data: chunk,
@@ -5878,15 +5908,6 @@ impl AppRuntime {
                         });
                         return;
                     }
-                }
-            }
-            // Flush whatever partial line is left in the carry buffer so
-            // the last line of a short-lived agent (e.g. `gemini --help`)
-            // is not lost.
-            if let Some((kind, hub, spawn_id, carry)) = hub_state.as_mut() {
-                if !carry.is_empty() {
-                    push_agent_line(*kind, hub, *spawn_id, carry);
-                    carry.clear();
                 }
             }
 
@@ -6700,15 +6721,13 @@ fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> B
 }
 
 #[cfg(test)]
-mod agent_pty_bridge_tests {
-    //! SPEC-2809 — Tests for the agent PTY → ProcessConsoleHub bridge.
-    //!
-    //! The Console window's `agent` tab depends on
-    //! `forward_agent_chunk_to_hub` correctly reassembling lines across
-    //! chunk boundaries and stripping ANSI + redacting secrets before
-    //! pushing to the hub. These tests pin that behaviour without
-    //! requiring a live PTY or Playwright run.
-    use super::{forward_agent_chunk_to_hub, push_agent_line};
+mod agent_launch_stage_tests {
+    //! SPEC-2809 (revised) — Tests for the Launch Wizard -> Console
+    //! `agent` tab stage emission. Confirms that `emit_agent_launch_stage`
+    //! pushes a banner line to the ProcessConsoleHub under the
+    //! `AgentBootstrap` kind so the Console window surfaces the launch
+    //! pipeline before the PTY pane takes over.
+    use super::{emit_agent_launch_stage, next_agent_launch_stage_id};
     use gwt_core::process_console::{ProcessConsoleHub, ProcessKind, ProcessStream};
 
     fn drain_lines(hub: &ProcessConsoleHub) -> Vec<String> {
@@ -6719,118 +6738,53 @@ mod agent_pty_bridge_tests {
     }
 
     #[test]
-    fn forwards_whole_lines_when_terminated_with_newline() {
-        let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            1,
-            &mut carry,
-            b"hello\nworld\n",
-        );
-        assert_eq!(carry, "");
-        let lines = drain_lines(&hub);
-        assert_eq!(lines, vec!["hello".to_string(), "world".to_string()]);
+    fn launch_stage_ids_are_unique_per_caller() {
+        let a = next_agent_launch_stage_id();
+        let b = next_agent_launch_stage_id();
+        assert!(b > a, "stage ids must strictly increase: {a} -> {b}");
     }
 
     #[test]
-    fn preserves_partial_line_across_chunks() {
-        let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(ProcessKind::AgentBootstrap, &hub, 7, &mut carry, b"first ");
-        forward_agent_chunk_to_hub(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            7,
-            &mut carry,
-            b"chunk\nsecond",
+    fn emit_agent_launch_stage_pushes_a_banner_line_to_global_hub() {
+        // The global hub is installed lazily by `gwt_core::logging::init`
+        // in production, but tests run without that bootstrap. Install
+        // a hub before exercising the emit helper so the snapshot read
+        // observes the same instance the helper writes to. `set_global`
+        // succeeds at most once per process; ignore the result so this
+        // test cooperates with peers that also install the hub.
+        let _ = gwt_core::process_console::set_global(ProcessConsoleHub::new());
+        let spawn_id = next_agent_launch_stage_id();
+        emit_agent_launch_stage(spawn_id, "resolve_binary", "claude");
+        let hub = gwt_core::process_console::global();
+        let recent = hub.snapshot_kind(ProcessKind::AgentBootstrap);
+        assert!(
+            recent.iter().any(|line| line.spawn_id == spawn_id
+                && line.message == "[resolve_binary] claude"
+                && line.stream == ProcessStream::Stdout),
+            "expected a banner for the resolve_binary stage, got: {recent:?}",
         );
-        assert_eq!(carry, "second");
-        let lines = drain_lines(&hub);
-        assert_eq!(lines, vec!["first chunk".to_string()]);
     }
 
     #[test]
-    fn strips_ansi_escape_sequences_before_pushing() {
+    fn launch_stage_banner_includes_stage_label_in_message() {
         let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            3,
-            &mut carry,
-            b"\x1b[31mred\x1b[0m message\n",
-        );
-        let lines = drain_lines(&hub);
-        assert_eq!(lines, vec!["red message".to_string()]);
-    }
-
-    #[test]
-    fn splits_carriage_return_progress_lines_per_kind() {
-        let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            5,
-            &mut carry,
-            b"step1\rstep2\rstep3\n",
-        );
+        for stage in ["prepare_env", "spawn_pty", "ready"] {
+            hub.push(gwt_core::process_console::ProcessLine::new(
+                ProcessKind::AgentBootstrap,
+                42,
+                ProcessStream::Stdout,
+                format!("[{stage}] codex"),
+            ));
+        }
         let lines = drain_lines(&hub);
         assert_eq!(
             lines,
             vec![
-                "step1".to_string(),
-                "step2".to_string(),
-                "step3".to_string()
+                "[prepare_env] codex".to_string(),
+                "[spawn_pty] codex".to_string(),
+                "[ready] codex".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn skips_blank_lines_caused_by_consecutive_terminators() {
-        let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            11,
-            &mut carry,
-            b"alpha\r\nbeta\r\n",
-        );
-        let lines = drain_lines(&hub);
-        assert_eq!(lines, vec!["alpha".to_string(), "beta".to_string()]);
-    }
-
-    #[test]
-    fn push_agent_line_redacts_secret_tokens() {
-        let hub = ProcessConsoleHub::new();
-        push_agent_line(
-            ProcessKind::AgentBootstrap,
-            &hub,
-            13,
-            "Authorization: Bearer ghp_AAAAAAAAAAAAAAAAAAAAAAAA",
-        );
-        let lines = drain_lines(&hub);
-        assert_eq!(lines.len(), 1);
-        assert!(
-            !lines[0].contains("ghp_AAAAAAAAAAAAAAAAAAAAAAAA"),
-            "raw token must be redacted, got: {:?}",
-            lines[0]
-        );
-        assert!(lines[0].contains("***redacted***"));
-    }
-
-    #[test]
-    fn lines_are_marked_as_stdout_in_the_hub() {
-        let hub = ProcessConsoleHub::new();
-        let mut carry = String::new();
-        forward_agent_chunk_to_hub(ProcessKind::AgentBootstrap, &hub, 17, &mut carry, b"line\n");
-        let snapshot = hub.snapshot_kind(ProcessKind::AgentBootstrap);
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].stream, ProcessStream::Stdout);
-        assert_eq!(snapshot[0].spawn_id, 17);
     }
 }
 
