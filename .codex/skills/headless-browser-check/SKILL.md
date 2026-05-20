@@ -24,6 +24,8 @@ not use it for CI-only Playwright runs or generic web app servers.
 3. Start headless mode in a long-running exec session:
    - Create a temp URL handoff file and log path under `${TMPDIR:-/tmp}`.
    - Run `GWT_BROWSER_URL_FILE=<url-file> target/debug/gwt serve 2>&1 | tee <log-file>`.
+   - Treat this tee log as the startup/stdout log only; ordinary browser UI
+     actions may not appear there.
    - Use default auto-open behavior unless the user asks not to open a browser.
    - Use `--port <port>` or `--bind <addr>` only when the user requests it.
 4. Wait for readiness:
@@ -41,13 +43,21 @@ not use it for CI-only Playwright runs or generic web app servers.
 6. Tell the user:
    - The URL.
    - The log file path.
-   - That the agent is watching the process logs while they check.
+   - That the startup/stdout log may stay quiet during normal UI actions.
+   - That the agent is also watching recent project structured logs under
+     `~/.gwt/projects/*/logs/gwt.log.<date>` for backend events, access logs,
+     warnings, and errors.
    - Ask them to report what they see, or say when they are done.
 7. Monitor until the user is done:
    - Keep the exec session running.
    - Poll output about every 30 seconds.
+   - Also tail recently modified structured logs:
+     `find ~/.gwt/projects -path "*/logs/gwt.log.$(date -u +%F)" -mmin -30`.
    - Watch for `panic`, `ERROR`, `WARN`, `failed`, `refused`, `500`, WebSocket
      failures, asset load failures, and unexpected process exit.
+   - Do not promise that every window open or click will be logged. Normal UI
+     actions may show only HTTP/WebSocket/access activity, not semantic window
+     names.
    - Summarize only meaningful new log events. If nothing changed, say so
      briefly.
    - If the user reports a UI problem, immediately inspect recent server output
