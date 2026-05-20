@@ -10,14 +10,18 @@
  * and are summoned via the peek 帯 (`.op-sidebar-peek` / `.op-window-controls-peek`).
  */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
+
+test.beforeEach(async ({ page }) => {
+  await gotoLiveGwt(page, BASE);
+});
 
 test.describe("Operator chrome smoke", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
   test("project bar, status strip, peek 帯, and theme toggle render in auto-hide state", async ({ page }) => {
-    await page.goto(BASE);
     await expect(page.locator(".project-bar")).toBeVisible();
     await expect(page.locator(".op-status-strip")).toBeVisible();
     await expect(page.locator("#op-theme-toggle")).toBeVisible();
@@ -31,7 +35,6 @@ test.describe("Operator chrome smoke", () => {
   });
 
   test("hover on sidebar peek 帯 reveals the sidebar and collapses ~250ms after pointerleave", async ({ page }) => {
-    await page.goto(BASE);
     await page.locator(".op-sidebar-peek").hover();
     await expect(page.locator("html")).toHaveAttribute("data-op-sidebar", "revealed");
     await page.mouse.move(2000, 2000);
@@ -41,7 +44,6 @@ test.describe("Operator chrome smoke", () => {
   });
 
   test("hover on window controls peek 帯 reveals only the collapsible groups", async ({ page }) => {
-    await page.goto(BASE);
     await expect(page.locator("#tile-button")).toBeHidden();
     await page.locator(".op-window-controls-peek").hover();
     await expect(page.locator("html")).toHaveAttribute("data-op-window-controls", "revealed");
@@ -53,13 +55,11 @@ test.describe("Operator chrome smoke", () => {
   });
 
   test("keyboard focus on sidebar peek 帯 triggers reveal as a hover alternative", async ({ page }) => {
-    await page.goto(BASE);
     await page.locator(".op-sidebar-peek").focus();
     await expect(page.locator("html")).toHaveAttribute("data-op-sidebar", "revealed");
   });
 
   test("⌘K opens the command palette", async ({ page }) => {
-    await page.goto(BASE);
     await page.keyboard.press("Meta+K");
     await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
     await page.keyboard.press("Escape");
@@ -72,7 +72,6 @@ test.describe("Operator chrome reduced-motion", () => {
   test.use({ reducedMotion: "reduce" });
 
   test("prefers-reduced-motion collapses the panel without the close delay", async ({ page }) => {
-    await page.goto(BASE);
     await page.locator(".op-sidebar-peek").hover();
     await expect(page.locator("html")).toHaveAttribute("data-op-sidebar", "revealed");
     await page.mouse.move(2000, 2000);

@@ -12184,6 +12184,31 @@
         }
       });
 
+      function installPlaywrightTestBridge() {
+        if (window.__gwtPlaywrightTestBridge !== true) {
+          return;
+        }
+        if (window.__gwtPlaywrightTestBridgeInstalled === true) {
+          return;
+        }
+        window.__gwtPlaywrightTestBridgeInstalled = true;
+        window.addEventListener("__gwt_test_inject", (event) => {
+          const detail = event && event.detail;
+          if (!detail || typeof detail.kind !== "string") {
+            return;
+          }
+          receive(detail);
+        });
+        window.addEventListener("__gwt_test_send", (event) => {
+          const detail = event && event.detail;
+          if (!detail || typeof detail.kind !== "string") {
+            return;
+          }
+          send(detail);
+        });
+      }
+
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
+      installPlaywrightTestBridge();
       renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();
