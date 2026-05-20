@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use gwt_core::logging::{current_log_file, init, LogLevel, LoggingConfig};
+use gwt_core::logging::{current_log_file, init, read_log_file, LogLevel, LoggingConfig};
 
 #[test]
 fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
@@ -66,5 +66,30 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
     assert!(
         content.contains("warning sample"),
         "expected warn event in log file"
+    );
+
+    // SPEC-1924 US-14 / T-LFR-006: the on-disk JSONL produced by the live
+    // writer must be replayable by the new reader without any skipped lines.
+    let outcome = read_log_file(&log_path).expect("read_log_file should succeed");
+    assert_eq!(
+        outcome.diagnostics.skipped, 0,
+        "writer/reader shape mismatch: read_log_file skipped {} line(s)",
+        outcome.diagnostics.skipped
+    );
+    assert!(
+        outcome
+            .entries
+            .iter()
+            .any(|e| e.message == "hello from test" && e.source == "gwt_core::logging::test"),
+        "expected hello event to round-trip via read_log_file, got: {:?}",
+        outcome.entries
+    );
+    assert!(
+        outcome
+            .entries
+            .iter()
+            .any(|e| e.message == "warning sample"
+                && e.severity == gwt_core::logging::LogLevel::Warn),
+        "expected warn event to round-trip via read_log_file with Warn severity"
     );
 }

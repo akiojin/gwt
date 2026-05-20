@@ -24,6 +24,7 @@ pub mod event;
 pub mod fmt_layer;
 pub mod housekeep;
 pub mod init;
+pub mod reader;
 pub mod ui_forwarder;
 pub mod writer;
 
@@ -31,4 +32,5 @@ pub use config::{LogLevel, LoggingConfig};
 pub use event::LogEvent;
 pub use housekeep::{housekeep, HousekeepReport};
 pub use init::{apply_log_level_to_handle, init, LoggingHandles, ReloadHandle};
+pub use reader::{read_log_file, LogFileEntry, ReadDiagnostics, ReadOutcome};
 pub use writer::{current_log_file, log_file_for_date, LOG_FILE_BASENAME};
