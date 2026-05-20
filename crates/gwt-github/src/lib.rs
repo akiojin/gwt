@@ -22,6 +22,7 @@ pub mod migration;
 pub mod routing;
 pub mod sections;
 pub mod spec_ops;
+pub mod spec_validate;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{Cache, CacheEntry, CacheError, CacheMeta};
