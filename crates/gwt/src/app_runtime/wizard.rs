@@ -20,9 +20,9 @@ use std::{
 
 use chrono::Utc;
 use gwt::{
-    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
-    LaunchWizardLaunchPath, LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView,
-    LinkedIssueKind, WindowGeometry,
+    knowledge_launch_target_branch_name, KnowledgeKind, LaunchWizardCompletion,
+    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardState, LaunchWizardView, LinkedIssueKind, WindowGeometry,
 };
 use uuid::Uuid;
 
@@ -209,6 +209,53 @@ impl AppRuntime {
             wizard_id,
             wizard,
             workspace_resume_context,
+        });
+
+        Ok(())
+    }
+
+    pub(crate) fn open_knowledge_launch_wizard_for_base_branch(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        base_branch_name: &str,
+        issue_number: u64,
+        linked_issue_kind: LinkedIssueKind,
+    ) -> Result<(), String> {
+        let base_branch_name = normalize_branch_name(base_branch_name);
+        let target_branch_name =
+            knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+        let live_sessions = self.live_sessions_for_branch(tab_id, &target_branch_name);
+        let quick_start_root = project_root.to_path_buf();
+        let quick_start_entries = Vec::new();
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let docker_context = None;
+        let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(&base_branch_name),
+                normalized_branch_name: target_branch_name,
+                worktree_path: None,
+                quick_start_root,
+                live_sessions,
+                docker_context,
+                docker_service_status,
+                linked_issue_number: Some(issue_number),
+                linked_issue_kind: Some(linked_issue_kind),
+            },
+            base_branch_name,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+        );
+        wizard.mark_runtime_context_unresolved();
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id,
+            wizard,
+            workspace_resume_context: None,
         });
 
         Ok(())
@@ -810,19 +857,34 @@ impl AppRuntime {
         }
 
         match result {
-            Ok(branch_name) => match self.open_launch_wizard_for_branch(
-                &tab_id,
-                &project_root,
-                &branch_name,
-                Some(issue_number),
-                linked_issue_kind_from_knowledge(knowledge_kind),
-            ) {
-                Ok(()) => vec![self.launch_wizard_state_outbound()],
-                Err(error) => vec![OutboundEvent::reply(
-                    &client_id,
-                    knowledge_error_event(id, knowledge_kind, error, None, None),
-                )],
-            },
+            Ok(base_branch_name) => {
+                let Some(linked_issue_kind) = linked_issue_kind_from_knowledge(knowledge_kind)
+                else {
+                    return vec![OutboundEvent::reply(
+                        &client_id,
+                        knowledge_error_event(
+                            id,
+                            knowledge_kind,
+                            "Launch Agent is not available for this knowledge bridge",
+                            None,
+                            None,
+                        ),
+                    )];
+                };
+                match self.open_knowledge_launch_wizard_for_base_branch(
+                    &tab_id,
+                    &project_root,
+                    &base_branch_name,
+                    issue_number,
+                    linked_issue_kind,
+                ) {
+                    Ok(()) => vec![self.launch_wizard_state_outbound()],
+                    Err(error) => vec![OutboundEvent::reply(
+                        &client_id,
+                        knowledge_error_event(id, knowledge_kind, error, None, None),
+                    )],
+                }
+            }
             Err(error) => vec![OutboundEvent::reply(
                 &client_id,
                 knowledge_error_event(id, knowledge_kind, error, None, None),
