@@ -110,6 +110,7 @@ export function renderIndexSettingsPanel(options) {
     worktreeHashes.length === 0
     && !scopes.issues
     && !scopes.specs
+    && !scopes.lessons
     && (!scopes.files || Object.keys(scopes.files).length === 0)
     && (!scopes["files-docs"] || Object.keys(scopes["files-docs"]).length === 0)
   ) {

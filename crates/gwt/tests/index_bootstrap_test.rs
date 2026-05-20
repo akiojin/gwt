@@ -129,6 +129,40 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
     );
 }
 
+#[test]
+fn bootstrap_preserves_repo_scoped_lessons_index_directory() {
+    // SPEC-2805: lessons is repo-scoped at ~/.gwt/index/<repo>/lessons/. Bootstrap
+    // must not treat it as an orphan worktree dir or as legacy worktree-scoped
+    // state, regardless of whether a current worktree exists.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let wt = tmp.path().join("wt-feature");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/project.git");
+    commit_file(&repo, "README.md", "# repo\n");
+    add_worktree(&repo, &wt);
+
+    let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+    let index_root = tmp.path().join("index");
+    let lessons_dir = index_root.join(repo_hash.as_str()).join("lessons");
+    fs::create_dir_all(&lessons_dir).expect("create repo-scoped lessons dir");
+    fs::write(lessons_dir.join("chroma.sqlite3"), "fake-db").expect("write lessons db");
+    fs::write(lessons_dir.join("meta.json"), r#"{"schema_version":1}"#)
+        .expect("write lessons meta");
+
+    let spawner = RecordingSpawner::default();
+    bootstrap_project_index_for_path_with(&wt, &index_root, &spawner).expect("bootstrap index");
+
+    assert!(
+        lessons_dir.join("chroma.sqlite3").exists(),
+        "bootstrap must preserve the repo-scoped lessons chroma.sqlite3"
+    );
+    assert!(
+        lessons_dir.join("meta.json").exists(),
+        "bootstrap must preserve the repo-scoped lessons meta.json"
+    );
+}
+
 fn call_project_root_matches(call: &str, expected: &Path) -> bool {
     let Some(actual) = call.split('|').nth(1) else {
         return false;
