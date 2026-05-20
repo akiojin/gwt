@@ -19,6 +19,8 @@ const ROOT_MODULES = new Set([
   "app.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
+  // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
+  "canvas-wheel-gesture.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-tab-confirm-modal.js",

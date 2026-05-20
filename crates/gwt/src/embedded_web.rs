@@ -66,6 +66,10 @@ pub fn terminal_wheel_scroll_js() -> &'static str {
     include_str!("../web/terminal-wheel-scroll.js")
 }
 
+pub fn canvas_wheel_gesture_js() -> &'static str {
+    include_str!("../web/canvas-wheel-gesture.js")
+}
+
 pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -258,6 +262,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-wheel-scroll.js",
         source: terminal_wheel_scroll_js,
         marker: "createTerminalWheelScrollController",
+    },
+    RootJsModuleAsset {
+        path: "/canvas-wheel-gesture.js",
+        source: canvas_wheel_gesture_js,
+        marker: "createCanvasWheelGestureClassifier",
     },
     RootJsModuleAsset {
         path: "/theme-manager.js",
@@ -1334,6 +1343,25 @@ mod tests {
         assert!(
             html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
             "expected capture-phase wheel routing to be installed through the named handler",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_wheel_gesture_classifier_is_served_and_imported() {
+        let js = app_js();
+        let asset = root_js_module_assets()
+            .iter()
+            .find(|asset| asset.path == "/canvas-wheel-gesture.js")
+            .expect("expected canvas wheel gesture classifier asset");
+
+        assert_eq!(asset.marker, "createCanvasWheelGestureClassifier");
+        assert!(
+            js.contains("from \"/canvas-wheel-gesture.js\""),
+            "expected app.js to import the canvas wheel gesture classifier",
+        );
+        assert!(
+            js.contains("canvasWheelGestureClassifier.classify(event)"),
+            "expected canvas wheel routing to classify the whole wheel gesture before routing",
         );
     }
 

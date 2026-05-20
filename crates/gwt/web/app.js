@@ -59,6 +59,7 @@
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
+      import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
       import { createViewportSyncState } from "/viewport-sync.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
@@ -326,6 +327,9 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       const viewportSyncState = createViewportSyncState({
         initialViewport: viewport,
+      });
+      const canvasWheelGestureClassifier = createCanvasWheelGestureClassifier({
+        idleMs: 300,
       });
       let viewportRasterTimer = null;
       let launchWizard = null;
@@ -11584,26 +11588,25 @@
         if (!targetElement || !canvas.contains(targetElement)) {
           return;
         }
+        const wheelMode = canvasWheelGestureClassifier.classify(event);
         // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
         // `.surface-terminal`; every other workspace-window forwards plain
         // wheel to the DOM so panel scroll regions (Knowledge / Profile /
         // Logs / Board / Issue / SPEC / Settings ...) and modal
         // content scroll natively without registering a per-class whitelist.
         if (
-          !event.ctrlKey &&
-          !event.metaKey &&
+          wheelMode !== "zoom" &&
           targetElement.closest(".surface-terminal")
         ) {
           return;
         }
         if (
-          !event.ctrlKey &&
-          !event.metaKey &&
+          wheelMode !== "zoom" &&
           targetElement.closest(".workspace-window")
         ) {
           return;
         }
-        if (event.ctrlKey || event.metaKey) {
+        if (wheelMode === "zoom") {
           // Ctrl/Cmd + wheel = zoom
           event.preventDefault();
           event.stopPropagation();
