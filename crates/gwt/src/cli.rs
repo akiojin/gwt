@@ -33,6 +33,7 @@ mod issue_spec;
 mod pane;
 mod plan;
 mod pr;
+pub(crate) mod register;
 pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -152,6 +153,8 @@ pub enum CliCommand {
     Plan(PlanCommand),
     /// `gwtd build ...` — gwt-build-spec exit CLI.
     Build(BuildCommand),
+    /// `gwtd register ...` — gwt-register-spec exit CLI (SPEC-2784).
+    Register(RegisterCommand),
     /// `gwtd update [...]` and `gwtd __internal {apply-update,run-installer} ...`.
     Update(UpdateCommand),
     /// `gwtd daemon ...` — long-running runtime daemon (SPEC-2077).
@@ -375,6 +378,8 @@ pub type PlanCommand = SkillStateAction;
 /// SPEC-1942 family enum for `gwtd build ...`. Backed by [`SkillStateAction`].
 pub type BuildCommand = SkillStateAction;
 
+/// SPEC-2784 family enum for `gwtd register ...`. Same skill-state lifecycle.
+pub type RegisterCommand = SkillStateAction;
 /// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane
 /// inspection and lifecycle operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +560,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "discuss"
                     | "plan"
                     | "build"
+                    | "register"
                     | "daemon"
                     | "workspace"
                     | "pane"
@@ -674,7 +680,7 @@ pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Build)
 }
 
-fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
+pub(crate) fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
         "start" => {
@@ -746,6 +752,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
+        CliCommand::Register(action) => register::run(env, action, &mut out)?,
         CliCommand::Hook(HookCommand::Run { name, rest }) => {
             return hook::run_hook(env, &name, &rest);
         }

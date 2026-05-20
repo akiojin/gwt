@@ -404,3 +404,112 @@ fn apply_phase_change_does_not_disturb_body_or_sections() {
     let spec_section = fs::read_to_string(tmp.path().join("11/sections/spec.md")).unwrap();
     assert_eq!(spec_section, "immutable spec");
 }
+
+// Regression: When an Issue body contains gwt-spec marker patterns as prose
+// or code (e.g., a plain bug Issue describing the SPEC format), the loose
+// substring detection in `gwt::issue_cache::is_spec_issue` triggers
+// `gh issue view` and ends up calling `write_snapshot` with a body whose
+// header parses but whose sections index is malformed. Previously this
+// surfaced as `body parse error: broken index map: ...` and propagated up
+// to the GUI Issue refresh.
+//
+// The cache layer now splits responsibilities to absorb the regression
+// without introducing a data-loss vector on real SPECs that happen to be
+// transiently malformed:
+//
+// - `write_snapshot` is lenient: it always caches `body.md` and `meta.json`
+//   verbatim. Sections are only materialized when parse succeeds.
+// - `load_entry` is strict for header-present-but-malformed bodies. It
+//   returns `None` so `SpecOps::write_section` never operates on an empty
+//   sections map (which would otherwise rewrite the body's section index
+//   with only the freshly-edited section, orphaning any content stored in
+//   the comments referenced by the malformed index).
+// - `load_entry` still surfaces plain Issues (no header) with an empty
+//   `SpecBody` so the GUI list keeps showing them.
+#[test]
+fn write_snapshot_falls_back_to_plain_when_sections_index_is_malformed() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+
+    // Body has a structurally valid gwt-spec header but the sections
+    // index is on a single line (as it would be when quoted in prose),
+    // which `parse_index_map` cannot disentangle.
+    let body = "Background:\n\
+<!-- gwt-spec id=42 version=1 -->\n\
+<!-- sections: plan=comment:777 spec=body tasks=body -->\n\
+\n\
+Rest of the body is human prose, not a real SPEC.\n"
+        .to_string();
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(123),
+        title: "Plain Issue with SPEC-looking prose".into(),
+        body: body.clone(),
+        labels: vec!["bug".into()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("t1"),
+        comments: Vec::new(),
+    };
+
+    cache
+        .write_snapshot(&snapshot)
+        .expect("write_snapshot must succeed even when SPEC parse fails");
+
+    // Body and meta should be present and verbatim.
+    let body_on_disk = fs::read_to_string(tmp.path().join("123/body.md")).unwrap();
+    assert_eq!(body_on_disk, body);
+    assert!(tmp.path().join("123/meta.json").is_file());
+
+    // Sections directory must exist but be empty.
+    let sections_dir = tmp.path().join("123/sections");
+    assert!(sections_dir.is_dir());
+    let leftover: Vec<_> = fs::read_dir(&sections_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "sections/ must be empty for fallback-cached entry (got: {:?})",
+        leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+
+    // load_entry must NOT surface this entry: the SPEC header is present
+    // but parse failed, so exposing an empty SpecBody would let
+    // `SpecOps::write_section` recompute the routing from scratch and
+    // overwrite the body's sections index, orphaning any content in
+    // comments referenced by the malformed index.
+    assert!(
+        cache.load_entry(IssueNumber(123)).is_none(),
+        "load_entry must hide header-present-but-malformed entries to \
+         prevent SpecOps::write_section from corrupting them"
+    );
+}
+
+// Companion to the previous test: a plain Issue (no `<!-- gwt-spec id=...`
+// header at all) must still surface from `load_entry` with an empty
+// `SpecBody`, so the GUI keeps listing it. Hiding plain Issues by accident
+// would silently drop bug reports / docs / chores from the Issue window.
+#[test]
+fn load_entry_surfaces_plain_issue_with_empty_spec_body() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+
+    let body = "Just a plain bug report.\nNo gwt-spec markers here.\n".to_string();
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(456),
+        title: "Plain bug".into(),
+        body: body.clone(),
+        labels: vec!["bug".into()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("t1"),
+        comments: Vec::new(),
+    };
+    cache.write_snapshot(&snapshot).unwrap();
+
+    let entry = cache
+        .load_entry(IssueNumber(456))
+        .expect("plain Issue must surface from load_entry");
+    assert_eq!(entry.snapshot.number, IssueNumber(456));
+    assert_eq!(entry.snapshot.body, body);
+    assert!(entry.spec_body.sections.is_empty());
+}

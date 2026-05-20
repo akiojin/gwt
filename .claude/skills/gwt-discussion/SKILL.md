@@ -286,7 +286,14 @@ When the discussion stabilizes, update the right artifacts in one batch.
 
 - Use `references/intake.md` for search and routing discipline
 - Use `references/ddd-modeling.md` for Bounded Context and domain modeling
-- Use `references/registration.md` to create or seed `spec.md`
+- **Register the SPEC via `gwt-register-spec`** (sub-skill, SPEC-2784). The
+  caller prepares title + body file from this discussion's outcome; the
+  sub-skill validates, executes the canonical `create` → `--edit spec` →
+  `--section spec` roundtrip safely, and returns the new Issue number. Add
+  `Register Spec` to the Action Bundle. Use `references/registration.md`
+  only when the sub-skill is unavailable; in that case follow its 2-step
+  flow manually and verify `--section spec` returns non-empty content
+  before handoff.
 - Use `references/clarification.md` to remove high-impact
   `[NEEDS CLARIFICATION]` markers
 - Use `references/deepening.md` when the user asks for deeper analysis on an
@@ -334,6 +341,7 @@ Reason: <one sentence>
 - Resume Build Context: <what the implementer must use>
 
 ### Action Bundle
+- Register Spec
 - Update Spec
 - Update Plan
 - Resume Build
@@ -341,6 +349,10 @@ Reason: <one sentence>
 - Write Lesson
 - No Action
 ```
+
+`Register Spec` runs the `gwt-register-spec` sub-skill (SPEC-2784) to
+materialize a new SPEC Issue safely. Use it instead of manual
+`gwtd issue spec create` whenever a fresh SPEC owner is needed.
 
 This final result is the handoff point where the workflow may leave Plan Mode.
 

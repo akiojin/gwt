@@ -153,14 +153,20 @@ impl Cache {
                 }
                 prune_unlisted_files(&sections_dir, &desired_sections)?;
             }
-            Err(ParseError::MissingHeader) => {
-                // Plain GitHub Issues share the same cache root as SPEC Issues
-                // but do not carry gwt-spec section markers. For those entries
-                // we still cache body/meta/comments and simply omit `sections/`.
+            Err(_) => {
+                // Either the body has no gwt-spec header at all (plain Issue),
+                // or it looks like a SPEC but the structural parse failed
+                // (e.g., the body contains prose / code that happens to match
+                // the gwt-spec header pattern, the sections index is malformed,
+                // or a referenced comment is missing). In all such cases the
+                // Issue cannot be safely exposed as a structured SPEC, so we
+                // persist it as a plain Issue: body and meta are cached, but
+                // no per-section files are written. A subsequent refresh that
+                // arrives with a well-formed SPEC body will rewrite the
+                // sections/ tree on the next call.
                 let desired_sections: HashSet<String> = HashSet::new();
                 prune_unlisted_files(&sections_dir, &desired_sections)?;
             }
-            Err(err) => return Err(CacheError::Parse(err)),
         }
 
         // Finally, write meta.json.
@@ -225,6 +231,10 @@ impl Cache {
         let spec_body = match SpecBody::parse(&snapshot.body, &parsed_comments) {
             Ok(spec_body) => spec_body,
             Err(ParseError::MissingHeader) => SpecBody {
+                // Plain Issue (no `<!-- gwt-spec id=... -->` header at all):
+                // synthesize an empty SpecBody so the entry still surfaces
+                // to UI consumers as a regular Issue. This mirrors the
+                // existing `write_snapshot` path for plain Issues.
                 meta: SpecMeta {
                     id: meta.number.to_string(),
                     version: 1,
@@ -232,7 +242,22 @@ impl Cache {
                 sections_index: crate::body::SectionsIndex::default(),
                 sections: std::collections::BTreeMap::new(),
             },
-            Err(_) => return None,
+            Err(_) => {
+                // Body carries a SPEC header but the structural parse fails
+                // (malformed sections index, missing referenced comment,
+                // etc.). We intentionally do NOT downgrade these to an
+                // empty SpecBody: a subsequent `SpecOps::write_section`
+                // would recompute the routing from the empty section map
+                // and rewrite the body's index, orphaning content stored in
+                // comments referenced only by the original (malformed)
+                // index. Returning `None` keeps such entries out of UI
+                // lists until the next refresh either repairs the body or
+                // proves it is truly a plain Issue. The on-disk cache is
+                // still populated (write_snapshot is lenient), so the
+                // body / meta survive in `~/.gwt/cache/issues/<n>/` for
+                // diagnostics.
+                return None;
+            }
         };
         Some(CacheEntry {
             snapshot,

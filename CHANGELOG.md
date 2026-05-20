@@ -1,6 +1,36 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.40.0] - 2026-05-20
+
+### Bug Fixes
+
+- **release:** MacOS DMG bundle に icon.icns と CFBundleIconFile を再配線 (#2799)
+- **gui:** Gate Linked issue section to Issue Bridge launches (SPEC-2014)
+- **logging:** Adapt Logs window reader to canonical JSONL shape (SPEC-1924 US-14)
+- **logging:** Disambiguate tracing_subscriber::fmt intra-doc link in reader
+- **issue-cache:** Detect spec issues by body header to keep refresh resilient to label loss
+- **gui:** Register /release-notes-window.js to unblock splash boot
+- **gui:** Register release-notes-window.js in embedded_web allow-list
+- **gui:** Make #app-version look clickable, drop noisy tooltip
+- **gui:** Give .release-notes-window fixed positioning so it actually shows
+- **release:** Windows と Linux も tao window icon を明示配線する (#2799)
+- **issue-cache:** Cache plain when SPEC body parse fails to absorb is_spec_issue regression
+
+### Features
+
+- **skills:** Introduce gwt-register-spec for safe SPEC creation (SPEC-2784)
+- **gui:** Surface server URL in status strip with browser+copy (SPEC-2785)
+- **core:** Introduce ProcessConsoleHub and migrate gh CLI callers (SPEC-1924 / SPEC-2019)
+
+### Refactor
+
+- **cli:** Move parse_register_args into cli/register to honor cli.rs size budget
+
+### Testing
+
+- **playwright:** Add live E2E spec for Release Notes window + lessons
+
 ## [9.39.0] - 2026-05-20
 
 ### Bug Fixes
