@@ -36,6 +36,46 @@ SPEC #2780 (Release Notes Window) 実装で、以下のテストが全て GREEN 
 
 ---
 
+## 2026-05-20 — 外部プロセスラッパーは caller buf を raw に保ち、redaction は hub のみに限定する
+
+### 事象
+
+`gwt_core::process_console::spawn_logged` の初版で stdout/stderr 各行を hub にも caller-facing
+`SpawnOutput.stdout` にも **redact 後** の文字列で書き込み、`tokio::io::AsyncBufReadExt::lines` で
+読んだ後に常に `\n` を append していた。結果、(1) `gh auth token` の戻り値が
+`***redacted***` になりトークン取得が壊れ、(2) `print!("job log 91")` (改行なし) を
+モックしている既存テストが `"job log 91\n"` を見て assertion 失敗した。
+
+### 原因
+
+- redact を 1 か所に集約する設計判断のとき、「user-visible な log/UI」と「caller が
+  そのまま downstream API に渡す raw buffer」の責任分離を忘れた。
+- `BufReader::lines()` は line terminator を strip する。「行ごとの forward」と
+  「raw な buffer 復元」を同じパスで両立させようとして、便宜的に `\n` を毎回 append
+  したため、もともと改行のない出力にも改行が混入した。
+
+### 再発防止策
+
+1. **caller-facing buffer は raw bytes そのまま**: `tokio::io::AsyncReadExt::read_to_end`
+   で生のバイト列を取得し、`String::from_utf8_lossy` してそのまま返す。terminator や
+   redaction を caller の見える値に施さない。
+2. **redaction は hub/log/UI に流す前だけ**: ring buffer push と broadcast send の
+   直前で `redact_line` を適用する。caller の戻り値や `tracing` summary には素値を保つ。
+3. **行分割は forward 用途に限定**: hub に流す単位として `\n` と `\r` で split する
+   が、caller の `buf` には影響させない。CR-only progress line (docker pull / git clone)
+   も同じ split で kind ごとの discrete event になる。
+4. **既存モックを必ず通す**: 既存テストがコマンド出力を `print!`/`println!` で
+   モックしている場合、改行有無まで含めて互換性を維持する。新規 wrapper を導入する
+   ときは「`Command::output()` と同じバイト列」を契約に書き、テストを先に通してから
+   実装を縮める。
+5. **secret redaction の network leak**: gh / git / docker は通常 token を echo
+   しないが、verbose / debug ログでは漏れる。FR としては `Authorization` / `token=` /
+   `gh_*` / `ghp_*` / `ghs_*` / `ghu_*` を redact pattern に明示し、ring buffer と
+   broadcast の両方に適用する。canonical log には summary event だけが書かれるため、
+   line-level の漏洩は構造的に発生しない (FR-040 / SC-013)。
+
+---
+
 ## 2026-05-20 — `gwtd issue spec create -f <body>` は section マーカーを付けない
 
 ### 事象
