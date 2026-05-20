@@ -48,14 +48,110 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {
         return Ok(());
     };
+    ensure_coordination_assets_for_session(&session);
     let mut projection = load_or_default_workspace_projection(&session.worktree_path)?;
     projection.project_root = session.worktree_path.clone();
-    let registered = register_session_in_projection(&mut projection, &session, Utc::now());
-    if registered {
+    let now = Utc::now();
+    let registered = register_session_in_projection(&mut projection, &session, now);
+    let derived = derive_title_summary_from_owner(&mut projection, &session);
+    if derived {
+        projection.updated_at = now;
+    }
+    if registered || derived {
         save_workspace_projection(&session.worktree_path, &projection)?;
         crate::cli::workspace::publish_workspace_change(&session.worktree_path);
     }
     Ok(())
+}
+
+/// SPEC-2359 Phase U-9 (FR-177): re-materialize coordination skill + hook
+/// assets on SessionStart when they are missing for an already-present
+/// agent target. This closes the gap where a worktree created before the
+/// generator was added (or partially cleaned) is missing
+/// `.codex/skills/gwt-coordination/SKILL.md` or `.codex/hooks.json`
+/// while other Codex assets are still present, leaving Codex without
+/// canonical title-summary guidance. Best-effort: failures are swallowed
+/// so the hook does not block agent start.
+fn ensure_coordination_assets_for_session(session: &Session) {
+    if !coordination_assets_need_refresh(&session.worktree_path) {
+        return;
+    }
+    let _ = crate::managed_assets::refresh_existing_managed_gwt_assets_for_worktree(
+        &session.worktree_path,
+    );
+}
+
+fn coordination_assets_need_refresh(worktree: &Path) -> bool {
+    let codex_dir = worktree.join(".codex");
+    let codex_skill = worktree.join(".codex/skills/gwt-coordination/SKILL.md");
+    let codex_hooks = worktree.join(".codex/hooks.json");
+    let claude_dir = worktree.join(".claude");
+    let claude_skill = worktree.join(".claude/skills/gwt-coordination/SKILL.md");
+    let claude_settings = worktree.join(".claude/settings.local.json");
+
+    let codex_needs = codex_dir.is_dir() && (!codex_skill.exists() || !codex_hooks.exists());
+    let claude_needs = claude_dir.is_dir() && (!claude_skill.exists() || !claude_settings.exists());
+    codex_needs || claude_needs
+}
+
+/// SPEC-2359 Phase U-9 (FR-173 / FR-174): auto-derive `title_summary`
+/// from the workspace's first linked Issue/SPEC at SessionStart when the
+/// agent has no explicit title yet. Existing explicit values are never
+/// overwritten (US-43 non-destructive contract). Missing cache entries
+/// are a silent no-op so owner-less sessions stay empty and fall back to
+/// the existing empty-trigger reminder path.
+fn derive_title_summary_from_owner(
+    projection: &mut WorkspaceProjection,
+    session: &Session,
+) -> bool {
+    let issue_cache_root =
+        crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&session.worktree_path);
+    derive_title_summary_from_owner_with_cache(projection, &session.id, &issue_cache_root)
+}
+
+fn derive_title_summary_from_owner_with_cache(
+    projection: &mut WorkspaceProjection,
+    session_id: &str,
+    issue_cache_root: &Path,
+) -> bool {
+    let Some(agent_idx) = projection
+        .agents
+        .iter()
+        .position(|agent| agent.session_id == session_id)
+    else {
+        return false;
+    };
+    if projection.agents[agent_idx]
+        .title_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return false;
+    }
+    let Some(issue) = projection.linked_issues.first() else {
+        return false;
+    };
+    let issue_number = issue.number;
+    let title = match load_issue_title_from_cache(issue_cache_root, issue_number) {
+        Some(value) => value,
+        None => return false,
+    };
+    projection.agents[agent_idx].title_summary = Some(title);
+    true
+}
+
+fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Option<String> {
+    let path = cache_root.join(issue_number.to_string()).join("meta.json");
+    let bytes = fs::read(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
 }
 
 /// Insert a stub `WorkspaceAgentSummary` for `session` if no agent with
@@ -225,9 +321,10 @@ fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdent
     else {
         return Ok(None);
     };
-    if agent.is_unassigned() {
-        return Ok(None);
-    }
+    // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも初回
+    // UserPromptSubmit で prompt-based identity derivation を発火させるため、
+    // is_unassigned() による early-return は撤去した。non-destructive 原則
+    // (FR-166 / FR-180) は missing_identity_for_agent の空判定で維持される。
     Ok(Some(missing_identity_for_agent(agent)))
 }
 
@@ -630,6 +727,98 @@ mod tests {
         );
     }
 
+    fn unassigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
+        let mut a = assigned_agent(session_id, repo);
+        a.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+        a.workspace_id = None;
+        a
+    }
+
+    #[test]
+    fn missing_identity_for_session_does_not_skip_unassigned_agents() {
+        // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも
+        // missing_identity_for_session が `Some(MissingIdentity)` を返し、
+        // 後続の auto-derive が発火可能であること。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let agent = unassigned_agent("session-unassigned", &repo);
+
+        // 直接 missing_identity_for_agent を呼ぶ side-channel test
+        // (missing_identity_for_session は projection IO に依存するため、
+        // ここでは agent 単体で missing 判定が affiliation 非依存である
+        // ことを示す)
+        let missing = missing_identity_for_agent(&agent);
+        assert!(missing.title_summary, "unassigned + empty title -> missing");
+        assert!(missing.current_focus, "unassigned + empty focus -> missing");
+    }
+
+    #[test]
+    fn user_prompt_submit_derives_identity_for_unassigned_agent() {
+        // SPEC-2359 Phase U-10 / US-46: 「フォントが見にくいので修正して」
+        // のような prompt で unassigned session の title が auto-derive される。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let agent = unassigned_agent("session-unassigned", &repo);
+
+        let payload = serde_json::json!({
+            "session_id": "claude-provider-session",
+            "prompt": "$gwt-discussion フォントが見にくいので修正してください。"
+        });
+
+        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
+        let identity = derive_identity_from_prompt(&prompt).expect("identity");
+        let update = workspace_projection_update_for_identity(
+            "session-unassigned",
+            missing_identity_for_agent(&agent),
+            &identity,
+        )
+        .expect("update must build for unassigned + missing identity");
+
+        assert_eq!(
+            update.agent_session_id.as_deref(),
+            Some("session-unassigned")
+        );
+        assert!(
+            update.agent_title_summary.is_some(),
+            "title must be derived for unassigned + missing"
+        );
+        let title = update.agent_title_summary.unwrap();
+        assert!(!title.is_empty(), "derived title must not be empty");
+        let title_chars = title.chars().count();
+        assert!(
+            title_chars <= 30,
+            "derived title should be concise (got {} chars: {})",
+            title_chars,
+            title
+        );
+        assert!(
+            update.agent_current_focus.is_some(),
+            "focus must also be derived"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_preserves_explicit_identity_for_unassigned_agent() {
+        // US-46 でも US-43 の non-destructive 原則 (FR-166 / FR-180) を
+        // 維持する: unassigned でも explicit title があれば上書きしない。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let mut agent = unassigned_agent("session-keep", &repo);
+        agent.title_summary = Some("Existing custom title".to_string());
+        agent.current_focus = Some("Existing focus".to_string());
+
+        let missing = missing_identity_for_agent(&agent);
+        assert!(
+            !missing.title_summary,
+            "explicit title must be considered NOT missing"
+        );
+        assert!(
+            !missing.current_focus,
+            "explicit focus must be considered NOT missing"
+        );
+        assert!(missing.complete(), "no derive should fire");
+    }
+
     #[test]
     fn user_prompt_submit_builds_update_for_missing_workspace_identity() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -705,6 +894,202 @@ mod tests {
         let identity = derive_identity_from_prompt(&prompt).expect("identity");
 
         assert_eq!(identity.title_summary, "Workspace識別UX不具合");
+    }
+
+    fn write_issue_cache_meta(cache_root: &std::path::Path, number: u64, title: &str) {
+        let dir = cache_root.join(number.to_string());
+        std::fs::create_dir_all(&dir).expect("issue dir");
+        let meta = serde_json::json!({
+            "number": number,
+            "title": title,
+            "labels": [],
+            "state": "open",
+            "updated_at": "2026-05-20T00:00:00Z",
+            "comment_ids": [],
+        });
+        std::fs::write(dir.join("meta.json"), meta.to_string()).expect("meta");
+    }
+
+    fn projection_with_linked_issue(
+        repo: &std::path::Path,
+        session_id: &str,
+        issue_number: u64,
+    ) -> WorkspaceProjection {
+        let mut projection = projection_for(repo);
+        projection
+            .linked_issues
+            .push(gwt_core::workspace_projection::WorkspaceIssueLink {
+                number: issue_number,
+                title: None,
+                url: None,
+            });
+        let mut agent = assigned_agent(session_id, repo);
+        agent.title_summary = None;
+        agent.current_focus = None;
+        projection.agents.push(agent);
+        projection
+    }
+
+    #[test]
+    fn session_start_derives_title_summary_from_owner_issue_cache() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        write_issue_cache_meta(&cache_root, 2359, "Workspace / Start Work");
+
+        let session_id = "session-derive";
+        let mut projection = projection_with_linked_issue(&repo, session_id, 2359);
+
+        let updated =
+            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
+
+        assert!(
+            updated,
+            "auto-derive must apply when title is empty and cache exists"
+        );
+        assert_eq!(
+            projection.agents[0].title_summary.as_deref(),
+            Some("Workspace / Start Work"),
+            "title must be sourced from issue cache meta.json"
+        );
+    }
+
+    #[test]
+    fn session_start_does_not_overwrite_existing_title_summary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        write_issue_cache_meta(&cache_root, 2359, "Workspace / Start Work");
+
+        let session_id = "session-explicit";
+        let mut projection = projection_with_linked_issue(&repo, session_id, 2359);
+        projection.agents[0].title_summary = Some("Custom title".to_string());
+
+        let updated =
+            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
+
+        assert!(!updated, "explicit title must be preserved");
+        assert_eq!(
+            projection.agents[0].title_summary.as_deref(),
+            Some("Custom title")
+        );
+    }
+
+    #[test]
+    fn session_start_owner_absent_keeps_title_summary_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+
+        let session_id = "session-no-owner";
+        let mut projection = projection_for(&repo);
+        let mut agent = assigned_agent(session_id, &repo);
+        agent.title_summary = None;
+        projection.agents.push(agent);
+
+        let updated =
+            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
+
+        assert!(!updated, "no linked_issues -> no-op");
+        assert_eq!(projection.agents[0].title_summary, None);
+    }
+
+    #[test]
+    fn session_start_owner_cache_missing_is_silent_noop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        // cache_root exists conceptually but contains no entry for issue 9999
+
+        let session_id = "session-missing-cache";
+        let mut projection = projection_with_linked_issue(&repo, session_id, 9999);
+
+        let updated =
+            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
+
+        assert!(!updated, "missing cache file must be a silent no-op");
+        assert_eq!(projection.agents[0].title_summary, None);
+    }
+
+    #[test]
+    fn session_start_owner_cache_with_empty_title_is_noop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        write_issue_cache_meta(&cache_root, 7, "   ");
+
+        let session_id = "session-empty-title";
+        let mut projection = projection_with_linked_issue(&repo, session_id, 7);
+
+        let updated =
+            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
+
+        assert!(!updated, "empty/whitespace title must not be applied");
+        assert_eq!(projection.agents[0].title_summary, None);
+    }
+
+    #[test]
+    fn coordination_assets_need_refresh_when_codex_skill_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree = temp.path();
+        // Pretend Codex has been set up but its coordination skill was lost.
+        std::fs::create_dir_all(worktree.join(".codex/skills/gwt-other")).expect("codex other");
+        std::fs::write(worktree.join(".codex/hooks.json"), "{}").expect("hooks");
+        assert!(coordination_assets_need_refresh(worktree));
+    }
+
+    #[test]
+    fn coordination_assets_need_refresh_when_codex_hooks_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree = temp.path();
+        std::fs::create_dir_all(worktree.join(".codex/skills/gwt-coordination"))
+            .expect("coordination dir");
+        std::fs::write(
+            worktree.join(".codex/skills/gwt-coordination/SKILL.md"),
+            "skill",
+        )
+        .expect("skill");
+        // hooks.json absent
+        assert!(coordination_assets_need_refresh(worktree));
+    }
+
+    #[test]
+    fn coordination_assets_need_refresh_when_claude_skill_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree = temp.path();
+        std::fs::create_dir_all(worktree.join(".claude/skills/gwt-other")).expect("claude other");
+        std::fs::write(worktree.join(".claude/settings.local.json"), "{}").expect("settings");
+        assert!(coordination_assets_need_refresh(worktree));
+    }
+
+    #[test]
+    fn coordination_assets_need_refresh_false_when_everything_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktree = temp.path();
+        std::fs::create_dir_all(worktree.join(".codex/skills/gwt-coordination"))
+            .expect("codex coord");
+        std::fs::write(
+            worktree.join(".codex/skills/gwt-coordination/SKILL.md"),
+            "x",
+        )
+        .expect("codex skill");
+        std::fs::write(worktree.join(".codex/hooks.json"), "{}").expect("hooks");
+        std::fs::create_dir_all(worktree.join(".claude/skills/gwt-coordination"))
+            .expect("claude coord");
+        std::fs::write(
+            worktree.join(".claude/skills/gwt-coordination/SKILL.md"),
+            "x",
+        )
+        .expect("claude skill");
+        std::fs::write(worktree.join(".claude/settings.local.json"), "{}").expect("settings");
+        assert!(!coordination_assets_need_refresh(worktree));
+    }
+
+    #[test]
+    fn coordination_assets_need_refresh_false_for_unmanaged_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // No .codex, no .claude at all — worktree is not managed.
+        assert!(!coordination_assets_need_refresh(temp.path()));
     }
 
     #[test]

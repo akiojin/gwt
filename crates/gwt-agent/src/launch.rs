@@ -1427,12 +1427,12 @@ mod tests {
     #[test]
     fn build_gemini_with_model() {
         let config = AgentLaunchBuilder::new(AgentId::Gemini)
-            .model("gemini-2.5-pro")
+            .model("gemini-3-flash-preview")
             .build();
 
         assert_eq!(config.command, "gemini");
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"gemini-2.5-pro".to_string()));
+        assert!(config.args.contains(&"gemini-3-flash-preview".to_string()));
     }
 
     #[test]
@@ -1504,6 +1504,17 @@ mod tests {
         assert!(spec_arg
             .unwrap()
             .contains("@anthropic-ai/claude-code@latest"));
+    }
+
+    #[test]
+    fn resolve_runner_latest_uses_official_gemini_package() {
+        let runner = resolve_runner(&AgentId::Gemini, "latest");
+        assert!(!runner.executable.is_empty());
+        let spec_arg = runner.base_args.iter().find(|a| a.contains('@'));
+        assert_eq!(
+            spec_arg.map(String::as_str),
+            Some("@google/gemini-cli@latest")
+        );
     }
 
     #[test]

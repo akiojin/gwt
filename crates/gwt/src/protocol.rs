@@ -6,7 +6,7 @@ use gwt_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    branch_cleanup::BranchCleanupResultEntry,
+    branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
     file_content::{Encoding, Newline},
@@ -234,6 +234,13 @@ pub enum FrontendEvent {
     LoadLogs {
         id: String,
     },
+    /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
+    /// the current `ProcessConsoleHub` ring buffer so historical lines
+    /// (e.g. gh calls that happened before the window opened) are visible
+    /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
+    LoadProcessConsole {
+        id: String,
+    },
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -273,10 +280,14 @@ pub enum FrontendEvent {
         id: String,
         branches: Vec<String>,
         delete_remote: bool,
+        #[serde(default)]
+        force_filesystem_delete: bool,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
+        #[serde(default)]
+        force_filesystem_delete: bool,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -955,6 +966,21 @@ pub enum BackendEvent {
     LogEntryAppended {
         entry: LogEvent,
     },
+    /// SPEC-2809 — A single redacted, ANSI-stripped stdout/stderr line
+    /// from an external process (gh / git / docker / agent / runner)
+    /// piped through `gwt_core::process_console::ProcessConsoleHub`.
+    /// Console window and Logs window both consume this event.
+    ProcessLine {
+        line: gwt_core::process_console::ProcessLine,
+    },
+    /// SPEC-2809 Phase F2 — reply to [`FrontendEvent::LoadProcessConsole`]
+    /// containing the current ring buffer for every kind, time-sorted.
+    /// The Console window controller replays these into its per-kind
+    /// buffers so historical lines are visible on first mount.
+    ProcessConsoleSnapshot {
+        id: String,
+        lines: Vec<gwt_core::process_console::ProcessLine>,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -998,6 +1024,15 @@ pub enum BackendEvent {
     BranchCleanupResult {
         id: String,
         results: Vec<BranchCleanupResultEntry>,
+    },
+    BranchCleanupProgress {
+        id: String,
+        branch: String,
+        execution_branch: Option<String>,
+        index: usize,
+        total: usize,
+        phase: BranchCleanupProgressPhase,
+        message: String,
     },
     BranchError {
         id: String,
@@ -1460,6 +1495,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "branch_cleanup_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "branch_error",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -1729,11 +1769,14 @@ impl BackendEvent {
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
+            BackendEvent::ProcessLine { .. } => "process_line",
+            BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
             BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
             BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
+            BackendEvent::BranchCleanupProgress { .. } => "branch_cleanup_progress",
             BackendEvent::BranchError { .. } => "branch_error",
             BackendEvent::BoardError { .. } => "board_error",
             BackendEvent::ProfileError { .. } => "profile_error",

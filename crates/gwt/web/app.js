@@ -28,6 +28,7 @@
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
+      import { createConsoleWindow } from "/console-window.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
@@ -529,6 +530,9 @@
         if (preset === "workspace") {
           return "workspace";
         }
+        if (preset === "console") {
+          return "console";
+        }
         return "mock";
       }
 
@@ -592,6 +596,36 @@
             }
           },
         });
+      }
+
+      // SPEC-2809 — registry of Console window controllers keyed by windowId.
+      // Each Console window registers itself on render and unregisters on
+      // close; the `process_line` dispatcher fans out incoming lines to every
+      // active controller so multiple Console windows stay in sync.
+      const consoleControllers = new Map();
+      function ensureConsoleController(windowId) {
+        let controller = consoleControllers.get(windowId);
+        if (!controller) {
+          controller = createConsoleWindow({
+            document,
+            windowId,
+            send: (payload) => socketTransport.send(payload),
+          });
+          consoleControllers.set(windowId, controller);
+        }
+        return controller;
+      }
+      function disposeConsoleController(windowId) {
+        const controller = consoleControllers.get(windowId);
+        if (controller) {
+          controller.close();
+          consoleControllers.delete(windowId);
+        }
+      }
+      function broadcastProcessLineToConsoles(line) {
+        for (const controller of consoleControllers.values()) {
+          controller.push(line);
+        }
       }
 
       const releaseNotesWindow = createReleaseNotesWindow({
@@ -1712,6 +1746,8 @@
           // Workspace cleanup is local-only by default even when
           // cleanup_candidate.default_delete_remote is present on the wire.
           deleteRemote: false,
+          forceFilesystemDelete: false,
+          progress: null,
           results: [],
         };
         branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
@@ -4497,6 +4533,8 @@
               open: false,
               stage: "confirm",
               deleteRemote: false,
+              forceFilesystemDelete: false,
+              progress: null,
               results: [],
             },
           });
@@ -4640,6 +4678,11 @@
             error: "",
             severity: "debug",
             query: "",
+            // SPEC-2019 Amendment 2026-05-20 (Process facet) — AND-filter
+            // by ProcessKind on top of severity + query. "" means "all".
+            // Matches LogEvent.fields.kind injected by `spawn_logged`
+            // summary events (target = "gwt.process.summary").
+            processKind: "",
             selectedEntryId: null,
             unreadAlerts: 0,
             unreadEntryId: null,
@@ -5119,14 +5162,29 @@
       function filteredLogEntries(state) {
         const minimumRank = logSeverityRank(state.severity);
         const query = String(state.query || "").trim().toLowerCase();
+        const processKind = String(state.processKind || "");
         return (state.entries || [])
           .filter(
             (entry) =>
               logSeverityRank(entry.severity) >= minimumRank &&
-              logMatchesQuery(entry, query),
+              logMatchesQuery(entry, query) &&
+              logMatchesProcessKind(entry, processKind),
           )
           .slice()
           .reverse();
+      }
+
+      // SPEC-2019 Amendment 2026-05-20 — AND-combine the Process kind chip
+      // with severity / keyword filters. When `processKind` is empty the
+      // entry passes through; otherwise the entry must carry the matching
+      // `kind` field in its `fields` map. `spawn_logged` summary events
+      // emit the kind there (target = "gwt.process.summary").
+      function logMatchesProcessKind(entry, processKind) {
+        if (!processKind) {
+          return true;
+        }
+        const fields = entry.fields || {};
+        return String(fields.kind || "") === processKind;
       }
 
       function appendLiveLogEntry(entry) {
@@ -5172,6 +5230,7 @@
         const status = body.querySelector(".logs-status");
         const unreadButton = body.querySelector(".logs-unread-button");
         const severitySelect = body.querySelector(".logs-severity-select");
+        const processKindSelect = body.querySelector(".logs-process-kind-select");
         const searchInput = body.querySelector(".logs-search-input");
         const timeline = body.querySelector(".logs-timeline");
         const detailPane = body.querySelector(".logs-detail-pane");
@@ -5179,6 +5238,7 @@
           !status ||
           !unreadButton ||
           !severitySelect ||
+          !processKindSelect ||
           !searchInput ||
           !timeline ||
           !detailPane
@@ -5215,6 +5275,7 @@
             ? "1 unread alert"
             : `${state.unreadAlerts} unread alerts`;
         severitySelect.value = state.severity;
+        processKindSelect.value = state.processKind || "";
         searchInput.value = state.query;
 
         timeline.innerHTML = "";
@@ -7991,6 +8052,44 @@
         }));
       }
 
+      function initialBranchCleanupProgress(branches) {
+        return {
+          current: null,
+          items: branches.map((branch) => ({
+            branch,
+            status: "pending",
+            message: "",
+          })),
+        };
+      }
+
+      function updateBranchCleanupProgress(windowId, event) {
+        const state = ensureBranchListState(windowId);
+        const branches = Array.from(state.cleanupSelected);
+        if (!state.cleanupModal.progress) {
+          state.cleanupModal.progress = initialBranchCleanupProgress(
+            branches.length > 0 ? branches : [event.branch],
+          );
+        }
+        const progress = state.cleanupModal.progress;
+        progress.current = {
+          branch: event.branch,
+          executionBranch: event.execution_branch || null,
+          index: event.index,
+          total: event.total,
+          phase: event.phase,
+          message: event.message || "",
+        };
+        let item = progress.items.find((candidate) => candidate.branch === event.branch);
+        if (!item) {
+          item = { branch: event.branch, status: "pending", message: "" };
+          progress.items.push(item);
+        }
+        item.executionBranch = event.execution_branch || null;
+        item.status = event.phase || "running";
+        item.message = event.message || "";
+      }
+
       function failRunningBranchCleanup(windowId, message) {
         const state = ensureBranchListState(windowId);
         if (state.cleanupModal.stage !== "running") {
@@ -8151,6 +8250,8 @@
         state.cleanupModal.open = true;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
+        state.cleanupModal.forceFilesystemDelete = false;
+        state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
@@ -8169,6 +8270,8 @@
         state.cleanupModal.open = false;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
+        state.cleanupModal.forceFilesystemDelete = false;
+        state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
         if (branchCleanupWindowId === windowId) {
           branchCleanupWindowId = null;
@@ -8186,6 +8289,7 @@
         }
         state.notice = "";
         state.cleanupModal.stage = "running";
+        state.cleanupModal.progress = initialBranchCleanupProgress(branches);
         state.cleanupModal.results = [];
         renderBranchCleanupModal();
         if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
@@ -8193,6 +8297,7 @@
             kind: "run_workspace_cleanup",
             branch: branches[0],
             delete_remote: state.cleanupModal.deleteRemote,
+            force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
           });
           return;
         }
@@ -8201,6 +8306,7 @@
           id: windowId,
           branches,
           delete_remote: state.cleanupModal.deleteRemote,
+          force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
         });
       }
 
@@ -8233,6 +8339,11 @@
           onDeleteRemoteToggle: (checked) => {
             if (state) {
               state.cleanupModal.deleteRemote = checked;
+            }
+          },
+          onForceFilesystemDeleteToggle: (checked) => {
+            if (state) {
+              state.cleanupModal.forceFilesystemDelete = checked;
             }
           },
         });
@@ -8708,6 +8819,17 @@
                   </select>
                 </label>
                 <label class="logs-filter-field">
+                  <span>Process</span>
+                  <select class="logs-process-kind-select">
+                    <option value="">All</option>
+                    <option value="gh">gh</option>
+                    <option value="git">git</option>
+                    <option value="docker">docker</option>
+                    <option value="agent">agent</option>
+                    <option value="runner">runner</option>
+                  </select>
+                </label>
+                <label class="logs-filter-field">
                   <span>Search</span>
                   <input class="logs-search-input" type="search" placeholder="Filter message, source, or fields" />
                 </label>
@@ -8744,6 +8866,12 @@
               frontendUnits.logsSurface.renderLogs(windowData.id);
             });
           body
+            .querySelector(".logs-process-kind-select")
+            .addEventListener("change", (event) => {
+              state.processKind = event.target.value;
+              frontendUnits.logsSurface.renderLogs(windowData.id);
+            });
+          body
             .querySelector(".logs-search-input")
             .addEventListener("input", (event) => {
               state.query = event.target.value;
@@ -8761,6 +8889,20 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          return;
+        }
+
+        if (surface === "console") {
+          // SPEC-2809 — Console window mount: register a controller for
+          // this windowId and attach its DOM to the window body. The
+          // controller subscribes implicitly via the shared
+          // `consoleControllers` registry that the `process_line`
+          // dispatcher fans out to.
+          const controller = ensureConsoleController(windowData.id);
+          while (body.firstChild) {
+            body.removeChild(body.firstChild);
+          }
+          controller.mount(body);
           return;
         }
 
@@ -9961,6 +10103,7 @@
         openBranchCleanupModal,
         closeBranchCleanupModal,
         renderBranchCleanupModal,
+        updateBranchCleanupProgress,
         // SPEC-2009 amendment: Worktree picker + file content viewer.
         openWorktreePicker,
         closeWorktreePicker,
@@ -10488,6 +10631,24 @@
           case "log_entry_appended":
             frontendUnits.logsSurface.appendLiveEntry(event.entry);
             break;
+          case "process_line":
+            // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
+            // line from `ProcessConsoleHub` to every Console window
+            // controller. Phase F3 also wires Logs window's Process facet
+            // to consume the same event independently.
+            if (event.line) {
+              broadcastProcessLineToConsoles(event.line);
+            }
+            break;
+          case "process_console_snapshot": {
+            // SPEC-2809 Phase F2 — initial ring buffer replay for the
+            // Console window that just mounted.
+            const target = consoleControllers.get(event.id);
+            if (target) {
+              target.ingestSnapshot(event.lines || []);
+            }
+            break;
+          }
           case "knowledge_entries": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
               event.id,
@@ -10629,6 +10790,19 @@
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
               workspaceKanbanSurface.renderWindows();
+              break;
+            }
+            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+            break;
+          }
+          case "branch_cleanup_progress": {
+            frontendUnits.branchesFileTreeSurface.updateBranchCleanupProgress(
+              event.id,
+              event,
+            );
+            branchCleanupWindowId = event.id;
+            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+              frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
               break;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);

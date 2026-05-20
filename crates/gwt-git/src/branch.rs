@@ -76,10 +76,7 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
         return Ok(false);
     }
 
-    let output = gwt_core::process::hidden_command("git")
-        .args(["cherry", base, branch])
-        .current_dir(repo_path)
-        .output()
+    let output = gwt_core::process::run_git_logged(&["cherry", base, branch], Some(repo_path))
         .map_err(|e| GwtError::Git(format!("cherry: {e}")))?;
 
     if !output.status.success() {
@@ -176,15 +173,15 @@ fn detect_cleanable_target_for_remote(
 /// `[gone]` (FR-018a). Used to flag branches whose remote was deleted but
 /// which still exist locally.
 pub fn list_gone_branches(repo_path: &Path) -> Result<HashSet<String>> {
-    let output = gwt_core::process::hidden_command("git")
-        .args([
+    let output = gwt_core::process::run_git_logged(
+        &[
             "for-each-ref",
             "--format=%(refname:short)\t%(upstream:track)",
             "refs/heads/",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("for-each-ref gone: {e}")))?;
+        ],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("for-each-ref gone: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -218,10 +215,7 @@ pub fn delete_local_branch(repo_path: &Path, name: &str, force: bool) -> Result<
     }
 
     let flag = if force { "-D" } else { "-d" };
-    let output = gwt_core::process::hidden_command("git")
-        .args(["branch", flag, name])
-        .current_dir(repo_path)
-        .output()
+    let output = gwt_core::process::run_git_logged(&["branch", flag, name], Some(repo_path))
         .map_err(|e| GwtError::Git(format!("branch {flag}: {e}")))?;
 
     if !output.status.success() {
@@ -233,11 +227,11 @@ pub fn delete_local_branch(repo_path: &Path, name: &str, force: bool) -> Result<
 
 /// Returns true when `git rev-parse --verify <ref>` succeeds.
 fn ref_exists(repo_path: &Path, refname: &str) -> Result<bool> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["rev-parse", "--verify", "--quiet", refname])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("rev-parse: {e}")))?;
+    let output = gwt_core::process::run_git_logged(
+        &["rev-parse", "--verify", "--quiet", refname],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("rev-parse: {e}")))?;
     Ok(output.status.success())
 }
 
@@ -268,17 +262,23 @@ pub struct DivergenceInfo {
 /// Returns `DivergenceInfo { ahead, behind }`. If either ref is missing the
 /// command will fail and an error is returned.
 pub fn git_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<DivergenceInfo> {
-    let output = gwt_core::process::hidden_command("git")
-        .args([
+    // `-C <path>` is on the argv so callers can run from any CWD; we
+    // still pass `current_dir=None` because the `-C` flag is canonical
+    // and run_git_logged should not silently re-anchor the directory.
+    let repo_str = repo_path.to_string_lossy();
+    let range = format!("{branch}...{upstream}");
+    let output = gwt_core::process::run_git_logged(
+        &[
             "-C",
-            &repo_path.to_string_lossy(),
+            repo_str.as_ref(),
             "rev-list",
             "--count",
             "--left-right",
-            &format!("{branch}...{upstream}"),
-        ])
-        .output()
-        .map_err(|e| GwtError::Git(format!("rev-list --left-right: {e}")))?;
+            &range,
+        ],
+        None,
+    )
+    .map_err(|e| GwtError::Git(format!("rev-list --left-right: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -340,11 +340,12 @@ pub struct Branch {
 pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     let format =
         "%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(upstream:track)\t%(creatordate:iso8601)";
-    let output = gwt_core::process::hidden_command("git")
-        .args(["for-each-ref", &format!("--format={format}"), "refs/heads/"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("for-each-ref: {e}")))?;
+    let format_arg = format!("--format={format}");
+    let output = gwt_core::process::run_git_logged(
+        &["for-each-ref", &format_arg, "refs/heads/"],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("for-each-ref: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -361,15 +362,15 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     let remote_names = list_remote_names(repo_path).unwrap_or_default();
 
     // Also list remote branches
-    let remote_output = gwt_core::process::hidden_command("git")
-        .args([
+    let remote_output = gwt_core::process::run_git_logged(
+        &[
             "for-each-ref",
             "--format=%(refname:short)\t%(creatordate:iso8601)",
             "refs/remotes/",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("for-each-ref remotes: {e}")))?;
+        ],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("for-each-ref remotes: {e}")))?;
 
     if remote_output.status.success() {
         for line in String::from_utf8_lossy(&remote_output.stdout).lines() {
@@ -403,10 +404,7 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
 }
 
 pub fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
-    let output = gwt_core::process::hidden_command("git")
-        .arg("remote")
-        .current_dir(repo_path)
-        .output()
+    let output = gwt_core::process::run_git_logged(&["remote"], Some(repo_path))
         .map_err(|e| GwtError::Git(format!("remote: {e}")))?;
 
     if !output.status.success() {

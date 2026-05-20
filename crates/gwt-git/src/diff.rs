@@ -40,19 +40,19 @@ impl FileEntry {
     pub fn diff_content(&self, repo_path: &Path) -> Result<String> {
         match self.status {
             FileStatus::Staged => {
-                let output = gwt_core::process::hidden_command("git")
-                    .args(["diff", "--cached", "--", self.path.to_str().unwrap_or("")])
-                    .current_dir(repo_path)
-                    .output()
-                    .map_err(|e| GwtError::Git(format!("diff --cached: {e}")))?;
+                let path_str = self.path.to_str().unwrap_or("");
+                let output = gwt_core::process::run_git_logged(
+                    &["diff", "--cached", "--", path_str],
+                    Some(repo_path),
+                )
+                .map_err(|e| GwtError::Git(format!("diff --cached: {e}")))?;
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
             }
             FileStatus::Unstaged => {
-                let output = gwt_core::process::hidden_command("git")
-                    .args(["diff", "--", self.path.to_str().unwrap_or("")])
-                    .current_dir(repo_path)
-                    .output()
-                    .map_err(|e| GwtError::Git(format!("diff: {e}")))?;
+                let path_str = self.path.to_str().unwrap_or("");
+                let output =
+                    gwt_core::process::run_git_logged(&["diff", "--", path_str], Some(repo_path))
+                        .map_err(|e| GwtError::Git(format!("diff: {e}")))?;
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
             }
             FileStatus::Untracked => {
@@ -65,10 +65,7 @@ impl FileEntry {
 
 /// Get the working tree status as a list of `FileEntry`.
 pub fn get_status(repo_path: &Path) -> Result<Vec<FileEntry>> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["status", "--porcelain=v1"])
-        .current_dir(repo_path)
-        .output()
+    let output = gwt_core::process::run_git_logged(&["status", "--porcelain=v1"], Some(repo_path))
         .map_err(|e| GwtError::Git(format!("status: {e}")))?;
 
     if !output.status.success() {

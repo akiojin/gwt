@@ -1,5 +1,54 @@
 # Lessons Learned
 
+## 2026-05-20 — develop merge ≠ 既存 session で動く: hook 経路 binary は `installed gwtd` で固定される (Phase U-9 self-bench で発見)
+
+### 事象
+
+SPEC-2359 Phase U-9 (PR #2819) を develop に merge 後、self-bench として live Claude Code session の `title_summary` を activity descriptor (`PR チェック中`) に書き換え、RemindersState を stale threshold 直前まで prime したが、次の UserPromptSubmit で stale reminder (`# Agent Title Stale`) は context に注入されず、prime した新 field (`last_title_summary_seen` / `unchanged_turn_count` / `phase_changed_in_window`) はすべて wipe された。
+
+### 原因
+
+`.claude/settings.local.json` の hook command は `'/Applications/GWT.app/Contents/MacOS/gwtd' hook event UserPromptSubmit` のように **installed gwtd binary を絶対 path で固定** している。私のセッションが起動した時点の installed binary は `gwtd 9.40.0` 直前の `gwtd 9.38.0` で、Phase U-9 (FR-178 stale detection / 新 RemindersState field) を含まない。
+
+差分検証で確定 (同 primed state + 同 UserPromptSubmit payload):
+
+- 旧 v9.38.0: `additionalContext` 2825 bytes / `Agent Title Stale` 不在 / RemindersState 新 field を null に wipe
+- 新 v9.40.0 (`target/debug/gwtd`, PR #2819 を含む): 3268 bytes (+443) / `Agent Title Stale` 注入 / `unchanged_turn_count: 8→9`, `last_title_summary_seen: 'PR チェック中'`, `phase_changed_in_window: true` を保持
+
+Phase U-9 のコード自体は正しく動作するが、live session に reach するのは「次に gwt release を切って installed binary が新版に置き換わるか、`.claude/settings.local.json` を手で `target/debug/gwtd` に向ける」のいずれかが必要。
+
+### 再発防止策
+
+1. **hook 経路の binary は worktree 起動時の `installed gwtd` で固定されると認識する**: `.claude/settings.local.json` / `.codex/hooks.json` は generator が `installed_gwt_candidates()` で resolve した path をハードコードする。一度書き出されたら手で書き換えない限り変化しない。`refresh_existing_managed_gwt_assets_for_worktree` が再生成する時も同じ installed path を使う。development fallback の `target/debug/gwtd` に向くのは installed binary が見つからない時だけ。
+2. **release を切らずに動作観測が必要な変更は development binary 経由で test する**: 新 hook 機能の動作観測は `target/debug/gwtd hook event <Event>` を **直接** 投入して output を見るのが正本経路。live session の system-reminder block に injection されるのを待つのは installed binary に依存するため不確実。
+3. **「PR merge = 既存 user の挙動が変わる」と誤解しない**: code が `develop` に届いたタイミングと、user の installed binary が新版になるタイミングはずれる。release ワークフロー (`/release` skill 等) を回して app bundle / installer を新版に bump しないと、既存 session の挙動は変わらない。完了報告で「次回 session から効く」と書く時、それが「次回 SessionStart hook の発火」を指すのか「次回 release 配布後の新 session」を指すのかを区別する。Phase U-9 の場合、新規 worktree の materialization は installed binary が呼ぶ generator の話なので、generator が新バージョンを emit するには installed binary 自体の更新が必要。
+4. **gwt-verify の Overall PASS は live session 動作の証明ではない**: gwt-verify の test matrix は `target/debug/gwtd` を使って unit / integration test を走らせる。これは「コードが正しい」ことの証明であって「user の live session で動く」ことの証明ではない。視認系 verification (E2E headed / live-session dogfooding) は installed binary deploy 後に追加で必要。
+
+---
+
+## 2026-05-20 — User 観察と code 上の強制機構の方向が逆だった時は salience asymmetry を疑う (title-summary content / Codex vs Claude Code)
+
+### 事象
+
+User が「Codex は agent window の `title_summary` をよく更新するが、Claude Code はあまり更新しない」と報告。しかも更新内容が `PR チェック中` のような activity descriptor (作業内容) になっていて、複数 pane を監視する user が agent の goal を把握できない状態だった。
+
+### 原因
+
+1. **観察と code 上の強制機構が逆向き**だった。Claude Code 側には dual-path 強制 (skill + `board_reminder` empty-trigger reminder) が `.claude/settings.local.json` の 5 hook events 経由で機能していたのに、Codex 側は `.codex/skills/gwt-coordination/SKILL.md` も `.codex/hooks.json` も worktree に materialize されていなかった。code 上の強制機構の配置だけ見ると Claude Code の方が title 更新は強制されるはずだが、実観察は逆。
+2. **真因は salience asymmetry**: Claude Code は CLAUDE.md → AGENTS.md import + skills + hook reminders + Board reminder + 永続化 SessionStart context 等の中で title 規則が reminder fatigue で normalized as noise になる。Codex は AGENTS.md を primary system instruction として読むため、競合する context が少なく title 規則が salient に残る。
+3. **canonical guidance の Bad 例不足**: `coordination_guidance.rs::SKILL_BODY_EN` の Bad 例は `done` / `Working on X` の 2 つだけで、`PR チェック中` / `verifying tests` / `fixing bug` のような phase/activity descriptor を明示的に Bad と書いていなかったため agent が許容と解釈していた。
+4. **empty-trigger reminder が one-shot だった**: `title_summary_required_reminder()` は title が empty の時だけ fire し、初期 set 後 phase が進んでも再注入されない (stale 化)。
+
+### 再発防止策
+
+1. **User 観察と code 上の強制機構が逆向きを示唆する時は code-side enforcement を信じず salience を疑う**: コードに hook + skill + validation が完備されていても、agent がそれを surface しないなら enforcement は無効。reminder fatigue / 競合 context / 長すぎる system prompt は salience を破壊する。仮説検証時は「強い強制が無い側」の方が良く動く可能性を等しく扱う。
+2. **content validation は activity descriptor では成立しない**: 「中」/「verifying」/「checking」/「working on」のような activity 系語尾は無限のバリエーションを持ち、string matching ベースの reject / warning は false positive が多すぎて運用に耐えない。代わりに canonical guidance の Bad 例 + auto-derive from owner + per-turn stale reminder の defense-in-depth で対処する (SPEC-2359 Phase U-9 / US-45)。
+3. **dual-language SKILL body を扱う時は両方更新を強制する**: `SKILL_BODY_EN` と `SKILL_BODY_JA` がある場合、`render_skill_md` test が EN-only emit を強制するなら、JA-only の Bad 例 (例: `〜中`) は JA-speaking agent に届かない。`required_phrases()` drift guard には EN の representative phrase を入れ、JA body には `skill_body_ja_contains_*` の独立 test で drift を検出する。
+4. **一度設定された state の stale 化は empty-trigger reminder では検知できない**: `title_summary` のような「初期 set 後は更新が agent 任せ」になる field は、N turn 連続で同 value + 関連 field (`current_focus` / Board kind 等) の drift を検出する stale-detection reminder を追加する。state は `RemindersState` 等 既存 sidecar に `#[serde(default)]` で field 追加すれば legacy state 後方互換。
+5. **`.codex/` 配下 asset の missing は worktree 状態次第で発生する**: managed asset generator (`generate_coordination_guidance_for_codex`, `generate_codex_hooks`) が code にあっても、worktree が generator 追加前に作られていれば materialize されていない。SessionStart hook で missing 検出 → `refresh_existing_managed_gwt_assets_for_worktree` 呼び出しの idempotent re-materialization を追加すると old worktree も自己修復できる (FR-177)。
+
+---
+
 ## 2026-05-20 — SPEC の FR で platform scope を限定すると、サイレントな regression を生む（macOS app icon）
 
 ### 事象
@@ -52,6 +101,46 @@ SPEC #2780 (Release Notes Window) 実装で、以下のテストが全て GREEN 
 
 - `crates/gwt/playwright/tests/release-notes-live.spec.ts` を新規追加 (live backend、`installEmbeddedRoutes` 不使用)。最初は 8/8 RED で embedded_web.rs の欠落と splash auto-dismiss bug を可視化。embedded_web.rs 修正後、8/8 GREEN (chromium-dark 4 + chromium-light 4、serial)。
 - embedded_web.rs 本体の fix は **別 agent の PR #2797** (work/20260520-0409 / cb25afc1) が canonical で develop に merge 済み。並行調査していて重複検出した。PR #2797 は `every_root_js_module_import_in_app_assets_is_registered` 回帰防止 unit test を含む。私の PR #2798 は live E2E spec と本 lessons の追記のみに縮小して PR #2797 の補完に位置付けた。
+
+---
+
+## 2026-05-20 — 外部プロセスラッパーは caller buf を raw に保ち、redaction は hub のみに限定する
+
+### 事象
+
+`gwt_core::process_console::spawn_logged` の初版で stdout/stderr 各行を hub にも caller-facing
+`SpawnOutput.stdout` にも **redact 後** の文字列で書き込み、`tokio::io::AsyncBufReadExt::lines` で
+読んだ後に常に `\n` を append していた。結果、(1) `gh auth token` の戻り値が
+`***redacted***` になりトークン取得が壊れ、(2) `print!("job log 91")` (改行なし) を
+モックしている既存テストが `"job log 91\n"` を見て assertion 失敗した。
+
+### 原因
+
+- redact を 1 か所に集約する設計判断のとき、「user-visible な log/UI」と「caller が
+  そのまま downstream API に渡す raw buffer」の責任分離を忘れた。
+- `BufReader::lines()` は line terminator を strip する。「行ごとの forward」と
+  「raw な buffer 復元」を同じパスで両立させようとして、便宜的に `\n` を毎回 append
+  したため、もともと改行のない出力にも改行が混入した。
+
+### 再発防止策
+
+1. **caller-facing buffer は raw bytes そのまま**: `tokio::io::AsyncReadExt::read_to_end`
+   で生のバイト列を取得し、`String::from_utf8_lossy` してそのまま返す。terminator や
+   redaction を caller の見える値に施さない。
+2. **redaction は hub/log/UI に流す前だけ**: ring buffer push と broadcast send の
+   直前で `redact_line` を適用する。caller の戻り値や `tracing` summary には素値を保つ。
+3. **行分割は forward 用途に限定**: hub に流す単位として `\n` と `\r` で split する
+   が、caller の `buf` には影響させない。CR-only progress line (docker pull / git clone)
+   も同じ split で kind ごとの discrete event になる。
+4. **既存モックを必ず通す**: 既存テストがコマンド出力を `print!`/`println!` で
+   モックしている場合、改行有無まで含めて互換性を維持する。新規 wrapper を導入する
+   ときは「`Command::output()` と同じバイト列」を契約に書き、テストを先に通してから
+   実装を縮める。
+5. **secret redaction の network leak**: gh / git / docker は通常 token を echo
+   しないが、verbose / debug ログでは漏れる。FR としては `Authorization` / `token=` /
+   `gh_*` / `ghp_*` / `ghs_*` / `ghu_*` を redact pattern に明示し、ring buffer と
+   broadcast の両方に適用する。canonical log には summary event だけが書かれるため、
+   line-level の漏洩は構造的に発生しない (FR-040 / SC-013)。
 
 ---
 

@@ -118,7 +118,7 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::Gemini,
         command: "gemini",
         display_name: "Gemini CLI",
-        package_name: Some("@anthropic-ai/gemini-cli"),
+        package_name: Some("@google/gemini-cli"),
         color: AgentColor::Magenta,
         aliases: &["gemini", "gemini cli", "gemini-cli"],
         cache_key: "gemini",
@@ -345,6 +345,7 @@ mod tests {
             AgentId::ClaudeCode.package_name(),
             Some("@anthropic-ai/claude-code")
         );
+        assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
         assert_eq!(AgentId::OpenCode.package_name(), None);
         assert_eq!(AgentId::OpenClaw.package_name(), None);
         assert_eq!(AgentId::Hermes.package_name(), None);

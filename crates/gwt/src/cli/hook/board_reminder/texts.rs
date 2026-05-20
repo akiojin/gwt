@@ -308,3 +308,24 @@ When useful, use the same short title on the Board milestone:\n\
 **Use language: en** for narrative outputs (Board post bodies, Workspace summaries, and Agent title-summary; gwtd subcommands, flags, and code examples stay English).\n",
     }
 }
+
+pub(super) fn title_summary_stale_reminder(lang: &str) -> &'static str {
+    match reminder_language(lang) {
+        ReminderLanguage::Ja => "# Agent Title Stale\n\
+\n\
+`title-summary` が複数ターン同じ値のままで、`current-focus` だけが変化しています。実装の scope が本当に変わった場合は title を更新してください。phase / activity の変化だけなら title は変えずに `--current-focus` だけ更新する運用が正しいです。\n\
+\n\
+更新する場合のコマンド例:\n\
+  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --title-summary '<新しい作業 scope>'\n\
+\n\
+`title-summary` は作業の scope です。phase / activity descriptor (`PR チェック中`、`verifying tests`、`fixing bug` 等) は `--current-focus` または Board `--body` に分けます。\n",
+        ReminderLanguage::En => "# Agent Title Stale\n\
+\n\
+The `title-summary` has stayed unchanged for several UserPromptSubmit turns while `current-focus` has shifted. If the work scope actually changed, update the title; if only the phase / activity changed, leave the title and update `--current-focus` only.\n\
+\n\
+Command to refresh the title:\n\
+  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --title-summary '<new work scope>'\n\
+\n\
+`title-summary` is the work scope; phase / activity descriptors (`PR check in progress`, `verifying tests`, `fixing bug`, etc.) belong in `--current-focus` or the Board `--body`, not in the title.\n",
+    }
+}

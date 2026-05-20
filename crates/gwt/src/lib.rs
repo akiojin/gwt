@@ -43,7 +43,9 @@ pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
 }
 
 pub use branch_cleanup::{
-    cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
+    cleanup_selected_branches, cleanup_selected_branches_with_options,
+    cleanup_selected_branches_with_progress, BranchCleanupOptions, BranchCleanupProgressEntry,
+    BranchCleanupProgressPhase, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
 pub use branch_list::{
     hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
@@ -79,13 +81,14 @@ pub use knowledge_bridge::{
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
-    load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
-    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath,
-    LaunchWizardLaunchRequest, LaunchWizardLiveSessionView, LaunchWizardMode,
-    LaunchWizardOptionView, LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles,
-    LaunchWizardProgressStepView, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
-    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
-    QuickStartLaunchMode, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
+    knowledge_launch_target_branch_name, load_agent_options, AgentOption, DockerWizardContext,
+    LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
+    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
+    LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
+    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
+    LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,

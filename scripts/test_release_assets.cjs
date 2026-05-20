@@ -236,6 +236,42 @@ run("README install guidance points to GUI-first release assets", () => {
   }
 });
 
+run("windows MSI diagnostics are documented for launch failures", () => {
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");
+
+  for (const doc of [readme, readmeJa]) {
+    assert.match(doc, /diagnose-windows-msi\.ps1/);
+    assert.match(doc, /msiexec|Windows Installer/);
+  }
+});
+
+run("windows MSI diagnostic script captures installer evidence", () => {
+  const diagnosticScript = fs.readFileSync(
+    path.join(__dirname, "diagnose-windows-msi.ps1"),
+    "utf8"
+  );
+
+  for (const required of [
+    "Get-FileHash",
+    "Get-AuthenticodeSignature",
+    "Zone.Identifier",
+    "Start-Transcript",
+    "msiexec.exe",
+    "/L*V",
+    "Get-ChildItem",
+    "gwt.exe",
+    "--version",
+    "serve",
+    "--no-open",
+  ]) {
+    assert.ok(
+      diagnosticScript.includes(required),
+      `diagnose-windows-msi.ps1 must include "${required}"`
+    );
+  }
+});
+
 run("portable tarball extraction installs the unix bundle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
   const sourceDir = path.join(root, "source");

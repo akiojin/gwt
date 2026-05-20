@@ -607,7 +607,8 @@ body {
 .workspace-window.surface-mock,
 .workspace-window.surface-workspace,
 .workspace-window.surface-knowledge,
-.workspace-window.surface-profile {
+.workspace-window.surface-profile,
+.workspace-window.surface-console {
   background: var(--color-surface);
 }
 
@@ -635,7 +636,8 @@ body {
 .surface-logs .titlebar,
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
-.surface-profile .titlebar {
+.surface-profile .titlebar,
+.surface-console .titlebar {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   border-bottom: 1px solid var(--color-border);
@@ -2528,6 +2530,43 @@ body {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.branch-cleanup-progress-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.branch-cleanup-progress-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.branch-cleanup-progress-branch {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-cleanup-progress-status {
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+
+.branch-cleanup-progress-message {
+  grid-column: 1 / -1;
   color: var(--color-text-muted);
 }
 

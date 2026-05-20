@@ -5,11 +5,11 @@ description: "Semantic search over project source files using vector embeddings.
 
 # Project Search
 
-gwt maintains a vector search index of project implementation files using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/files/` (with a sibling `files-docs/` collection for documentation). The gwt TUI keeps a per-Worktree filesystem watcher running so changes flow into the index automatically. When invoked outside the TUI, the runner auto-builds the index on the first call.
+gwt maintains a vector search index of project implementation files using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/files/` (with a sibling `files-docs/` collection for documentation). The gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) keeps a per-Worktree filesystem watcher running so changes flow into the index automatically. When invoked outside the gwt app, the runner auto-builds the index on the first call.
 
 ## Environment
 
-When the gwt TUI launches an agent pane, the following env vars are exported automatically:
+When the gwt GUI app launches an agent pane, the following env vars are exported automatically:
 
 - `GWT_PROJECT_ROOT` — absolute path of the active worktree
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
@@ -59,7 +59,7 @@ On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe` as the Python ex
 
 ## Notes
 
-- The TUI watcher (2 s debounce, 100-file batch) keeps the index live; non-TUI sessions get an mtime+size diff per call
+- The gwt GUI watcher (2 s debounce, 100-file batch) keeps the index live; external runner invocations get an mtime+size diff per call
 - The runner auto-builds the index when missing (use `--no-auto-build` to suppress)
 - `search-files` is implementation-focused and excludes embedded skill assets, local/archived SPEC trees, local task logs, and snapshot files
 - Project docs are indexed separately and can be searched with `search-files-docs`

@@ -60,4 +60,36 @@ fn frontend_event_rebuild_index_cell_deserializes_with_all_scopes() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+
+    let lessons = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "rebuild_index_cell",
+        "project_root": "/abs/repo",
+        "scope": "lessons"
+    }))
+    .expect("rebuild_index_cell scope=lessons should deserialize (SPEC-2805)");
+    match lessons {
+        FrontendEvent::RebuildIndexCell {
+            project_root,
+            scope,
+            worktree_hash,
+        } => {
+            assert_eq!(project_root, "/abs/repo");
+            assert_eq!(scope, IndexRebuildScope::Lessons);
+            assert_eq!(
+                worktree_hash, None,
+                "lessons is repo-scoped, worktree_hash must not be required"
+            );
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn index_rebuild_scope_lessons_metadata_matches_repo_scoped_contract() {
+    let scope = IndexRebuildScope::Lessons;
+    assert_eq!(scope.label(), "lessons");
+    assert!(
+        !scope.requires_worktree_hash(),
+        "lessons is repo-scoped — rebuild cell must not require worktree_hash"
+    );
 }

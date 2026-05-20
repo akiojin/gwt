@@ -3949,3 +3949,125 @@ kbd.op-kbd {
   padding: 0 6px;
   font-size: var(--type-2xs);
 }
+
+/* SPEC-2809 — Console window: VS Code Output-panel equivalent. Five
+   fixed kind tabs (gh / git / docker / agent / runner) share the same
+   chrome as the Logs window so it visually belongs to the same family
+   instead of looking like a foreign control. */
+.console-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+
+.console-window__tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  flex-wrap: wrap;
+}
+
+.console-window__tab {
+  appearance: none;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-mono);
+  font-weight: 600;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.console-window__tab:hover {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.console-window__tab[aria-selected="true"] {
+  background: var(--color-state-active);
+  border-color: transparent;
+  color: var(--color-text-on-active, var(--color-bg, #fff));
+}
+
+.console-window__tab:focus-visible {
+  outline: 2px solid var(--color-state-active);
+  outline-offset: -2px;
+}
+
+.console-window__body {
+  flex: 1 1 auto;
+  position: relative;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.console-window__pane {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.5;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.console-window__pane::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.console-window__pane::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.console-window__invocation-header {
+  display: block;
+  color: var(--color-text-muted);
+  margin-top: 10px;
+  margin-bottom: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-mono);
+  font-size: var(--type-2xs, 11px);
+}
+
+.console-window__invocation-header:first-child {
+  margin-top: 0;
+}
+
+.console-window__line {
+  display: block;
+}
+
+.console-window__line--stdout {
+  color: var(--color-text);
+}
+
+.console-window__line--stderr {
+  color: var(--color-state-blocked);
+}
+
+.console-window__empty {
+  display: block;
+  color: var(--color-text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}

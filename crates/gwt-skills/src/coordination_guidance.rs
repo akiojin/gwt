@@ -89,7 +89,14 @@ the current task, summary, next action, or focus changes:
 Workspace summaries. Write what the work is, not its completion state.
 
 - Good: `Agent title summaries`
-- Bad: `Agent title summaries done`, `Working on agent title summaries`
+- Bad (completion state): `Agent title summaries done`, `Working on agent title summaries`
+- Bad (activity / phase descriptors): `PR check in progress`, `verifying tests`, `fixing bug`, `checking CI`, `reviewing PR`
+
+Rule: title-summary = work scope; phase / activity descriptors are for
+`--current-focus` or Board `--body`. Keep the title stable while the
+phase or activity changes, and update it only when the underlying work
+scope changes (for example, starting a new task or moving to a
+different Issue / SPEC).
 
 Put completion, active, blocked, and similar state in `--status`,
 `--current-focus`, `--summary`, or the Board `--body`, not in
@@ -184,7 +191,13 @@ summary、next action、focus が変わったら必ず更新します:
 **短い作業名**。状態や結果ではなく「何の作業か」を書きます。
 
 - 例: `エージェントタイトル改善` ✓
-- 不可: `エージェントタイトル改善完了`、`エージェントタイトル改善中` ✗
+- 不可 (完了状態): `エージェントタイトル改善完了`、`エージェントタイトル改善中` ✗
+- 不可 (activity / phase): `PR チェック中`、`verifying tests`、`fixing bug`、`checking CI`、`reviewing PR` ✗
+
+Rule: title-summary は作業の scope。phase / activity descriptor は
+`--current-focus` または Board `--body` に書きます。title は phase /
+activity が変わっても変えず、scope (新しい task や別 Issue / SPEC
+への移行) が変わった時だけ更新します。
 
 完了 / 進行中 / ブロック中などの状態は `--status`、`--current-focus`、
 `--summary`、または Board `--body` に分けます。
@@ -293,6 +306,10 @@ mod tests {
             "git checkout -b",
             "git worktree add/remove",
             "AGENTS.md or CLAUDE.md",
+            "PR check in progress",
+            "verifying tests",
+            "fixing bug",
+            "title-summary = work scope",
         ]
     }
 
@@ -503,6 +520,94 @@ mod tests {
             after.contains("gwtd workspace update"),
             "fresh content must contain canonical Workspace directive"
         );
+    }
+
+    #[test]
+    fn skill_body_en_contains_activity_bad_examples_and_rule() {
+        let body = SKILL_BODY_EN;
+        for phrase in [
+            "PR check in progress",
+            "verifying tests",
+            "fixing bug",
+            "checking CI",
+            "reviewing PR",
+            "title-summary = work scope",
+        ] {
+            assert!(
+                body.contains(phrase),
+                "SKILL_BODY_EN must contain activity Bad example or rule phrase: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_body_ja_contains_activity_bad_examples_and_rule() {
+        let body = SKILL_BODY_JA;
+        for phrase in [
+            "PR チェック中",
+            "verifying tests",
+            "fixing bug",
+            "checking CI",
+            "reviewing PR",
+            "title-summary は作業の scope",
+        ] {
+            assert!(
+                body.contains(phrase),
+                "SKILL_BODY_JA must contain activity Bad example or rule phrase: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_skill_md_propagates_activity_rule_to_emitted_file() {
+        let rendered = render_skill_md();
+        for phrase in [
+            "PR check in progress",
+            "verifying tests",
+            "fixing bug",
+            "title-summary = work scope",
+        ] {
+            assert!(
+                rendered.contains(phrase),
+                "render_skill_md() must propagate activity Bad example / rule: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_writes_byte_identical_skill_md_with_activity_rule_to_both_targets() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+
+        let claude = tmp
+            .path()
+            .join(".claude/skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md");
+        let codex = tmp
+            .path()
+            .join(".codex/skills")
+            .join(SKILL_NAME)
+            .join("SKILL.md");
+
+        let claude_content = std::fs::read_to_string(&claude).unwrap();
+        let codex_content = std::fs::read_to_string(&codex).unwrap();
+
+        assert_eq!(
+            claude_content, codex_content,
+            "Claude and Codex SKILL.md must remain byte-identical for Phase U-9 parity"
+        );
+        for phrase in [
+            "PR check in progress",
+            "verifying tests",
+            "fixing bug",
+            "title-summary = work scope",
+        ] {
+            assert!(
+                claude_content.contains(phrase),
+                "materialized SKILL.md must carry the activity Bad example / rule: {phrase}"
+            );
+        }
     }
 
     #[test]

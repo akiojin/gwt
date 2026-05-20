@@ -33,7 +33,7 @@ Minimum workflow:
 
 ## Environment
 
-When the gwt TUI launches an agent pane, the following env vars are exported automatically:
+When the gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) launches an agent pane, the following env vars are exported automatically:
 
 - `GWT_PROJECT_ROOT` — absolute path of the active worktree
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
@@ -81,7 +81,7 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Notes
 
-- `search-specs` refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache before non-TUI searches
+- `search-specs` refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache before external (non-GUI) runner invocations
 - The runner auto-builds the index when missing (use `--no-auto-build` to suppress)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance

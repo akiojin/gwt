@@ -14,14 +14,14 @@ use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
-    cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
-    list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state, read_binary_chunk, read_text_file,
-    refresh_managed_gwt_assets_for_agent, resolve_launch_spec, workspace_state_path, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    cleanup_selected_branches_with_progress, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    read_binary_chunk, read_text_file, refresh_managed_gwt_assets_for_agent, resolve_launch_spec,
+    workspace_state_path, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, BranchListEntry,
+    ContentLimits, DockerWizardContext, FileContentError, FrontendEvent, HookForwardTarget,
+    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -211,6 +211,15 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
     clients.dispatch(vec![OutboundEvent::broadcast(
         BackendEvent::LogEntryAppended { entry },
     )]);
+}
+
+/// SPEC-2809 Phase F1 — fan out one external-process line to every
+/// connected client. The Console window renders it under the matching
+/// kind tab; the Logs window renders it inside the Process kind facet.
+fn broadcast_process_line(clients: &ClientHub, line: gwt_core::process_console::ProcessLine) {
+    clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::ProcessLine {
+        line,
+    })]);
 }
 
 fn spawn_project_index_status_check(
@@ -776,6 +785,13 @@ enum UserEvent {
     },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
+    },
+    /// SPEC-2809 Phase F1 — one redacted line from an external process
+    /// (gh / git / docker / agent / runner) emitted by
+    /// `ProcessConsoleHub`. Broadcast to all WebSocket clients so the
+    /// Console window and Logs window can both render it.
+    ProcessLine {
+        line: gwt_core::process_console::ProcessLine,
     },
     RuntimeOutput {
         id: String,
@@ -2881,7 +2897,8 @@ mod tests {
                 if message == "Window is not a knowledge bridge"
         ));
 
-        let cleanup_missing = runtime.run_branch_cleanup_events("client-1", "missing", &[], false);
+        let cleanup_missing =
+            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false);
         assert_eq!(cleanup_missing.len(), 1);
         assert!(matches!(
             cleanup_missing[0].event,
@@ -2889,7 +2906,7 @@ mod tests {
         ));
 
         let cleanup_wrong =
-            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false);
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false);
         assert_eq!(cleanup_wrong.len(), 1);
         assert!(matches!(
             cleanup_wrong[0].event,
@@ -3212,8 +3229,21 @@ mod tests {
             &branches_id,
             &[String::from("feature/prune-me")],
             false,
+            false,
         );
         assert!(cleanup_events.is_empty());
+        wait_for_recorded_event("branch cleanup progress dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupProgress { .. }
+                        ))
+                )
+            })
+        });
         wait_for_recorded_event("branch cleanup dispatch", &events, |events| {
             events.iter().any(|event| {
                 matches!(
@@ -3513,6 +3543,7 @@ mod tests {
                 id: branches_id.clone(),
                 branches: vec!["feature/missing".to_string()],
                 delete_remote: false,
+                force_filesystem_delete: false,
             },
         );
         assert!(cleanup_events.is_empty());
@@ -3684,6 +3715,18 @@ mod tests {
         ));
         let issue_session = runtime.launch_wizard.as_ref().expect("launch wizard");
         assert!(!issue_session.wizard.is_hydrating);
+        let issue_view = issue_session.wizard.view();
+        assert_eq!(issue_view.mode, gwt::LaunchWizardMode::Knowledge);
+        assert_eq!(issue_view.branch_name, "work/issue-7");
+        assert_eq!(issue_view.branch_mode, "create_new");
+        assert!(!issue_view.show_branch_controls);
+        let issue_config = issue_session
+            .wizard
+            .build_launch_config()
+            .expect("issue launch config");
+        assert_eq!(issue_config.branch.as_deref(), Some("work/issue-7"));
+        assert_eq!(issue_config.base_branch.as_deref(), Some("feature/demo"));
+        assert!(issue_config.working_dir.is_none());
         assert_eq!(
             issue_session.wizard.context.linked_issue_kind,
             Some(gwt::LinkedIssueKind::Issue)
@@ -3703,6 +3746,18 @@ mod tests {
             });
         assert_eq!(prepared_spec.len(), 1);
         let spec_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        let spec_view = spec_session.wizard.view();
+        assert_eq!(spec_view.mode, gwt::LaunchWizardMode::Knowledge);
+        assert_eq!(spec_view.branch_name, "feature/spec-2014");
+        assert_eq!(spec_view.branch_mode, "create_new");
+        assert!(!spec_view.show_branch_controls);
+        let spec_config = spec_session
+            .wizard
+            .build_launch_config()
+            .expect("spec launch config");
+        assert_eq!(spec_config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(spec_config.base_branch.as_deref(), Some("feature/demo"));
+        assert!(spec_config.working_dir.is_none());
         assert_eq!(
             spec_session.wizard.context.linked_issue_kind,
             Some(gwt::LinkedIssueKind::Spec)
@@ -5039,6 +5094,39 @@ mod tests {
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &repo)));
 
+        let mut knowledge_dir = None;
+        let mut knowledge_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("work/issue-7"),
+            &mut base_branch,
+            &mut knowledge_dir,
+            &mut knowledge_env,
+        )
+        .expect("knowledge launch worktree");
+        let knowledge_dir = knowledge_dir.expect("knowledge launch worktree dir");
+        assert!(
+            !super::same_worktree_path(&knowledge_dir, &repo),
+            "Knowledge Launch must not reuse the current develop project root"
+        );
+        assert!(knowledge_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| { super::same_worktree_path(Path::new(value), &knowledge_dir) }));
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&knowledge_dir)
+            .output()
+            .expect("current branch in knowledge worktree");
+        assert!(
+            output.status.success(),
+            "git branch --show-current failed for knowledge worktree"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "work/issue-7"
+        );
+
         let preset = temp.path().join("preset");
         let mut preset_dir = Some(preset.clone());
         let mut preset_env = HashMap::new();
@@ -5972,6 +6060,30 @@ fn main() -> wry::Result<()> {
                 }
             }));
         }
+        // SPEC-2809 Phase F1 — subscribe to the ProcessConsoleHub
+        // broadcast channel and fan out every line as a UserEvent. The
+        // existing tracing UI forwarder above is unchanged; the two
+        // streams are independent (summary tracing vs. line-level
+        // process I/O).
+        let mut process_rx = log_handles.process_console_hub.subscribe();
+        let process_proxy = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            loop {
+                match process_rx.recv().await {
+                    Ok(line) => {
+                        let _ = process_proxy.send_event(UserEvent::ProcessLine { line });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Slow subscribers can fall behind during
+                        // bursts (e.g. `docker pull`). Drop the lag
+                        // signal and keep going; the ring buffer is
+                        // the durable replay surface, not this stream.
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }));
     }
 
     let (bind_addr, bind_port) = match serve_args.as_ref() {
@@ -6182,6 +6294,9 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
+            }
+            Event::UserEvent(UserEvent::ProcessLine { line }) => {
+                broadcast_process_line(&clients, line);
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);

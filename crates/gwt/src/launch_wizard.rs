@@ -37,6 +37,14 @@ impl LinkedIssueKind {
 pub enum LaunchWizardMode {
     Branch,
     StartWork,
+    Knowledge,
+}
+
+pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {
+    match kind {
+        LinkedIssueKind::Issue => format!("work/issue-{number}"),
+        LinkedIssueKind::Spec => format!("feature/spec-{number}"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -904,6 +912,30 @@ impl LaunchWizardState {
             quick_start_entries,
             LaunchWizardPreviousProfiles::from_profile(previous_profile),
         )
+    }
+
+    pub fn open_knowledge_launch_with_previous_profiles(
+        context: LaunchWizardContext,
+        base_branch_name: String,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+        previous_profiles: LaunchWizardPreviousProfiles,
+    ) -> Self {
+        let mut state = Self::new_with(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+            false,
+        );
+        state.wizard_mode = LaunchWizardMode::Knowledge;
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.launch_path = LaunchWizardLaunchPath::ManualSetup;
+        state.selected = step_default_selection(state.step, &state);
+        state.is_new_branch = true;
+        state.base_branch_name = Some(base_branch_name);
+        state.branch_name = state.context.normalized_branch_name.clone();
+        state
     }
 
     pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
@@ -3021,30 +3053,34 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     },
 ];
 
-const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 6] = [
+const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
         label: "Default (Auto)",
         description: "Use Gemini default model",
-    },
-    ModelDisplayOption {
-        label: "gemini-3-pro-preview",
-        description: "Preview pro model",
     },
     ModelDisplayOption {
         label: "gemini-3-flash-preview",
         description: "Preview flash model",
     },
     ModelDisplayOption {
-        label: "gemini-2.5-pro",
-        description: "Stable pro model",
+        label: "gemini-3.1-flash-lite-preview",
+        description: "Preview flash-lite model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash",
-        description: "Balanced speed and reasoning",
+        description: "Stable flash model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash-lite",
-        description: "Fastest Gemini option",
+        description: "Stable flash-lite model",
+    },
+    ModelDisplayOption {
+        label: "gemma-4-31b-it",
+        description: "Gemma 4 31B instruction model",
+    },
+    ModelDisplayOption {
+        label: "gemma-4-26b-a4b-it",
+        description: "Gemma 4 26B A4B instruction model",
     },
 ];
 
@@ -5198,6 +5234,66 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_launch_mode_uses_issue_target_branch_and_hides_branch_controls() {
+        let target_branch = knowledge_launch_target_branch_name(LinkedIssueKind::Issue, 7);
+        let state = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            context_with_linked_issue(branch("develop"), &target_branch, LinkedIssueKind::Issue, 7),
+            "develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+
+        let view = state.view();
+
+        assert_eq!(state.step, LaunchWizardStep::LaunchTarget);
+        assert_eq!(view.title, "Launch Agent");
+        assert_eq!(view.mode, LaunchWizardMode::Knowledge);
+        assert_eq!(view.branch_name, "work/issue-7");
+        assert_eq!(view.branch_mode, "create_new");
+        assert!(!view.show_branch_controls);
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_name.as_deref(), Some("develop"));
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("work/issue-7"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+        assert_eq!(config.linked_issue_number, Some(7));
+    }
+
+    #[test]
+    fn knowledge_launch_mode_uses_spec_target_branch_and_hides_linked_issue_section() {
+        let target_branch = knowledge_launch_target_branch_name(LinkedIssueKind::Spec, 2014);
+        let state = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            context_with_linked_issue(
+                branch("develop"),
+                &target_branch,
+                LinkedIssueKind::Spec,
+                2014,
+            ),
+            "develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+
+        let view = state.view();
+
+        assert_eq!(view.mode, LaunchWizardMode::Knowledge);
+        assert_eq!(view.branch_name, "feature/spec-2014");
+        assert_eq!(view.branch_mode, "create_new");
+        assert!(!view.show_branch_controls);
+        assert!(!view.show_linked_issue);
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+        assert_eq!(config.linked_issue_number, Some(2014));
+    }
+
+    #[test]
     fn previous_profile_docker_service_falls_back_to_current_suggestion() {
         let mut ctx = context(branch("feature/current"), "feature/current");
         ctx.docker_context = Some(DockerWizardContext {
@@ -6410,7 +6506,18 @@ mod tests {
                 "gpt-5.2",
             ]
         );
-        assert!(current_model_options("gemini").contains(&"gemini-2.5-pro"));
+        assert_eq!(
+            current_model_options("gemini"),
+            vec![
+                "Default (Auto)",
+                "gemini-3-flash-preview",
+                "gemini-3.1-flash-lite-preview",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemma-4-31b-it",
+                "gemma-4-26b-a4b-it",
+            ]
+        );
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());
