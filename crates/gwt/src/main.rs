@@ -213,6 +213,15 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
     )]);
 }
 
+/// SPEC-2809 Phase F1 — fan out one external-process line to every
+/// connected client. The Console window renders it under the matching
+/// kind tab; the Logs window renders it inside the Process kind facet.
+fn broadcast_process_line(clients: &ClientHub, line: gwt_core::process_console::ProcessLine) {
+    clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::ProcessLine {
+        line,
+    })]);
+}
+
 fn spawn_project_index_status_check(
     _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
@@ -776,6 +785,13 @@ enum UserEvent {
     },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
+    },
+    /// SPEC-2809 Phase F1 — one redacted line from an external process
+    /// (gh / git / docker / agent / runner) emitted by
+    /// `ProcessConsoleHub`. Broadcast to all WebSocket clients so the
+    /// Console window and Logs window can both render it.
+    ProcessLine {
+        line: gwt_core::process_console::ProcessLine,
     },
     RuntimeOutput {
         id: String,
@@ -5972,6 +5988,30 @@ fn main() -> wry::Result<()> {
                 }
             }));
         }
+        // SPEC-2809 Phase F1 — subscribe to the ProcessConsoleHub
+        // broadcast channel and fan out every line as a UserEvent. The
+        // existing tracing UI forwarder above is unchanged; the two
+        // streams are independent (summary tracing vs. line-level
+        // process I/O).
+        let mut process_rx = log_handles.process_console_hub.subscribe();
+        let process_proxy = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            loop {
+                match process_rx.recv().await {
+                    Ok(line) => {
+                        let _ = process_proxy.send_event(UserEvent::ProcessLine { line });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Slow subscribers can fall behind during
+                        // bursts (e.g. `docker pull`). Drop the lag
+                        // signal and keep going; the ring buffer is
+                        // the durable replay surface, not this stream.
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }));
     }
 
     let (bind_addr, bind_port) = match serve_args.as_ref() {
@@ -6179,6 +6219,9 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
+            }
+            Event::UserEvent(UserEvent::ProcessLine { line }) => {
+                broadcast_process_line(&clients, line);
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);

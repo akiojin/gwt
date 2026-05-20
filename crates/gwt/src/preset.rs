@@ -23,6 +23,10 @@ pub enum WindowPreset {
     Workspace,
     Board,
     Pr,
+    /// SPEC-2809 — independent Console window surface for external
+    /// process (gh / git / docker / agent / runner) stdout/stderr live
+    /// tail. Reads from `ProcessConsoleHub` (SPEC-1924 domain).
+    Console,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +39,7 @@ pub enum WindowSurface {
     Logs,
     Knowledge,
     Workspace,
+    Console,
     Mock,
 }
 
@@ -53,13 +58,14 @@ impl WindowSurface {
             Self::Logs => "logs",
             Self::Knowledge => "knowledge",
             Self::Workspace => "workspace",
+            Self::Console => "console",
             Self::Mock => "mock",
         }
     }
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 13] = [
+    pub const ALL: [WindowPreset; 14] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
@@ -73,6 +79,7 @@ impl WindowPreset {
         WindowPreset::Workspace,
         WindowPreset::Board,
         WindowPreset::Pr,
+        WindowPreset::Console,
     ];
 
     pub fn title(self) -> &'static str {
@@ -92,6 +99,7 @@ impl WindowPreset {
             Self::Workspace => "Workspace",
             Self::Board => "Board",
             Self::Pr => "PR",
+            Self::Console => "Console",
         }
     }
 
@@ -112,6 +120,7 @@ impl WindowPreset {
             Self::Workspace => "Workspace lifecycle Kanban",
             Self::Board => "Placeholder board surface",
             Self::Pr => "Placeholder PR surface",
+            Self::Console => "External process stdout/stderr per kind",
         }
     }
 
@@ -132,6 +141,7 @@ impl WindowPreset {
             Self::Workspace => "workspace",
             Self::Board => "board",
             Self::Pr => "pr",
+            Self::Console => "console",
         }
     }
 
@@ -146,6 +156,7 @@ impl WindowPreset {
             Self::Board => WindowSurface::Board,
             Self::Issue | Self::Spec | Self::Pr => WindowSurface::Knowledge,
             Self::Workspace => WindowSurface::Workspace,
+            Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
         }
     }
@@ -163,6 +174,7 @@ impl WindowPreset {
             WindowSurface::Workspace => (1040.0, 680.0),
             WindowSurface::Profile | WindowSurface::Logs => (560.0, 420.0),
             WindowSurface::Board => (520.0, 480.0),
+            WindowSurface::Console => (720.0, 420.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
     }
@@ -187,7 +199,8 @@ impl WindowPreset {
             | Self::Spec
             | Self::Workspace
             | Self::Board
-            | Self::Pr => None,
+            | Self::Pr
+            | Self::Console => None,
         }
     }
 
@@ -331,7 +344,8 @@ where
         | WindowPreset::Spec
         | WindowPreset::Workspace
         | WindowPreset::Board
-        | WindowPreset::Pr => unreachable!("non-process presets are rejected above"),
+        | WindowPreset::Pr
+        | WindowPreset::Console => unreachable!("non-process presets are rejected above"),
     }
 }
 
@@ -450,7 +464,7 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 13);
+        assert_eq!(WindowPreset::ALL.len(), 14);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::Workspace.title(), "Workspace");
@@ -481,6 +495,7 @@ mod tests {
             WindowPreset::Workspace,
             WindowPreset::Board,
             WindowPreset::Pr,
+            WindowPreset::Console,
         ] {
             assert!(
                 preset.opens_maximized_by_default(),
@@ -618,6 +633,12 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Workspace);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Console => {
+                    assert_eq!(preset.surface(), WindowSurface::Console);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                    assert_eq!(preset.default_size(), (720.0, 420.0));
                 }
                 WindowPreset::Agent => unreachable!("WindowPreset::ALL excludes Agent"),
                 other => {

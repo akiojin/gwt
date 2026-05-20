@@ -955,6 +955,13 @@ pub enum BackendEvent {
     LogEntryAppended {
         entry: LogEvent,
     },
+    /// SPEC-2809 — A single redacted, ANSI-stripped stdout/stderr line
+    /// from an external process (gh / git / docker / agent / runner)
+    /// piped through `gwt_core::process_console::ProcessConsoleHub`.
+    /// Console window and Logs window both consume this event.
+    ProcessLine {
+        line: gwt_core::process_console::ProcessLine,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -1729,6 +1736,7 @@ impl BackendEvent {
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
+            BackendEvent::ProcessLine { .. } => "process_line",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",

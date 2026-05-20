@@ -28,6 +28,7 @@
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
+      import { createConsoleWindow } from "/console-window.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
@@ -529,6 +530,9 @@
         if (preset === "workspace") {
           return "workspace";
         }
+        if (preset === "console") {
+          return "console";
+        }
         return "mock";
       }
 
@@ -592,6 +596,32 @@
             }
           },
         });
+      }
+
+      // SPEC-2809 — registry of Console window controllers keyed by windowId.
+      // Each Console window registers itself on render and unregisters on
+      // close; the `process_line` dispatcher fans out incoming lines to every
+      // active controller so multiple Console windows stay in sync.
+      const consoleControllers = new Map();
+      function ensureConsoleController(windowId) {
+        let controller = consoleControllers.get(windowId);
+        if (!controller) {
+          controller = createConsoleWindow({ document });
+          consoleControllers.set(windowId, controller);
+        }
+        return controller;
+      }
+      function disposeConsoleController(windowId) {
+        const controller = consoleControllers.get(windowId);
+        if (controller) {
+          controller.close();
+          consoleControllers.delete(windowId);
+        }
+      }
+      function broadcastProcessLineToConsoles(line) {
+        for (const controller of consoleControllers.values()) {
+          controller.push(line);
+        }
       }
 
       const releaseNotesWindow = createReleaseNotesWindow({
@@ -8764,6 +8794,20 @@
           return;
         }
 
+        if (surface === "console") {
+          // SPEC-2809 — Console window mount: register a controller for
+          // this windowId and attach its DOM to the window body. The
+          // controller subscribes implicitly via the shared
+          // `consoleControllers` registry that the `process_line`
+          // dispatcher fans out to.
+          const controller = ensureConsoleController(windowData.id);
+          while (body.firstChild) {
+            body.removeChild(body.firstChild);
+          }
+          controller.mount(body);
+          return;
+        }
+
         if (surface === "knowledge") {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
@@ -10487,6 +10531,15 @@
           }
           case "log_entry_appended":
             frontendUnits.logsSurface.appendLiveEntry(event.entry);
+            break;
+          case "process_line":
+            // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
+            // line from `ProcessConsoleHub` to every Console window
+            // controller. Phase F3 also wires Logs window's Process facet
+            // to consume the same event independently.
+            if (event.line) {
+              broadcastProcessLineToConsoles(event.line);
+            }
             break;
           case "knowledge_entries": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
