@@ -262,7 +262,18 @@ export function createUpdateCtaController({
 
   function renderModalDownloading(version) {
     const modal = ensureModal();
+    // SPEC-2041 Phase 19 (Playwright `update-modal.spec.ts` follow-up): keep
+    // renderModal* idempotent. Repeated identical events (live backend
+    // re-polling update state, retried `apply_update_start`, etc.) used to
+    // detach the action buttons mid-click while the test was driving the
+    // post-ready flow. Detect "no-op" calls by checking the state + the
+    // recorded version dataset, and skip the clearChildren/appendChild
+    // churn.
+    if (modal.dataset.state === "downloading" && modal.dataset.version === String(version || "")) {
+      return;
+    }
     modal.dataset.state = "downloading";
+    modal.dataset.version = String(version || "");
     clearChildren(modal);
 
     const fill = el("div", { className: "update-modal__progress-fill" });
@@ -317,7 +328,12 @@ export function createUpdateCtaController({
 
   function renderModalReady(version) {
     const modal = ensureModal();
+    // See renderModalDownloading: idempotency guard for repeated events.
+    if (modal.dataset.state === "ready" && modal.dataset.version === String(version || "")) {
+      return;
+    }
     modal.dataset.state = "ready";
+    modal.dataset.version = String(version || "");
     clearChildren(modal);
 
     const later = el("button", {
@@ -372,6 +388,7 @@ export function createUpdateCtaController({
   function renderModalFailed({ stage, reason, log_path, message }) {
     const modal = ensureModal();
     modal.dataset.state = "failed";
+    delete modal.dataset.version;
     clearChildren(modal);
 
     // Phase 19 promotes structured `reason`, but `message` is still on the
