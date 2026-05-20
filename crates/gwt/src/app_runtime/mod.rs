@@ -252,6 +252,25 @@ fn sanitize_ui_action_field(value: &str) -> String {
         .collect()
 }
 
+fn sanitize_ui_action_url(value: &str) -> String {
+    let sanitized = sanitize_ui_action_field(value);
+    let Some((scheme, rest)) = sanitized.split_once("://") else {
+        return sanitized;
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        sanitized
+    } else {
+        format!("{scheme}://{authority}")
+    }
+}
+
 fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
     let mut items: Vec<String> = values
         .into_iter()
@@ -271,38 +290,6 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
         }
     }
     summary
-}
-
-fn launch_wizard_action_name(action: &LaunchWizardAction) -> &'static str {
-    match action {
-        LaunchWizardAction::Select { .. } => "select",
-        LaunchWizardAction::Back => "back",
-        LaunchWizardAction::Cancel => "cancel",
-        LaunchWizardAction::SubmitText { .. } => "submit_text",
-        LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
-        LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
-        LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
-        LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
-        LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
-        LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
-        LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
-        LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
-        LaunchWizardAction::SetLaunchTarget { .. } => "set_launch_target",
-        LaunchWizardAction::SetAgent { .. } => "set_agent",
-        LaunchWizardAction::SetModel { .. } => "set_model",
-        LaunchWizardAction::SetReasoning { .. } => "set_reasoning",
-        LaunchWizardAction::SetRuntimeTarget { .. } => "set_runtime_target",
-        LaunchWizardAction::SetWindowsShell { .. } => "set_windows_shell",
-        LaunchWizardAction::SetDockerService { .. } => "set_docker_service",
-        LaunchWizardAction::SetDockerLifecycle { .. } => "set_docker_lifecycle",
-        LaunchWizardAction::SetVersion { .. } => "set_version",
-        LaunchWizardAction::SetExecutionMode { .. } => "set_execution_mode",
-        LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
-        LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
-        LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
-        LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
-        LaunchWizardAction::Submit => "submit",
-    }
 }
 
 fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
@@ -569,7 +556,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             .count(linked_issue_number.unwrap_or_default() as usize),
         FrontendEvent::LaunchWizardAction { action, .. } => {
             let mut log = FrontendUserActionLog::new("launch_wizard_action", "launch")
-                .mode(launch_wizard_action_name(action));
+                .mode(AppRuntime::launch_wizard_action_label(action));
             match action {
                 LaunchWizardAction::SetAgent { agent_id } => {
                     log = log.agent(agent_id);
@@ -638,7 +625,8 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             FrontendUserActionLog::new("delete_custom_agent", "custom_agents").agent(agent_id)
         }
         FrontendEvent::TestBackendConnection { base_url, .. } => {
-            FrontendUserActionLog::new("test_backend_connection", "custom_agents").target(base_url)
+            FrontendUserActionLog::new("test_backend_connection", "custom_agents")
+                .target(sanitize_ui_action_url(base_url))
         }
         FrontendEvent::ListAgentBackends { agent } => {
             FrontendUserActionLog::new("list_agent_backends", "agent_backends")
@@ -663,7 +651,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             agent, base_url, ..
         } => FrontendUserActionLog::new("test_agent_backend_connection", "agent_backends")
             .agent(agent.as_str())
-            .target(base_url),
+            .target(sanitize_ui_action_url(base_url)),
         FrontendEvent::StartMigration { tab_id } => {
             FrontendUserActionLog::new("start_migration", "migration").target(tab_id)
         }
@@ -12861,6 +12849,38 @@ exit 1
                 .values()
                 .any(|value| value.contains("must-not-leak")),
             "env values must not be written to the user action log: {action:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_user_action_redacts_backend_test_url_secrets() {
+        let custom_agent_log =
+            super::frontend_user_action_log(&FrontendEvent::TestBackendConnection {
+                base_url: "https://user:pass@example.com/v1?token=secret#frag".to_string(),
+                api_key: "api-key-must-not-leak".to_string(),
+            })
+            .expect("custom agent backend test action log");
+        assert_eq!(custom_agent_log.ui_target, "https://example.com");
+
+        let builtin_agent_log =
+            super::frontend_user_action_log(&FrontendEvent::TestAgentBackendConnection {
+                agent: gwt_agent::BuiltinAgentId::Codex,
+                base_url: "http://token@example.net:11434/openai?signed=secret".to_string(),
+                api_key: "agent-key-must-not-leak".to_string(),
+            })
+            .expect("builtin agent backend test action log");
+        assert_eq!(builtin_agent_log.ui_target, "http://example.net:11434");
+
+        let logged_values = [
+            custom_agent_log.ui_target.as_str(),
+            builtin_agent_log.ui_target.as_str(),
+        ];
+        assert!(
+            !logged_values.iter().any(|value| value.contains("user")
+                || value.contains("pass")
+                || value.contains("token")
+                || value.contains("secret")),
+            "backend test URLs must not leak credentials or query strings: {logged_values:?}"
         );
     }
 
