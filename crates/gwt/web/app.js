@@ -6864,35 +6864,23 @@
           panel.appendChild(section);
         }
 
-        if (showSetupForms && launchWizard.show_agent_settings) {
+        // SPEC-2014 Amendment 2026-05-20 (FR-057 / FR-058):
+        // The Linked issue section renders only when the wizard was opened
+        // through the Knowledge Issue Bridge. The issue number is shown as
+        // read-only text instead of an editable input.
+        if (showSetupForms && launchWizard.show_linked_issue) {
           const section = createLaunchSection(
             "Linked issue",
-            "Optional: Link an issue to this launch session.",
+            "Read-only: this agent will be linked to the originating issue.",
           );
           const grid = createNode("div", "launch-form-grid");
           const field = createLaunchField("Issue number", false);
-          const input = createNode("input", "launch-input");
-          input.type = "number";
-          input.min = "1";
-          // SPEC-2356 — see createLaunchField comment: aria-label is the
-          // programmatic name since launch-field labels are non-<label> divs.
-          input.setAttribute("aria-label", "Issue number");
-          input.value = launchWizard.linked_issue_number
-            ? launchWizard.linked_issue_number.toString()
-            : "";
-          input.placeholder = "e.g., 1938";
-          input.addEventListener("change", () => {
-            const value = input.value.trim();
-            if (value) {
-              sendWizardAction({
-                kind: "set_linked_issue",
-                issue_number: parseInt(value, 10),
-              });
-            } else {
-              sendWizardAction({ kind: "clear_linked_issue" });
-            }
-          });
-          field.appendChild(input);
+          // The launch-field label already announces "Issue number"; the
+          // static value div is read alongside that label so SR users hear
+          // "Issue number, #N" without needing a per-value aria-label.
+          const value = createNode("div", "launch-static-value");
+          value.textContent = `#${launchWizard.linked_issue_number}`;
+          field.appendChild(value);
           grid.appendChild(field);
           section.appendChild(grid);
           panel.appendChild(section);
