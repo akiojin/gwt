@@ -1,5 +1,6 @@
 /* SPEC-2356 — Living Telemetry縮退 (FR-016 / US-2 AS-3 / US-1 AS-2). */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 
@@ -8,7 +9,7 @@ test.describe("prefers-reduced-motion", () => {
   test.use({ reducedMotion: "reduce" });
 
   test("status strip dot has no infinite animation", async ({ page }) => {
-    await page.goto(BASE);
+    await gotoLiveGwt(page, BASE);
     const dot = page.locator(".op-status-strip__live-dot");
     await expect(dot).toBeVisible();
     const animation = await dot.evaluate((el) => getComputedStyle(el).animationName);
