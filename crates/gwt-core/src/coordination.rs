@@ -1412,6 +1412,25 @@ pub struct RemindersState {
     pub last_injected_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
+    /// SPEC-2359 Phase U-9 (FR-178): the `title_summary` value observed
+    /// on the most recent UserPromptSubmit. Used to detect stale titles
+    /// after the agent has set a non-empty value but has not updated it
+    /// while phase / activity continues to drift.
+    #[serde(default)]
+    pub last_title_summary_seen: Option<String>,
+    /// Number of consecutive UserPromptSubmit turns observed with the
+    /// same `title_summary`. Reset to 0 when the title changes.
+    #[serde(default)]
+    pub unchanged_turn_count: u32,
+    /// The `current_focus` value observed on the most recent
+    /// UserPromptSubmit, used as the phase / activity drift signal.
+    #[serde(default)]
+    pub last_current_focus_seen: Option<String>,
+    /// Sticky flag that turns true once `current_focus` changes during a
+    /// window where `title_summary` is unchanged. Reset to false when
+    /// the title changes.
+    #[serde(default)]
+    pub phase_changed_in_window: bool,
 }
 
 /// Directory that stores per-agent-session reminder sidecar files.
@@ -3375,6 +3394,7 @@ mod tests {
         let state = RemindersState {
             last_injected_at: Some(now),
             last_reminded_kind: HashMap::from([("status".to_string(), now)]),
+            ..RemindersState::default()
         };
         write_reminders_state(dir.path(), agent_session_id, &state).unwrap();
 
