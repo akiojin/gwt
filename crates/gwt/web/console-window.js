@@ -168,13 +168,16 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
       }
       // The backend pushes a synthetic header line as the very first
       // entry of each spawn (the actual command string prefixed with
-      // "$ "). Detect that prefix here and render it as a banner so the
-      // user sees `$ git rev-parse --git-dir` instead of the previous
-      // useless `$ spawn_id=N` marker.
+      // "$ ") and a footer prefixed with "→ ". Agent stage banners use
+      // a short single-word bracket label (e.g. "[wizard] ..."). The
+      // ConsoleTeeLayer also emits "[gwt::index] ..." lines but those
+      // are regular log lines, not banners — so the bracket pattern
+      // requires a short ASCII word with no `::` or `_` separators.
       const message = String(line.message ?? "");
       const isHeader =
-        message.startsWith("$ ") || message.startsWith("[") ||
-        message.startsWith("→ ");
+        message.startsWith("$ ") ||
+        message.startsWith("→ ") ||
+        /^\[[a-z]+\]\s/i.test(message);
       if (isHeader) {
         appendHeaderNode(pane.container, message);
       } else {
@@ -194,7 +197,6 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
     node.className = "console-window__invocation-header";
     node.textContent = text;
     container.appendChild(node);
-    container.appendChild(document.createTextNode("\n"));
   }
 
   function appendLineNode(container, line) {
@@ -205,7 +207,6 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
         : "console-window__line console-window__line--stdout";
     node.textContent = line.message ?? "";
     container.appendChild(node);
-    container.appendChild(document.createTextNode("\n"));
   }
 
   function close() {
