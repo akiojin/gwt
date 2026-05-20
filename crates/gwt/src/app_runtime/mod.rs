@@ -1,4 +1,5 @@
 use super::*;
+use gwt::LaunchWizardAction;
 
 #[derive(Clone)]
 pub enum AppEventProxy {
@@ -168,6 +169,565 @@ fn dispatch_agent_launch_success<F>(
         result: Ok(completion),
     });
     spawn_project_index_bootstrap(proxy, project_index_root);
+}
+
+#[derive(Default)]
+struct FrontendUserActionLog {
+    action: &'static str,
+    surface: &'static str,
+    window_id: String,
+    ui_target: String,
+    profile_name: String,
+    env_keys: String,
+    env_var_count: usize,
+    disabled_env_count: usize,
+    agent_id: String,
+    count: usize,
+    mode: String,
+    forced: bool,
+}
+
+impl FrontendUserActionLog {
+    fn new(action: &'static str, surface: &'static str) -> Self {
+        Self {
+            action,
+            surface,
+            ..Default::default()
+        }
+    }
+
+    fn window(mut self, id: &str) -> Self {
+        self.window_id = sanitize_ui_action_field(id);
+        self
+    }
+
+    fn target(mut self, value: impl AsRef<str>) -> Self {
+        self.ui_target = sanitize_ui_action_field(value.as_ref());
+        self
+    }
+
+    fn profile(mut self, name: impl AsRef<str>) -> Self {
+        self.profile_name = sanitize_ui_action_field(name.as_ref());
+        self
+    }
+
+    fn agent(mut self, id: impl AsRef<str>) -> Self {
+        self.agent_id = sanitize_ui_action_field(id.as_ref());
+        self
+    }
+
+    fn mode(mut self, value: impl AsRef<str>) -> Self {
+        self.mode = sanitize_ui_action_field(value.as_ref());
+        self
+    }
+
+    fn count(mut self, value: usize) -> Self {
+        self.count = value;
+        self
+    }
+
+    fn force(mut self, value: bool) -> Self {
+        self.forced = value;
+        self
+    }
+
+    fn env_keys<'a>(mut self, values: impl IntoIterator<Item = &'a str>) -> Self {
+        let keys: Vec<_> = values.into_iter().collect();
+        self.env_var_count = keys.len();
+        self.env_keys = summarize_ui_action_values(keys);
+        self
+    }
+
+    fn disabled_env_count(mut self, value: usize) -> Self {
+        self.disabled_env_count = value;
+        self
+    }
+}
+
+fn sanitize_ui_action_field(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect()
+}
+
+fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let mut items: Vec<String> = values
+        .into_iter()
+        .map(sanitize_ui_action_field)
+        .filter(|value| !value.is_empty())
+        .collect();
+    items.sort();
+    items.dedup();
+    let truncated = items.len() > 12;
+    items.truncate(12);
+    let mut summary = items.join(",");
+    if truncated {
+        if !summary.is_empty() {
+            summary.push_str(",...");
+        } else {
+            summary.push_str("...");
+        }
+    }
+    summary
+}
+
+fn launch_wizard_action_name(action: &LaunchWizardAction) -> &'static str {
+    match action {
+        LaunchWizardAction::Select { .. } => "select",
+        LaunchWizardAction::Back => "back",
+        LaunchWizardAction::Cancel => "cancel",
+        LaunchWizardAction::SubmitText { .. } => "submit_text",
+        LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+        LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
+        LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
+        LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
+        LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+        LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
+        LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
+        LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
+        LaunchWizardAction::SetLaunchTarget { .. } => "set_launch_target",
+        LaunchWizardAction::SetAgent { .. } => "set_agent",
+        LaunchWizardAction::SetModel { .. } => "set_model",
+        LaunchWizardAction::SetReasoning { .. } => "set_reasoning",
+        LaunchWizardAction::SetRuntimeTarget { .. } => "set_runtime_target",
+        LaunchWizardAction::SetWindowsShell { .. } => "set_windows_shell",
+        LaunchWizardAction::SetDockerService { .. } => "set_docker_service",
+        LaunchWizardAction::SetDockerLifecycle { .. } => "set_docker_lifecycle",
+        LaunchWizardAction::SetVersion { .. } => "set_version",
+        LaunchWizardAction::SetExecutionMode { .. } => "set_execution_mode",
+        LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
+        LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
+        LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
+        LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
+        LaunchWizardAction::Submit => "submit",
+    }
+}
+
+fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
+    let log = match event {
+        FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::OpenProjectDialog => {
+            FrontendUserActionLog::new("open_project_dialog", "project")
+        }
+        FrontendEvent::SelectCloneProjectParent => {
+            FrontendUserActionLog::new("select_clone_project_parent", "project")
+        }
+        FrontendEvent::GithubRepositorySearch { query } => {
+            FrontendUserActionLog::new("github_repository_search", "project").count(query.len())
+        }
+        FrontendEvent::CloneProjectStart { url, parent_path } => {
+            FrontendUserActionLog::new("clone_project_start", "project")
+                .count(url.len())
+                .mode(parent_path)
+        }
+        FrontendEvent::ReopenRecentProject { path } => {
+            FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
+        }
+        FrontendEvent::SelectProjectTab { tab_id } => {
+            FrontendUserActionLog::new("select_project_tab", "project").target(tab_id)
+        }
+        FrontendEvent::CloseProjectTab { tab_id } => {
+            FrontendUserActionLog::new("close_project_tab", "project").target(tab_id)
+        }
+        FrontendEvent::CreateWindow { preset, .. } => {
+            FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))
+        }
+        FrontendEvent::LoadProcessConsole { id } => {
+            FrontendUserActionLog::new("load_process_console", "console").window(id)
+        }
+        FrontendEvent::FocusWindow { id, .. } => {
+            FrontendUserActionLog::new("focus_window", "window").window(id)
+        }
+        FrontendEvent::CycleFocus { direction, .. } => {
+            FrontendUserActionLog::new("cycle_focus", "window").mode(format!("{direction:?}"))
+        }
+        FrontendEvent::ArrangeWindows { mode, .. } => {
+            FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
+        }
+        FrontendEvent::MaximizeWindow { id, .. } => {
+            FrontendUserActionLog::new("maximize_window", "window").window(id)
+        }
+        FrontendEvent::MinimizeWindow { id } => {
+            FrontendUserActionLog::new("minimize_window", "window").window(id)
+        }
+        FrontendEvent::RestoreWindow { id } => {
+            FrontendUserActionLog::new("restore_window", "window").window(id)
+        }
+        FrontendEvent::DockWindowTab { id, target_id } => {
+            FrontendUserActionLog::new("dock_window_tab", "window")
+                .window(id)
+                .target(target_id)
+        }
+        FrontendEvent::ActivateWindowTab { id } => {
+            FrontendUserActionLog::new("activate_window_tab", "window").window(id)
+        }
+        FrontendEvent::DetachWindowTab { id, .. } => {
+            FrontendUserActionLog::new("detach_window_tab", "window").window(id)
+        }
+        FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
+        FrontendEvent::CloseWindow { id } => {
+            FrontendUserActionLog::new("close_window", "window").window(id)
+        }
+        FrontendEvent::LoadFileTree { id, path } => {
+            FrontendUserActionLog::new("load_file_tree", "file")
+                .window(id)
+                .target(path.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::ListFileTreeWorktrees { id } => {
+            FrontendUserActionLog::new("list_file_tree_worktrees", "file").window(id)
+        }
+        FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
+            FrontendUserActionLog::new("select_file_tree_worktree", "file")
+                .window(id)
+                .target(worktree_id)
+        }
+        FrontendEvent::LoadFileContent { id, path, mode, .. } => {
+            FrontendUserActionLog::new("load_file_content", "file")
+                .window(id)
+                .target(path)
+                .mode(format!("{mode:?}"))
+        }
+        FrontendEvent::SaveFileContent { id, path, mode, .. } => {
+            FrontendUserActionLog::new("save_file_content", "file")
+                .window(id)
+                .target(path)
+                .mode(format!("{mode:?}"))
+        }
+        FrontendEvent::LoadBranches { id } => {
+            FrontendUserActionLog::new("load_branches", "branches").window(id)
+        }
+        FrontendEvent::RunBranchCleanup {
+            id,
+            branches,
+            delete_remote,
+            force_filesystem_delete,
+        } => FrontendUserActionLog::new("run_branch_cleanup", "branches")
+            .window(id)
+            .target(summarize_ui_action_values(
+                branches.iter().map(String::as_str),
+            ))
+            .count(branches.len())
+            .mode(if *delete_remote {
+                "delete_remote"
+            } else {
+                "local_only"
+            })
+            .force(*force_filesystem_delete),
+        FrontendEvent::RunWorkspaceCleanup {
+            branch,
+            delete_remote,
+            force_filesystem_delete,
+        } => FrontendUserActionLog::new("run_workspace_cleanup", "workspace")
+            .target(branch)
+            .count(1)
+            .mode(if *delete_remote {
+                "delete_remote"
+            } else {
+                "local_only"
+            })
+            .force(*force_filesystem_delete),
+        FrontendEvent::LoadBoard { id, all } => FrontendUserActionLog::new("load_board", "board")
+            .window(id)
+            .mode(if *all { "all" } else { "workspace" }),
+        FrontendEvent::LoadBoardHistory { id, all, limit, .. } => {
+            FrontendUserActionLog::new("load_board_history", "board")
+                .window(id)
+                .count(*limit)
+                .mode(if *all { "all" } else { "workspace" })
+        }
+        FrontendEvent::PostBoardEntry {
+            id,
+            entry_kind,
+            body,
+            ..
+        } => FrontendUserActionLog::new("post_board_entry", "board")
+            .window(id)
+            .mode(format!("{entry_kind:?}"))
+            .count(body.len()),
+        FrontendEvent::OpenBoardOriginAgent {
+            id,
+            origin_session_id,
+            ..
+        } => FrontendUserActionLog::new("open_board_origin_agent", "board")
+            .window(id)
+            .target(origin_session_id),
+        FrontendEvent::LoadProfile { id } => {
+            FrontendUserActionLog::new("load_profile", "profile").window(id)
+        }
+        FrontendEvent::SelectProfile { id, profile_name } => {
+            FrontendUserActionLog::new("select_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::CreateProfile { id, name } => {
+            FrontendUserActionLog::new("create_profile", "profile")
+                .window(id)
+                .profile(name)
+        }
+        FrontendEvent::SetActiveProfile { id, profile_name } => {
+            FrontendUserActionLog::new("set_active_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::SaveProfile {
+            id,
+            name,
+            env_vars,
+            disabled_env,
+            ..
+        } => FrontendUserActionLog::new("save_profile", "profile")
+            .window(id)
+            .profile(name)
+            .env_keys(env_vars.iter().map(|entry| entry.key.as_str()))
+            .disabled_env_count(disabled_env.len()),
+        FrontendEvent::DeleteProfile { id, profile_name } => {
+            FrontendUserActionLog::new("delete_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::LoadLogs { id } => {
+            FrontendUserActionLog::new("load_logs", "logs").window(id)
+        }
+        FrontendEvent::LoadKnowledgeBridge {
+            id,
+            knowledge_kind,
+            refresh,
+            ..
+        } => FrontendUserActionLog::new("load_knowledge_bridge", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .force(*refresh),
+        FrontendEvent::SearchKnowledgeBridge {
+            id,
+            knowledge_kind,
+            query,
+            ..
+        } => FrontendUserActionLog::new("search_knowledge_bridge", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .count(query.len()),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id,
+            knowledge_kind,
+            number,
+            ..
+        } => FrontendUserActionLog::new("select_knowledge_bridge_entry", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .target(number.to_string()),
+        FrontendEvent::UpdateKnowledgeBridgePhase {
+            id,
+            issue_number,
+            target_phase,
+            ..
+        } => FrontendUserActionLog::new("update_knowledge_bridge_phase", "knowledge")
+            .window(id)
+            .target(issue_number.to_string())
+            .mode(target_phase.as_deref().unwrap_or("backlog")),
+        FrontendEvent::RebuildIndexCell {
+            project_root,
+            scope,
+            worktree_hash,
+        } => FrontendUserActionLog::new("rebuild_index_cell", "index")
+            .target(project_root)
+            .mode(format!("{scope:?}"))
+            .agent(worktree_hash.as_deref().unwrap_or_default()),
+        FrontendEvent::RefreshIndexStatus { project_root } => {
+            FrontendUserActionLog::new("refresh_index_status", "index").target(project_root)
+        }
+        FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
+            FrontendUserActionLog::new("open_issue_launch_wizard", "launch")
+                .window(id)
+                .target(issue_number.to_string())
+        }
+        FrontendEvent::OpenStartWork => FrontendUserActionLog::new("open_start_work", "launch"),
+        FrontendEvent::ResumeWorkspace { source, .. } => {
+            FrontendUserActionLog::new("resume_workspace", "workspace").mode(format!("{source:?}"))
+        }
+        FrontendEvent::ListResumableAgents { workspace_id } => {
+            FrontendUserActionLog::new("list_resumable_agents", "workspace")
+                .target(workspace_id.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => {
+            FrontendUserActionLog::new("resume_workspace_agent", "workspace").target(session_id)
+        }
+        FrontendEvent::OpenLaunchWizard {
+            id,
+            branch_name,
+            linked_issue_number,
+        } => FrontendUserActionLog::new("open_launch_wizard", "launch")
+            .window(id)
+            .target(branch_name)
+            .count(linked_issue_number.unwrap_or_default() as usize),
+        FrontendEvent::OpenActiveWorkLaunchWizard {
+            branch_name,
+            linked_issue_number,
+        } => FrontendUserActionLog::new("open_active_work_launch_wizard", "launch")
+            .target(branch_name)
+            .count(linked_issue_number.unwrap_or_default() as usize),
+        FrontendEvent::LaunchWizardAction { action, .. } => {
+            let mut log = FrontendUserActionLog::new("launch_wizard_action", "launch")
+                .mode(launch_wizard_action_name(action));
+            match action {
+                LaunchWizardAction::SetAgent { agent_id } => {
+                    log = log.agent(agent_id);
+                }
+                LaunchWizardAction::SetBranchName { value }
+                | LaunchWizardAction::SetBranchType { prefix: value }
+                | LaunchWizardAction::SetModel { model: value }
+                | LaunchWizardAction::SetReasoning { reasoning: value }
+                | LaunchWizardAction::SetVersion { version: value }
+                | LaunchWizardAction::SetExecutionMode { mode: value }
+                | LaunchWizardAction::SetDockerService { service: value } => {
+                    log = log.target(value);
+                }
+                LaunchWizardAction::SubmitText { value } => {
+                    log = log.count(value.len());
+                }
+                LaunchWizardAction::SetSkipPermissions { enabled }
+                | LaunchWizardAction::SetCodexFastMode { enabled } => {
+                    log = log.force(*enabled);
+                }
+                LaunchWizardAction::SetLinkedIssue { issue_number } => {
+                    log = log.target(issue_number.to_string());
+                }
+                _ => {}
+            }
+            log
+        }
+        FrontendEvent::ApplyUpdate => FrontendUserActionLog::new("apply_update", "update"),
+        FrontendEvent::ApplyUpdateStart => {
+            FrontendUserActionLog::new("apply_update_start", "update")
+        }
+        FrontendEvent::CancelUpdateDownload => {
+            FrontendUserActionLog::new("cancel_update_download", "update")
+        }
+        FrontendEvent::ApplyUpdateLater => {
+            FrontendUserActionLog::new("apply_update_later", "update")
+        }
+        FrontendEvent::ApplyUpdateRestartNow => {
+            FrontendUserActionLog::new("apply_update_restart_now", "update")
+        }
+        FrontendEvent::OpenUpdateLog { log_path } => {
+            FrontendUserActionLog::new("open_update_log", "update")
+                .target(log_path.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::OpenServerUrl { .. } => {
+            FrontendUserActionLog::new("open_server_url", "status")
+        }
+        FrontendEvent::ListCustomAgents => {
+            FrontendUserActionLog::new("list_custom_agents", "custom_agents")
+        }
+        FrontendEvent::ListCustomAgentPresets => {
+            FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
+        }
+        FrontendEvent::AddCustomAgentFromPreset { input } => {
+            FrontendUserActionLog::new("add_custom_agent_from_preset", "custom_agents")
+                .agent(&input.id)
+                .profile(&input.display_name)
+        }
+        FrontendEvent::UpdateCustomAgent { agent } => {
+            FrontendUserActionLog::new("update_custom_agent", "custom_agents")
+                .agent(&agent.id)
+                .profile(&agent.display_name)
+                .env_keys(agent.env.keys().map(String::as_str))
+        }
+        FrontendEvent::DeleteCustomAgent { agent_id } => {
+            FrontendUserActionLog::new("delete_custom_agent", "custom_agents").agent(agent_id)
+        }
+        FrontendEvent::TestBackendConnection { base_url, .. } => {
+            FrontendUserActionLog::new("test_backend_connection", "custom_agents").target(base_url)
+        }
+        FrontendEvent::ListAgentBackends { agent } => {
+            FrontendUserActionLog::new("list_agent_backends", "agent_backends")
+                .agent(agent.as_str())
+        }
+        FrontendEvent::AddAgentBackend { agent, profile } => {
+            FrontendUserActionLog::new("add_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(&profile.id)
+        }
+        FrontendEvent::UpdateAgentBackend { agent, id, .. } => {
+            FrontendUserActionLog::new("update_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(id)
+        }
+        FrontendEvent::DeleteAgentBackend { agent, id } => {
+            FrontendUserActionLog::new("delete_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(id)
+        }
+        FrontendEvent::TestAgentBackendConnection {
+            agent, base_url, ..
+        } => FrontendUserActionLog::new("test_agent_backend_connection", "agent_backends")
+            .agent(agent.as_str())
+            .target(base_url),
+        FrontendEvent::StartMigration { tab_id } => {
+            FrontendUserActionLog::new("start_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::SkipMigration { tab_id } => {
+            FrontendUserActionLog::new("skip_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::QuitMigration { tab_id } => {
+            FrontendUserActionLog::new("quit_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::GetSystemSettings => {
+            FrontendUserActionLog::new("get_system_settings", "settings")
+        }
+        FrontendEvent::UpdateSystemSettings {
+            language,
+            codex_trust_managed_hooks,
+        } => FrontendUserActionLog::new("update_system_settings", "settings")
+            .target(language)
+            .force(codex_trust_managed_hooks.unwrap_or(false)),
+        FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
+            FrontendUserActionLog::new("workspace_projection_prune", "workspace")
+                .mode(if *dry_run { "dry_run" } else { "apply" })
+                .count(ids.len())
+        }
+        FrontendEvent::SaveUiTrace { trace } => {
+            let entries = trace.entries().map(|entries| entries.len()).unwrap_or(0);
+            FrontendUserActionLog::new("save_ui_trace", "diagnostics")
+                .target(trace.session_id().unwrap_or_default())
+                .count(entries)
+        }
+        FrontendEvent::OpenReleaseNotes { focus_version, .. } => {
+            FrontendUserActionLog::new("open_release_notes", "release_notes")
+                .target(focus_version.as_deref().unwrap_or_default())
+        }
+        // These events can contain high-volume, high-frequency, or sensitive
+        // payloads. They are handled by more specific logs or diagnostics.
+        FrontendEvent::UpdateViewport { .. }
+        | FrontendEvent::UpdateWindowGeometry { .. }
+        | FrontendEvent::TerminalInput { .. }
+        | FrontendEvent::PasteImage { .. } => return None,
+    };
+    Some(log)
+}
+
+fn log_frontend_user_action(client_id: &str, event: &FrontendEvent) {
+    let Some(log) = frontend_user_action_log(event) else {
+        return;
+    };
+    tracing::info!(
+        target: "gwt_ui_action",
+        client_id = %client_id,
+        action = %log.action,
+        surface = %log.surface,
+        window_id = %log.window_id,
+        ui_target = %log.ui_target,
+        profile_name = %log.profile_name,
+        env_keys = %log.env_keys,
+        env_var_count = log.env_var_count as u64,
+        disabled_env_count = log.disabled_env_count as u64,
+        agent_id = %log.agent_id,
+        count = log.count as u64,
+        mode = %log.mode,
+        forced = log.forced,
+        "frontend user action"
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -2062,6 +2622,7 @@ impl AppRuntime {
         client_id: ClientId,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
+        log_frontend_user_action(&client_id, &event);
         match event {
             FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
@@ -12245,6 +12806,62 @@ exit 1
             .profiles
             .iter()
             .any(|profile| profile.name == "review" && profile.description == "Review profile"));
+    }
+
+    #[test]
+    fn app_runtime_logs_profile_save_user_action_without_env_values() {
+        let temp = tempdir().expect("tempdir");
+        let _config_home = ScopedEnvVar::set("GWT_CONFIG_HOME", temp.path());
+        Settings::default()
+            .save(&temp.path().join("config.toml"))
+            .expect("save settings");
+
+        let mut runtime = sample_runtime(temp.path(), vec![], None);
+        let events = capture_tracing_events(|| {
+            let _ = runtime.handle_frontend_event(
+                "client-1".to_string(),
+                FrontendEvent::SaveProfile {
+                    id: "profile-window".to_string(),
+                    current_name: "default".to_string(),
+                    name: "default".to_string(),
+                    description: String::new(),
+                    env_vars: vec![ProfileEnvEntryView {
+                        key: "Test".to_string(),
+                        value: "must-not-leak".to_string(),
+                    }],
+                    disabled_env: vec![],
+                },
+            );
+        });
+
+        let action = events
+            .iter()
+            .find(|event| event.target == "gwt_ui_action")
+            .expect("profile save user action log");
+        assert_eq!(action.level, Level::INFO);
+        assert_eq!(
+            action.fields.get("action").map(String::as_str),
+            Some("save_profile")
+        );
+        assert_eq!(
+            action.fields.get("profile_name").map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            action.fields.get("env_keys").map(String::as_str),
+            Some("Test")
+        );
+        assert_eq!(
+            action.fields.get("env_var_count").map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            !action
+                .fields
+                .values()
+                .any(|value| value.contains("must-not-leak")),
+            "env values must not be written to the user action log: {action:?}"
+        );
     }
 
     #[test]
