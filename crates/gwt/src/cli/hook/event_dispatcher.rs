@@ -9,7 +9,8 @@ use std::{path::Path, time::Instant};
 
 use super::{
     board_reminder, diagnostics, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    skill_plan_spec_stop_check, skill_register_spec_stop_check, workflow_policy,
+    workspace_identity, HookError, HookOutput,
 };
 
 pub fn handle_with_input(
@@ -120,6 +121,9 @@ fn handle_stop(
         }),
         run_value(event, "skill-build-spec-stop-check", || {
             skill_build_spec_stop_check::handle_with_input(worktree_root, input, current_session)
+        }),
+        run_value(event, "skill-register-spec-stop-check", || {
+            skill_register_spec_stop_check::handle_with_input(worktree_root, input, current_session)
         }),
     ] {
         if matches!(output, HookOutput::StopBlock { .. }) {

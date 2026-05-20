@@ -67,6 +67,7 @@ fn print_help() {
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
+    println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
     println!("  workspace   Update Workspace current projection and summary journal");
     println!("  update      Check / apply gwt updates");
@@ -86,6 +87,7 @@ fn family_help(family: &str) -> Option<String> {
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
@@ -247,6 +249,7 @@ fn format_hook_help() -> String {
         "  skill-discussion-stop-check             Stop-check for gwt-discussion",
         "  skill-plan-spec-stop-check              Stop-check for gwt-plan-spec",
         "  skill-build-spec-stop-check             Stop-check for gwt-build-spec",
+        "  skill-register-spec-stop-check          Stop-check for gwt-register-spec",
         "",
         "Stdin: hooks read JSON from stdin per the Claude Code hook contract.",
         "",
@@ -312,6 +315,22 @@ fn format_build_help() -> String {
         "  phase --spec <n> --label <stage>       Mark a phase milestone (red/green/...)",
         "  complete --spec <n>                    Mark build-spec complete",
         "  abort --spec <n> [--reason <text>]     Abort build-spec",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_register_help() -> String {
+    [
+        "gwtd register — gwt-register-spec exit CLI (SPEC-2784).",
+        "",
+        "Usage: gwtd register <action> --spec <n> [...]",
+        "",
+        "Actions:",
+        "  start --spec <n>                       Mark register-spec started (use --spec 0 if id unknown)",
+        "  phase --spec <n> --label <stage>       Milestone: validation/create/edit/roundtrip",
+        "  complete --spec <n>                    Mark register-spec complete",
+        "  abort --spec <n> [--reason <text>]     Abort register-spec",
         "",
     ]
     .join("\n")
