@@ -1407,8 +1407,8 @@ fn workspace_projection_is_eligible_for_auto_done(projection: &WorkspaceProjecti
 /// WorkItem currently associated with `branch`. The function loads the current
 /// projection at `current_path` and emits Done iff
 /// `projection.git_details.branch` matches `branch`. Used by user-confirmed
-/// cleanup to mark the matching Workspace as completed before worktree/branch
-/// deletion. Idempotent per `work_item_id` via
+/// cleanup to mark the matching Workspace as completed after worktree/branch
+/// deletion succeeds. Idempotent per `work_item_id` via
 /// [`emit_workspace_done_event_if_absent_paths`].
 pub fn emit_workspace_done_event_for_branch_paths(
     current_path: &Path,

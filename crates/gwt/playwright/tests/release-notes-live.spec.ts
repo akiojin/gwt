@@ -16,6 +16,7 @@
  * the gwt-verify --mode pre-pr flow once a real server is wired up.
  */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -28,38 +29,9 @@ test.describe.serial("Release Notes window (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
   test.beforeEach(async ({ page }) => {
-    // The Operator splash should auto-dismiss after ~1.45s and persists a
-    // sessionStorage flag so subsequent loads skip it entirely. We pre-set
-    // the flag here so the splash is skipped from the first load.
-    //
-    // KNOWN ISSUE (filed separately): in live mode the splash currently
-    // refuses to dismiss even when the sessionStorage flag is set. While
-    // that is open, force-hide the overlay client-side so the rest of the
-    // E2E can still exercise the Release Notes flow. Remove the force-hide
-    // once the splash dismiss bug is closed.
-    await page.addInitScript(() => {
-      try {
-        window.sessionStorage.setItem("gwt:ui:briefing", "1");
-      } catch {
-        /* no-op */
-      }
-    });
-    await page.goto(BASE);
-    // KNOWN ISSUE workarounds (track in follow-up Issue):
-    //  1. Splash overlay refuses to dismiss in live mode even with the
-    //     sessionStorage flag set; force-hide it.
-    //  2. Workspace state can carry over modal backdrops (file-tree picker,
-    //     etc.) that intercept pointer events. Inject a permanent style rule
-    //     that disables `pointer-events` on every modal-backdrop so any
-    //     late-arriving modal cannot steal the click on `#app-version`.
-    await page.addStyleTag({
-      content: `.modal-backdrop, #op-briefing { display: none !important; pointer-events: none !important; }`,
-    });
-    await page.evaluate(() => {
-      const overlay = document.getElementById("op-briefing");
-      if (overlay) overlay.hidden = true;
-    });
+    await gotoLiveGwt(page, BASE);
     await expect(page.locator("#op-briefing")).toBeHidden();
+    await expect(page.locator("#project-picker")).toBeHidden();
   });
 
   test("clicking #app-version opens the Release Notes window with current version focused", async ({

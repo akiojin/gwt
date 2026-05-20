@@ -8,6 +8,7 @@
  * matches the existing Playwright suite's skip-by-default contract.
  */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 
@@ -15,7 +16,10 @@ test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
   test("CTA -> downloading -> ready -> Later morphs CTA to ready", async ({ page }) => {
-    await page.goto(BASE);
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressUpdateApplyStart: true,
+    });
 
     // Simulate `update_state available` arriving from backend.
     await page.evaluate(() => {
@@ -74,7 +78,10 @@ test.describe("Update modal", () => {
   });
 
   test("update_apply_error renders failed state with stage / reason / log", async ({ page }) => {
-    await page.goto(BASE);
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressUpdateApplyStart: true,
+    });
 
     await page.evaluate(() => {
       window.dispatchEvent(

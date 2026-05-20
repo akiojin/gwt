@@ -18,6 +18,7 @@ import {
   applyVisibilityTransition,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
+  elementHasLayoutBox,
   runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
@@ -293,6 +294,40 @@ test("attachHostResizeReflow throws when given a non-DOM window", () => {
   );
 });
 
+test("elementHasLayoutBox blocks 0-size containers (Issue #2832 / SPEC-2008 Phase 26.A regression)", () => {
+  // SPEC-2008 Phase 26.A only checked `.hidden` and `.minimized`, so a
+  // structurally-visible window whose flex/grid layout had not propagated
+  // could pass the visibility predicate while the parent container was
+  // still 0x0. fitAddon then resolved against the broken box, isReady
+  // flipped true, and the deferredWrites flushed into xterm's default
+  // 80x24 grid — the Claude Code post-launch corruption symptom.
+  assert.equal(elementHasLayoutBox({ clientWidth: 800, clientHeight: 480 }), true);
+  assert.equal(elementHasLayoutBox({ clientWidth: 0, clientHeight: 480 }), false);
+  assert.equal(elementHasLayoutBox({ clientWidth: 800, clientHeight: 0 }), false);
+  assert.equal(elementHasLayoutBox({ clientWidth: 0, clientHeight: 0 }), false);
+
+  // Falls back to getBoundingClientRect when client* are unavailable
+  // (e.g. linkedom fixtures used elsewhere in this suite).
+  assert.equal(
+    elementHasLayoutBox({
+      getBoundingClientRect: () => ({ width: 600, height: 320 }),
+    }),
+    true,
+  );
+  assert.equal(
+    elementHasLayoutBox({
+      getBoundingClientRect: () => ({ width: 0, height: 320 }),
+    }),
+    false,
+  );
+
+  // Defensive default: missing element falls through (don't pin the
+  // handshake retry loop on inputs the predicate can not measure).
+  assert.equal(elementHasLayoutBox(null), true);
+  assert.equal(elementHasLayoutBox(undefined), true);
+  assert.equal(elementHasLayoutBox({}), true);
+});
+
 test("app.js wires the reflow controller for resize, transition, and predicate", () => {
   // Source-string contract retained per the lesson — limited to wiring
   // detection so a future refactor that drops the import / call surfaces
@@ -336,5 +371,31 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /scheduleTerminalFocusActivation\(topmostId,\s*\{\s*shouldPersistGeometry:\s*false,?\s*\}\)/,
     "topmost focus activation must not persist geometry on every workspace render",
+  );
+
+  // Issue #2832 — SPEC-2008 Phase 26.A regression fix: completeInitialFitHandshake
+  // must defer (and retry via rAF) while the container has no layout box,
+  // so deferredWrites do not flush into xterm's default 80x24 grid before
+  // fit can resolve real cols/rows. Wiring detection only — behavior
+  // coverage lives in the elementHasLayoutBox unit test above.
+  assert.match(
+    appSource,
+    /elementHasLayoutBox/,
+    "app.js must import elementHasLayoutBox so the initial-fit handshake can gate on container layout",
+  );
+  assert.match(
+    appSource,
+    /terminalContainerHasLayoutBox\(windowId\)/,
+    "completeInitialFitHandshake must consult terminalContainerHasLayoutBox",
+  );
+  assert.match(
+    appSource,
+    /handshakeAttempts/,
+    "completeInitialFitHandshake must bound its retry loop with a handshakeAttempts counter",
+  );
+  assert.match(
+    appSource,
+    /HANDSHAKE_RETRY_LIMIT/,
+    "handshake retry must be capped by HANDSHAKE_RETRY_LIMIT",
   );
 });

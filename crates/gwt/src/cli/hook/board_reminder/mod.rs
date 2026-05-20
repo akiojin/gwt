@@ -24,7 +24,7 @@ mod texts;
 
 use std::{
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
@@ -56,7 +56,7 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookError> {
-    let _ = HookEvent::read_from_str(input)?;
+    let hook_event = HookEvent::read_from_str(input)?;
     let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
         return Ok(HookOutput::Silent);
     };
@@ -64,6 +64,7 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookErr
     let Some(session) = current_session_from_env(&sessions_dir)? else {
         return Ok(HookOutput::Silent);
     };
+    let session = session_scoped_to_hook_cwd(session, hook_event.as_ref());
     let Some(plan) = compute_plan(event, &session, Utc::now())? else {
         return Ok(HookOutput::Silent);
     };
@@ -85,6 +86,30 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
         return Ok(None);
     }
     Session::load(&path).map(Some)
+}
+
+fn session_scoped_to_hook_cwd(mut session: Session, hook_event: Option<&HookEvent>) -> Session {
+    let Some(cwd) = hook_event.and_then(|event| hook_cwd_path(event.cwd.as_deref())) else {
+        return session;
+    };
+    session.worktree_path = cwd;
+    session.repo_hash =
+        gwt_core::repo_hash::detect_repo_hash(&session.worktree_path).map(|hash| hash.to_string());
+    session
+}
+
+fn hook_cwd_path(cwd: Option<&str>) -> Option<PathBuf> {
+    let value = cwd.map(str::trim).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    if !path.exists() {
+        return None;
+    }
+    Some(dunce::canonicalize(&path).unwrap_or(path))
 }
 
 /// Build the OR-match key list for self-targeted entry detection
@@ -381,6 +406,26 @@ mod tests {
         save_workspace_projection(repo, &projection).expect("save workspace projection");
     }
 
+    fn init_repo(path: &Path, origin: &str) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed for {}", path.display());
+        let remote = std::process::Command::new("git")
+            .args(["remote", "add", "origin", origin])
+            .current_dir(path)
+            .status()
+            .expect("git remote add");
+        assert!(
+            remote.success(),
+            "git remote add failed for {}",
+            path.display()
+        );
+    }
+
     fn entry(
         author: &str,
         kind: BoardEntryKind,
@@ -632,6 +677,59 @@ mod tests {
         assert!(!text.contains("old post before last inject"));
         assert!(text.contains("brand new post"));
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
+    }
+
+    #[test]
+    fn handle_user_prompt_submit_uses_hook_cwd_for_board_scope() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo_a = home.path().join("repo-a");
+        let repo_b = home.path().join("repo-b");
+        init_repo(&repo_a, "https://github.com/example/repo-a.git");
+        init_repo(&repo_b, "https://github.com/example/repo-b.git");
+
+        let session = make_session(&repo_a, "work/repo-a", "Codex");
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save session");
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let now = Utc::now();
+
+        post_entry(
+            &repo_a,
+            entry(
+                "Other",
+                BoardEntryKind::Status,
+                "repo-a stale update",
+                "work/repo-a",
+                "session-repo-a",
+                now - chrono::Duration::minutes(5),
+            ),
+        )
+        .unwrap();
+        post_entry(
+            &repo_b,
+            entry(
+                "Other",
+                BoardEntryKind::Status,
+                "repo-b current update",
+                "work/repo-b",
+                "session-repo-b",
+                now - chrono::Duration::minutes(4),
+            ),
+        )
+        .unwrap();
+
+        let input = serde_json::json!({ "cwd": repo_b }).to_string();
+        let output = handle_with_input("UserPromptSubmit", &input).unwrap();
+        let text = additional_context(&output);
+
+        assert!(text.contains("repo-b current update"), "{text}");
+        assert!(!text.contains("repo-a stale update"), "{text}");
     }
 
     #[test]

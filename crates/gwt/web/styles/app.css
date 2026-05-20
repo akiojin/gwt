@@ -2533,6 +2533,43 @@ body {
   color: var(--color-text-muted);
 }
 
+.branch-cleanup-progress-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.branch-cleanup-progress-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.branch-cleanup-progress-branch {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-cleanup-progress-status {
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+
+.branch-cleanup-progress-message {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+}
+
 .branch-cleanup-results-summary {
   margin-top: 12px;
   font-family: var(--font-mono);
