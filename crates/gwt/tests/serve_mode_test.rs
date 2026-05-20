@@ -136,6 +136,36 @@ fn serve_mode_starts_server_without_opening_webview() {
         "default serve mode must bind to 127.0.0.1, got {url}",
     );
 
+    // SPEC-2785 US-2 AS-2 / FR-F: `gwt serve` must announce the Ctrl-C
+    // shutdown contract on stderr so headless operators know how to stop
+    // the server gracefully. We drain stderr a little further to confirm
+    // the line, bounded by a small follow-up budget so this test never
+    // blocks indefinitely on a quiet stderr.
+    let mut saw_ctrl_c_hint = false;
+    let ctrl_c_deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < ctrl_c_deadline {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(line) => {
+                transcript.push(line.clone());
+                if line.contains("gwt serve: press Ctrl-C to stop") {
+                    saw_ctrl_c_hint = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if !saw_ctrl_c_hint {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader_handle.join();
+        panic!(
+            "expected 'gwt serve: press Ctrl-C to stop' on stderr after URL line. transcript:\n{}",
+            transcript.join("\n")
+        );
+    }
+
     let healthz = format!("{url}healthz");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -152,4 +182,114 @@ fn serve_mode_starts_server_without_opening_webview() {
     // verifies that the wait completed successfully — that is, we did not
     // leak the child process.
     let _ = status;
+}
+
+/// SPEC-2785 US-2 AS-3 / FR-F: `GWT_BROWSER_URL_FILE` is the canonical
+/// non-stderr handoff channel for CI / Playwright. Setting it to a writable
+/// path must persist the bound URL there so harnesses can consume the URL
+/// without parsing stderr.
+#[test]
+#[ignore = "Spawns the full gwt binary and requires a warm ~/.gwt; opt in with --ignored"]
+fn serve_mode_writes_browser_url_to_handoff_file_when_env_set() {
+    let temp_cwd = tempfile::tempdir().expect("temp cwd");
+    let handoff_dir = tempfile::tempdir().expect("handoff dir");
+    let handoff_path = handoff_dir.path().join("gwt-browser-url.txt");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gwt"))
+        .arg("serve")
+        .arg("--port")
+        .arg("0")
+        .arg("--no-open")
+        .env("GWT_FORCE_NEW_INSTANCE", "1")
+        .env("GWT_BROWSER_URL_FILE", &handoff_path)
+        .current_dir(temp_cwd.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gwt serve");
+
+    let stderr = child.stderr.take().expect("stderr handle");
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader_handle = thread::Builder::new()
+        .name("gwt-serve-stderr-reader".to_string())
+        .spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn stderr reader thread");
+
+    // Wait for the URL line so we know the embedded server has started and
+    // the handoff file has been written by the parent process.
+    let started = Instant::now();
+    let timeout = Duration::from_secs(180);
+    let mut url: Option<String> = None;
+    let mut transcript: Vec<String> = Vec::new();
+    loop {
+        let remaining = match timeout.checked_sub(started.elapsed()) {
+            Some(remaining) if !remaining.is_zero() => remaining,
+            _ => break,
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(line) => {
+                transcript.push(line.clone());
+                if let Some(rest) = line.strip_prefix("gwt browser URL: ") {
+                    url = Some(rest.trim().to_string());
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let url = match url {
+        Some(value) => value,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader_handle.join();
+            panic!(
+                "did not observe 'gwt browser URL:' on stderr within {timeout:?}. transcript:\n{}",
+                transcript.join("\n")
+            );
+        }
+    };
+
+    // The handoff file is written by the parent immediately after the
+    // stderr announcement, but the two are independent syscalls; tolerate
+    // a tiny race by polling for a short while before failing.
+    let mut file_contents = String::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&handoff_path) {
+            if !text.trim().is_empty() {
+                file_contents = text;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader_handle.join();
+
+    assert!(
+        !file_contents.is_empty(),
+        "GWT_BROWSER_URL_FILE must be populated; path={}",
+        handoff_path.display()
+    );
+    assert_eq!(
+        file_contents.trim(),
+        url.trim(),
+        "handoff file contents must match the stderr URL line",
+    );
+    assert!(
+        file_contents.trim().starts_with("http://127.0.0.1:"),
+        "handoff URL must point at the local embedded server, got {file_contents:?}"
+    );
 }

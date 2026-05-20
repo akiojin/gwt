@@ -1684,6 +1684,48 @@ fn search_github_repositories(
     parse_github_repository_search_results(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// SPEC-2785 FR-E: exact same-origin match between the embedded server's
+/// bound URL and a frontend-supplied URL. Used as the pre-spawn gate by
+/// [`AppRuntime::open_server_url_events`] so a renderer compromise cannot
+/// smuggle an arbitrary URL into the OS opener.
+///
+/// Comparison is byte-exact. Trailing-slash and case differences are NOT
+/// normalized — the frontend derives its URL from `window.location.origin`
+/// so the two strings are always produced by the same source and any drift
+/// is a bug worth surfacing rather than papering over.
+fn validate_server_url(allowed: Option<&str>, requested: &str) -> bool {
+    matches!(allowed, Some(value) if value == requested)
+}
+
+/// SPEC-2785 FR-C / FR-E: launch the platform default browser for a URL
+/// argument (analogous to [`open_path_with_os_default`] but reserved for URLs
+/// that have already cleared [`validate_server_url`]). The opener receives
+/// the URL via argv directly, never through a shell, so URL contents cannot
+/// trigger shell metacharacter expansion.
+fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
+    use std::process::Command;
+    let child = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd.spawn()?
+    } else if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd");
+        // The empty "" before the URL is required by `start` so that a URL
+        // beginning with quoted text is not interpreted as a window title.
+        cmd.args(["/C", "start", "", url]);
+        cmd.spawn()?
+    } else {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd.spawn()?
+    };
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// SPEC-2041 Phase 19 (FR-065): launch the platform default opener
 /// (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows). Errors are
 /// silently dropped so the modal does not surface noise; the path is logged
@@ -1810,6 +1852,12 @@ pub struct AppRuntime {
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
     pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
+    /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
+    /// `open_server_url_events` can reject requests whose origin differs from
+    /// the bound URL. `None` before the server is started (e.g. during early
+    /// AppRuntime construction or unit tests that never call
+    /// `set_server_url`).
+    pub(crate) server_url: Option<String>,
 }
 
 impl ProjectTabRuntime {
@@ -1892,6 +1940,7 @@ impl AppRuntime {
             pty_writers,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            server_url: None,
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -1956,6 +2005,13 @@ impl AppRuntime {
 
     pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
         self.hook_forward_target = Some(target);
+    }
+
+    /// SPEC-2785 FR-E: capture the embedded server URL after the axum bind
+    /// completes so `open_server_url_events` can reject mismatched origin
+    /// requests before invoking the OS opener.
+    pub(crate) fn set_server_url(&mut self, url: String) {
+        self.server_url = Some(url);
     }
 
     pub(crate) fn handle_frontend_event(
@@ -2266,6 +2322,7 @@ impl AppRuntime {
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }
+            FrontendEvent::OpenServerUrl { url } => self.open_server_url_events(&client_id, url),
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -2661,6 +2718,34 @@ impl AppRuntime {
                 ),
             )],
         }
+    }
+
+    /// SPEC-2785 US-1 / FR-C / FR-E: user clicked the server URL cell in the
+    /// status strip. The renderer-supplied `url` is treated as untrusted and
+    /// is only forwarded to [`open_url_with_os_default`] when it matches the
+    /// embedded server's bound URL captured by [`Self::set_server_url`].
+    /// Mismatched origins (or an unset server URL) are dropped with a trace
+    /// log so a compromised renderer cannot redirect the OS opener to an
+    /// arbitrary URL. The handler returns no outbound events; the click is a
+    /// side-effect only.
+    fn open_server_url_events(&self, _client_id: &str, url: String) -> Vec<OutboundEvent> {
+        if validate_server_url(self.server_url.as_deref(), &url) {
+            if let Err(error) = open_url_with_os_default(&url) {
+                tracing::trace!(
+                    target: "gwt::open_server_url",
+                    %error,
+                    "failed to spawn OS browser opener"
+                );
+            }
+        } else {
+            tracing::trace!(
+                target: "gwt::open_server_url",
+                requested = %url,
+                allowed = ?self.server_url,
+                "rejected open_server_url request: origin mismatch"
+            );
+        }
+        Vec::new()
     }
 
     /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
@@ -7257,6 +7342,7 @@ exit 1
             pty_writers,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            server_url: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -14765,6 +14851,78 @@ exit 1
         let missing = logs_root.path().join("does-not-exist.log");
         let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
         assert!(resolved.is_none(), "missing files must be rejected");
+    }
+
+    // SPEC-2785 FR-E: open_server_url requests must be gated by an exact
+    // same-origin match against the embedded server's bound URL. The shared
+    // validator function is reused by `AppRuntime::open_server_url_events`
+    // so a mismatched origin cannot smuggle an arbitrary URL into the OS
+    // opener.
+    #[test]
+    fn validate_server_url_accepts_exact_bound_url() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(super::validate_server_url(
+            allowed,
+            "http://127.0.0.1:54321/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_different_port() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(
+            allowed,
+            "http://127.0.0.1:54322/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_different_scheme() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(
+            allowed,
+            "https://127.0.0.1:54321/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_when_allowed_is_none() {
+        assert!(!super::validate_server_url(None, "http://127.0.0.1:54321/"));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_external_origin() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(allowed, "http://evil.example/"));
+    }
+
+    // SPEC-2785 SC-4: `open_server_url_events` returns an empty event list and
+    // performs no OS opener side effect when the requested URL does not match
+    // the configured server URL. The state mutation guard is `server_url`
+    // being None or unequal to the request.
+    #[test]
+    fn open_server_url_events_rejects_mismatched_origin() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        runtime.set_server_url("http://127.0.0.1:54321/".to_string());
+        let outbound =
+            runtime.open_server_url_events("client-1", "http://evil.example/".to_string());
+        assert!(
+            outbound.is_empty(),
+            "mismatched origin must yield no outbound events"
+        );
+    }
+
+    #[test]
+    fn open_server_url_events_rejects_when_server_url_unset() {
+        let temp = tempdir().expect("tempdir");
+        let (runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        let outbound =
+            runtime.open_server_url_events("client-1", "http://127.0.0.1:54321/".to_string());
+        assert!(
+            outbound.is_empty(),
+            "unset server URL must reject any open request"
+        );
     }
 
     #[test]
