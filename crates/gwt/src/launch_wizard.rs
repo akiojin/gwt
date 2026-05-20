@@ -37,6 +37,11 @@ impl LinkedIssueKind {
 pub enum LaunchWizardMode {
     Branch,
     StartWork,
+    Knowledge,
+}
+
+pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {
+    format!("feature/{}-{number}", kind.branch_kind_segment())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -904,6 +909,30 @@ impl LaunchWizardState {
             quick_start_entries,
             LaunchWizardPreviousProfiles::from_profile(previous_profile),
         )
+    }
+
+    pub fn open_knowledge_launch_with_previous_profiles(
+        context: LaunchWizardContext,
+        base_branch_name: String,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+        previous_profiles: LaunchWizardPreviousProfiles,
+    ) -> Self {
+        let mut state = Self::new_with(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+            false,
+        );
+        state.wizard_mode = LaunchWizardMode::Knowledge;
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.launch_path = LaunchWizardLaunchPath::ManualSetup;
+        state.selected = step_default_selection(state.step, &state);
+        state.is_new_branch = true;
+        state.base_branch_name = Some(base_branch_name);
+        state.branch_name = state.context.normalized_branch_name.clone();
+        state
     }
 
     pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
@@ -5195,6 +5224,66 @@ mod tests {
             config.working_dir.is_none(),
             "Start Work must defer worktree materialization until launch confirmation"
         );
+    }
+
+    #[test]
+    fn knowledge_launch_mode_uses_issue_target_branch_and_hides_branch_controls() {
+        let target_branch = knowledge_launch_target_branch_name(LinkedIssueKind::Issue, 7);
+        let state = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            context_with_linked_issue(branch("develop"), &target_branch, LinkedIssueKind::Issue, 7),
+            "develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+
+        let view = state.view();
+
+        assert_eq!(state.step, LaunchWizardStep::LaunchTarget);
+        assert_eq!(view.title, "Launch Agent");
+        assert_eq!(view.mode, LaunchWizardMode::Knowledge);
+        assert_eq!(view.branch_name, "feature/issue-7");
+        assert_eq!(view.branch_mode, "create_new");
+        assert!(!view.show_branch_controls);
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_name.as_deref(), Some("develop"));
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("feature/issue-7"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+        assert_eq!(config.linked_issue_number, Some(7));
+    }
+
+    #[test]
+    fn knowledge_launch_mode_uses_spec_target_branch_and_hides_linked_issue_section() {
+        let target_branch = knowledge_launch_target_branch_name(LinkedIssueKind::Spec, 2014);
+        let state = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            context_with_linked_issue(
+                branch("develop"),
+                &target_branch,
+                LinkedIssueKind::Spec,
+                2014,
+            ),
+            "develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+
+        let view = state.view();
+
+        assert_eq!(view.mode, LaunchWizardMode::Knowledge);
+        assert_eq!(view.branch_name, "feature/spec-2014");
+        assert_eq!(view.branch_mode, "create_new");
+        assert!(!view.show_branch_controls);
+        assert!(!view.show_linked_issue);
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert!(config.working_dir.is_none());
+        assert_eq!(config.linked_issue_number, Some(2014));
     }
 
     #[test]

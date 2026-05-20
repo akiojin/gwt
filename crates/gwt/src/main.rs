@@ -3684,6 +3684,18 @@ mod tests {
         ));
         let issue_session = runtime.launch_wizard.as_ref().expect("launch wizard");
         assert!(!issue_session.wizard.is_hydrating);
+        let issue_view = issue_session.wizard.view();
+        assert_eq!(issue_view.mode, gwt::LaunchWizardMode::Knowledge);
+        assert_eq!(issue_view.branch_name, "feature/issue-7");
+        assert_eq!(issue_view.branch_mode, "create_new");
+        assert!(!issue_view.show_branch_controls);
+        let issue_config = issue_session
+            .wizard
+            .build_launch_config()
+            .expect("issue launch config");
+        assert_eq!(issue_config.branch.as_deref(), Some("feature/issue-7"));
+        assert_eq!(issue_config.base_branch.as_deref(), Some("feature/demo"));
+        assert!(issue_config.working_dir.is_none());
         assert_eq!(
             issue_session.wizard.context.linked_issue_kind,
             Some(gwt::LinkedIssueKind::Issue)
@@ -3703,6 +3715,18 @@ mod tests {
             });
         assert_eq!(prepared_spec.len(), 1);
         let spec_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        let spec_view = spec_session.wizard.view();
+        assert_eq!(spec_view.mode, gwt::LaunchWizardMode::Knowledge);
+        assert_eq!(spec_view.branch_name, "feature/spec-2014");
+        assert_eq!(spec_view.branch_mode, "create_new");
+        assert!(!spec_view.show_branch_controls);
+        let spec_config = spec_session
+            .wizard
+            .build_launch_config()
+            .expect("spec launch config");
+        assert_eq!(spec_config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(spec_config.base_branch.as_deref(), Some("feature/demo"));
+        assert!(spec_config.working_dir.is_none());
         assert_eq!(
             spec_session.wizard.context.linked_issue_kind,
             Some(gwt::LinkedIssueKind::Spec)
@@ -5038,6 +5062,39 @@ mod tests {
         assert!(current_env
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &repo)));
+
+        let mut knowledge_dir = None;
+        let mut knowledge_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/issue-7"),
+            &mut base_branch,
+            &mut knowledge_dir,
+            &mut knowledge_env,
+        )
+        .expect("knowledge launch worktree");
+        let knowledge_dir = knowledge_dir.expect("knowledge launch worktree dir");
+        assert!(
+            !super::same_worktree_path(&knowledge_dir, &repo),
+            "Knowledge Launch must not reuse the current develop project root"
+        );
+        assert!(knowledge_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| { super::same_worktree_path(Path::new(value), &knowledge_dir) }));
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&knowledge_dir)
+            .output()
+            .expect("current branch in knowledge worktree");
+        assert!(
+            output.status.success(),
+            "git branch --show-current failed for knowledge worktree"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "feature/issue-7"
+        );
 
         let preset = temp.path().join("preset");
         let mut preset_dir = Some(preset.clone());
