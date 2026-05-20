@@ -760,9 +760,26 @@ fn probe_host_package_runner(
     remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> bool {
+    // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit
+    // `gwt.process.summary` start / end events so agent-bootstrap
+    // probes appear in the Logs Process facet and the Console window
+    // counts them under the `agent` tab. stdio stays redirected to
+    // /dev/null because the probe only consumes the exit status.
+    let spawn_id = next_agent_spawn_id();
+    let label = format!("{} {}", command, args.join(" "));
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "agent",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "start",
+        "process start",
+    );
+    let started_at = std::time::Instant::now();
+
     let mut process = gwt_core::process::hidden_command(command);
     process
-        .args(args)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -773,7 +790,30 @@ fn probe_host_package_runner(
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
-    process.status().is_ok_and(|status| status.success())
+    let status = process.status();
+    let ok = status.as_ref().is_ok_and(|status| status.success());
+
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let exit_code = status.ok().and_then(|s| s.code()).map(|c| c as i64);
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "agent",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "end",
+        exit_code = exit_code,
+        duration_ms = duration_ms,
+        success = ok,
+        "process end",
+    );
+
+    ok
+}
+
+static AGENT_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_agent_spawn_id() -> u64 {
+    AGENT_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn command_matches_runner(command: &str, runner: &str) -> bool {
