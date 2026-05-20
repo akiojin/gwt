@@ -343,8 +343,12 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 "#;
 
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
             "api",
             "graphql",
             "-f",
@@ -355,17 +359,18 @@ query($owner: String!, $repo: String!, $number: Int!) {
             &format!("repo={repo}"),
             "-F",
             &format!("number={}", number.0),
-        ])
-        .output()?;
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh api graphql issue timeline"),
+    )?;
 
-    if !output.status.success() {
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh api graphql failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let nodes = value
         .get("data")

@@ -185,6 +185,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "discuss" => super::parse_discuss_args(&rest),
         "plan" => super::parse_plan_args(&rest),
         "build" => super::parse_build_args(&rest),
+        "register" => super::register::parse_args(&rest),
         "daemon" => super::parse_daemon_args(&rest),
         "workspace" => super::parse_workspace_args(&rest),
         "pane" => parse_pane_args(&rest),

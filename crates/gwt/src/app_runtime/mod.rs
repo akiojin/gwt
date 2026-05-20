@@ -1661,27 +1661,75 @@ fn search_github_repositories(
     if trimmed.is_empty() {
         return Err("repository search query is required".to_string());
     }
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let hub = gwt_core::process_console::global();
+    let limit_str = limit.to_string();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
             "search",
             "repos",
             trimmed,
             "--json",
             "fullName,description,url,defaultBranch,visibility,updatedAt",
             "--limit",
-            &limit.to_string(),
-        ])
-        .output()
-        .map_err(|error| format!("gh search repos: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            limit_str.as_str(),
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh search repos"),
+    )
+    .map_err(|error| format!("gh search repos: {error}"))?;
+    if !output.success() {
+        let stderr = output.stderr.trim().to_string();
         return Err(if stderr.is_empty() {
             "gh search repos failed".to_string()
         } else {
             stderr
         });
     }
-    parse_github_repository_search_results(&String::from_utf8_lossy(&output.stdout))
+    parse_github_repository_search_results(&output.stdout)
+}
+
+/// SPEC-2785 FR-E: exact same-origin match between the embedded server's
+/// bound URL and a frontend-supplied URL. Used as the pre-spawn gate by
+/// [`AppRuntime::open_server_url_events`] so a renderer compromise cannot
+/// smuggle an arbitrary URL into the OS opener.
+///
+/// Comparison is byte-exact. Trailing-slash and case differences are NOT
+/// normalized — the frontend derives its URL from `window.location.origin`
+/// so the two strings are always produced by the same source and any drift
+/// is a bug worth surfacing rather than papering over.
+fn validate_server_url(allowed: Option<&str>, requested: &str) -> bool {
+    matches!(allowed, Some(value) if value == requested)
+}
+
+/// SPEC-2785 FR-C / FR-E: launch the platform default browser for a URL
+/// argument (analogous to [`open_path_with_os_default`] but reserved for URLs
+/// that have already cleared [`validate_server_url`]). The opener receives
+/// the URL via argv directly, never through a shell, so URL contents cannot
+/// trigger shell metacharacter expansion.
+fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
+    use std::process::Command;
+    let child = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        cmd.spawn()?
+    } else if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd");
+        // The empty "" before the URL is required by `start` so that a URL
+        // beginning with quoted text is not interpreted as a window title.
+        cmd.args(["/C", "start", "", url]);
+        cmd.spawn()?
+    } else {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        cmd.spawn()?
+    };
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// SPEC-2041 Phase 19 (FR-065): launch the platform default opener
@@ -1810,6 +1858,12 @@ pub struct AppRuntime {
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
     pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
+    /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
+    /// `open_server_url_events` can reject requests whose origin differs from
+    /// the bound URL. `None` before the server is started (e.g. during early
+    /// AppRuntime construction or unit tests that never call
+    /// `set_server_url`).
+    pub(crate) server_url: Option<String>,
 }
 
 impl ProjectTabRuntime {
@@ -1892,6 +1946,7 @@ impl AppRuntime {
             pty_writers,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            server_url: None,
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -1956,6 +2011,13 @@ impl AppRuntime {
 
     pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
         self.hook_forward_target = Some(target);
+    }
+
+    /// SPEC-2785 FR-E: capture the embedded server URL after the axum bind
+    /// completes so `open_server_url_events` can reject mismatched origin
+    /// requests before invoking the OS opener.
+    pub(crate) fn set_server_url(&mut self, url: String) {
+        self.server_url = Some(url);
     }
 
     pub(crate) fn handle_frontend_event(
@@ -2266,6 +2328,7 @@ impl AppRuntime {
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
             }
+            FrontendEvent::OpenServerUrl { url } => self.open_server_url_events(&client_id, url),
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -2661,6 +2724,34 @@ impl AppRuntime {
                 ),
             )],
         }
+    }
+
+    /// SPEC-2785 US-1 / FR-C / FR-E: user clicked the server URL cell in the
+    /// status strip. The renderer-supplied `url` is treated as untrusted and
+    /// is only forwarded to [`open_url_with_os_default`] when it matches the
+    /// embedded server's bound URL captured by [`Self::set_server_url`].
+    /// Mismatched origins (or an unset server URL) are dropped with a trace
+    /// log so a compromised renderer cannot redirect the OS opener to an
+    /// arbitrary URL. The handler returns no outbound events; the click is a
+    /// side-effect only.
+    fn open_server_url_events(&self, _client_id: &str, url: String) -> Vec<OutboundEvent> {
+        if validate_server_url(self.server_url.as_deref(), &url) {
+            if let Err(error) = open_url_with_os_default(&url) {
+                tracing::trace!(
+                    target: "gwt::open_server_url",
+                    %error,
+                    "failed to spawn OS browser opener"
+                );
+            }
+        } else {
+            tracing::trace!(
+                target: "gwt::open_server_url",
+                requested = %url,
+                allowed = ?self.server_url,
+                "rejected open_server_url request: origin mismatch"
+            );
+        }
+        Vec::new()
     }
 
     /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
@@ -3985,13 +4076,24 @@ impl AppRuntime {
         }
 
         match load_log_entries_from_dir(&self.log_dir) {
-            Ok(entries) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::LogEntries {
-                    id: id.to_string(),
-                    entries,
-                },
-            )],
+            Ok(outcome) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::LogEntries {
+                        id: id.to_string(),
+                        entries: outcome.entries,
+                    },
+                )];
+                if outcome.diagnostics.skipped > 0 {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::LogEntryAppended {
+                            entry: skipped_lines_warning(&outcome.diagnostics),
+                        },
+                    ));
+                }
+                events
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::LogError {
@@ -4629,43 +4731,35 @@ impl AppRuntime {
     }
 }
 
-fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
+/// Read the active canonical log file via the SPEC-1924 FR-035 reader.
+///
+/// Returns the decoded snapshot together with `ReadDiagnostics` so the caller
+/// can surface a non-blocking warning when malformed lines were skipped
+/// (FR-036 / SC-010). IO errors other than `NotFound` are forwarded as a
+/// human-readable message so the Logs window can switch to an error state
+/// without crashing the agent.
+fn load_log_entries_from_dir(log_dir: &Path) -> Result<gwt_core::logging::ReadOutcome, String> {
     let path = gwt_core::logging::current_log_file(log_dir);
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "Failed to open log file {}: {error}",
-                path.display()
-            ))
-        }
-    };
-    let reader = std::io::BufReader::new(file);
-    let mut entries = Vec::new();
-    for (index, line) in std::io::BufRead::lines(reader).enumerate() {
-        let line = line.map_err(|error| {
-            format!(
-                "Failed to read log line {} from {}: {error}",
-                index + 1,
-                path.display()
-            )
-        })?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let entry =
-            serde_json::from_str::<gwt_core::logging::LogEvent>(trimmed).map_err(|error| {
-                format!(
-                    "Failed to parse log line {} from {}: {error}",
-                    index + 1,
-                    path.display()
-                )
-            })?;
-        entries.push(entry);
-    }
-    Ok(entries)
+    gwt_core::logging::read_log_file(&path)
+        .map_err(|error| format!("Failed to read log file {}: {error}", path.display()))
+}
+
+/// Build the synthetic warning event surfaced when `read_log_file` skipped
+/// malformed lines. Keeps the message phrasing consistent with the Logs
+/// window expectation of a single notice per load (FR-036 / SC-010).
+fn skipped_lines_warning(
+    diagnostics: &gwt_core::logging::ReadDiagnostics,
+) -> gwt_core::logging::LogEvent {
+    let count = diagnostics.skipped;
+    let plural = if count == 1 { "line" } else { "lines" };
+    gwt_core::logging::LogEvent::new(
+        gwt_core::logging::LogLevel::Warn,
+        "gwt_core::logging::reader",
+        format!(
+            "Skipped {count} malformed {plural} while reading {}",
+            diagnostics.path.display()
+        ),
+    )
 }
 
 fn spawn_branch_cleanup_async(
@@ -6487,7 +6581,7 @@ mod tests {
             coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
             BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
         },
-        logging::{current_log_file, LogEvent, LogLevel},
+        logging::{current_log_file, LogLevel},
         paths::gwt_cache_dir,
         repo_hash::detect_repo_hash,
     };
@@ -7254,6 +7348,7 @@ exit 1
             pty_writers,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            server_url: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -11806,14 +11901,16 @@ exit 1
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "logs-1");
         let log_path = current_log_file(&runtime.log_dir);
-        let entry =
-            LogEvent::new(LogLevel::Warn, "pty", "runtime stalled").with_detail("retrying read");
+        // Write the canonical on-disk JSONL shape produced by
+        // `tracing_subscriber::fmt::layer().json()` (see
+        // `crates/gwt-core/src/logging/fmt_layer.rs`) so the reader exercises
+        // the production format end-to-end (SPEC-1924 FR-035).
         fs::write(
             &log_path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&entry).expect("serialize log event")
-            ),
+            "{\"timestamp\":\"2026-05-20T09:00:00.000000+00:00\",\
+             \"level\":\"WARN\",\
+             \"fields\":{\"message\":\"runtime stalled\",\"detail\":\"retrying read\"},\
+             \"target\":\"pty\"}\n",
         )
         .expect("write log snapshot");
 
@@ -11833,8 +11930,80 @@ exit 1
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].message == "runtime stalled"
+                && entries[0].detail.as_deref() == Some("retrying read")
+                && entries[0].source == "pty"
                 && matches!(entries[0].severity, LogLevel::Warn)
         ));
+    }
+
+    /// SPEC-1924 US-14 / FR-036 / SC-010 — when canonical log file contains
+    /// malformed lines, the Logs window receives the surviving entries plus
+    /// exactly one Warning notice via `LogEntryAppended`.
+    #[test]
+    fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "logs-1",
+            repo,
+            WindowPreset::Logs,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "logs-1");
+        let log_path = current_log_file(&runtime.log_dir);
+        let good = "{\"timestamp\":\"2026-05-20T09:00:00.000000+00:00\",\
+            \"level\":\"INFO\",\"fields\":{\"message\":\"ok\"},\"target\":\"gwt\"}";
+        let malformed = "{\"foo\":\"bar\"}";
+        fs::write(&log_path, format!("{good}\n{malformed}\n{good}\n")).expect("write log snapshot");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadLogs {
+                id: window_id.clone(),
+            },
+        );
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected LogEntries + LogEntryAppended for skipped notice, got {:?}",
+            events
+        );
+
+        let entries_match = matches!(
+            &events[0],
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::LogEntries { id, entries },
+            } if client_id == "client-1"
+                && id == &window_id
+                && entries.len() == 2
+                && entries.iter().all(|e| e.message == "ok")
+        );
+        assert!(
+            entries_match,
+            "first event must be LogEntries: {:?}",
+            events[0]
+        );
+
+        let warning_match = matches!(
+            &events[1],
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::LogEntryAppended { entry },
+            } if client_id == "client-1"
+                && entry.severity == LogLevel::Warn
+                && entry.source == "gwt_core::logging::reader"
+                && entry.message.contains("Skipped 1 malformed line")
+        );
+        assert!(
+            warning_match,
+            "second event must be a Warn LogEntryAppended notice: {:?}",
+            events[1]
+        );
     }
 
     #[test]
@@ -14690,6 +14859,78 @@ exit 1
         assert!(resolved.is_none(), "missing files must be rejected");
     }
 
+    // SPEC-2785 FR-E: open_server_url requests must be gated by an exact
+    // same-origin match against the embedded server's bound URL. The shared
+    // validator function is reused by `AppRuntime::open_server_url_events`
+    // so a mismatched origin cannot smuggle an arbitrary URL into the OS
+    // opener.
+    #[test]
+    fn validate_server_url_accepts_exact_bound_url() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(super::validate_server_url(
+            allowed,
+            "http://127.0.0.1:54321/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_different_port() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(
+            allowed,
+            "http://127.0.0.1:54322/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_different_scheme() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(
+            allowed,
+            "https://127.0.0.1:54321/"
+        ));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_when_allowed_is_none() {
+        assert!(!super::validate_server_url(None, "http://127.0.0.1:54321/"));
+    }
+
+    #[test]
+    fn validate_server_url_rejects_external_origin() {
+        let allowed = Some("http://127.0.0.1:54321/");
+        assert!(!super::validate_server_url(allowed, "http://evil.example/"));
+    }
+
+    // SPEC-2785 SC-4: `open_server_url_events` returns an empty event list and
+    // performs no OS opener side effect when the requested URL does not match
+    // the configured server URL. The state mutation guard is `server_url`
+    // being None or unequal to the request.
+    #[test]
+    fn open_server_url_events_rejects_mismatched_origin() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        runtime.set_server_url("http://127.0.0.1:54321/".to_string());
+        let outbound =
+            runtime.open_server_url_events("client-1", "http://evil.example/".to_string());
+        assert!(
+            outbound.is_empty(),
+            "mismatched origin must yield no outbound events"
+        );
+    }
+
+    #[test]
+    fn open_server_url_events_rejects_when_server_url_unset() {
+        let temp = tempdir().expect("tempdir");
+        let (runtime, _events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        let outbound =
+            runtime.open_server_url_events("client-1", "http://127.0.0.1:54321/".to_string());
+        assert!(
+            outbound.is_empty(),
+            "unset server URL must reject any open request"
+        );
+    }
+
     #[test]
     fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         let home = tempdir().expect("home tempdir");
@@ -14889,5 +15130,86 @@ exit 1
                 .map(|i| (i.id.clone(), i.status_category.clone()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    // SPEC-1924 US-14 FR-035 / FR-036 / SC-010 / SC-011 — verify the Logs
+    // window snapshot reader goes through `gwt_core::logging::read_log_file`
+    // and that the synthetic warning event is well-formed when malformed
+    // lines are skipped.
+
+    const PROD_LINE_INFO: &str = r#"{"timestamp":"2026-05-20T09:00:00.015355+09:00","level":"INFO","fields":{"message":"PTY resize completed","outcome":"ok"},"target":"gwt::resize::pty"}"#;
+    const MALFORMED_LINE: &str = r#"{"foo":"bar"}"#;
+
+    fn write_canonical_log_file(log_dir: &Path, lines: &[&str]) {
+        fs::create_dir_all(log_dir).expect("create log dir");
+        let log_path = current_log_file(log_dir);
+        let mut file = fs::File::create(&log_path).expect("create log file");
+        for line in lines {
+            file.write_all(line.as_bytes()).expect("write line");
+            file.write_all(b"\n").expect("write newline");
+        }
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_returns_outcome_with_no_skipped_lines() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_log_file(dir.path(), &[PROD_LINE_INFO]);
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(outcome.entries[0].message, "PTY resize completed");
+        assert_eq!(outcome.diagnostics.skipped, 0);
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_counts_skipped_lines() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_log_file(
+            dir.path(),
+            &[PROD_LINE_INFO, MALFORMED_LINE, PROD_LINE_INFO],
+        );
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert_eq!(outcome.entries.len(), 2);
+        assert_eq!(outcome.diagnostics.skipped, 1);
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_returns_empty_outcome_when_file_missing() {
+        let dir = tempdir().expect("tempdir");
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert!(outcome.entries.is_empty());
+        assert_eq!(outcome.diagnostics.skipped, 0);
+    }
+
+    #[test]
+    fn skipped_lines_warning_is_warn_severity_and_includes_count_and_path() {
+        let diagnostics = gwt_core::logging::ReadDiagnostics {
+            path: PathBuf::from("/tmp/gwt.log.2026-05-20"),
+            skipped: 3,
+        };
+
+        let event = super::skipped_lines_warning(&diagnostics);
+
+        assert_eq!(event.severity, LogLevel::Warn);
+        assert_eq!(event.source, "gwt_core::logging::reader");
+        assert!(event.message.contains("Skipped 3 malformed lines"));
+        assert!(event.message.contains("/tmp/gwt.log.2026-05-20"));
+    }
+
+    #[test]
+    fn skipped_lines_warning_singular_for_one_line() {
+        let diagnostics = gwt_core::logging::ReadDiagnostics {
+            path: PathBuf::from("/tmp/x.log"),
+            skipped: 1,
+        };
+
+        let event = super::skipped_lines_warning(&diagnostics);
+
+        assert!(event.message.contains("Skipped 1 malformed line "));
     }
 }

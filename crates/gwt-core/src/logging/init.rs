@@ -1,10 +1,12 @@
 //! Subscriber initialization and handle types.
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    filter::EnvFilter,
-    layer::SubscriberExt,
+    filter::{EnvFilter, FilterFn},
+    layer::{Layer, SubscriberExt},
     reload::{self, Handle as TracingReloadHandle},
     util::SubscriberInitExt,
     Registry,
@@ -16,6 +18,7 @@ use super::{
     ui_forwarder::UiForwarderLayer,
     writer, LogEvent,
 };
+use crate::process_console::ProcessConsoleHub;
 
 /// Reload handle for the `EnvFilter` layer.
 ///
@@ -43,6 +46,10 @@ pub struct LoggingHandles {
     /// The directory that logs are written to (canonicalised path
     /// after `create_dir_all`).
     pub log_dir: std::path::PathBuf,
+    /// Ephemeral hub that collects external process stdout / stderr
+    /// lines. SPEC-1924 FR-038. Cheap to clone; hand a clone to the GUI
+    /// runtime so the Logs window can subscribe.
+    pub process_console_hub: Arc<ProcessConsoleHub>,
 }
 
 impl LoggingHandles {
@@ -121,7 +128,14 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     };
     let (reloadable_filter, reload_handle) = reload::Layer::new(env_filter);
 
-    let fmt = fmt_layer::build(non_blocking);
+    // SPEC-1924 FR-040: keep `gwt.process.line` events out of the
+    // canonical JSONL file. They only need to flow to the UI forwarder
+    // and (via spawn_logged) to the ProcessConsoleHub. The filter is
+    // applied to the file writer layer only, so the UI layer still
+    // observes the line events for live forwarding hooks.
+    let fmt = fmt_layer::build(non_blocking).with_filter(FilterFn::new(|metadata| {
+        !metadata.target().starts_with("gwt.process.line")
+    }));
     let ui = UiForwarderLayer::new(ui_tx.clone());
 
     Registry::default()
@@ -141,11 +155,18 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
         );
     }
 
+    let process_console_hub = ProcessConsoleHub::new();
+    // SPEC-1924 FR-039: install the process-wide hub so synchronous
+    // gh / git / docker / runner wrappers can find it without
+    // threading it through every call site.
+    let _ = crate::process_console::set_global(process_console_hub.clone());
+
     Ok(LoggingHandles {
         guard,
         reload_handle,
         ui_rx: Some(ui_rx),
         ui_tx,
         log_dir: config.log_dir,
+        process_console_hub: Arc::new(process_console_hub),
     })
 }

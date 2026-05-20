@@ -1449,10 +1449,13 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
     /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_codex_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
     "expected Launch settings controls to be part of setup forms only",
   );
+  // SPEC-2014 Amendment 2026-05-20 (FR-057): Linked issue is gated by its
+  // dedicated `show_linked_issue` flag so it only appears when the wizard
+  // was opened through the Knowledge Issue Bridge.
   assert.match(
     appSource,
-    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_agent_settings\s*\)/,
-    "expected Linked issue controls to be part of setup forms only",
+    /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_linked_issue\s*\)/,
+    "expected Linked issue controls to be gated by show_linked_issue and setup forms",
   );
 });
 
@@ -1698,9 +1701,13 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // so screen readers announce their purpose instead of just "edit text"
   // (input/textarea) or the first option (select). This audit covers
   // the launch wizard and profile editor surfaces.
+  // SPEC-2014 Amendment 2026-05-20 (FR-058): the wizard "Issue number"
+  // field is now rendered as static read-only text (no <input>), so its
+  // accessibility name is conveyed by the surrounding launch-field label
+  // instead of a per-input aria-label. The audit entry is removed
+  // accordingly.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
-    { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
     { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },

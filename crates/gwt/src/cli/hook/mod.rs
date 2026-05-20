@@ -29,6 +29,7 @@ pub mod segments;
 pub mod skill_build_spec_stop_check;
 pub mod skill_discussion_stop_check;
 pub mod skill_plan_spec_stop_check;
+pub mod skill_register_spec_stop_check;
 pub mod workflow_policy;
 mod workspace_identity;
 pub mod worktree;
@@ -60,6 +61,7 @@ pub enum HookKind {
     SkillDiscussionStopCheck,
     SkillPlanSpecStopCheck,
     SkillBuildSpecStopCheck,
+    SkillRegisterSpecStopCheck,
 }
 
 impl HookKind {
@@ -81,6 +83,7 @@ impl HookKind {
             "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
             "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
             "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
+            "skill-register-spec-stop-check" => Some(Self::SkillRegisterSpecStopCheck),
             _ => None,
         }
     }
@@ -239,8 +242,8 @@ pub fn run_daemon_hook<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
         block_bash_policy, event_dispatcher, provider_event, skill_build_spec_stop_check,
-        skill_discussion_stop_check, skill_plan_spec_stop_check, workflow_policy, HookKind,
-        HookOutput,
+        skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+        workflow_policy, HookKind, HookOutput,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -405,6 +408,16 @@ pub fn run_daemon_hook<E: CliEnv>(
             let cwd = env.repo_path().to_path_buf();
             let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
             let output = skill_build_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillRegisterSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_register_spec_stop_check::handle_with_input(
                 &cwd,
                 &stdin,
                 current_session.as_deref(),

@@ -58,6 +58,10 @@ pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
 
+pub fn release_notes_window_js() -> &'static str {
+    include_str!("../web/release-notes-window.js")
+}
+
 pub fn terminal_context_menu_js() -> &'static str {
     include_str!("../web/terminal-context-menu.js")
 }
@@ -186,6 +190,15 @@ pub fn custom_agent_env_editor_js() -> &'static str {
     include_str!("../web/custom-agent-env-editor.js")
 }
 
+// SPEC-2780 — release notes window with version selector. app.js imports this
+// via `import { createReleaseNotesWindow } from "/release-notes-window.js"` at
+// module top level. Missing this route causes the ES module load to fail and
+// the splash to hang because none of the boot wiring (mission briefing,
+// WebSocket connect, operator shell) runs.
+pub fn release_notes_window_js() -> &'static str {
+    include_str!("../web/release-notes-window.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -231,6 +244,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/update-cta.js",
         source: update_cta_js,
         marker: "createUpdateCtaController",
+    },
+    RootJsModuleAsset {
+        path: "/release-notes-window.js",
+        source: release_notes_window_js,
+        marker: "createReleaseNotesWindow",
     },
     RootJsModuleAsset {
         path: "/terminal-context-menu.js",
@@ -331,6 +349,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/custom-agent-env-editor.js",
         source: custom_agent_env_editor_js,
         marker: "renderCustomAgentEnvEditor",
+    },
+    RootJsModuleAsset {
+        path: "/release-notes-window.js",
+        source: release_notes_window_js,
+        marker: "createReleaseNotesWindow",
     },
 ];
 
@@ -1106,6 +1129,87 @@ mod tests {
                 asset.path,
                 asset.marker,
             );
+        }
+    }
+
+    /// SPEC-2780 follow-up — every top-level `import ... from "/x.js"` in any
+    /// shipped JS module must be registered in `ROOT_JS_MODULE_ASSETS` or the
+    /// embedded server returns 404 at runtime, the ES module load aborts, and
+    /// the splash hangs because no boot wiring runs. We learned this the hard
+    /// way when `/release-notes-window.js` was added to `app.js` without a
+    /// matching route; assert here so the regression cannot recur silently.
+    #[test]
+    fn every_root_js_module_import_in_app_assets_is_registered() {
+        use std::collections::BTreeSet;
+
+        // Crawl every embedded JS source registered with the server plus
+        // `app.js` (the entrypoint) for `from "/X.js"` patterns.
+        let mut imports: BTreeSet<String> = BTreeSet::new();
+        let mut sources: Vec<(&str, &str)> = vec![("/app.js", app_js())];
+        for asset in root_js_module_assets() {
+            sources.push((asset.path, (asset.source)()));
+        }
+
+        for (origin, source) in &sources {
+            collect_root_js_imports(source, origin, &mut imports);
+        }
+
+        let registered: BTreeSet<String> = root_js_module_assets()
+            .iter()
+            .map(|asset| asset.path.to_string())
+            .collect();
+
+        let missing: Vec<String> = imports
+            .difference(&registered)
+            .filter(|path| *path != "/app.js")
+            .cloned()
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "embedded JS modules import these paths but they are not registered \
+             in ROOT_JS_MODULE_ASSETS (will 404 at runtime and freeze splash): {:?}",
+            missing,
+        );
+    }
+
+    fn collect_root_js_imports(
+        source: &str,
+        origin: &str,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        // Tolerant scanner for top-level absolute-path module imports of the
+        // shape `from "/something.js"` or `from '/something.js'`. We do not
+        // need a full JS parser here; the goal is to catch obvious 404 traps.
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("import")
+                && !trimmed.starts_with("} from")
+                && !trimmed.contains(" from ")
+            {
+                continue;
+            }
+            for quote in ['"', '\''] {
+                let mut rest = line;
+                while let Some(idx) = rest.find(quote) {
+                    let after = &rest[idx + 1..];
+                    if let Some(end) = after.find(quote) {
+                        let candidate = &after[..end];
+                        if candidate.starts_with('/') && candidate.ends_with(".js") {
+                            // Ignore the entrypoint itself; app.js is served by
+                            // a dedicated handler, not via root_js_module_assets.
+                            if candidate != "/app.js" {
+                                out.insert(candidate.to_string());
+                            }
+                        }
+                        rest = &after[end + 1..];
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // Suppress the unused-variable lint when no match path is taken.
+            let _ = origin;
         }
     }
 
@@ -2545,8 +2649,36 @@ mod tests {
         );
         assert!(
             html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
-                && html.contains("showSetupForms && launchWizard.show_agent_settings"),
-            "expected branch and linked issue controls to be gated to setup forms",
+                && html.contains("showSetupForms && launchWizard.show_linked_issue"),
+            "expected branch and linked issue controls to be gated to setup forms \
+             (linked issue uses dedicated show_linked_issue flag per SPEC-2014 FR-057)",
+        );
+    }
+
+    // SPEC-2014 Amendment 2026-05-20 (US-25 / FR-057-059 / SC-032)
+    // The Launch Wizard "Linked issue" section must render through the
+    // `show_linked_issue` gate and must not contain an editable input that
+    // dispatches `set_linked_issue` / `clear_linked_issue` from the UI. The
+    // value is rendered as static read-only text.
+    #[test]
+    fn embedded_web_launch_wizard_linked_issue_is_readonly_for_issue_bridge() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("showSetupForms && launchWizard.show_linked_issue"),
+            "expected Linked issue section to be gated by show_linked_issue (FR-057)",
+        );
+        assert!(
+            !html.contains(r#"kind: "set_linked_issue""#),
+            "expected the frontend to stop dispatching set_linked_issue from the wizard UI (FR-058)",
+        );
+        assert!(
+            !html.contains(r#"kind: "clear_linked_issue""#),
+            "expected the frontend to stop dispatching clear_linked_issue from the wizard UI (FR-058)",
+        );
+        assert!(
+            html.contains("launchWizard.linked_issue_number") && html.contains("Issue number"),
+            "expected the Linked issue section to render the issue number as static read-only text",
         );
     }
 

@@ -7,14 +7,56 @@
 //!
 //! All helpers are `pub(super)` so the parent `cli::pr` module can re-export
 //! them and `cli::env` can call them via `super::pr::*`.
+//!
+//! Every spawn flows through `gwt_core::process_console::spawn_logged_blocking`
+//! so the canonical log captures `gwt.process.summary` events for each
+//! invocation (SPEC-1924 FR-039 / FR-040).
 
+use std::ffi::OsStr;
 use std::io;
+use std::path::Path;
 
+use gwt_core::process_console::{spawn_logged_blocking, ProcessKind, SpawnOptions, SpawnOutput};
 use gwt_git::PrStatus;
 
 use crate::cli::{
     PrCheckItem, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread, PrReviewThreadComment,
 };
+
+fn run_gh_in<I, S>(label: &str, repo_path: Option<&Path>, args: I) -> io::Result<SpawnOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let hub = gwt_core::process_console::global();
+    let args_vec: Vec<std::ffi::OsString> =
+        args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    let mut options = SpawnOptions::new(label);
+    if let Some(dir) = repo_path {
+        options = options.current_dir(dir);
+    }
+    spawn_logged_blocking(&hub, ProcessKind::Gh, "gh", &args_vec, options)
+}
+
+fn run_gh<I, S>(label: &str, args: I) -> io::Result<SpawnOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_gh_in(label, None, args)
+}
+
+fn run_git_in<I, S>(label: &str, repo_path: &Path, args: I) -> io::Result<SpawnOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let hub = gwt_core::process_console::global();
+    let args_vec: Vec<std::ffi::OsString> =
+        args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    let options = SpawnOptions::new(label).current_dir(repo_path);
+    spawn_logged_blocking(&hub, ProcessKind::Git, "git", &args_vec, options)
+}
 
 const PR_STATUS_FIELDS: &str =
     "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
@@ -23,25 +65,25 @@ const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeSt
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
     if let Some(branch) = current_branch_name(repo_path)? {
         let repo = github_remote_owner_and_repo(repo_path);
-        let output = gwt_core::process::hidden_command("gh")
-            .args([
+        let output = run_gh_in(
+            &format!("gh pr list --head {branch}"),
+            Some(repo_path),
+            [
                 "pr",
                 "list",
                 "--head",
-                &branch,
+                branch.as_str(),
                 "--state",
                 "all",
                 "--json",
                 PR_LIST_FIELDS,
                 "--limit",
                 "100",
-            ])
-            .current_dir(repo_path)
-            .output()?;
+            ],
+        )?;
 
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let pr_values = filter_current_repo_head_prs(&stdout, &branch, repo.as_ref())?;
+        if output.success() {
+            let pr_values = filter_current_repo_head_prs(&output.stdout, &branch, repo.as_ref())?;
             if !pr_values.is_empty() {
                 let filtered_stdout = serde_json::to_string(&pr_values)
                     .map_err(|err| io::Error::other(err.to_string()))?;
@@ -54,14 +96,14 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
         }
     }
 
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["pr", "view", "--json", PR_STATUS_FIELDS])
-        .current_dir(repo_path)
-        .output()?;
+    let output = run_gh_in(
+        "gh pr view",
+        Some(repo_path),
+        ["pr", "view", "--json", PR_STATUS_FIELDS],
+    )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let trimmed = stderr.trim();
+    if !output.success() {
+        let trimmed = output.stderr.trim();
         let lowered = trimmed.to_ascii_lowercase();
         if lowered.contains("no pull requests found")
             || lowered.contains("no pull request found")
@@ -72,8 +114,7 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
         return Err(io::Error::other(format!("gh pr view: {trimmed}")));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pr = gwt_git::pr_status::parse_pr_status_json(&stdout)
+    let pr = gwt_git::pr_status::parse_pr_status_json(&output.stdout)
         .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(Some(pr))
 }
@@ -132,30 +173,31 @@ fn pr_head_repository_name(value: &serde_json::Value) -> Option<&str> {
 }
 
 fn current_branch_name(repo_path: &std::path::Path) -> io::Result<Option<String>> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let output = run_git_in(
+        "git branch --show-current",
+        repo_path,
+        ["branch", "--show-current"],
+    )?;
+    if !output.success() {
         return Ok(None);
     }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = output.stdout.trim().to_string();
     Ok((!branch.is_empty()).then_some(branch))
 }
 
 pub(super) fn github_remote_owner_and_repo(
     repo_path: &std::path::Path,
 ) -> Option<(String, String)> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let output = run_git_in(
+        "git remote get-url origin",
+        repo_path,
+        ["remote", "get-url", "origin"],
+    )
+    .ok()?;
+    if !output.success() {
         return None;
     }
-    let remote_url = String::from_utf8_lossy(&output.stdout);
-    parse_github_remote_url(remote_url.trim())
+    parse_github_remote_url(output.stdout.trim())
 }
 
 fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
@@ -199,20 +241,19 @@ pub fn create_pr_via_gh(
         args.push("--draft".to_string());
     }
 
-    let output = gwt_core::process::hidden_command("gh")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let output = run_gh_in("gh pr create", Some(repo_path), &args)?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh pr create: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let url = extract_pr_url(&stdout).ok_or_else(|| {
-        io::Error::other(format!("gh pr create: missing PR URL in output: {stdout}"))
+    let url = extract_pr_url(&output.stdout).ok_or_else(|| {
+        io::Error::other(format!(
+            "gh pr create: missing PR URL in output: {}",
+            output.stdout
+        ))
     })?;
     let number = parse_pr_number_from_url(&url)
         .ok_or_else(|| io::Error::other(format!("gh pr create: invalid PR URL: {url}")))?;
@@ -242,14 +283,11 @@ pub fn edit_pr_via_gh(
         args.push(label.clone());
     }
 
-    let output = gwt_core::process::hidden_command("gh")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let output = run_gh_in("gh pr edit", Some(repo_path), &args)?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh pr edit: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
     gwt_git::pr_status::fetch_pr_status(repo_slug, number)
@@ -273,14 +311,16 @@ pub fn comment_on_pr_via_gh(
     number: u64,
     body: &str,
 ) -> io::Result<()> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["pr", "comment", &number.to_string(), "--body", body])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let number_str = number.to_string();
+    let output = run_gh_in(
+        &format!("gh pr comment {number}"),
+        Some(repo_path),
+        ["pr", "comment", number_str.as_str(), "--body", body],
+    )?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh pr comment: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
     Ok(())
@@ -288,17 +328,15 @@ pub fn comment_on_pr_via_gh(
 
 pub fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
     let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["api", &endpoint])
-        .output()?;
-    if !output.status.success() {
+    let output = run_gh(&format!("gh api {endpoint}"), ["api", endpoint.as_str()])?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh api {endpoint}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
 
-    let values: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+    let values: Vec<serde_json::Value> = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     Ok(values
         .into_iter()
@@ -370,8 +408,9 @@ query($owner: String!, $repo: String!, $number: Int!) {
   }
 }
 "#;
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let output = run_gh(
+        "gh api graphql reviewThreads",
+        [
             "api",
             "graphql",
             "-f",
@@ -382,16 +421,16 @@ query($owner: String!, $repo: String!, $number: Int!) {
             &format!("repo={repo}"),
             "-F",
             &format!("number={number}"),
-        ])
-        .output()?;
-    if !output.status.success() {
+        ],
+    )?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh api graphql: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let nodes = value
         .get("data")
@@ -498,8 +537,9 @@ mutation($threadId: ID!, $body: String!) {
 }
 "#;
         if should_reply_to_review_thread(&current_thread, body) {
-            let reply = gwt_core::process::hidden_command("gh")
-                .args([
+            let reply = run_gh(
+                "gh api graphql reply",
+                [
                     "api",
                     "graphql",
                     "-f",
@@ -508,12 +548,12 @@ mutation($threadId: ID!, $body: String!) {
                     &format!("threadId={}", thread.id),
                     "-f",
                     &format!("body={body}"),
-                ])
-                .output()?;
-            if !reply.status.success() {
+                ],
+            )?;
+            if !reply.success() {
                 return Err(io::Error::other(format!(
                     "gh api graphql reply: {}",
-                    String::from_utf8_lossy(&reply.stderr).trim()
+                    reply.stderr.trim()
                 )));
             }
         }
@@ -525,17 +565,18 @@ mutation($threadId: ID!) {
   }
 }
 "#;
-        let resolve = gwt_core::process::hidden_command("gh")
-            .args([
+        let resolve = run_gh(
+            "gh api graphql resolve",
+            [
                 "api",
                 "graphql",
                 "-f",
                 &format!("query={resolve_mutation}"),
                 "-f",
                 &format!("threadId={}", thread.id),
-            ])
-            .output()?;
-        if !resolve.status.success() {
+            ],
+        )?;
+        if !resolve.success() {
             if fetch_pr_review_thread_state_via_gh(owner, repo, number, &thread.id)?
                 .as_ref()
                 .is_some_and(|thread| thread.is_resolved)
@@ -545,7 +586,7 @@ mutation($threadId: ID!) {
             }
             return Err(io::Error::other(format!(
                 "gh api graphql resolve: {}",
-                String::from_utf8_lossy(&resolve.stderr).trim()
+                resolve.stderr.trim()
             )));
         }
 
@@ -571,20 +612,21 @@ pub fn fetch_pr_checks_via_gh(
         "startedAt",
         "completedAt",
     ];
-    let mut output = gwt_core::process::hidden_command("gh")
-        .args([
+    let number_str = number.to_string();
+    let mut output = run_gh_in(
+        &format!("gh pr checks {number}"),
+        Some(repo_path),
+        [
             "pr",
             "checks",
-            &number.to_string(),
+            number_str.as_str(),
             "--json",
             &primary_fields.join(","),
-        ])
-        .current_dir(repo_path)
-        .output()?;
+        ],
+    )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let available = parse_available_fields(&stderr);
+    if !output.success() {
+        let available = parse_available_fields(&output.stderr);
         if !available.is_empty() {
             let fallback_fields = [
                 "name",
@@ -601,23 +643,22 @@ pub fn fetch_pr_checks_via_gh(
                 .filter(|field| available.iter().any(|candidate| candidate == field))
                 .collect();
             if !selected.is_empty() {
-                output = gwt_core::process::hidden_command("gh")
-                    .args([
+                output = run_gh_in(
+                    &format!("gh pr checks {number} fallback"),
+                    Some(repo_path),
+                    [
                         "pr",
                         "checks",
-                        &number.to_string(),
+                        number_str.as_str(),
                         "--json",
                         &selected.join(","),
-                    ])
-                    .current_dir(repo_path)
-                    .output()?;
+                    ],
+                )?;
             }
         }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let checks = parse_pr_checks_items_response(&stdout, &stderr, output.status.success())?;
+    let checks = parse_pr_checks_items_response(&output.stdout, &output.stderr, output.success())?;
     let merge_status = pr.effective_merge_status().to_string();
 
     Ok(PrChecksSummary {

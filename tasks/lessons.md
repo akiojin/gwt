@@ -18,6 +18,41 @@
 
 ---
 
+## 2026-05-20 — Unit / Playwright snapshot tests は E2E ではない
+
+### 事象
+
+SPEC #2780 (Release Notes Window) 実装で、以下のテストが全て GREEN だった:
+
+- gwt-core release_notes::tests 12 件 PASS (parser unit)
+- protocol round-trip 5 件 PASS (serde 単体)
+- pnpm test:frontend-unit 507 件 PASS (linkedom + node:test の DOM 単体)
+- pnpm test:visual 34 件 PASS (Playwright snapshot、20 件は skip)
+- cargo clippy / fmt CLEAN
+- CI 全 13 check SUCCESS、auto-merge で v9.39.0 として release
+
+それにもかかわらず、production では **release-notes-window.js が 404 で配信されず、機能完全に死んでいた**。ユーザーが GUI を起動して確認するまで誰も気付かなかった。
+
+### 原因
+
+1. **crates/gwt/src/embedded_web.rs に新 JS module の RootJsModuleAsset エントリを追加し忘れた**。embedded server は allow-list ベースで asset を配信する設計だが、新規 web/ ファイルを追加した際に embedded_web.rs への登録が必須であることが workflow / spec / 既存テストのいずれでも強制されていなかった。
+2. **既存の Playwright spec で `GWT_PLAYWRIGHT_BASE_URL` 必須の live-mode tests (theme-toggle 等) は CI で env var が未設定のため全て skip されていた**。誰も live mode で動作確認していなかった。`pnpm test:visual` の "34 passed / 20 skipped" の "20 skipped" は全てこのカテゴリ。
+3. **Playwright snapshot tests は `installEmbeddedRoutes()` で frontend を route 経由で直接配信するため、embedded_web.rs の allow-list を経由しない**。つまり embedded server の asset routing は test されていない。
+
+### 再発防止策
+
+1. **新規 `crates/gwt/web/*.js` モジュール追加時は、必ず `crates/gwt/src/embedded_web.rs` に `RootJsModuleAsset` エントリと `pub fn <name>_js() -> &'static str` を追加する**。コンパイル時に検出できるよう、app.js の import 一覧と embedded_web.rs の RootJsModuleAsset を突き合わせる integration test を `crates/gwt/tests/embedded_web_routing_test.rs` として追加することを検討する（follow-up Issue）。
+2. **live mode E2E spec を最低 1 件は CI で実行する**。`gwt serve` を background で起動して `GWT_PLAYWRIGHT_BASE_URL` を設定する CI step を追加する（follow-up Issue）。
+3. **UI 変更を PR にする前に、`cargo run -p gwt --bin gwt` で実際に起動して manual smoke を実施する**。AGENTS.md「For UI or frontend changes, start the dev server and use the feature in a browser before reporting the task as complete」を厳守する。「Playwright tests 通った = 動く」と勘違いしない。
+4. **PR body の checklist で「目視確認はレビュアー側で実施」と書いて user に押し付けない**。テストカバレッジに穴がある場合は明示的に "I cannot verify the live UI in this environment" と書き、leaving-it-to-reviewer の責務逃れをしない。
+5. **同じ trap が広範に存在する**: `crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs` は app.js の import を `installEmbeddedRoutes` の ROOT_MODULES と突き合わせるが、embedded_web.rs の RootJsModuleAsset との突き合わせは存在しない。すべての route 配信経路を相互検証する skeleton test が要る。
+
+### 検証
+
+- `crates/gwt/playwright/tests/release-notes-live.spec.ts` を新規追加 (live backend、`installEmbeddedRoutes` 不使用)。最初は 8/8 RED で embedded_web.rs の欠落と splash auto-dismiss bug を可視化。embedded_web.rs を修正後、4/4 GREEN。
+
+---
+
 ## 2026-05-20 — `gwtd issue spec create -f <body>` は section マーカーを付けない
 
 ### 事象

@@ -99,10 +99,13 @@
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める:
-  - ユーザーシナリオとテスト（受け入れシナリオ）
+- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/lessons.md 参照）
+- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（gwt-register-spec の validation が強制する 7 セクション）:
+  - 背景 / ユビキタス言語
+  - ユーザーシナリオと受け入れシナリオ
   - 機能要件（FR-\*）
   - 成功基準
+  - Out of Scope / Related Artifacts
 - `gwt-plan-spec` で `plan` / `tasks` section も策定してから実装に入る
 - 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。
 - Git 環境の作成が必要な場合は、ユーザー操作に基づく gwt の Start Work / Launch materialization が担当する。
