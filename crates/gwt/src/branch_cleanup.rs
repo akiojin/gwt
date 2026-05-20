@@ -20,11 +20,62 @@ pub struct BranchCleanupResultEntry {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BranchCleanupOptions {
+    pub delete_remote: bool,
+    pub force_filesystem_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchCleanupProgressPhase {
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchCleanupProgressEntry {
+    pub branch: String,
+    pub execution_branch: Option<String>,
+    pub index: usize,
+    pub total: usize,
+    pub phase: BranchCleanupProgressPhase,
+    pub message: String,
+}
+
 pub fn cleanup_selected_branches(
     repo_path: &Path,
     entries: &[BranchListEntry],
     selected_branches: &[String],
     delete_remote: bool,
+) -> Vec<BranchCleanupResultEntry> {
+    cleanup_selected_branches_with_options(
+        repo_path,
+        entries,
+        selected_branches,
+        BranchCleanupOptions {
+            delete_remote,
+            force_filesystem_delete: false,
+        },
+    )
+}
+
+pub fn cleanup_selected_branches_with_options(
+    repo_path: &Path,
+    entries: &[BranchListEntry],
+    selected_branches: &[String],
+    options: BranchCleanupOptions,
+) -> Vec<BranchCleanupResultEntry> {
+    cleanup_selected_branches_with_progress(repo_path, entries, selected_branches, options, |_| {})
+}
+
+pub fn cleanup_selected_branches_with_progress(
+    repo_path: &Path,
+    entries: &[BranchListEntry],
+    selected_branches: &[String],
+    options: BranchCleanupOptions,
+    mut progress: impl FnMut(BranchCleanupProgressEntry),
 ) -> Vec<BranchCleanupResultEntry> {
     let git_root = git_command_root(repo_path);
     let manager = gwt_git::WorktreeManager::new(&git_root);
@@ -32,21 +83,34 @@ pub fn cleanup_selected_branches(
         .iter()
         .map(|entry| (entry.name.as_str(), entry))
         .collect();
+    let total = selected_branches.len();
 
     selected_branches
         .iter()
-        .map(|branch_name| {
+        .enumerate()
+        .map(|(offset, branch_name)| {
+            let index = offset + 1;
             let Some(entry) = lookup.get(branch_name.as_str()).copied() else {
-                return BranchCleanupResultEntry {
+                let result = BranchCleanupResultEntry {
                     branch: branch_name.clone(),
                     execution_branch: None,
                     status: BranchCleanupResultStatus::Failed,
                     message: "Branch not found".to_string(),
                 };
+                emit_result_progress(&mut progress, &result, index, total);
+                return result;
             };
             let execution_branch = entry.cleanup.execution_branch.clone();
+            progress(BranchCleanupProgressEntry {
+                branch: entry.name.clone(),
+                execution_branch: execution_branch.clone(),
+                index,
+                total,
+                phase: BranchCleanupProgressPhase::Running,
+                message: format!("Cleaning {}", entry.name),
+            });
             let Some(target_branch) = execution_branch.clone() else {
-                return BranchCleanupResultEntry {
+                let result = BranchCleanupResultEntry {
                     branch: entry.name.clone(),
                     execution_branch,
                     status: BranchCleanupResultStatus::Failed,
@@ -57,9 +121,11 @@ pub fn cleanup_selected_branches(
                             .unwrap_or(BranchCleanupBlockedReason::Unknown),
                     ),
                 };
+                emit_result_progress(&mut progress, &result, index, total);
+                return result;
             };
             if entry.cleanup.availability == BranchCleanupAvailability::Blocked {
-                return BranchCleanupResultEntry {
+                let result = BranchCleanupResultEntry {
                     branch: entry.name.clone(),
                     execution_branch: Some(target_branch),
                     status: BranchCleanupResultStatus::Failed,
@@ -70,19 +136,28 @@ pub fn cleanup_selected_branches(
                             .unwrap_or(BranchCleanupBlockedReason::Unknown),
                     ),
                 };
+                emit_result_progress(&mut progress, &result, index, total);
+                return result;
             }
             if !is_gwt_workspace_branch(&target_branch) {
-                return BranchCleanupResultEntry {
+                let result = BranchCleanupResultEntry {
                     branch: entry.name.clone(),
                     execution_branch: Some(target_branch),
                     status: BranchCleanupResultStatus::Failed,
                     message: blocked_reason_message(BranchCleanupBlockedReason::NonWorkspaceBranch),
                 };
+                emit_result_progress(&mut progress, &result, index, total);
+                return result;
             }
 
-            match manager.cleanup_branch(&target_branch) {
+            let cleanup_result = if options.force_filesystem_delete {
+                manager.cleanup_branch_with_force_filesystem_delete(&target_branch, true)
+            } else {
+                manager.cleanup_branch(&target_branch)
+            };
+            let result = match cleanup_result {
                 Ok(()) => {
-                    if delete_remote && entry.cleanup.upstream.is_some() {
+                    if options.delete_remote && entry.cleanup.upstream.is_some() {
                         match manager
                             .delete_remote_branch(&target_branch, entry.cleanup.upstream.as_deref())
                         {
@@ -126,9 +201,33 @@ pub fn cleanup_selected_branches(
                     status: BranchCleanupResultStatus::Failed,
                     message: format!("Cleanup failed: {error}"),
                 },
-            }
+            };
+            emit_result_progress(&mut progress, &result, index, total);
+            result
         })
         .collect()
+}
+
+fn emit_result_progress(
+    progress: &mut impl FnMut(BranchCleanupProgressEntry),
+    result: &BranchCleanupResultEntry,
+    index: usize,
+    total: usize,
+) {
+    let phase = match result.status {
+        BranchCleanupResultStatus::Success | BranchCleanupResultStatus::Partial => {
+            BranchCleanupProgressPhase::Done
+        }
+        BranchCleanupResultStatus::Failed => BranchCleanupProgressPhase::Failed,
+    };
+    progress(BranchCleanupProgressEntry {
+        branch: result.branch.clone(),
+        execution_branch: result.execution_branch.clone(),
+        index,
+        total,
+        phase,
+        message: result.message.clone(),
+    });
 }
 
 fn is_gwt_workspace_branch(branch_name: &str) -> bool {

@@ -321,9 +321,10 @@ fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdent
     else {
         return Ok(None);
     };
-    if agent.is_unassigned() {
-        return Ok(None);
-    }
+    // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも初回
+    // UserPromptSubmit で prompt-based identity derivation を発火させるため、
+    // is_unassigned() による early-return は撤去した。non-destructive 原則
+    // (FR-166 / FR-180) は missing_identity_for_agent の空判定で維持される。
     Ok(Some(missing_identity_for_agent(agent)))
 }
 
@@ -724,6 +725,98 @@ mod tests {
             "{}",
             identity.current_focus
         );
+    }
+
+    fn unassigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
+        let mut a = assigned_agent(session_id, repo);
+        a.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+        a.workspace_id = None;
+        a
+    }
+
+    #[test]
+    fn missing_identity_for_session_does_not_skip_unassigned_agents() {
+        // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも
+        // missing_identity_for_session が `Some(MissingIdentity)` を返し、
+        // 後続の auto-derive が発火可能であること。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let agent = unassigned_agent("session-unassigned", &repo);
+
+        // 直接 missing_identity_for_agent を呼ぶ side-channel test
+        // (missing_identity_for_session は projection IO に依存するため、
+        // ここでは agent 単体で missing 判定が affiliation 非依存である
+        // ことを示す)
+        let missing = missing_identity_for_agent(&agent);
+        assert!(missing.title_summary, "unassigned + empty title -> missing");
+        assert!(missing.current_focus, "unassigned + empty focus -> missing");
+    }
+
+    #[test]
+    fn user_prompt_submit_derives_identity_for_unassigned_agent() {
+        // SPEC-2359 Phase U-10 / US-46: 「フォントが見にくいので修正して」
+        // のような prompt で unassigned session の title が auto-derive される。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let agent = unassigned_agent("session-unassigned", &repo);
+
+        let payload = serde_json::json!({
+            "session_id": "claude-provider-session",
+            "prompt": "$gwt-discussion フォントが見にくいので修正してください。"
+        });
+
+        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
+        let identity = derive_identity_from_prompt(&prompt).expect("identity");
+        let update = workspace_projection_update_for_identity(
+            "session-unassigned",
+            missing_identity_for_agent(&agent),
+            &identity,
+        )
+        .expect("update must build for unassigned + missing identity");
+
+        assert_eq!(
+            update.agent_session_id.as_deref(),
+            Some("session-unassigned")
+        );
+        assert!(
+            update.agent_title_summary.is_some(),
+            "title must be derived for unassigned + missing"
+        );
+        let title = update.agent_title_summary.unwrap();
+        assert!(!title.is_empty(), "derived title must not be empty");
+        let title_chars = title.chars().count();
+        assert!(
+            title_chars <= 30,
+            "derived title should be concise (got {} chars: {})",
+            title_chars,
+            title
+        );
+        assert!(
+            update.agent_current_focus.is_some(),
+            "focus must also be derived"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_preserves_explicit_identity_for_unassigned_agent() {
+        // US-46 でも US-43 の non-destructive 原則 (FR-166 / FR-180) を
+        // 維持する: unassigned でも explicit title があれば上書きしない。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let mut agent = unassigned_agent("session-keep", &repo);
+        agent.title_summary = Some("Existing custom title".to_string());
+        agent.current_focus = Some("Existing focus".to_string());
+
+        let missing = missing_identity_for_agent(&agent);
+        assert!(
+            !missing.title_summary,
+            "explicit title must be considered NOT missing"
+        );
+        assert!(
+            !missing.current_focus,
+            "explicit focus must be considered NOT missing"
+        );
+        assert!(missing.complete(), "no derive should fire");
     }
 
     #[test]

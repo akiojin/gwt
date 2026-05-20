@@ -1750,6 +1750,8 @@
           // Workspace cleanup is local-only by default even when
           // cleanup_candidate.default_delete_remote is present on the wire.
           deleteRemote: false,
+          forceFilesystemDelete: false,
+          progress: null,
           results: [],
         };
         branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
@@ -4535,6 +4537,8 @@
               open: false,
               stage: "confirm",
               deleteRemote: false,
+              forceFilesystemDelete: false,
+              progress: null,
               results: [],
             },
           });
@@ -8052,6 +8056,44 @@
         }));
       }
 
+      function initialBranchCleanupProgress(branches) {
+        return {
+          current: null,
+          items: branches.map((branch) => ({
+            branch,
+            status: "pending",
+            message: "",
+          })),
+        };
+      }
+
+      function updateBranchCleanupProgress(windowId, event) {
+        const state = ensureBranchListState(windowId);
+        const branches = Array.from(state.cleanupSelected);
+        if (!state.cleanupModal.progress) {
+          state.cleanupModal.progress = initialBranchCleanupProgress(
+            branches.length > 0 ? branches : [event.branch],
+          );
+        }
+        const progress = state.cleanupModal.progress;
+        progress.current = {
+          branch: event.branch,
+          executionBranch: event.execution_branch || null,
+          index: event.index,
+          total: event.total,
+          phase: event.phase,
+          message: event.message || "",
+        };
+        let item = progress.items.find((candidate) => candidate.branch === event.branch);
+        if (!item) {
+          item = { branch: event.branch, status: "pending", message: "" };
+          progress.items.push(item);
+        }
+        item.executionBranch = event.execution_branch || null;
+        item.status = event.phase || "running";
+        item.message = event.message || "";
+      }
+
       function failRunningBranchCleanup(windowId, message) {
         const state = ensureBranchListState(windowId);
         if (state.cleanupModal.stage !== "running") {
@@ -8212,6 +8254,8 @@
         state.cleanupModal.open = true;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
+        state.cleanupModal.forceFilesystemDelete = false;
+        state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
@@ -8230,6 +8274,8 @@
         state.cleanupModal.open = false;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
+        state.cleanupModal.forceFilesystemDelete = false;
+        state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
         if (branchCleanupWindowId === windowId) {
           branchCleanupWindowId = null;
@@ -8247,6 +8293,7 @@
         }
         state.notice = "";
         state.cleanupModal.stage = "running";
+        state.cleanupModal.progress = initialBranchCleanupProgress(branches);
         state.cleanupModal.results = [];
         renderBranchCleanupModal();
         if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
@@ -8254,6 +8301,7 @@
             kind: "run_workspace_cleanup",
             branch: branches[0],
             delete_remote: state.cleanupModal.deleteRemote,
+            force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
           });
           return;
         }
@@ -8262,6 +8310,7 @@
           id: windowId,
           branches,
           delete_remote: state.cleanupModal.deleteRemote,
+          force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
         });
       }
 
@@ -8294,6 +8343,11 @@
           onDeleteRemoteToggle: (checked) => {
             if (state) {
               state.cleanupModal.deleteRemote = checked;
+            }
+          },
+          onForceFilesystemDeleteToggle: (checked) => {
+            if (state) {
+              state.cleanupModal.forceFilesystemDelete = checked;
             }
           },
         });
@@ -10053,6 +10107,7 @@
         openBranchCleanupModal,
         closeBranchCleanupModal,
         renderBranchCleanupModal,
+        updateBranchCleanupProgress,
         // SPEC-2009 amendment: Worktree picker + file content viewer.
         openWorktreePicker,
         closeWorktreePicker,
@@ -10739,6 +10794,19 @@
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
               workspaceKanbanSurface.renderWindows();
+              break;
+            }
+            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+            break;
+          }
+          case "branch_cleanup_progress": {
+            frontendUnits.branchesFileTreeSurface.updateBranchCleanupProgress(
+              event.id,
+              event,
+            );
+            branchCleanupWindowId = event.id;
+            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+              frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
               break;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
