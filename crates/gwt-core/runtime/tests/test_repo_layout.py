@@ -69,6 +69,29 @@ class ResolveDbPathTests(unittest.TestCase):
         )
         self.assertEqual(path.parts[-len(expected) :], expected)
 
+    def test_lessons_scope_is_repo_scoped(self):
+        path = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash=None,
+            scope="lessons",
+        )
+        expected = (".gwt", "index", "abc1234567890def", "lessons")
+        self.assertEqual(path.parts[-len(expected) :], expected)
+
+    def test_lessons_scope_ignores_worktree_hash(self):
+        with_wt = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash="111122223333ffff",
+            scope="lessons",
+        )
+        without_wt = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash=None,
+            scope="lessons",
+        )
+        self.assertEqual(with_wt, without_wt)
+        self.assertNotIn("worktrees", with_wt.parts)
+
     def test_files_scope_without_worktree_hash_raises(self):
         with self.assertRaises(ValueError):
             runner.resolve_db_path(

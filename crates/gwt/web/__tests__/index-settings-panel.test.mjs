@@ -82,7 +82,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
 
   const scopeRows = Array.from(table.querySelectorAll("tbody tr"));
   const scopes = scopeRows.map((tr) => tr.dataset.scope);
-  assert.deepEqual(scopes, ["issues", "specs", "files", "files-docs"]);
+  assert.deepEqual(scopes, ["issues", "specs", "lessons", "files", "files-docs"]);
 
   // Repo-shared issues row spans all worktree columns and reports ready.
   const issuesCell = scopeRows[0].querySelector(".settings-index-cell");
@@ -94,15 +94,19 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.match(specsCell.textContent, /count_mismatch/);
   assert.ok(specsCell.classList.contains("unhealthy"));
 
+  // lessons row is repo-shared and renders a single column-spanning cell.
+  const lessonsCell = scopeRows[2].querySelector(".settings-index-cell");
+  assert.equal(lessonsCell.colSpan, 2);
+
   // files row has one cell per worktree, in worktree-hash sort order.
-  const filesCells = scopeRows[2].querySelectorAll(".settings-index-cell");
+  const filesCells = scopeRows[3].querySelectorAll(".settings-index-cell");
   assert.equal(filesCells.length, 2);
   assert.equal(filesCells[0].dataset.worktreeHash, "wtAhash");
   assert.equal(filesCells[1].dataset.worktreeHash, "wtBhash");
   assert.ok(filesCells[1].classList.contains("unhealthy"));
 
   // files-docs only seeded wtAhash — wtB renders an empty placeholder.
-  const docsCells = scopeRows[3].querySelectorAll(".settings-index-cell");
+  const docsCells = scopeRows[4].querySelectorAll(".settings-index-cell");
   assert.equal(docsCells.length, 2);
   assert.ok(docsCells[1].classList.contains("settings-index-cell-empty"));
 });

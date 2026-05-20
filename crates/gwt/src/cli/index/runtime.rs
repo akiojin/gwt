@@ -92,6 +92,12 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
+            label: "lessons",
+            action: "index-lessons",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
             label: "files",
             action: "index-files",
             scope: Some("files"),
@@ -108,6 +114,7 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
         IndexScope::All => all,
         IndexScope::Issues => all.into_iter().filter(|a| a.label == "issues").collect(),
         IndexScope::Specs => all.into_iter().filter(|a| a.label == "specs").collect(),
+        IndexScope::Lessons => all.into_iter().filter(|a| a.label == "lessons").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
             .into_iter()
@@ -183,7 +190,7 @@ pub fn render_index_status(
         report.dependencies_installed
     ));
     if let Some(status) = payload.get("status").and_then(Value::as_object) {
-        for scope in ["issues", "specs", "files", "files-docs"] {
+        for scope in ["issues", "specs", "lessons", "files", "files-docs"] {
             if let Some(scope_status) = status.get(scope) {
                 let healthy = scope_status
                     .get("healthy")
