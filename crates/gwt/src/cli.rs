@@ -390,13 +390,13 @@ pub enum PaneCommand {
     /// `gwtd pane close <id>` / `gwtd pane stop <id>`.
     Close { id: String },
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexScope {
     All,
     Issues,
     Specs,
     Lessons,
+    Board,
     Files,
     FilesDocs,
 }

@@ -58,6 +58,7 @@ pub enum IndexRebuildScope {
     Issues,
     Specs,
     Lessons,
+    Board,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -69,6 +70,7 @@ impl IndexRebuildScope {
             Self::Issues => "issues",
             Self::Specs => "specs",
             Self::Lessons => "lessons",
+            Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -162,6 +164,8 @@ pub struct ProjectIndexScopes {
     pub specs: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lessons: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -177,6 +181,7 @@ impl ProjectIndexScopes {
         self.issues.is_none()
             && self.specs.is_none()
             && self.lessons.is_none()
+            && self.board.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -344,6 +349,11 @@ pub fn build_aggregated_status_view(
                 scopes.lessons = Some(view);
             }
         }
+        if scopes.board.is_none() {
+            if let Some(view) = status_obj.get("board").and_then(parse_scope_health) {
+                scopes.board = Some(view);
+            }
+        }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
             scopes.files.insert(probe.input.worktree_hash.clone(), view);
         }
@@ -393,6 +403,9 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
         count += 1;
     }
     if matches!(&scopes.lessons, Some(view) if !view.healthy) {
+        count += 1;
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
         count += 1;
     }
     count += scopes.files.values().filter(|view| !view.healthy).count();
@@ -809,6 +822,12 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
+        IndexRebuildScope::Board => RebuildAction {
+            label: "board",
+            action: "index-board",
+            scope: None,
+            needs_worktree_hash: false,
+        },
         IndexRebuildScope::Files => RebuildAction {
             label: "files",
             action: "index-files",
@@ -841,6 +860,9 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     }
     if matches!(&scopes.lessons, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Lessons, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     for (wt_hash, view) in &scopes.files {
         if !view.healthy {
@@ -885,6 +907,9 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     }
     if matches!(&scopes.lessons, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Lessons, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {

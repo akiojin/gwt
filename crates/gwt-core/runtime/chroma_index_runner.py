@@ -972,7 +972,7 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "lessons", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "lessons", "board", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
@@ -980,6 +980,7 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "specs"
 V2_ISSUES_COLLECTION = "issues"
 V2_LESSONS_COLLECTION = "lessons"
+V2_BOARD_COLLECTION = "board"
 
 
 def gwt_index_root() -> Path:
@@ -1003,7 +1004,7 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "lessons"}:
+    if scope in {"issues", "specs", "lessons", "board"}:
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
@@ -1255,7 +1256,7 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
-    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "lessons"):
+    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "lessons", "board"):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
 
@@ -2108,6 +2109,223 @@ def action_index_lessons_v2(
     return {"ok": True, "scope": "lessons", "indexed": indexed}
 
 
+def _gwt_home() -> Path:
+    return Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home()) / ".gwt"
+
+
+def _board_coordination_roots(repo_hash: str, project_root: Optional[str]) -> List[Path]:
+    roots = [_gwt_home() / "projects" / repo_hash / "coordination"]
+    if project_root:
+        legacy = Path(project_root) / ".gwt" / "coordination"
+        if legacy not in roots:
+            roots.append(legacy)
+    return roots
+
+
+def _load_board_segment_events(segment_path: Path) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    try:
+        lines = segment_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        entry = payload.get("entry")
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _load_board_documents(
+    repo_hash: str,
+    project_root: Optional[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load Board entries from repo-scoped segmented coordination history."""
+    for coordination_root in _board_coordination_roots(repo_hash, project_root):
+        manifest_path = coordination_root / "events.manifest.json"
+        segments_root = coordination_root / "events"
+        if not manifest_path.is_file() or not segments_root.is_dir():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        docs: List[Dict[str, Any]] = []
+        manifest_entries: List[Dict[str, Any]] = []
+        for segment in manifest.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            file_name = str(segment.get("file", "")).strip()
+            if not file_name:
+                continue
+            segment_path = segments_root / file_name
+            if not segment_path.is_file():
+                continue
+            try:
+                stat = segment_path.stat()
+            except OSError:
+                continue
+            manifest_entries.append(
+                {
+                    "path": f"coordination/events/{file_name}",
+                    "mtime": int(stat.st_mtime),
+                    "size": int(stat.st_size),
+                }
+            )
+            for entry in _load_board_segment_events(segment_path):
+                if "entry_id" not in entry and entry.get("id"):
+                    entry["entry_id"] = entry.get("id")
+                docs.append(entry)
+        docs.sort(key=lambda entry: entry.get("created_at", ""))
+        return docs, manifest_entries
+
+    return [], []
+
+
+def _board_entry_document(entry: Dict[str, Any]) -> str:
+    parts = [
+        str(entry.get("title_summary") or ""),
+        str(entry.get("kind") or ""),
+        str(entry.get("body") or ""),
+        " ".join(str(value) for value in entry.get("related_topics") or []),
+        " ".join(str(value) for value in entry.get("related_owners") or []),
+        str(entry.get("author") or ""),
+        str(entry.get("origin_branch") or ""),
+    ]
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _build_board_records(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for entry in entries:
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            continue
+        body = str(entry.get("body") or "")
+        records.append(
+            {
+                "id": entry_id,
+                "document": _board_entry_document(entry),
+                "metadata": {
+                    "entry_id": entry_id,
+                    "kind": str(entry.get("kind") or ""),
+                    "author": str(entry.get("author") or ""),
+                    "title_summary": str(entry.get("title_summary") or ""),
+                    "body_preview": body[:500],
+                    "created_at": str(entry.get("created_at") or ""),
+                    "updated_at": str(entry.get("updated_at") or ""),
+                    "origin_branch": str(entry.get("origin_branch") or ""),
+                    "origin_session_id": str(entry.get("origin_session_id") or ""),
+                    "audience": ",".join(str(value) for value in entry.get("audience") or []),
+                    "related_topics": ",".join(str(value) for value in entry.get("related_topics") or []),
+                    "related_owners": ",".join(str(value) for value in entry.get("related_owners") or []),
+                },
+            }
+        )
+    return records
+
+
+def action_index_board_v2(
+    repo_hash: str,
+    project_root: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+) -> dict:
+    """Index Board coordination history into the repo-scoped board store."""
+    db_path = resolve_db_path(repo_hash, None, "board", db_root=db_root)
+    entries, new_entries = _load_board_documents(repo_hash, project_root)
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "board",
+            "mode": mode,
+            "done": 0,
+            "total": len(entries),
+        }
+    )
+
+    indexed = 0
+    with acquire_lock(db_path, exclusive=True):
+        if mode != "incremental":
+            _reset_chroma_store(db_path)
+        make_collection = (
+            _make_chroma_collection
+            if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(db_path, V2_BOARD_COLLECTION)
+        try:
+            old_entries = read_manifest(db_path, scope="board")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            history_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+
+            if mode != "incremental" or history_changed:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                records = _build_board_records(entries)
+            else:
+                records = []
+
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "board",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+
+            if records:
+                ids = [r["id"] for r in records]
+                documents = [r["document"] for r in records]
+                metadatas = [r["metadata"] for r in records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+                indexed = len(records)
+
+            write_manifest(db_path, scope="board", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                scope="board",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": indexed,
+                },
+            )
+        finally:
+            _close_chroma_client(client)
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "board",
+            "mode": mode,
+            "indexed": indexed,
+            "total": indexed,
+        }
+    )
+    return {"ok": True, "scope": "board", "indexed": indexed}
+
+
 def _format_lessons_results(
     items: List[Dict[str, Any]], n_results: int = 10
 ) -> List[Dict[str, Any]]:
@@ -2207,6 +2425,8 @@ def _scope_meta_path(
         return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
     if scope == "lessons":
         return resolve_db_path(repo_hash, None, "lessons", db_root=db_root) / META_FILENAME
+    if scope == "board":
+        return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -2277,6 +2497,7 @@ def _scope_collection_name(scope: str) -> str:
         "specs": V2_SPECS_COLLECTION,
         "issues": V2_ISSUES_COLLECTION,
         "lessons": V2_LESSONS_COLLECTION,
+        "board": V2_BOARD_COLLECTION,
     }[scope]
 
 
@@ -2348,11 +2569,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "lessons") and document_count < manifest_count:
+    elif scope in ("specs", "lessons", "board") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "lessons") and document_count != manifest_count:
+    elif scope not in ("specs", "lessons", "board") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -2609,6 +2830,36 @@ def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+def _split_csv_meta(value: Any) -> List[str]:
+    if not value:
+        return []
+    return [part for part in str(value).split(",") if part]
+
+
+def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    formatted = []
+    for it in items:
+        meta = it["metadata"] or {}
+        formatted.append(
+            {
+                "entry_id": meta.get("entry_id", it["id"]),
+                "kind": meta.get("kind", ""),
+                "author": meta.get("author", ""),
+                "title_summary": meta.get("title_summary", ""),
+                "body_preview": meta.get("body_preview", ""),
+                "created_at": meta.get("created_at", ""),
+                "updated_at": meta.get("updated_at", ""),
+                "origin_branch": meta.get("origin_branch", ""),
+                "origin_session_id": meta.get("origin_session_id", ""),
+                "audience": _split_csv_meta(meta.get("audience", "")),
+                "related_topics": _split_csv_meta(meta.get("related_topics", "")),
+                "related_owners": _split_csv_meta(meta.get("related_owners", "")),
+                "distance": it["distance"],
+            }
+        )
+    return formatted
+
+
 def action_search_v2(
     action: str,
     repo_hash: str,
@@ -2626,6 +2877,7 @@ def action_search_v2(
         "search-specs": "specs",
         "search-issues": "issues",
         "search-lessons": "lessons",
+        "search-board": "board",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
@@ -2683,6 +2935,13 @@ def action_search_v2(
                 mode="full",
                 db_root=db_root,
             )
+        elif scope == "board":
+            build = action_index_board_v2(
+                repo_hash=repo_hash,
+                project_root=project_root,
+                mode="full",
+                db_root=db_root,
+            )
         else:
             build = action_index_files_v2(
                 project_root=project_root,
@@ -2712,6 +2971,8 @@ def action_search_v2(
         return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
     if scope == "lessons":
         return {"ok": True, "lessonResults": _format_lessons_results(items, n_results)}
+    if scope == "board":
+        return {"ok": True, "boardResults": _format_board_results(items)[:n_results]}
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
@@ -2743,6 +3004,7 @@ def action_status_v2(
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
         "lessons": _scope_status_v2(repo_hash, None, "lessons", db_root=db_root),
+        "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
     }
     if worktree_hash:
         for scope in ("files", "files-docs"):
@@ -2764,6 +3026,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "probe",
             "index-files",
+            "index-files-docs",
             "search-files",
             "search-files-docs",
             "index",
@@ -2775,6 +3038,8 @@ def parse_args() -> argparse.Namespace:
             "search-specs",
             "index-lessons",
             "search-lessons",
+            "index-board",
+            "search-board",
         ],
     )
     parser.add_argument("--project-root", default="")
@@ -2787,7 +3052,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "lessons"],
+        choices=["", "issues", "specs", "files", "files-docs", "lessons", "board"],
     )
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
@@ -2862,12 +3127,23 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
+        if action == "index-board":
+            emit(
+                action_index_board_v2(
+                    repo_hash=repo_hash,
+                    project_root=args.project_root or None,
+                    mode=args.mode,
+                )
+            )
+            return 0
+
         if action in (
             "search-files",
             "search-files-docs",
             "search-specs",
             "search-issues",
             "search-lessons",
+            "search-board",
         ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})

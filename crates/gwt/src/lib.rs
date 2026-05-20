@@ -16,6 +16,7 @@ pub mod file_content;
 pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
+pub mod index_search;
 pub mod index_worker;
 mod issue_cache;
 pub mod knowledge_bridge;
@@ -62,6 +63,7 @@ pub use file_content::{
 };
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
+pub use index_search::search_project_index;
 pub use index_worker::{
     aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
     auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
@@ -119,10 +121,11 @@ pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileContentErrorKind,
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
-    GitHubRepositorySearchResultView, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-    ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
-    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
-    WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
+    GitHubRepositorySearchResultView, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
+    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistoryView,
+    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView,
+    WorkspaceWorkEventView, WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;

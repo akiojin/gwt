@@ -85,6 +85,14 @@ pub struct KnowledgeLoadRequest<'a> {
     pub(crate) refresh: bool,
 }
 
+pub struct ProjectIndexSearchRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) query: &'a str,
+    pub(crate) request_id: u64,
+    pub(crate) scopes: Vec<gwt::IndexSearchScope>,
+    pub(crate) worktree_hash: Option<String>,
+}
+
 struct KnowledgeRefreshTask {
     client_id: String,
     id: String,
@@ -103,6 +111,16 @@ struct KnowledgeSearchTask {
     query: String,
     request_id: u64,
     selected_number: Option<u64>,
+}
+
+struct ProjectIndexSearchTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    query: String,
+    request_id: u64,
+    scopes: Vec<gwt::IndexSearchScope>,
+    worktree_hash: Option<String>,
 }
 
 pub struct WindowRuntime {
@@ -2204,6 +2222,22 @@ impl AppRuntime {
                     query: &query,
                     request_id,
                     selected_number,
+                },
+            ),
+            FrontendEvent::SearchProjectIndex {
+                id,
+                query,
+                request_id,
+                scopes,
+                worktree_hash,
+            } => self.search_project_index_events(
+                &client_id,
+                ProjectIndexSearchRequest {
+                    id: &id,
+                    query: &query,
+                    request_id,
+                    scopes,
+                    worktree_hash,
                 },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -4513,6 +4547,106 @@ impl AppRuntime {
                         knowledge_error_event(id, kind, error, Some(request_id), Some(query))
                     }
                 };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+    }
+
+    pub(crate) fn search_project_index_events(
+        &self,
+        client_id: &str,
+        request: ProjectIndexSearchRequest<'_>,
+    ) -> Vec<OutboundEvent> {
+        let id = request.id;
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Index {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window is not an Index surface".to_string(),
+                },
+            )];
+        }
+
+        self.spawn_project_index_search(ProjectIndexSearchTask {
+            client_id: client_id.to_string(),
+            id: id.to_string(),
+            project_root: tab.project_root.clone(),
+            query: request.query.to_string(),
+            request_id: request.request_id,
+            scopes: request.scopes,
+            worktree_hash: request.worktree_hash,
+        });
+        Vec::new()
+    }
+
+    fn spawn_project_index_search(&self, task: ProjectIndexSearchTask) {
+        let ProjectIndexSearchTask {
+            client_id,
+            id,
+            project_root,
+            query,
+            request_id,
+            scopes,
+            worktree_hash,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = match gwt::search_project_index(
+                &project_root,
+                &query,
+                &scopes,
+                worktree_hash.as_deref(),
+            ) {
+                Ok(results) => BackendEvent::ProjectIndexSearchResults {
+                    id: id.clone(),
+                    query: query.clone(),
+                    request_id,
+                    results,
+                },
+                Err(error) => BackendEvent::ProjectIndexSearchError {
+                    id: id.clone(),
+                    query: query.clone(),
+                    request_id,
+                    message: error,
+                },
+            };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));

@@ -53,6 +53,7 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "issues" => Ok(IndexScope::Issues),
         "specs" => Ok(IndexScope::Specs),
         "lessons" => Ok(IndexScope::Lessons),
+        "board" => Ok(IndexScope::Board),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -168,6 +169,16 @@ mod tests {
             parse(&s(&["rebuild", "--scope", "lessons"])).unwrap(),
             IndexCommand::Rebuild {
                 scope: IndexScope::Lessons
+            }
+        );
+    }
+
+    #[test]
+    fn parses_index_rebuild_board_scope() {
+        assert_eq!(
+            parse(&s(&["rebuild", "--scope", "board"])).unwrap(),
+            IndexCommand::Rebuild {
+                scope: IndexScope::Board
             }
         );
     }
