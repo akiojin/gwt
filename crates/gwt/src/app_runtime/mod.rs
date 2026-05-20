@@ -1661,27 +1661,33 @@ fn search_github_repositories(
     if trimmed.is_empty() {
         return Err("repository search query is required".to_string());
     }
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let hub = gwt_core::process_console::global();
+    let limit_str = limit.to_string();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
             "search",
             "repos",
             trimmed,
             "--json",
             "fullName,description,url,defaultBranch,visibility,updatedAt",
             "--limit",
-            &limit.to_string(),
-        ])
-        .output()
-        .map_err(|error| format!("gh search repos: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            limit_str.as_str(),
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh search repos"),
+    )
+    .map_err(|error| format!("gh search repos: {error}"))?;
+    if !output.success() {
+        let stderr = output.stderr.trim().to_string();
         return Err(if stderr.is_empty() {
             "gh search repos failed".to_string()
         } else {
             stderr
         });
     }
-    parse_github_repository_search_results(&String::from_utf8_lossy(&output.stdout))
+    parse_github_repository_search_results(&output.stdout)
 }
 
 /// SPEC-2785 FR-E: exact same-origin match between the embedded server's

@@ -57,26 +57,31 @@ impl PrStatus {
 ///
 /// The `repo_slug` should be in "owner/repo" format.
 pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            repo_slug,
-            "--json",
-            "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
-        ])
-        .output()
-        .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
+    let hub = gwt_core::process_console::global();
+    let args = [
+        "pr",
+        "view",
+        &number.to_string(),
+        "--repo",
+        repo_slug,
+        "--json",
+        "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+    ];
+    let label = format!("gh pr view {}", number);
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &args,
+        gwt_core::process_console::SpawnOptions::new(label),
+    )
+    .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(GwtError::Git(format!("gh pr view: {stderr}")));
+    if !output.success() {
+        return Err(GwtError::Git(format!("gh pr view: {}", output.stderr)));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_pr_status_json(&stdout)
+    parse_pr_status_json(&output.stdout)
 }
 
 /// Parse `gh pr view --json` output.
@@ -242,16 +247,23 @@ where
 }
 
 fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(args)
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("gh {}: {e}", args.join(" "))))?;
+    let hub = gwt_core::process_console::global();
+    let label = format!("gh {}", args.join(" "));
+    let options =
+        gwt_core::process_console::SpawnOptions::new(label.clone()).current_dir(repo_path);
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        args,
+        options,
+    )
+    .map_err(|e| GwtError::Git(format!("{label}: {e}")))?;
 
     Ok(GhCliOutput {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        success: output.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
 }
 
@@ -348,29 +360,31 @@ pub struct PrCheckReport {
 /// Runs `gh pr view` to gather CI, merge, and review states. Falls back
 /// to `Unknown` states when `gh` is unavailable or the repo has no open PR.
 pub fn pr_check_report(repo_path: &Path) -> Result<PrCheckReport> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
             "pr",
             "view",
             "--json",
             "statusCheckRollup,mergeable,mergeStateStatus,reviewDecision,state,title",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh pr view --json").current_dir(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.success() {
         return Ok(PrCheckReport {
             ci: CiStatus::Unknown,
             merge: MergeStatus::Unknown,
             review: ReviewStatus::Unknown,
-            summary: format!("No open PR or gh error: {}", stderr.trim()),
+            summary: format!("No open PR or gh error: {}", output.stderr.trim()),
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_pr_check_report_json(&stdout)
+    parse_pr_check_report_json(&output.stdout)
 }
 
 /// Parse `gh pr view --json` output into an extended PR check report.
