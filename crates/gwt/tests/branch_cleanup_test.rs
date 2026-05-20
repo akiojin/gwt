@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use gwt::{
-    cleanup_selected_branches, list_branch_entries_with_active_sessions, BranchCleanupResultStatus,
+    cleanup_selected_branches, cleanup_selected_branches_with_options,
+    list_branch_entries_with_active_sessions, BranchCleanupOptions, BranchCleanupResultStatus,
 };
 use tempfile::tempdir;
 
@@ -167,6 +168,46 @@ fn cleanup_selected_branches_rejects_blocked_branch() {
     assert!(
         branch_exists(repo.path(), "refs/heads/main"),
         "protected branch should remain"
+    );
+}
+
+#[test]
+fn cleanup_selected_branches_force_mode_does_not_bypass_non_workspace_branch_guard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+
+    run_git(
+        temp.path(),
+        &["init", "-q", repo.to_str().expect("repo path")],
+    );
+    init_repo(&repo);
+    run_git(&repo, &["checkout", "-qb", "feature/manual"]);
+    std::fs::write(repo.join("manual.txt"), "manual\n").expect("write manual");
+    run_git(&repo, &["add", "manual.txt"]);
+    run_git(&repo, &["commit", "-qm", "manual"]);
+    run_git(&repo, &["checkout", "main"]);
+
+    let entries =
+        list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
+    let results = cleanup_selected_branches_with_options(
+        &repo,
+        &entries,
+        &[String::from("feature/manual")],
+        BranchCleanupOptions {
+            delete_remote: false,
+            force_filesystem_delete: true,
+        },
+    );
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+    assert_eq!(
+        results[0].message,
+        "Only gwt-managed workspaces can be cleaned up"
+    );
+    assert!(
+        branch_exists(&repo, "refs/heads/feature/manual"),
+        "force filesystem cleanup must not delete non-workspace branches"
     );
 }
 

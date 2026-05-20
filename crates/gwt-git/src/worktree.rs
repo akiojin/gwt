@@ -392,6 +392,33 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Force-remove the worktree at `path`, including locked worktrees.
+    ///
+    /// Git requires `--force` twice for locked worktrees. Keep this behind
+    /// the explicit cleanup force mode so normal cleanup still respects that
+    /// extra guardrail.
+    pub fn remove_force_twice(&self, path: &Path) -> Result<()> {
+        let path_arg = path_arg_for_git(path);
+        let output = gwt_core::process::hidden_command("git")
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                "--force",
+                path_arg.as_str(),
+            ])
+            .current_dir(&self.repo_path)
+            .output()
+            .map_err(|e| GwtError::Git(format!("worktree remove --force --force: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
     /// Run `git worktree prune --expire now` to clear orphaned worktree
     /// metadata immediately. Plain `git worktree prune` honors the
     /// `gc.worktreePruneExpire` grace period (default `3.months.ago`), so a
@@ -421,6 +448,21 @@ impl WorktreeManager {
     /// branches, and orphaned worktree metadata: a `git worktree prune`
     /// fallback handles entries whose on-disk path has already vanished.
     pub fn cleanup_branch(&self, branch: &str) -> Result<()> {
+        self.cleanup_branch_with_force_filesystem_delete(branch, false)
+    }
+
+    /// Remove the worktree and local branch for `branch`.
+    ///
+    /// When `force_filesystem_delete` is true, cleanup may use Git's double
+    /// force for locked worktrees and may remove leftover filesystem residue
+    /// from the Git-registered worktree path if Git reports a non-empty
+    /// directory class failure. Callers must still apply branch-level safety
+    /// checks before enabling this mode.
+    pub fn cleanup_branch_with_force_filesystem_delete(
+        &self,
+        branch: &str,
+        force_filesystem_delete: bool,
+    ) -> Result<()> {
         let worktree_path = self
             .list()?
             .into_iter()
@@ -428,10 +470,19 @@ impl WorktreeManager {
             .map(|wt| wt.path);
 
         if let Some(path) = worktree_path {
-            match self.remove_force(&path) {
+            let remove_result = if force_filesystem_delete {
+                self.remove_force_twice(&path)
+            } else {
+                self.remove_force(&path)
+            };
+            match remove_result {
                 Ok(()) => {}
                 Err(err) if is_missing_worktree_error(&err) => {
                     // Worktree metadata is stale; prune and continue.
+                    self.prune()?;
+                }
+                Err(err) if force_filesystem_delete && is_filesystem_residue_error(&err) => {
+                    remove_worktree_filesystem_residue(&path)?;
                     self.prune()?;
                 }
                 Err(err) => return Err(err),
@@ -452,6 +503,24 @@ fn is_missing_worktree_error(err: &GwtError) -> bool {
         || message.contains("not a work tree")
         || message.contains("no such file or directory")
         || message.contains("does not exist")
+}
+
+fn is_filesystem_residue_error(err: &GwtError) -> bool {
+    let message = err.to_string().to_lowercase();
+    message.contains("directory not empty")
+        || message.contains("failed to delete")
+        || message.contains("failed to remove")
+}
+
+fn remove_worktree_filesystem_residue(path: &Path) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path)
+            .map_err(|e| GwtError::Git(format!("remove worktree residue: {e}"))),
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|e| GwtError::Git(format!("remove worktree residue: {e}"))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(GwtError::Git(format!("inspect worktree residue: {err}"))),
+    }
 }
 
 fn run_command_with_timeout(
@@ -1136,6 +1205,73 @@ prunable gitdir file points to non-existent location
         assert!(manager.remove(&worktree_path).is_err());
         manager.remove_force(&worktree_path).unwrap();
         assert!(!worktree_path.exists());
+    }
+
+    #[test]
+    fn cleanup_branch_force_filesystem_mode_removes_locked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "work/locked");
+        manager
+            .create_from_base("main", "work/locked", &worktree_path)
+            .or_else(|_| manager.create_from_base("master", "work/locked", &worktree_path))
+            .unwrap();
+
+        let lock = gwt_core::process::hidden_command("git")
+            .args(["worktree", "lock", worktree_path.to_str().unwrap()])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree lock");
+        assert!(
+            lock.status.success(),
+            "git worktree lock failed: {}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+
+        assert!(
+            manager.cleanup_branch("work/locked").is_err(),
+            "single-force cleanup should not remove a locked worktree"
+        );
+        manager
+            .cleanup_branch_with_force_filesystem_delete("work/locked", true)
+            .unwrap();
+
+        assert!(!worktree_path.exists());
+        let branches = crate::branch::list_branches(&repo_path).unwrap();
+        assert!(!branches
+            .iter()
+            .any(|b| b.is_local && b.name == "work/locked"));
+    }
+
+    #[test]
+    fn filesystem_residue_helper_removes_non_empty_worktree_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let residue_path = tmp.path().join("work").join("residue");
+        std::fs::create_dir_all(residue_path.join("nested")).unwrap();
+        std::fs::write(
+            residue_path.join("nested").join("leftover.txt"),
+            "leftover\n",
+        )
+        .unwrap();
+
+        remove_worktree_filesystem_residue(&residue_path).unwrap();
+
+        assert!(!residue_path.exists());
+    }
+
+    #[test]
+    fn filesystem_residue_error_matches_git_directory_not_empty_failures() {
+        assert!(is_filesystem_residue_error(&GwtError::Git(
+            "error: failed to delete '/repo/work/old': Directory not empty".to_string(),
+        )));
+        assert!(!is_filesystem_residue_error(&GwtError::Git(
+            "fatal: invalid reference: work/old".to_string(),
+        )));
     }
 
     #[test]
