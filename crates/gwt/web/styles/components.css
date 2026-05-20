@@ -4017,3 +4017,10 @@ kbd.op-kbd {
 .console-window__line--stderr {
   color: var(--color-state-warn, #f85149);
 }
+
+.console-window__empty {
+  display: block;
+  color: var(--color-text-subtle, #8b949e);
+  font-style: italic;
+  padding: 4px 0;
+}

@@ -606,7 +606,11 @@
       function ensureConsoleController(windowId) {
         let controller = consoleControllers.get(windowId);
         if (!controller) {
-          controller = createConsoleWindow({ document });
+          controller = createConsoleWindow({
+            document,
+            windowId,
+            send: (payload) => socketTransport.send(payload),
+          });
           consoleControllers.set(windowId, controller);
         }
         return controller;
@@ -10541,6 +10545,15 @@
               broadcastProcessLineToConsoles(event.line);
             }
             break;
+          case "process_console_snapshot": {
+            // SPEC-2809 Phase F2 — initial ring buffer replay for the
+            // Console window that just mounted.
+            const target = consoleControllers.get(event.id);
+            if (target) {
+              target.ingestSnapshot(event.lines || []);
+            }
+            break;
+          }
           case "knowledge_entries": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
               event.id,

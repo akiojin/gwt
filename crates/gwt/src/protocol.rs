@@ -234,6 +234,13 @@ pub enum FrontendEvent {
     LoadLogs {
         id: String,
     },
+    /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
+    /// the current `ProcessConsoleHub` ring buffer so historical lines
+    /// (e.g. gh calls that happened before the window opened) are visible
+    /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
+    LoadProcessConsole {
+        id: String,
+    },
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -961,6 +968,14 @@ pub enum BackendEvent {
     /// Console window and Logs window both consume this event.
     ProcessLine {
         line: gwt_core::process_console::ProcessLine,
+    },
+    /// SPEC-2809 Phase F2 — reply to [`FrontendEvent::LoadProcessConsole`]
+    /// containing the current ring buffer for every kind, time-sorted.
+    /// The Console window controller replays these into its per-kind
+    /// buffers so historical lines are visible on first mount.
+    ProcessConsoleSnapshot {
+        id: String,
+        lines: Vec<gwt_core::process_console::ProcessLine>,
     },
     KnowledgeEntries {
         id: String,
@@ -1737,6 +1752,7 @@ impl BackendEvent {
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
             BackendEvent::ProcessLine { .. } => "process_line",
+            BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",

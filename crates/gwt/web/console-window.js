@@ -15,7 +15,7 @@ const KINDS = ["gh", "git", "docker", "agent", "runner"];
 const CAP_PER_KIND = 5000;
 const FOLLOW_THRESHOLD_PX = 24;
 
-export function createConsoleWindow({ document } = {}) {
+export function createConsoleWindow({ document, send = null, windowId = null } = {}) {
   if (!document) {
     throw new Error("createConsoleWindow requires a document");
   }
@@ -23,14 +23,17 @@ export function createConsoleWindow({ document } = {}) {
   const state = {
     root: null,
     tabRow: null,
-    panes: new Map(), // kind -> { container, tab, buffer, lastSpawnId, scrollFollow }
+    panes: new Map(), // kind -> { container, tab, buffer, lastSpawnId, scrollFollow, empty }
     activeKind: "gh",
+    windowId,
+    send,
   };
 
   for (const kind of KINDS) {
     state.panes.set(kind, {
       container: null,
       tab: null,
+      emptyHint: null,
       buffer: [],
       lastSpawnId: null,
       scrollFollow: true,
@@ -75,8 +78,16 @@ export function createConsoleWindow({ document } = {}) {
       container.setAttribute("role", "tabpanel");
       container.hidden = kind !== state.activeKind;
       container.addEventListener("scroll", () => updateScrollFollow(kind));
+      // Empty-state hint shown when no lines have arrived for this kind
+      // yet. Removed when the first line is pushed.
+      const emptyHint = document.createElement("span");
+      emptyHint.className = "console-window__empty";
+      emptyHint.textContent = emptyHintText(kind);
+      container.appendChild(emptyHint);
       body.appendChild(container);
-      state.panes.get(kind).container = container;
+      const pane = state.panes.get(kind);
+      pane.container = container;
+      pane.emptyHint = emptyHint;
     }
 
     root.appendChild(tabRow);
@@ -86,7 +97,24 @@ export function createConsoleWindow({ document } = {}) {
     }
     state.root = root;
     state.tabRow = tabRow;
+
+    // SPEC-2809 — request the current ring buffer so historical lines
+    // surfaces immediately. Reply arrives as `process_console_snapshot`.
+    if (typeof state.send === "function" && state.windowId) {
+      state.send({ kind: "load_process_console", id: state.windowId });
+    }
     return root;
+  }
+
+  function emptyHintText(kind) {
+    return `Waiting for ${kind} process output...`;
+  }
+
+  function ingestSnapshot(lines) {
+    if (!Array.isArray(lines)) return;
+    for (const line of lines) {
+      push(line);
+    }
   }
 
   function activate(kind) {
@@ -139,6 +167,10 @@ export function createConsoleWindow({ document } = {}) {
     }
 
     if (pane.container) {
+      if (pane.emptyHint && pane.emptyHint.parentNode === pane.container) {
+        pane.container.removeChild(pane.emptyHint);
+        pane.emptyHint = null;
+      }
       if (line.spawn_id !== undefined && pane.buffer[pane.buffer.length - 2]?.kind === "header") {
         appendHeaderNode(pane.container, pane.buffer[pane.buffer.length - 2]);
       }
@@ -190,6 +222,7 @@ export function createConsoleWindow({ document } = {}) {
   return {
     mount,
     push,
+    ingestSnapshot,
     activate,
     close,
     isOpen,
