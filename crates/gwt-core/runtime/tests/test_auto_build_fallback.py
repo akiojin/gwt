@@ -186,6 +186,61 @@ class AutoBuildFallbackTests(unittest.TestCase):
             db = db_root / "abc1234567890def" / "specs"
             self.assertTrue(db.exists(), f"index dir was not created: {db}")
 
+    def test_search_lessons_auto_builds_when_index_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            (root / "tasks").mkdir(parents=True)
+            (root / "tasks" / "lessons.md").write_text(
+                "# Lessons Learned\n\n"
+                "## 2026-05-20 — watcher debounce regression\n\n"
+                "### 事象\n watcher fired too often.\n\n"
+                "### 原因\n debounce too low.\n\n"
+                "### 再発防止策\n raise debounce.\n",
+                encoding="utf-8",
+            )
+
+            db_root = Path(tmp) / "index_root"
+            result = runner.action_search_v2(
+                action="search-lessons",
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                project_root=str(root),
+                query="watcher debounce",
+                n_results=5,
+                no_auto_build=False,
+                db_root=db_root,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertIn("lessonResults", result)
+            self.assertGreaterEqual(len(result["lessonResults"]), 1, result["lessonResults"])
+            top = result["lessonResults"][0]
+            self.assertEqual(top["date"], "2026-05-20")
+            self.assertIn("watcher debounce", top["title"])
+            db = db_root / "abc1234567890def" / "lessons"
+            self.assertTrue(db.exists(), f"lessons index dir was not created: {db}")
+
+    def test_search_lessons_returns_index_missing_when_no_auto_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            (root / "tasks").mkdir(parents=True)
+            (root / "tasks" / "lessons.md").write_text("# empty\n", encoding="utf-8")
+            db_root = Path(tmp) / "index_root"
+
+            result = runner.action_search_v2(
+                action="search-lessons",
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                project_root=str(root),
+                query="anything",
+                n_results=5,
+                no_auto_build=True,
+                db_root=db_root,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["error_code"], "INDEX_MISSING")
+
     def test_search_specs_refreshes_existing_index_from_issue_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
