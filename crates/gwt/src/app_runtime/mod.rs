@@ -2045,6 +2045,20 @@ impl AppRuntime {
             FrontendEvent::CreateWindow { preset, bounds } => {
                 self.create_window_events(preset, bounds)
             }
+            FrontendEvent::LoadProcessConsole { id } => {
+                // SPEC-2809 Phase F2 — Console window mount asks for the
+                // current ring buffer. Use the global hub installed by
+                // `gwt_core::logging::init`. Reply to the requesting
+                // client only so other Consoles do not see duplicates.
+                let hub = gwt_core::process_console::global();
+                vec![OutboundEvent::reply(
+                    client_id.clone(),
+                    BackendEvent::ProcessConsoleSnapshot {
+                        id,
+                        lines: hub.snapshot_all(),
+                    },
+                )]
+            }
             FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(direction, bounds)

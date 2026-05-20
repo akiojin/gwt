@@ -27,9 +27,11 @@ pub mod kind;
 pub mod line;
 pub mod redact;
 pub mod spawn;
+pub mod strip_ansi;
 
 pub use hub::{global, set_global, ProcessConsoleHub, DEFAULT_RING_CAPACITY};
 pub use kind::{ParseProcessKindError, ProcessKind};
 pub use line::{ProcessLine, ProcessStream};
 pub use redact::{redact_line, REDACTED};
 pub use spawn::{spawn_logged, spawn_logged_blocking, SpawnOptions, SpawnOutput};
+pub use strip_ansi::strip_ansi;

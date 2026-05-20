@@ -254,7 +254,12 @@ where
         if piece.is_empty() {
             continue;
         }
-        let redacted = redact::redact_line(piece);
+        // SPEC-2809 FR-008 — ANSI strip then redaction for hub-facing
+        // text. The caller-facing `buf` keeps the raw bytes so
+        // `gh auth token` and other secret-handling helpers still
+        // receive the original value.
+        let stripped = super::strip_ansi::strip_ansi(piece);
+        let redacted = redact::redact_line(&stripped);
         hub.push(ProcessLine::new(kind, spawn_id, stream, redacted));
         total_lines += 1;
     }
