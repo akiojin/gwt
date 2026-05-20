@@ -58,6 +58,10 @@ pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
 
+pub fn release_notes_window_js() -> &'static str {
+    include_str!("../web/release-notes-window.js")
+}
+
 pub fn terminal_context_menu_js() -> &'static str {
     include_str!("../web/terminal-context-menu.js")
 }
@@ -231,6 +235,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/update-cta.js",
         source: update_cta_js,
         marker: "createUpdateCtaController",
+    },
+    RootJsModuleAsset {
+        path: "/release-notes-window.js",
+        source: release_notes_window_js,
+        marker: "createReleaseNotesWindow",
     },
     RootJsModuleAsset {
         path: "/terminal-context-menu.js",
