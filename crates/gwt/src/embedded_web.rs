@@ -195,6 +195,14 @@ pub fn release_notes_window_js() -> &'static str {
     include_str!("../web/release-notes-window.js")
 }
 
+// SPEC-2809 — Console window for external process stdout/stderr live tail.
+// 5 fixed kind tabs (gh / git / docker / agent / runner). app.js imports
+// `createConsoleWindow` at module top level so this asset MUST be registered
+// here; otherwise the ES module load fails and splash hangs (PR #2797 lesson).
+pub fn console_window_js() -> &'static str {
+    include_str!("../web/console-window.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -345,6 +353,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/release-notes-window.js",
         source: release_notes_window_js,
         marker: "createReleaseNotesWindow",
+    },
+    RootJsModuleAsset {
+        path: "/console-window.js",
+        source: console_window_js,
+        marker: "createConsoleWindow",
     },
 ];
 

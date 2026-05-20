@@ -52,6 +52,7 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "all" => Ok(IndexScope::All),
         "issues" => Ok(IndexScope::Issues),
         "specs" => Ok(IndexScope::Specs),
+        "lessons" => Ok(IndexScope::Lessons),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -162,6 +163,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_index_rebuild_lessons_scope() {
+        assert_eq!(
+            parse(&s(&["rebuild", "--scope", "lessons"])).unwrap(),
+            IndexCommand::Rebuild {
+                scope: IndexScope::Lessons
+            }
+        );
+    }
+
+    #[test]
     fn audit_log_dir_uses_project_scoped_gwt_log_directory() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("repo");
@@ -216,6 +227,38 @@ mod tests {
         assert!(out.contains("runtime: ready asset=cccccccccccccccc smoke=passed"));
         assert!(out
             .contains("files: unhealthy reason=manifest_missing documents=3 repair_required=true"));
+    }
+
+    #[test]
+    fn renders_lessons_scope_health() {
+        let report = gwt_core::runtime::ProjectIndexRuntimeReport {
+            runner_hash: "aaaaaaaaaaaaaaaa".to_string(),
+            requirements_hash: "bbbbbbbbbbbbbbbb".to_string(),
+            runner_smoke_tested: true,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "runtime": {
+                "healthy": true,
+                "reason": "ready",
+                "asset_hash": "cccccccccccccccc",
+                "smoke_test": "passed"
+            },
+            "status": {
+                "lessons": {
+                    "healthy": true,
+                    "repair_required": false,
+                    "reason": "ready",
+                    "document_count": 234
+                }
+            }
+        });
+        let mut out = String::new();
+        render_index_status(&mut out, &report, &payload);
+        assert!(
+            out.contains("lessons: ready reason=ready documents=234 repair_required=false"),
+            "render output missing lessons line:\n{out}"
+        );
     }
 
     #[test]

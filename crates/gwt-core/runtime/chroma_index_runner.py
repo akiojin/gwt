@@ -972,13 +972,14 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "lessons", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "specs"
 V2_ISSUES_COLLECTION = "issues"
+V2_LESSONS_COLLECTION = "lessons"
 
 
 def gwt_index_root() -> Path:
@@ -1002,7 +1003,7 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs"}:
+    if scope in {"issues", "specs", "lessons"}:
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
@@ -1254,7 +1255,7 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
-    if worktree_dir.name in ("specs", "files", "files-docs", "issues"):
+    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "lessons"):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
 
@@ -1880,6 +1881,261 @@ def _load_cached_spec_documents(
     return specs, manifest_entries
 
 
+_LESSON_DATE_HEADING_RE = re.compile(
+    r"^##\s+(?P<date>\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(?P<title>.+?)\s*$"
+)
+_LESSON_BARE_HEADING_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$")
+_LESSON_HEADING_CHUNK_SUFFIX_RE = re.compile(r"\s+\[\d+\]\s*$")
+
+
+def _parse_lesson_heading(heading: str) -> tuple[str, str]:
+    """Extract (date, title) from an H2 heading.
+
+    Handles three shapes:
+    - ``## 2026-05-20 — title`` → ("2026-05-20", "title")
+    - ``## title without date`` → ("", "title without date")
+    - ``## 2026-05-20 — title [2]`` (paragraph-split suffix) → strip suffix
+    """
+    cleaned = _LESSON_HEADING_CHUNK_SUFFIX_RE.sub("", heading)
+    dated = _LESSON_DATE_HEADING_RE.match(cleaned)
+    if dated:
+        return dated.group("date"), dated.group("title").strip()
+    bare = _LESSON_BARE_HEADING_RE.match(cleaned)
+    if bare:
+        return "", bare.group("title").strip()
+    return "", heading.strip()
+
+
+def _load_lessons_documents(
+    project_root: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load ``<project_root>/tasks/lessons.md`` and chunk it into lesson units.
+
+    Returns a tuple ``(lessons, manifest_entries)`` where ``manifest_entries``
+    contains at most one entry describing the source file's mtime/size.
+    Missing file → both empty. Empty file → empty lessons but a manifest
+    entry so that the runner can still detect future content additions.
+    """
+    root = Path(project_root)
+    source_path = root / "tasks" / "lessons.md"
+    if not source_path.is_file():
+        return [], []
+
+    try:
+        content = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return [], []
+
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return [], []
+    manifest_entries = [
+        {
+            "path": "tasks/lessons.md",
+            "mtime": int(stat.st_mtime),
+            "size": int(stat.st_size),
+        }
+    ]
+
+    chunks = _chunk_spec_content(content)
+    if not chunks:
+        return [], manifest_entries
+
+    lessons: List[Dict[str, Any]] = []
+    grouped: Dict[tuple[str, str], int] = {}
+    for chunk in chunks:
+        heading = chunk["heading"]
+        body = chunk["body"]
+        # `_chunk_spec_content` emits a synthetic "(intro)" chunk for any
+        # leading content before the first H2 (e.g. the `# Lessons Learned`
+        # title line). That preamble is not a real lesson — skip it.
+        if not heading.startswith("## "):
+            continue
+        date, title = _parse_lesson_heading(heading)
+        key = (date, title)
+        chunk_idx = grouped.get(key, 0)
+        grouped[key] = chunk_idx + 1
+        digest_input = f"{heading}\n{body}".encode("utf-8")
+        lesson_id = hashlib.sha1(digest_input).hexdigest()[:12]
+        lessons.append(
+            {
+                "lesson_id": lesson_id,
+                "date": date,
+                "title": title,
+                "heading": heading,
+                "body": body,
+                "chunk_idx": chunk_idx,
+                # total_chunks is filled in once the whole file is scanned
+                "total_chunks": 0,
+            }
+        )
+
+    for lesson in lessons:
+        key = (lesson["date"], lesson["title"])
+        lesson["total_chunks"] = grouped[key]
+
+    return lessons, manifest_entries
+
+
+def _build_lesson_records(
+    lessons: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Materialize Chroma upsert records for the lessons scope."""
+    records: List[Dict[str, Any]] = []
+    for lesson in lessons:
+        title = lesson.get("title", "")
+        heading = lesson.get("heading", "")
+        body = lesson.get("body", "")
+        document = f"{title}\n{heading}\n{body}".strip()
+        records.append(
+            {
+                "id": f"lesson-{lesson.get('lesson_id', '')}",
+                "document": document,
+                "metadata": {
+                    "lesson_id": lesson.get("lesson_id", ""),
+                    "date": lesson.get("date", ""),
+                    "title": title,
+                    "heading": heading,
+                    "chunk_idx": int(lesson.get("chunk_idx", 0)),
+                    "total_chunks": int(lesson.get("total_chunks", 1)),
+                },
+            }
+        )
+    return records
+
+
+def action_index_lessons_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+) -> dict:
+    """Index ``tasks/lessons.md`` into the repo-scoped lessons Chroma store.
+
+    `worktree_hash` is accepted for symmetry with the other v2 actions but is
+    ignored — lessons is repo-scoped. Manifest diff degenerates to a single
+    entry; when the file changes (mtime or size), all chunks are re-upserted
+    after deleting prior records for the file.
+    """
+    del worktree_hash  # repo-scoped scope does not consume the worktree hash
+    db_path = resolve_db_path(repo_hash, None, "lessons", db_root=db_root)
+    lessons, new_entries = _load_lessons_documents(project_root)
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "lessons",
+            "mode": mode,
+            "done": 0,
+            "total": len(lessons),
+        }
+    )
+
+    indexed = 0
+    with acquire_lock(db_path, exclusive=True):
+        if mode != "incremental":
+            _reset_chroma_store(db_path)
+        make_collection = (
+            _make_chroma_collection
+            if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(db_path, V2_LESSONS_COLLECTION)
+        try:
+            old_entries = read_manifest(db_path, scope="lessons")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+
+            if mode != "incremental" or file_changed:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                lesson_records = _build_lesson_records(lessons)
+            else:
+                lesson_records = []
+
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "lessons",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+
+            if lesson_records:
+                ids = [r["id"] for r in lesson_records]
+                documents = [r["document"] for r in lesson_records]
+                metadatas = [r["metadata"] for r in lesson_records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+                indexed = len(lesson_records)
+
+            write_manifest(db_path, scope="lessons", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                scope="lessons",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": indexed,
+                },
+            )
+        finally:
+            _close_chroma_client(client)
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "lessons",
+            "mode": mode,
+            "indexed": indexed,
+            "total": indexed,
+        }
+    )
+    return {"ok": True, "scope": "lessons", "indexed": indexed}
+
+
+def _format_lessons_results(
+    items: List[Dict[str, Any]], n_results: int = 10
+) -> List[Dict[str, Any]]:
+    """Collapse chunked lesson results so each (date, title) appears once."""
+    formatted: List[Dict[str, Any]] = []
+    seen: set = set()
+    for it in items:
+        meta = it.get("metadata") or {}
+        date = meta.get("date", "")
+        title = meta.get("title", "")
+        key = (date, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        formatted.append(
+            {
+                "date": date,
+                "title": title,
+                "heading": meta.get("heading", ""),
+                "chunk_idx": int(meta.get("chunk_idx", 0)),
+                "distance": it.get("distance"),
+            }
+        )
+        if len(formatted) >= n_results:
+            break
+    return formatted
+
+
 def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for spec in specs:
@@ -1949,6 +2205,8 @@ def _scope_meta_path(
 ) -> Path:
     if scope == "specs":
         return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
+    if scope == "lessons":
+        return resolve_db_path(repo_hash, None, "lessons", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -2018,6 +2276,7 @@ def _scope_collection_name(scope: str) -> str:
         "files-docs": V2_FILES_DOCS_COLLECTION,
         "specs": V2_SPECS_COLLECTION,
         "issues": V2_ISSUES_COLLECTION,
+        "lessons": V2_LESSONS_COLLECTION,
     }[scope]
 
 
@@ -2089,11 +2348,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope == "specs" and document_count < manifest_count:
+    elif scope in ("specs", "lessons") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope != "specs" and document_count != manifest_count:
+    elif scope not in ("specs", "lessons") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -2366,6 +2625,7 @@ def action_search_v2(
         "search-files-docs": "files-docs",
         "search-specs": "specs",
         "search-issues": "issues",
+        "search-lessons": "lessons",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
@@ -2415,6 +2675,14 @@ def action_search_v2(
                 mode="full" if needs_build else "incremental",
                 db_root=db_root,
             )
+        elif scope == "lessons":
+            build = action_index_lessons_v2(
+                project_root=project_root,
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                mode="full",
+                db_root=db_root,
+            )
         else:
             build = action_index_files_v2(
                 project_root=project_root,
@@ -2431,9 +2699,9 @@ def action_search_v2(
     with acquire_lock(db_path, exclusive=False):
         client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
         try:
-            # SPECs are chunked, so a single SPEC can span many Chroma records.
-            # Over-fetch by 5x then collapse by spec_id in the formatter.
-            fetch_n = n_results * 5 if scope == "specs" else n_results
+            # SPECs / Lessons are chunked, so a single owner can span many
+            # Chroma records. Over-fetch by 5x then collapse in the formatter.
+            fetch_n = n_results * 5 if scope in ("specs", "lessons") else n_results
             items = _search_collection_v2(collection, query, fetch_n)
         finally:
             _close_chroma_client(client)
@@ -2442,6 +2710,8 @@ def action_search_v2(
         return {"ok": True, "results": _format_file_results(items)}
     if scope == "specs":
         return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
+    if scope == "lessons":
+        return {"ok": True, "lessonResults": _format_lessons_results(items, n_results)}
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
@@ -2472,6 +2742,7 @@ def action_status_v2(
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
+        "lessons": _scope_status_v2(repo_hash, None, "lessons", db_root=db_root),
     }
     if worktree_hash:
         for scope in ("files", "files-docs"):
@@ -2502,6 +2773,8 @@ def parse_args() -> argparse.Namespace:
             "search-issues",
             "index-specs",
             "search-specs",
+            "index-lessons",
+            "search-lessons",
         ],
     )
     parser.add_argument("--project-root", default="")
@@ -2514,7 +2787,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs"],
+        choices=["", "issues", "specs", "files", "files-docs", "lessons"],
     )
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
@@ -2575,7 +2848,27 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
-        if action in ("search-files", "search-files-docs", "search-specs", "search-issues"):
+        if action == "index-lessons":
+            if not args.project_root:
+                emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
+                return 2
+            emit(
+                action_index_lessons_v2(
+                    project_root=args.project_root,
+                    repo_hash=repo_hash,
+                    worktree_hash=None,
+                    mode=args.mode,
+                )
+            )
+            return 0
+
+        if action in (
+            "search-files",
+            "search-files-docs",
+            "search-specs",
+            "search-issues",
+            "search-lessons",
+        ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
                 return 2

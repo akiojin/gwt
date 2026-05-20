@@ -380,8 +380,7 @@ pub type BuildCommand = SkillStateAction;
 
 /// SPEC-2784 family enum for `gwtd register ...`. Same skill-state lifecycle.
 pub type RegisterCommand = SkillStateAction;
-/// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane
-/// inspection and lifecycle operations.
+/// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane inspection and lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneCommand {
     /// `gwtd pane list`.
@@ -397,6 +396,7 @@ pub enum IndexScope {
     All,
     Issues,
     Specs,
+    Lessons,
     Files,
     FilesDocs,
 }

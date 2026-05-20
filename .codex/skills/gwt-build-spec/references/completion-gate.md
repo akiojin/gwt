@@ -37,16 +37,25 @@ In SPEC mode, it reconciles all artifacts. In standalone mode, it verifies user 
 ### 5. Code verification
 
 Delegate to `gwt-verify --mode full` and require `Overall: PASS` in the
-evidence bundle. The sub-skill picks the matrix per changed surface (see
-`.codex/skills/gwt-verify/references/test-matrix.md`) — cargo for Rust
-crates, `pnpm test:frontend-*` for frontend JS, `pnpm test:visual` for
-WebView/browser UI surfaces only (Playwright is not invoked for non-browser
-surfaces), `pnpm test:release-*` for release-system changes, and
-`pnpm lint:skills` for skill assets.
+evidence bundle. The sub-skill is project-agnostic: it autodetects the host
+project's test runners from manifests (Cargo.toml / package.json /
+pyproject.toml / go.mod / ProjectSettings / *.sln / etc.), runs the
+appropriate unit / integration / E2E / visual tests for each changed
+surface, emits a Test Inventory naming the executed tests, and hands off
+to the user with a 4-step 導線 + Check Items before finalizing the
+report. The matrix is determined by what actually changed and the
+runners the project ships, not by a hard-coded cargo / pnpm / Playwright
+recipe. Project-local AGENTS.md / README instructions always take
+precedence over the generic matrix.
 
-If `gwt-verify` returns `Overall: FAIL` or `failed: tooling-missing`, the
-gate fails. Do not declare completion. Route the failure for repair per
-the failure-handling section below.
+The gate **fails** when any of:
+
+- `gwt-verify` returns `Overall: FAIL`
+- `failed: tooling-missing` is recorded
+- `User Verification Result` is `pending` (handoff never completed) or
+  `rejected(<reason>)` (user declined). The user's reason is preserved
+  in the evidence bundle; route the failure for repair per the
+  failure-handling section below.
 
 ## Standalone mode checks
 
