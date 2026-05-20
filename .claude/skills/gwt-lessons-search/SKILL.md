@@ -82,10 +82,20 @@ section in `tasks/memory.md`.
 
 ## Write path
 
-This skill does **not** write to `tasks/memory.md`. New reusable learning must
-be added by editing the file directly with `Type`, `Context`, `Learning`, and
-`Future Action` fields. The watcher and the auto-build fallback pick up the
-change automatically.
+Use `gwtd memory add` for new reusable learning. `gwtd lessons add` remains a
+legacy alias and writes the same canonical `tasks/memory.md` file:
+
+```bash
+"$GWT_BIN" memory add \
+  --type lesson \
+  --title "short title" \
+  --context "What happened or where the learning applies." \
+  --learning "The reusable insight." \
+  --future-action "What future agents should do differently."
+```
+
+Direct file edits remain acceptable for unusual bulk edits or manual cleanup.
+The watcher and the auto-build fallback pick up the change automatically.
 
 ## Notes
 

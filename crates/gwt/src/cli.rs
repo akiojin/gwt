@@ -4,19 +4,6 @@
 //! with `issue`, we treat it as a CLI call rather than a GUI launch. This
 //! module owns argv parsing, dispatches to the high-level SPEC operations in
 //! `gwt-github`, and writes the result to stdout/stderr.
-//!
-//! Supported commands:
-//! - `gwtd issue spec <n>` — print every section for an issue
-//! - `gwtd issue spec <n> --section <name>` — print one section only
-//! - `gwtd issue spec <n> --edit <name> -f <file>` — replace one section
-//!   from a file (`-` means stdin)
-//! - `gwtd issue spec <n> --edit spec --json [-f <file>] [--replace]` —
-//!   structured JSON update for the spec section
-//! - `gwtd issue spec list [--phase <name>] [--state open|closed]` —
-//!   list SPEC-labeled issues
-//! - `gwtd issue spec create --json --title <t> [-f <file>]` —
-//!   create a SPEC from structured JSON
-//! - `gwtd issue spec <n> --rename <title>` — rename the Issue title
 
 mod actions;
 mod board;
@@ -29,6 +16,7 @@ pub mod hook;
 pub(crate) mod index;
 mod issue;
 mod issue_spec;
+mod memory;
 mod pane;
 mod plan;
 mod pr;
@@ -46,6 +34,7 @@ pub use board::{BoardCommand, BoardPostCommand};
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
+pub use memory::MemoryCommand;
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +135,8 @@ pub enum CliCommand {
     Hook(HookCommand),
     /// `gwtd index ...` — local search index.
     Index(IndexCommand),
+    /// `gwtd memory ...` / `gwtd lessons ...` — append reusable project memory.
+    Memory(MemoryCommand),
     /// `gwtd discuss ...` — gwt-discussion exit CLI.
     Discuss(DiscussCommand),
     /// `gwtd plan ...` — gwt-plan-spec exit CLI.
@@ -437,7 +428,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs|memory|lessons]"
+                "usage: gwtd <issue|pr|actions|board|workspace|pane|index|memory|lessons|hook|discuss|plan|build|register|daemon> ..."
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -538,12 +529,6 @@ fn trim_title_status_punctuation(value: &str) -> &str {
     })
 }
 
-/// Determine whether the given argv (starting at the program name) should be
-/// handled as a CLI invocation. Returns `true` when argv[1..] begins with
-/// a supported top-level CLI verb such as `issue`, `pr`, `actions`, `board`,
-/// `hook`, `discuss`, `plan`, `build`, `pane`, `update`, or `__internal`. The GUI
-/// launcher keeps its legacy behaviour (positional repo path) for any other
-/// shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
         .map(|s| {
@@ -557,6 +542,8 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "update"
                     | "__internal"
                     | "index"
+                    | "memory"
+                    | "lessons"
                     | "discuss"
                     | "plan"
                     | "build"
@@ -594,6 +581,10 @@ pub fn parse_board_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// Parse an argv slice into a `gwtd index ...` [`CliCommand`].
 pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     index::parse(args).map(CliCommand::Index)
+}
+
+pub fn parse_memory_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    memory::parse(args).map(CliCommand::Memory)
 }
 
 /// Parse an argv slice into a `gwtd daemon ...` [`CliCommand`] (SPEC-2077).
@@ -749,6 +740,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
+        CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,

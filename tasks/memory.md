@@ -5814,3 +5814,10 @@ Agent window 内の TTY 表示が白一色になった。
 2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
 3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
    frontend DOM の computed color、launch env の順に切り分ける。
+
+## 2026-05-20 — memory 更新は reminder だけでなく writer command を提供する
+
+Type: workflow
+Context: SPEC-2805 の memory 化では hook reminder と検索導線を追加したが、active objective は gwt の機能として memory/lessons を更新できることだった。
+Learning: Agent に更新を促すだけでは gwt の更新機能とは言えない。永続 memory の運用には検索、reminder、supported writer command の 3 点が必要。
+Future Action: memory/lessons 更新導線を変更するときは gwtd memory add と legacy gwtd lessons add の動作、hook reminder、skill guidance を同時に検証する。

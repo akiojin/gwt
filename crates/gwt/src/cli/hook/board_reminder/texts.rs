@@ -214,20 +214,21 @@ pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): age
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
 If this task produced a reusable lesson, decision, failure pattern, or agent workflow correction, \
-update `tasks/memory.md` before declaring the work done. Use `Type`, `Context`, `Learning`, and \
-`Future Action` fields for new entries. Legacy `tasks/lessons.md` is only a compatibility fallback; \
-prefer `tasks/memory.md` for new memory.\n";
+run `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` \
+before declaring the work done. It writes `tasks/memory.md` with `Type`, `Context`, `Learning`, and \
+`Future Action` fields. Legacy `tasks/lessons.md` is only a compatibility fallback; prefer \
+`tasks/memory.md` for new memory.\n";
 
 pub(super) const MEMORY_UPDATE_REMINDER_JA: &str = "# Memory Reminder\n\
 \n\
 この作業で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、\
-完了宣言前に `tasks/memory.md` を更新してください。新規 entry には `Type`、`Context`、`Learning`、\
-`Future Action` を使います。legacy `tasks/lessons.md` は互換 fallback のみで、新しい memory は \
-`tasks/memory.md` に記録します。\n";
+完了宣言前に `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` \
+を実行してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで \
+`tasks/memory.md` に記録します。legacy `tasks/lessons.md` は互換 fallback のみです。\n";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to update `tasks/memory.md` before stopping. Use `Type`, `Context`, `Learning`, and `Future Action` for new entries.";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` before stopping. The command writes `tasks/memory.md` with `Type`, `Context`, `Learning`, and `Future Action` fields.";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に `tasks/memory.md` を更新するよう agent に促してください。新規 entry には `Type`、`Context`、`Learning`、`Future Action` を使います。";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで `tasks/memory.md` に記録します。";
 
 pub(super) const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \

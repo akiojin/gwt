@@ -64,6 +64,8 @@ fn print_help() {
     println!("  board       Read/write the coordination Board (SPEC-1974)");
     println!("  hook        Dispatch Claude Code / Codex hook events");
     println!("  index       Manage the local search index");
+    println!("  memory      Append reusable project memory");
+    println!("  lessons     Legacy alias for memory add");
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
@@ -84,6 +86,7 @@ fn family_help(family: &str) -> Option<String> {
         "board" => Some(format_board_help()),
         "hook" => Some(format_hook_help()),
         "index" => Some(format_index_help()),
+        "memory" | "lessons" => Some(format_memory_help()),
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
@@ -94,6 +97,21 @@ fn family_help(family: &str) -> Option<String> {
         "daemon" => Some(format_daemon_help()),
         _ => None,
     }
+}
+
+fn format_memory_help() -> String {
+    [
+        "gwtd memory — Append reusable project memory.",
+        "",
+        "Usage: gwtd memory add --title <text> --context <text> --learning <text> --future-action <text> [--type lesson|decision|workflow|failure-pattern] [--date YYYY-MM-DD]",
+        "       gwtd lessons add ...",
+        "",
+        "Notes:",
+        "  - Writes canonical tasks/memory.md.",
+        "  - The lessons command is a legacy alias and does not append tasks/lessons.md.",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_workspace_help() -> String {

@@ -37,6 +37,16 @@ The compatibility action reads the same repo-scoped memory index as
 
 ## Write path
 
-This skill does **not** write to `tasks/memory.md`. New reusable learning must
-be added by editing the file directly with `Type`, `Context`, `Learning`, and
-`Future Action` fields.
+Use `gwtd memory add` for new reusable learning. `gwtd lessons add` remains a
+legacy alias and writes the same canonical `tasks/memory.md` file:
+
+```bash
+"$GWT_BIN" memory add \
+  --type lesson \
+  --title "short title" \
+  --context "What happened or where the learning applies." \
+  --learning "The reusable insight." \
+  --future-action "What future agents should do differently."
+```
+
+Direct file edits remain acceptable for unusual bulk edits or manual cleanup.

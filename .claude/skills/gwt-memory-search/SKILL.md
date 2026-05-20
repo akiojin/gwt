@@ -77,8 +77,19 @@ section in `tasks/memory.md`.
 
 ## Write path
 
-This skill does not write to `tasks/memory.md`. New entries must be added by
-editing the file directly. Use this structure for new entries:
+Use `gwtd memory add` for new reusable memory entries:
+
+```bash
+"$GWT_BIN" memory add \
+  --type lesson \
+  --title "short title" \
+  --context "What happened or where the learning applies." \
+  --learning "The reusable insight." \
+  --future-action "What future agents should do differently."
+```
+
+The command writes the canonical `tasks/memory.md` entry with this structure.
+Direct file edits remain acceptable for unusual bulk edits or manual cleanup:
 
 ```markdown
 ## YYYY-MM-DD - short title
