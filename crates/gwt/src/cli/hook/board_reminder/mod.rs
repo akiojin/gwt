@@ -31,8 +31,14 @@ use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::coordination::{
     has_recent_post_by, load_entries_since_for_scope, load_reminders_state, write_reminders_state,
-    BoardEntryKind,
+    BoardEntryKind, RemindersState,
 };
+use gwt_core::workspace_projection::WorkspaceProjection;
+
+/// SPEC-2359 Phase U-9 (FR-178): minimum number of consecutive
+/// UserPromptSubmit turns with an unchanged `title_summary` before the
+/// stale reminder fires. Tuned conservatively to avoid reminder fatigue.
+const TITLE_SUMMARY_STALE_TURN_THRESHOLD: u32 = 8;
 
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
 use crate::board_audience::current_session_board_scope;
@@ -146,6 +152,95 @@ fn append_title_summary_required_context(
     }
 }
 
+/// SPEC-2359 Phase U-9 (FR-178): observe the current agent's
+/// `title_summary` and `current_focus` against the previously persisted
+/// reminder state, returning the updated state plus a `stale` flag that
+/// is true only on UserPromptSubmit when the title has stayed unchanged
+/// for at least [`TITLE_SUMMARY_STALE_TURN_THRESHOLD`] turns AND
+/// `current_focus` drifted within that window. Empty / unset title is
+/// owned by the empty-trigger reminder path and never triggers stale.
+fn compute_title_summary_stale_state(
+    event: IntentBoundaryEvent,
+    projection: Option<&WorkspaceProjection>,
+    session_id: &str,
+    current_state: &RemindersState,
+) -> (bool, RemindersState) {
+    let mut new_state = current_state.clone();
+    if event != IntentBoundaryEvent::UserPromptSubmit {
+        return (false, new_state);
+    }
+    let Some(projection) = projection else {
+        return (false, new_state);
+    };
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session_id)
+    else {
+        return (false, new_state);
+    };
+    let current_title = agent
+        .title_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let current_focus = agent
+        .current_focus
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let Some(title) = current_title else {
+        // Empty title is owned by the empty-trigger required reminder.
+        // Reset stale-detection state so the counter does not bleed
+        // across an empty → re-set cycle.
+        new_state.last_title_summary_seen = None;
+        new_state.unchanged_turn_count = 0;
+        new_state.phase_changed_in_window = false;
+        new_state.last_current_focus_seen = current_focus;
+        return (false, new_state);
+    };
+
+    if new_state.last_title_summary_seen.as_ref() == Some(&title) {
+        new_state.unchanged_turn_count = new_state.unchanged_turn_count.saturating_add(1);
+        if new_state.last_current_focus_seen != current_focus {
+            new_state.phase_changed_in_window = true;
+        }
+    } else {
+        new_state.last_title_summary_seen = Some(title);
+        new_state.unchanged_turn_count = 0;
+        new_state.phase_changed_in_window = false;
+    }
+    new_state.last_current_focus_seen = current_focus;
+
+    let stale = new_state.unchanged_turn_count >= TITLE_SUMMARY_STALE_TURN_THRESHOLD
+        && new_state.phase_changed_in_window;
+    (stale, new_state)
+}
+
+fn append_title_summary_stale_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    stale: bool,
+    language: &str,
+) -> HookOutput {
+    if !stale || event != IntentBoundaryEvent::UserPromptSubmit {
+        return output;
+    }
+    let stale_text = texts::title_summary_stale_reminder(language);
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{stale_text}"))
+        }
+        HookOutput::Silent => {
+            HookOutput::hook_specific_additional_context(event, stale_text.to_string())
+        }
+        other => other,
+    }
+}
+
 /// IO wrapper: read Board state from disk, build [`ReminderInputs`], and
 /// call the pure [`plan_reminder`]. Used by [`handle_with_input`] and kept
 /// public so tests can exercise the IO boundary.
@@ -210,6 +305,17 @@ pub fn compute_plan(
         agent_title_summary_missing(session)?,
         &language,
     );
+
+    let projection_for_stale =
+        gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?;
+    let (stale, updated_state) = compute_title_summary_stale_state(
+        intent_event,
+        projection_for_stale.as_ref(),
+        &session.id,
+        &plan.next_reminders,
+    );
+    plan.next_reminders = updated_state;
+    plan.output = append_title_summary_stale_context(plan.output, intent_event, stale, &language);
 
     Ok(Some(plan))
 }
@@ -767,5 +873,253 @@ mod tests {
                 "systemMessage": system_message(&plan.output)
             })
         );
+    }
+
+    fn projection_with_agent_identity(
+        repo: &Path,
+        session_id: &str,
+        title_summary: Option<&str>,
+        current_focus: Option<&str>,
+    ) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project(repo);
+        let mut agent = workspace_agent(
+            session_id,
+            Some("ws-stale"),
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        agent.title_summary = title_summary.map(str::to_string);
+        agent.current_focus = current_focus.map(str::to_string);
+        projection.agents.push(agent);
+        projection
+    }
+
+    #[test]
+    fn compute_plan_injects_title_summary_stale_reminder_after_threshold_with_focus_drift() {
+        let session_id = "session-stale";
+        let mut state = RemindersState::default();
+        // Prime the state: first turn observes the title, second turn introduces
+        // a focus change, then 7 more identical turns push the counter past the
+        // threshold (8) while the focus-drift flag stays sticky.
+        let projection_initial = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Workspace"),
+            Some("phase 1"),
+        );
+        let (stale_initial, next) = compute_title_summary_stale_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection_initial),
+            session_id,
+            &state,
+        );
+        assert!(!stale_initial, "first observation cannot be stale");
+        state = next;
+
+        // Drift current_focus to phase 2 while keeping the title constant.
+        let projection_drift = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Workspace"),
+            Some("phase 2"),
+        );
+        for _ in 0..8 {
+            let (_, n) = compute_title_summary_stale_state(
+                IntentBoundaryEvent::UserPromptSubmit,
+                Some(&projection_drift),
+                session_id,
+                &state,
+            );
+            state = n;
+        }
+
+        assert!(
+            state.unchanged_turn_count >= TITLE_SUMMARY_STALE_TURN_THRESHOLD,
+            "counter must reach threshold; got {}",
+            state.unchanged_turn_count
+        );
+        assert!(
+            state.phase_changed_in_window,
+            "focus drift must flip phase_changed_in_window"
+        );
+
+        // The next turn returns stale=true.
+        let (stale_final, _) = compute_title_summary_stale_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection_drift),
+            session_id,
+            &state,
+        );
+        assert!(
+            stale_final,
+            "stale must fire once threshold + phase drift hold"
+        );
+    }
+
+    #[test]
+    fn compute_plan_resets_stale_counter_when_title_summary_changes() {
+        let session_id = "session-reset";
+        let mut state = RemindersState::default();
+
+        let projection_a = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Title A"),
+            Some("phase 1"),
+        );
+        for _ in 0..5 {
+            let (_, n) = compute_title_summary_stale_state(
+                IntentBoundaryEvent::UserPromptSubmit,
+                Some(&projection_a),
+                session_id,
+                &state,
+            );
+            state = n;
+        }
+        assert!(state.unchanged_turn_count >= 4);
+
+        let projection_b = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Title B"),
+            Some("phase 1"),
+        );
+        let (stale, n) = compute_title_summary_stale_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection_b),
+            session_id,
+            &state,
+        );
+        state = n;
+        assert!(
+            !stale,
+            "title change must not trigger stale on the same turn"
+        );
+        assert_eq!(
+            state.unchanged_turn_count, 0,
+            "title change must reset counter"
+        );
+        assert!(
+            !state.phase_changed_in_window,
+            "title change must reset phase_changed_in_window"
+        );
+        assert_eq!(
+            state.last_title_summary_seen.as_deref(),
+            Some("Title B"),
+            "last_title_summary_seen tracks the new value"
+        );
+    }
+
+    #[test]
+    fn compute_plan_does_not_inject_stale_reminder_on_stop_event() {
+        let session_id = "session-stop";
+        let state = RemindersState {
+            last_title_summary_seen: Some("Title".to_string()),
+            unchanged_turn_count: TITLE_SUMMARY_STALE_TURN_THRESHOLD + 5,
+            last_current_focus_seen: Some("focus".to_string()),
+            phase_changed_in_window: true,
+            ..RemindersState::default()
+        };
+        let projection = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Title"),
+            Some("focus"),
+        );
+
+        let (stale, next) = compute_title_summary_stale_state(
+            IntentBoundaryEvent::Stop,
+            Some(&projection),
+            session_id,
+            &state,
+        );
+
+        assert!(!stale, "Stop event must never trigger stale reminder");
+        assert_eq!(
+            next.unchanged_turn_count,
+            TITLE_SUMMARY_STALE_TURN_THRESHOLD + 5,
+            "Stop event must leave state untouched"
+        );
+    }
+
+    #[test]
+    fn compute_plan_does_not_inject_stale_reminder_when_focus_unchanged() {
+        let session_id = "session-no-drift";
+        let mut state = RemindersState::default();
+        let projection = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Title"),
+            Some("focus"),
+        );
+
+        for _ in 0..(TITLE_SUMMARY_STALE_TURN_THRESHOLD + 3) {
+            let (stale, n) = compute_title_summary_stale_state(
+                IntentBoundaryEvent::UserPromptSubmit,
+                Some(&projection),
+                session_id,
+                &state,
+            );
+            state = n;
+            assert!(
+                !stale,
+                "no phase drift must keep stale=false even past the threshold"
+            );
+        }
+        assert!(
+            !state.phase_changed_in_window,
+            "phase_changed_in_window must remain false without focus drift"
+        );
+    }
+
+    #[test]
+    fn compute_plan_skips_stale_when_title_is_empty() {
+        let session_id = "session-empty";
+        let mut state = RemindersState {
+            last_title_summary_seen: Some("Stale".to_string()),
+            unchanged_turn_count: TITLE_SUMMARY_STALE_TURN_THRESHOLD,
+            phase_changed_in_window: true,
+            ..RemindersState::default()
+        };
+        let projection_empty =
+            projection_with_agent_identity(Path::new("/repo"), session_id, None, Some("focus"));
+
+        let (stale, next) = compute_title_summary_stale_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection_empty),
+            session_id,
+            &state,
+        );
+
+        assert!(!stale, "empty title is owned by the required reminder path");
+        assert_eq!(
+            next.unchanged_turn_count, 0,
+            "empty title must reset the counter"
+        );
+        assert_eq!(next.last_title_summary_seen, None);
+        state = next;
+        assert!(!state.phase_changed_in_window);
+    }
+
+    #[test]
+    fn reminders_state_round_trips_phase_u9_fields() {
+        let original = RemindersState {
+            last_injected_at: None,
+            last_reminded_kind: Default::default(),
+            last_title_summary_seen: Some("Title".to_string()),
+            unchanged_turn_count: 12,
+            last_current_focus_seen: Some("focus".to_string()),
+            phase_changed_in_window: true,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: RemindersState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
+
+        // Legacy state without the new fields must round-trip via serde defaults.
+        let legacy = r#"{"last_injected_at":null,"last_reminded_kind":{}}"#;
+        let restored_legacy: RemindersState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored_legacy.last_title_summary_seen, None);
+        assert_eq!(restored_legacy.unchanged_turn_count, 0);
+        assert_eq!(restored_legacy.last_current_focus_seen, None);
+        assert!(!restored_legacy.phase_changed_in_window);
     }
 }
