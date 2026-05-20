@@ -339,6 +339,11 @@ pub fn build_aggregated_status_view(
                 scopes.specs = Some(view);
             }
         }
+        if scopes.lessons.is_none() {
+            if let Some(view) = status_obj.get("lessons").and_then(parse_scope_health) {
+                scopes.lessons = Some(view);
+            }
+        }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
             scopes.files.insert(probe.input.worktree_hash.clone(), view);
         }
@@ -385,6 +390,9 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
         count += 1;
     }
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
+        count += 1;
+    }
+    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
         count += 1;
     }
     count += scopes.files.values().filter(|view| !view.healthy).count();
@@ -1505,6 +1513,7 @@ detached
                 "status": {
                     "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
                     "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
+                    "lessons": {"healthy": true, "document_count": 243, "reason": "ready"},
                     "files": {"healthy": true, "document_count": 310, "reason": "ready"},
                     "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
                 }
@@ -1517,9 +1526,46 @@ detached
         assert!(view.detail.contains("asset-hash-12"));
         assert!(view.scopes.issues.is_some());
         assert!(view.scopes.specs.is_some());
+        assert!(
+            view.scopes.lessons.is_some(),
+            "lessons scope must be present in aggregated view (SPEC-2805)"
+        );
+        assert_eq!(
+            view.scopes.lessons.as_ref().map(|view| view.document_count),
+            Some(243),
+        );
         assert_eq!(view.scopes.files.len(), 1);
         assert_eq!(view.scopes.files_docs.len(), 1);
         assert_eq!(view.worktrees.len(), 1);
+    }
+
+    #[test]
+    fn build_aggregated_status_view_counts_lessons_in_unhealthy_summary() {
+        let probes = vec![WorktreeProbeOutcome {
+            input: WorktreeProbeInput {
+                worktree_hash: "wtAhash".to_string(),
+                branch: "develop".to_string(),
+                path: PathBuf::from("/abs/wtA"),
+            },
+            status_payload: Ok(serde_json::json!({
+                "status": {
+                    "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
+                    "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
+                    "lessons": {"healthy": false, "repair_required": true, "reason": "manifest_missing", "document_count": 0},
+                    "files": {"healthy": true, "document_count": 310, "reason": "ready"},
+                    "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
+                }
+            })),
+        }];
+
+        let view = build_aggregated_status_view("asset-hash-12", &probes);
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert!(
+            view.detail.contains("1 index scope(s)"),
+            "unhealthy lessons must be counted (SPEC-2805); detail: {}",
+            view.detail
+        );
     }
 
     #[test]

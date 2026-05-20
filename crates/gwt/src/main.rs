@@ -3702,14 +3702,14 @@ mod tests {
         assert!(!issue_session.wizard.is_hydrating);
         let issue_view = issue_session.wizard.view();
         assert_eq!(issue_view.mode, gwt::LaunchWizardMode::Knowledge);
-        assert_eq!(issue_view.branch_name, "feature/issue-7");
+        assert_eq!(issue_view.branch_name, "work/issue-7");
         assert_eq!(issue_view.branch_mode, "create_new");
         assert!(!issue_view.show_branch_controls);
         let issue_config = issue_session
             .wizard
             .build_launch_config()
             .expect("issue launch config");
-        assert_eq!(issue_config.branch.as_deref(), Some("feature/issue-7"));
+        assert_eq!(issue_config.branch.as_deref(), Some("work/issue-7"));
         assert_eq!(issue_config.base_branch.as_deref(), Some("feature/demo"));
         assert!(issue_config.working_dir.is_none());
         assert_eq!(
@@ -5084,7 +5084,7 @@ mod tests {
         let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
-            Some("feature/issue-7"),
+            Some("work/issue-7"),
             &mut base_branch,
             &mut knowledge_dir,
             &mut knowledge_env,
@@ -5109,7 +5109,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
-            "feature/issue-7"
+            "work/issue-7"
         );
 
         let preset = temp.path().join("preset");

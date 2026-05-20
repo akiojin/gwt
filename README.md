@@ -58,6 +58,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 - GUI-first installer: `gwt-windows-x86_64.msi`
 - Portable bundle: `gwt-windows-x86_64.zip`
 - The public front door is `gwt.exe`; `gwtd.exe` is bundled for internal runtime use
+- If double-clicking the MSI appears to do nothing, run the diagnostic script
+  from PowerShell and attach the output directory when reporting the issue:
+
+```powershell
+$diag = "$env:TEMP\diagnose-windows-msi.ps1"
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/akiojin/gwt/main/scripts/diagnose-windows-msi.ps1 `
+  -OutFile $diag
+powershell -ExecutionPolicy Bypass -File $diag `
+  -MsiPath "$env:USERPROFILE\Downloads\gwt-windows-x86_64.msi"
+```
+
+The script records the MSI SHA256, Authenticode signature, Zone.Identifier
+download marker, Windows Installer `msiexec` verbose log, installed file layout,
+and basic `gwt.exe` launch evidence.
 
 ### Linux
 
