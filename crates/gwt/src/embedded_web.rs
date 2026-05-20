@@ -2640,8 +2640,36 @@ mod tests {
         );
         assert!(
             html.contains("showSetupForms && launchWizard.show_branch_controls !== false")
-                && html.contains("showSetupForms && launchWizard.show_agent_settings"),
-            "expected branch and linked issue controls to be gated to setup forms",
+                && html.contains("showSetupForms && launchWizard.show_linked_issue"),
+            "expected branch and linked issue controls to be gated to setup forms \
+             (linked issue uses dedicated show_linked_issue flag per SPEC-2014 FR-057)",
+        );
+    }
+
+    // SPEC-2014 Amendment 2026-05-20 (US-25 / FR-057-059 / SC-032)
+    // The Launch Wizard "Linked issue" section must render through the
+    // `show_linked_issue` gate and must not contain an editable input that
+    // dispatches `set_linked_issue` / `clear_linked_issue` from the UI. The
+    // value is rendered as static read-only text.
+    #[test]
+    fn embedded_web_launch_wizard_linked_issue_is_readonly_for_issue_bridge() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("showSetupForms && launchWizard.show_linked_issue"),
+            "expected Linked issue section to be gated by show_linked_issue (FR-057)",
+        );
+        assert!(
+            !html.contains(r#"kind: "set_linked_issue""#),
+            "expected the frontend to stop dispatching set_linked_issue from the wizard UI (FR-058)",
+        );
+        assert!(
+            !html.contains(r#"kind: "clear_linked_issue""#),
+            "expected the frontend to stop dispatching clear_linked_issue from the wizard UI (FR-058)",
+        );
+        assert!(
+            html.contains("launchWizard.linked_issue_number") && html.contains("Issue number"),
+            "expected the Linked issue section to render the issue number as static read-only text",
         );
     }
 

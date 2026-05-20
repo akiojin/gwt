@@ -34,3 +34,11 @@ pub use housekeep::{housekeep, HousekeepReport};
 pub use init::{apply_log_level_to_handle, init, LoggingHandles, ReloadHandle};
 pub use reader::{read_log_file, LogFileEntry, ReadDiagnostics, ReadOutcome};
 pub use writer::{current_log_file, log_file_for_date, LOG_FILE_BASENAME};
+
+// SPEC-1924 Update 2026-05-20: re-export ProcessConsoleHub family so
+// downstream crates can access them through `gwt_core::logging::...`
+// alongside the existing `LoggingHandles.process_console_hub` field.
+pub use crate::process_console::{
+    spawn_logged, spawn_logged_blocking, ProcessConsoleHub, ProcessKind, ProcessLine,
+    ProcessStream, SpawnOptions, SpawnOutput, DEFAULT_RING_CAPACITY,
+};

@@ -1939,6 +1939,7 @@ mod tests {
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            server_url: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -5988,6 +5989,11 @@ fn main() -> wry::Result<()> {
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
     let front_door = gui_front_door_launch_surface(server.url());
+    // SPEC-2785 FR-E: hand the bound URL to AppRuntime so
+    // `open_server_url_events` can gate `OpenServerUrl` requests against it.
+    // Must run before the WebView surface boots; the first frontend message
+    // is `FrontendReady` which does not exercise this code path.
+    app.set_server_url(front_door.browser_url.to_string());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
     if serve_args.is_some() {
         eprintln!("gwt serve: press Ctrl-C to stop");

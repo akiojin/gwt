@@ -96,29 +96,32 @@ fn cache_filename(owner: &str, repo: &str) -> String {
 /// Fetch open issues from GitHub via `gh issue list --json`.
 pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
     let repo_slug = format!("{owner}/{repo}");
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &[
             "issue",
             "list",
             "--repo",
-            &repo_slug,
+            repo_slug.as_str(),
             "--state",
             "open",
             "--json",
             "number,title,state,labels,assignees,body,url",
             "--limit",
             "100",
-        ])
-        .output()
-        .map_err(|e| GwtError::Git(format!("gh issue list: {e}")))?;
+        ],
+        gwt_core::process_console::SpawnOptions::new("gh issue list"),
+    )
+    .map_err(|e| GwtError::Git(format!("gh issue list: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(GwtError::Git(format!("gh issue list: {stderr}")));
+    if !output.success() {
+        return Err(GwtError::Git(format!("gh issue list: {}", output.stderr)));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_gh_issues_json(&stdout)
+    parse_gh_issues_json(&output.stdout)
 }
 
 /// Parse the JSON output from `gh issue list --json`.
