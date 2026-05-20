@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-05-20 — `gwtd issue spec create -f <body>` は section マーカーを付けない
+
+### 事象
+
+gwt-discussion → gwt-register-issue で新規 SPEC を登録する際、`gwtd issue spec create --title "..." -f spec.md` を実行して Issue #2780 が作成されたが、`gwtd issue spec 2780 --section spec` で `gwt issue: section 'spec' not found` となり、cache の `body.md` を確認すると `<!-- gwt-spec id=2780 version=1 --> <!-- sections: -->` のヘッダのみで spec section content が空だった。
+
+### 原因
+
+`gwtd issue spec create -f <body>` は body file の生 markdown をそのまま issue body に書き出すだけで、`<!-- artifact:spec BEGIN -->` ... `<!-- artifact:spec END -->` の section マーカーを自動付与しない。section マーカーがないと `gwtd issue spec --section spec` が認識できず、section editor (`--edit`) や cache パイプラインも空扱いになる。
+
+create コマンドが受け付ける body 形式が「section マーカー付き完成形」なのか「section content だけ」なのかが SKILL / AGENTS.md に明文化されていなかったため、後者を渡してしまい空 SPEC が生まれた。
+
+### 再発防止策
+
+1. **SPEC 作成は 2 ステップに分けるのが安全**: `gwtd issue spec create --title "SPEC: <title>" -f <minimal-stub>` で器を作り、直後に `gwtd issue spec <n> --edit spec -f <full-body>` で section content を投入する。`--edit` は section マーカーを自動付与するため確実に section が認識される。
+2. SPEC 作成系の手順は `gwt-register-issue` skill 内に正本フローとして書き起こす。可能なら専用 skill `gwt-register-spec` を新設して title 規約 / 7 section 構成 / マーカー処理 / create+edit の一本化をオーナーシップとして持たせる（別 SPEC として議論予定）。
+3. SPEC 作成直後に `gwtd issue spec <n> --section spec | head -5` を実行して空でないことを **必ず** 検証する。空なら `--edit spec -f` で再投入してから handoff する。
+4. SPEC body には `# SPEC: <title>` の H1 で始まり、`--title` 引数と完全一致させる慣習を保つ（既存 SPEC #2133 / #1932 と同じ）。
+
+---
+
 ## 2026-05-18 — Launch Agent Execution Mode の Resume を silent downgrade させない
 
 ### 事象

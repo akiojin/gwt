@@ -35,6 +35,8 @@ const ROOT_MODULES = new Set([
   "operator-shell.js",
   "project-clone-modal.js",
   "project-tabs-renderer.js",
+  // SPEC #2780 — Release Notes window opened from #app-version label.
+  "release-notes-window.js",
   "socket-receive-dispatcher.js",
   "terminal-context-menu.js",
   "terminal-wheel-scroll.js",

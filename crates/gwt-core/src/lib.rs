@@ -14,6 +14,7 @@ pub mod migration;
 pub mod paths;
 pub mod process;
 mod release_contract;
+pub mod release_notes;
 pub mod repo_hash;
 pub mod runtime;
 pub mod skill_state;
