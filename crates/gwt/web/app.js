@@ -4674,6 +4674,11 @@
             error: "",
             severity: "debug",
             query: "",
+            // SPEC-2019 Amendment 2026-05-20 (Process facet) — AND-filter
+            // by ProcessKind on top of severity + query. "" means "all".
+            // Matches LogEvent.fields.kind injected by `spawn_logged`
+            // summary events (target = "gwt.process.summary").
+            processKind: "",
             selectedEntryId: null,
             unreadAlerts: 0,
             unreadEntryId: null,
@@ -5153,14 +5158,29 @@
       function filteredLogEntries(state) {
         const minimumRank = logSeverityRank(state.severity);
         const query = String(state.query || "").trim().toLowerCase();
+        const processKind = String(state.processKind || "");
         return (state.entries || [])
           .filter(
             (entry) =>
               logSeverityRank(entry.severity) >= minimumRank &&
-              logMatchesQuery(entry, query),
+              logMatchesQuery(entry, query) &&
+              logMatchesProcessKind(entry, processKind),
           )
           .slice()
           .reverse();
+      }
+
+      // SPEC-2019 Amendment 2026-05-20 — AND-combine the Process kind chip
+      // with severity / keyword filters. When `processKind` is empty the
+      // entry passes through; otherwise the entry must carry the matching
+      // `kind` field in its `fields` map. `spawn_logged` summary events
+      // emit the kind there (target = "gwt.process.summary").
+      function logMatchesProcessKind(entry, processKind) {
+        if (!processKind) {
+          return true;
+        }
+        const fields = entry.fields || {};
+        return String(fields.kind || "") === processKind;
       }
 
       function appendLiveLogEntry(entry) {
@@ -5206,6 +5226,7 @@
         const status = body.querySelector(".logs-status");
         const unreadButton = body.querySelector(".logs-unread-button");
         const severitySelect = body.querySelector(".logs-severity-select");
+        const processKindSelect = body.querySelector(".logs-process-kind-select");
         const searchInput = body.querySelector(".logs-search-input");
         const timeline = body.querySelector(".logs-timeline");
         const detailPane = body.querySelector(".logs-detail-pane");
@@ -5213,6 +5234,7 @@
           !status ||
           !unreadButton ||
           !severitySelect ||
+          !processKindSelect ||
           !searchInput ||
           !timeline ||
           !detailPane
@@ -5249,6 +5271,7 @@
             ? "1 unread alert"
             : `${state.unreadAlerts} unread alerts`;
         severitySelect.value = state.severity;
+        processKindSelect.value = state.processKind || "";
         searchInput.value = state.query;
 
         timeline.innerHTML = "";
@@ -8742,6 +8765,17 @@
                   </select>
                 </label>
                 <label class="logs-filter-field">
+                  <span>Process</span>
+                  <select class="logs-process-kind-select">
+                    <option value="">All</option>
+                    <option value="gh">gh</option>
+                    <option value="git">git</option>
+                    <option value="docker">docker</option>
+                    <option value="agent">agent</option>
+                    <option value="runner">runner</option>
+                  </select>
+                </label>
+                <label class="logs-filter-field">
                   <span>Search</span>
                   <input class="logs-search-input" type="search" placeholder="Filter message, source, or fields" />
                 </label>
@@ -8775,6 +8809,12 @@
             .querySelector(".logs-severity-select")
             .addEventListener("change", (event) => {
               state.severity = event.target.value;
+              frontendUnits.logsSurface.renderLogs(windowData.id);
+            });
+          body
+            .querySelector(".logs-process-kind-select")
+            .addEventListener("change", (event) => {
+              state.processKind = event.target.value;
               frontendUnits.logsSurface.renderLogs(windowData.id);
             });
           body
