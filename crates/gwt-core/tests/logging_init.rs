@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use gwt_core::logging::{current_log_file, init, read_log_file, LogLevel, LoggingConfig};
+use gwt_core::process_console::ProcessKind;
 
 #[test]
 fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
@@ -30,6 +31,30 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
         "hello from test"
     );
     tracing::warn!(target: "gwt_core::logging::test", "warning sample");
+
+    // SPEC-2809 — ConsoleTeeLayer should map `gwt::index` events into
+    // the IndexRunner ring buffer so the Console window's Runner tab
+    // shows operational notes even when the chroma runner is not
+    // currently spawning a subprocess.
+    tracing::info!(
+        target: "gwt::index",
+        worktree = "test-wt",
+        "index status runner kicked"
+    );
+
+    let hub_snapshot_runner = handles
+        .process_console_hub
+        .snapshot_kind(ProcessKind::IndexRunner);
+    assert!(
+        hub_snapshot_runner
+            .iter()
+            .any(|line| line.message.contains("index status runner kicked")),
+        "expected ConsoleTeeLayer to push gwt::index event into IndexRunner buffer; got: {:?}",
+        hub_snapshot_runner
+            .iter()
+            .map(|l| l.message.as_str())
+            .collect::<Vec<_>>()
+    );
 
     // Drop the handles BEFORE reading the log file. `WorkerGuard::drop`
     // sends a shutdown signal to the non-blocking writer thread and
