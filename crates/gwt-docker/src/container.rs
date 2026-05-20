@@ -91,18 +91,34 @@ fn next_docker_spawn_id() -> u64 {
 }
 
 fn emit_docker_start(spawn_id: u64, action: &str, args: &[&str]) {
+    let label = format!("docker {}", args.join(" "));
     tracing::info!(
         target: "gwt.process.summary",
         kind = "docker",
         spawn_id = spawn_id,
-        label = %format!("docker {}", args.join(" ")),
+        label = %label,
         action = action,
         phase = "start",
         "process start",
     );
+    // SPEC-2809 (revised) — push the command banner so the Console
+    // window's docker tab shows the actual command rather than an
+    // opaque spawn_id.
+    gwt_core::process::push_command_banner_to_hub(
+        gwt_core::process_console::ProcessKind::Docker,
+        spawn_id,
+        &label,
+        None,
+    );
 }
 
 fn emit_docker_end(spawn_id: u64, action: &str, exit_code: Option<i32>, duration_ms: u64) {
+    gwt_core::process::push_command_summary_to_hub(
+        gwt_core::process_console::ProcessKind::Docker,
+        spawn_id,
+        exit_code,
+        duration_ms,
+    );
     tracing::info!(
         target: "gwt.process.summary",
         kind = "docker",

@@ -84,6 +84,17 @@ pub fn run_git_logged(
         "process start",
     );
 
+    // SPEC-2809 (revised) — push the actual command line as a banner
+    // into the hub so the Console window shows `$ git rev-parse ...`
+    // instead of an opaque `spawn_id=N` marker. The frontend detects
+    // the `$ ` prefix and styles it as an invocation header.
+    push_command_banner_to_hub(
+        crate::process_console::ProcessKind::Git,
+        spawn_id,
+        &label,
+        current_dir,
+    );
+
     let mut command = hidden_command("git");
     command.args(args);
     if let Some(dir) = current_dir {
@@ -106,6 +117,14 @@ pub fn run_git_logged(
         Err(_) => (None, false, 0, 0),
     };
 
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    push_command_summary_to_hub(
+        crate::process_console::ProcessKind::Git,
+        spawn_id,
+        exit_code,
+        duration_ms,
+    );
+
     tracing::info!(
         target: "gwt.process.summary",
         kind = "git",
@@ -113,7 +132,7 @@ pub fn run_git_logged(
         label = %label,
         phase = "end",
         exit_code = exit_code.map(|c| c as i64),
-        duration_ms = started_at.elapsed().as_millis() as u64,
+        duration_ms = duration_ms,
         stdout_lines = stdout_lines,
         stderr_lines = stderr_lines,
         success = success,
@@ -121,6 +140,52 @@ pub fn run_git_logged(
     );
 
     result
+}
+
+/// Shared helper: push a synthetic banner line (the command string
+/// prefixed with `$ `) as the first line of a new spawn. Used by
+/// `run_git_logged` and `spawn_logged` so the Console window can render
+/// a per-invocation header without needing a separate metadata channel.
+pub fn push_command_banner_to_hub(
+    kind: crate::process_console::ProcessKind,
+    spawn_id: u64,
+    label: &str,
+    current_dir: Option<&std::path::Path>,
+) {
+    let hub = crate::process_console::global();
+    let banner = match current_dir {
+        Some(dir) => format!("$ {} (cwd={})", label, dir.display()),
+        None => format!("$ {label}"),
+    };
+    hub.push(crate::process_console::ProcessLine::new(
+        kind,
+        spawn_id,
+        crate::process_console::ProcessStream::Stdout,
+        banner,
+    ));
+}
+
+/// Shared helper: push a synthetic summary line at spawn end with the
+/// exit code + duration so the Console window shows a closing footer
+/// per command.
+pub fn push_command_summary_to_hub(
+    kind: crate::process_console::ProcessKind,
+    spawn_id: u64,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+) {
+    let hub = crate::process_console::global();
+    let exit = match exit_code {
+        Some(code) => code.to_string(),
+        None => "?".to_string(),
+    };
+    let footer = format!("→ exit={exit} ({duration_ms}ms)");
+    hub.push(crate::process_console::ProcessLine::new(
+        kind,
+        spawn_id,
+        crate::process_console::ProcessStream::Stdout,
+        footer,
+    ));
 }
 
 fn forward_git_lines(spawn_id: u64, stdout: &[u8], stderr: &[u8]) {
