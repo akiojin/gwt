@@ -14,6 +14,7 @@ use tracing_subscriber::{
 
 use super::{
     config::{LogLevel, LoggingConfig},
+    console_tee::ConsoleTeeLayer,
     fmt_layer, housekeep,
     ui_forwarder::UiForwarderLayer,
     writer, LogEvent,
@@ -138,10 +139,22 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     }));
     let ui = UiForwarderLayer::new(ui_tx.clone());
 
+    // Install the hub BEFORE the subscriber so the ConsoleTeeLayer's
+    // first event finds the real hub instead of an orphan instance.
+    let process_console_hub = ProcessConsoleHub::new();
+    let _ = crate::process_console::set_global(process_console_hub.clone());
+
+    // SPEC-2809: ConsoleTeeLayer mirrors gwt-domain tracing events
+    // (target prefix → ProcessKind) into the ProcessConsoleHub so the
+    // Console window tabs see both actual command spawns and gwt-side
+    // operational notes (VS Code Output Panel parity).
+    let tee = ConsoleTeeLayer::new();
+
     Registry::default()
         .with(reloadable_filter)
         .with(fmt)
         .with(ui)
+        .with(tee)
         .try_init()
         .map_err(|e| format!("subscriber init failed: {e}"))?;
 
@@ -154,12 +167,6 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
             "invalid initial filter directive — fell back to default level"
         );
     }
-
-    let process_console_hub = ProcessConsoleHub::new();
-    // SPEC-1924 FR-039: install the process-wide hub so synchronous
-    // gh / git / docker / runner wrappers can find it without
-    // threading it through every call site.
-    let _ = crate::process_console::set_global(process_console_hub.clone());
 
     Ok(LoggingHandles {
         guard,
