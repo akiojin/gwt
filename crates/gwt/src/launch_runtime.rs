@@ -485,9 +485,26 @@ pub fn probe_host_package_runner_with_timeout(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
+    // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit summary tracing
+    // around the bounded-poll spawn so the Logs Process facet (kind =
+    // agent) and the Console window see the launch attempt. stdio is
+    // intentionally null because the caller only consumes the timeout +
+    // exit status; nothing to forward to the hub.
+    let agent_spawn_id =
+        AGENT_LAUNCH_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let agent_label = format!("{} {}", command, args.join(" "));
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "agent",
+        spawn_id = agent_spawn_id,
+        label = %agent_label,
+        phase = "start",
+        "process start",
+    );
+
     let mut process = gwt_core::process::hidden_command(command);
     process
-        .args(args)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -499,16 +516,46 @@ pub fn probe_host_package_runner_with_timeout(
         process.current_dir(cwd);
     }
     let Ok(mut child) = process.spawn() else {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = agent_spawn_id,
+            label = %agent_label,
+            phase = "end",
+            exit_code = None::<i64>,
+            success = false,
+            error = "spawn failed",
+            "process end",
+        );
         return false;
     };
     let start = Instant::now();
+    let emit_end = |exit_code: Option<i32>, success: bool, note: Option<&str>| {
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "agent",
+            spawn_id = agent_spawn_id,
+            label = %agent_label,
+            phase = "end",
+            exit_code = exit_code.map(|c| c as i64),
+            duration_ms = start.elapsed().as_millis() as u64,
+            success = success,
+            note = note,
+            "process end",
+        );
+    };
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                let success = status.success();
+                emit_end(status.code(), success, None);
+                return success;
+            }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    emit_end(None, false, Some("timeout"));
                     return false;
                 }
                 thread::sleep(poll_interval);
@@ -516,11 +563,15 @@ pub fn probe_host_package_runner_with_timeout(
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                emit_end(None, false, Some("wait error"));
                 return false;
             }
         }
     }
 }
+
+static AGENT_LAUNCH_SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);

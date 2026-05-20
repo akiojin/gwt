@@ -239,6 +239,29 @@ impl RunnerSpawner for PythonRunnerSpawner {
         project_root: &Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
+        // SPEC-1924 FR-039 / SPEC-2809 Phase D-runner — emit a
+        // `gwt.process.summary` start event so the Console window's
+        // runner tab and the Logs Process facet observe the Python
+        // chroma index runner spawn. The process is fire-and-forget
+        // (caller does not wait), so the `end` event is best-effort
+        // and intentionally omitted; the canonical log retains the
+        // start sentinel which is enough for incident triage.
+        let spawn_id = RUNNER_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let label = format!(
+            "{} {} --action index-issues",
+            self.python_executable.display(),
+            self.runner_script.display(),
+        );
+        tracing::info!(
+            target: "gwt.process.summary",
+            kind = "runner",
+            spawn_id = spawn_id,
+            label = %label,
+            phase = "start",
+            respect_ttl = respect_ttl,
+            "process start",
+        );
+
         let mut cmd = crate::process::hidden_command(&self.python_executable);
         cmd.arg(&self.runner_script)
             .arg("--action")
@@ -255,6 +278,8 @@ impl RunnerSpawner for PythonRunnerSpawner {
         cmd.spawn().map(|_| ())
     }
 }
+
+static RUNNER_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 // gwt_index_worktree_dir is re-exported from `crate::index::paths`; keep this
 // path in scope so tests can verify the layout matches.

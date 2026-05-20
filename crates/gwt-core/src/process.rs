@@ -43,6 +43,130 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
     capture_output(cmd, output)
 }
 
+// =====================================================================
+// SPEC-1924 Phase C-git — synchronous git wrapper that emits
+// `gwt.process.summary` start/end tracing and pushes captured stdout /
+// stderr lines into the `ProcessConsoleHub`. Drop-in replacement for the
+// common `hidden_command("git").args(...).current_dir(...).output()`
+// idiom; preserves the std::process::Output return so callers do not
+// need to change their downstream logic.
+// =====================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static GIT_SPAWN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn next_git_spawn_id() -> u64 {
+    GIT_SPAWN_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Spawn `git` with `args` in `current_dir`, capture stdout / stderr,
+/// emit Process facet summary tracing, and forward redacted lines to
+/// the hub (kind = `Git`).
+///
+/// Returns the same `std::process::Output` as `Command::output()` so the
+/// caller's existing `status.success()` / `stdout` / `stderr` handling
+/// keeps working unchanged.
+pub fn run_git_logged(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Output> {
+    let spawn_id = next_git_spawn_id();
+    let label = format!("git {}", args.join(" "));
+    let started_at = std::time::Instant::now();
+
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "git",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "start",
+        "process start",
+    );
+
+    let mut command = hidden_command("git");
+    command.args(args);
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+    let result = command.output();
+
+    let (exit_code, success, stdout_lines, stderr_lines) = match &result {
+        Ok(output) => {
+            forward_git_lines(spawn_id, &output.stdout, &output.stderr);
+            let stdout_lines = String::from_utf8_lossy(&output.stdout).lines().count() as u64;
+            let stderr_lines = String::from_utf8_lossy(&output.stderr).lines().count() as u64;
+            (
+                output.status.code(),
+                output.status.success(),
+                stdout_lines,
+                stderr_lines,
+            )
+        }
+        Err(_) => (None, false, 0, 0),
+    };
+
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "git",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "end",
+        exit_code = exit_code.map(|c| c as i64),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        stdout_lines = stdout_lines,
+        stderr_lines = stderr_lines,
+        success = success,
+        "process end",
+    );
+
+    result
+}
+
+fn forward_git_lines(spawn_id: u64, stdout: &[u8], stderr: &[u8]) {
+    let hub = crate::process_console::global();
+    forward_bytes_to_hub(
+        &hub,
+        spawn_id,
+        crate::process_console::ProcessStream::Stdout,
+        stdout,
+    );
+    forward_bytes_to_hub(
+        &hub,
+        spawn_id,
+        crate::process_console::ProcessStream::Stderr,
+        stderr,
+    );
+}
+
+fn forward_bytes_to_hub(
+    hub: &crate::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: crate::process_console::ProcessStream,
+    bytes: &[u8],
+) {
+    if bytes.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    for piece in text.split(['\n', '\r']) {
+        if piece.is_empty() {
+            continue;
+        }
+        // Match the redact + ANSI strip discipline of the async
+        // `spawn_logged` path so the hub never sees raw secrets or
+        // ANSI sequences.
+        let sanitized =
+            crate::process_console::redact_line(&crate::process_console::strip_ansi(piece));
+        hub.push(crate::process_console::ProcessLine::new(
+            crate::process_console::ProcessKind::Git,
+            spawn_id,
+            stream,
+            sanitized,
+        ));
+    }
+}
+
 /// Check whether a command exists on `$PATH`.
 pub fn command_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
