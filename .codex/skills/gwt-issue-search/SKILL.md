@@ -5,7 +5,7 @@ description: "Semantic search over all GitHub Issues using vector embeddings. Us
 
 # Issue Search
 
-gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt TUI refreshes it asynchronously at startup with a 15-minute TTL; non-TUI sessions get an auto-build on the first search.
+gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) refreshes it asynchronously at startup with a 15-minute TTL; external runner invocations get an auto-build on the first search.
 
 ## gwtd resolution
 
@@ -42,7 +42,7 @@ Suggested query patterns:
 
 ## Environment
 
-When the gwt TUI launches an agent pane, the following env vars are exported automatically:
+When the gwt GUI app launches an agent pane, the following env vars are exported automatically:
 
 - `GWT_PROJECT_ROOT` — absolute path of the active worktree
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
@@ -70,7 +70,7 @@ To force a refresh ignoring TTL:
   --project-root "$GWT_PROJECT_ROOT"
 ```
 
-Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes (used by the TUI startup background task).
+Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes (used by the gwt GUI startup background task).
 
 ## Issues search output format
 
@@ -89,7 +89,7 @@ Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes
 
 ## Notes
 
-- The TUI refreshes the Issue index automatically at startup (TTL 15 min). Non-TUI sessions trigger an inline build on the first search.
+- The gwt GUI app refreshes the Issue index automatically at startup (TTL 15 min). External runner invocations trigger an inline build on the first search.
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For SPEC search, use `gwt-spec-search` instead (SPECs are GitHub Issues cached at `~/.gwt/cache/issues/`)

@@ -127,19 +127,30 @@ impossible.**
 
 Before any push, PR create, or PR update operation, invoke
 `gwt-verify --mode pre-pr` and require `Overall: PASS` in the evidence
-bundle. This guarantees the right test matrix has run for the changed
-surfaces — cargo for Rust crates, `pnpm test:frontend-*` for frontend JS,
-`pnpm test:visual` for WebView/browser UI surfaces only (Playwright is not
-invoked for non-browser surfaces), `pnpm test:release-*` for release-system
-changes, and `pnpm lint:skills` for skill assets.
+bundle. `gwt-verify` is a project-agnostic Generic Verification Contract:
+it autodetects the host project's test runners (Cargo.toml /
+package.json / pyproject.toml / go.mod / ProjectSettings / *.sln / etc.),
+runs the appropriate unit / integration / E2E / visual tests for the
+changed surfaces, emits a Test Inventory naming exactly which tests
+were executed, and hands off to the user with a 4-step 導線 + Check
+Items before finalizing the report. Project-local AGENTS.md / README
+testing instructions always take precedence over the generic matrix.
 
-If `gwt-verify --mode pre-pr` returns `Overall: FAIL` or
-`failed: tooling-missing`, do not push, do not create a PR, and do not
-update an existing PR. Route the failure for repair (back to the TDD loop
-or `gwt-discussion`) and re-run pre-pr verification before retrying.
+The push / PR-write gate **fails** when any of:
+
+- `gwt-verify --mode pre-pr` returns `Overall: FAIL`
+- `failed: tooling-missing` is recorded
+- `User Verification Result` is `pending` (handoff never completed) or
+  `rejected(<reason>)` (user declined). The user's reason is preserved
+  in the evidence bundle.
+
+On failure, do not push, do not create a PR, and do not update an
+existing PR. Route the failure for repair (back to the TDD loop or
+`gwt-discussion`) and re-run pre-pr verification before retrying.
 
 This applies equally to Create and Fix modes — every code-changing
-re-push must be preceded by a fresh `gwt-verify --mode pre-pr` PASS.
+re-push must be preceded by a fresh `gwt-verify --mode pre-pr` PASS
+with a satisfied `User Verification Result`.
 
 ## Mode: Create
 

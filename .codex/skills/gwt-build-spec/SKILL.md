@@ -139,21 +139,28 @@ All other changes require the TDD loop.
 ## Phase 3: Verification
 
 Delegate environment-aware verification to `gwt-verify --mode full`. The
-sub-skill classifies the changed surfaces per
-`.codex/skills/gwt-verify/references/test-matrix.md`, runs the appropriate
-matrix per surface (cargo for Rust crates, `pnpm test:frontend-*` for frontend
-JS, `pnpm test:visual` only for WebView/browser UI surfaces, `pnpm
-test:release-*` only for release-system changes, `pnpm lint:skills` for skill
-asset changes), and returns an evidence bundle in `## Verification Report`
-form. Do not hard-code a static cargo command list here — the right matrix is
-determined by what actually changed.
+sub-skill is a project-agnostic Generic Verification Contract: it classifies
+the changed surfaces against `.codex/skills/gwt-verify/references/surface-taxonomy.md`,
+detects the host project's actual test runners from manifests
+(Cargo.toml / package.json / pyproject.toml / go.mod / ProjectSettings /
+*.sln / etc.) per `.codex/skills/gwt-verify/references/runner-detection.md`,
+runs the appropriate unit / integration / E2E / visual tests, emits a
+**Test Inventory** that names which tests were executed, and hands off to
+the user via a 4-step 導線 + Check Items before finalizing
+`## Verification Report`. The right matrix is determined by what actually
+changed and which runners the project ships; do not hard-code a static
+cargo / pnpm / Playwright command list here.
 
-The skill is considered green when:
+The skill is considered green when **all** of the following hold:
 
 - `gwt-verify --mode full` exits with `Overall: PASS`
 - the evidence bundle records no `failed: tooling-missing` entry
-- no Playwright snapshot diff is unresolved (visual regression must be
+- no visual / UI snapshot diff is unresolved (visual regression must be
   triaged before declaring PASS, not silently regenerated)
+- `User Verification Result` is one of `confirmed`, `n/a`, or
+  `skipped(<reason>)`. `pending` is not acceptable; `rejected(<reason>)`
+  forces `Overall: FAIL` and the implementation returns to Phase 2 (TDD
+  loop). The user's reason is preserved in the evidence bundle.
 
 In SPEC mode, also verify:
 

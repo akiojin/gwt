@@ -1882,4 +1882,198 @@ mod tests {
             "AGENTS.md must document the gwt-verify skill (SPEC-1935 Phase 17 FR-122)"
         );
     }
+
+    // SPEC-1935 Amendment (FR-129..FR-133): gwt-verify is a project-agnostic
+    // verification contract. The skill must document Test Inventory emission,
+    // a User Verification Handoff phase with a 4-step 導線 structure
+    // (build → launch → navigate → observe), and explicit Check Items.
+    // Callers (gwt-build-spec, gwt-manage-pr) must gate completion / push on
+    // the User Verification Result.
+
+    #[test]
+    fn gwt_verify_documents_test_inventory_section() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Test Inventory"),
+                "{relative} must document the Test Inventory section (SPEC-1935 FR-130)"
+            );
+            assert!(
+                content.contains("inventory unavailable"),
+                "{relative} must specify the `inventory unavailable: <reason>` fallback for unparseable runner output"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_verify_documents_user_verification_phase() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("User Verification"),
+                "{relative} must document the User Verification Handoff phase (SPEC-1935 FR-131)"
+            );
+            assert!(
+                content.contains("User Verification Result"),
+                "{relative} must record User Verification Result in the evidence bundle"
+            );
+            assert!(
+                content.contains("confirmed")
+                    && content.contains("rejected")
+                    && content.contains("pending"),
+                "{relative} must enumerate User Verification Result states (pending/confirmed/rejected)"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_verify_documents_4_step_navigation_path() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("導線") || content.contains("How to access"),
+                "{relative} must include a 導線 / How-to-access section for user verification (SPEC-1935 FR-132)"
+            );
+            for step in ["build", "launch", "navigate", "observe"] {
+                assert!(
+                    content.contains(step),
+                    "{relative} must document the 4-step 導線 structure (missing step: {step})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gwt_verify_documents_check_items_section() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Check Items"),
+                "{relative} must document the Check Items section presented to the user"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_verify_is_project_agnostic() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-verify/SKILL.md",
+            ".codex/skills/gwt-verify/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("project-agnostic")
+                    || content.contains("Generic Verification Contract"),
+                "{relative} must declare itself as project-agnostic / generic verification contract (SPEC-1935 FR-129)"
+            );
+            // Runner manifests the skill should hint at for autodetection.
+            for manifest in [
+                "Cargo.toml",
+                "package.json",
+                "pyproject.toml",
+                "go.mod",
+                "ProjectSettings",
+            ] {
+                assert!(
+                    content.contains(manifest),
+                    "{relative} must mention runner-manifest signal `{manifest}` for autodetection"
+                );
+            }
+            // Project-local AGENTS.md must take precedence over the generic matrix.
+            assert!(
+                content.contains("AGENTS.md") && content.contains("project"),
+                "{relative} must require honoring the project's own AGENTS.md when present"
+            );
+        }
+    }
+
+    #[test]
+    fn gwt_verify_new_references_are_bundled() {
+        use crate::assets::CLAUDE_SKILLS;
+
+        let verify_dir = CLAUDE_SKILLS
+            .get_dir(".claude/skills/gwt-verify")
+            .or_else(|| CLAUDE_SKILLS.get_dir("gwt-verify"))
+            .expect("gwt-verify directory must be bundled in CLAUDE_SKILLS");
+
+        let references = verify_dir
+            .get_dir(
+                verify_dir
+                    .path()
+                    .join("references")
+                    .to_str()
+                    .expect("references path is utf8"),
+            )
+            .expect("gwt-verify must ship a references/ subdir");
+
+        let reference_files: Vec<&str> = references
+            .files()
+            .filter_map(|f| f.path().file_name().and_then(|n| n.to_str()))
+            .collect();
+
+        for required in [
+            "surface-taxonomy.md",
+            "runner-detection.md",
+            "user-verification-guide.md",
+        ] {
+            assert!(
+                reference_files.contains(&required),
+                "gwt-verify references/ must include {required} (SPEC-1935 Amendment FR-129..FR-132)"
+            );
+        }
+    }
+
+    #[test]
+    fn build_spec_phase_3_requires_user_verification_result() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("User Verification Result"),
+                "{relative} must gate Phase 3 completion on User Verification Result (SPEC-1935 FR-133)"
+            );
+        }
+    }
+
+    #[test]
+    fn manage_pr_pre_pr_requires_user_verification_result() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("User Verification Result"),
+                "{relative} must gate push / PR create / update on User Verification Result (SPEC-1935 FR-133)"
+            );
+        }
+    }
 }

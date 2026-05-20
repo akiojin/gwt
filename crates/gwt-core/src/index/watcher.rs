@@ -196,7 +196,23 @@ fn is_builtin_skip(worktree: &Path, path: &Path) -> bool {
     }
 }
 
+/// Worktree-relative paths that override the builtin skip list. These files
+/// participate in the watcher even when their parent directory would normally
+/// be skipped. Keep the list intentionally small — every entry weakens the
+/// builtin skip guarantee.
+const WATCHER_BUILTIN_ALLOWLIST: &[&str] = &["tasks/lessons.md"];
+
+fn is_allowlisted(worktree: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(worktree).unwrap_or(path);
+    WATCHER_BUILTIN_ALLOWLIST
+        .iter()
+        .any(|allowed| rel == Path::new(allowed))
+}
+
 fn is_ignored(gi: &Gitignore, worktree: &Path, path: &Path) -> bool {
+    if is_allowlisted(worktree, path) {
+        return false;
+    }
     if is_builtin_skip(worktree, path) {
         return true;
     }
@@ -233,5 +249,32 @@ mod tests {
         let path = root.join("specs-archive/SPEC-10/spec.md");
 
         assert!(!is_builtin_skip(root, &path));
+    }
+
+    #[test]
+    fn tasks_lessons_md_is_watched_despite_tasks_skip() {
+        let root = Path::new("/repo");
+        let path = root.join("tasks/lessons.md");
+
+        let gi = build_gitignore(root);
+        assert!(!is_ignored(&gi, root, &path));
+    }
+
+    #[test]
+    fn tasks_todo_md_remains_skipped() {
+        let root = Path::new("/repo");
+        let path = root.join("tasks/todo.md");
+
+        let gi = build_gitignore(root);
+        assert!(is_ignored(&gi, root, &path));
+    }
+
+    #[test]
+    fn tasks_spec_archive_dir_remains_skipped() {
+        let root = Path::new("/repo");
+        let path = root.join("tasks/spec-1939/notes.md");
+
+        let gi = build_gitignore(root);
+        assert!(is_ignored(&gi, root, &path));
     }
 }
