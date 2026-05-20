@@ -57,6 +57,7 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
 pub enum IndexRebuildScope {
     Issues,
     Specs,
+    Lessons,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -67,6 +68,7 @@ impl IndexRebuildScope {
         match self {
             Self::Issues => "issues",
             Self::Specs => "specs",
+            Self::Lessons => "lessons",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -158,6 +160,8 @@ pub struct ProjectIndexScopes {
     pub issues: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specs: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lessons: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -172,6 +176,7 @@ impl ProjectIndexScopes {
     pub fn is_empty(&self) -> bool {
         self.issues.is_none()
             && self.specs.is_none()
+            && self.lessons.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -790,6 +795,12 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
+        IndexRebuildScope::Lessons => RebuildAction {
+            label: "lessons",
+            action: "index-lessons",
+            scope: None,
+            needs_worktree_hash: false,
+        },
         IndexRebuildScope::Files => RebuildAction {
             label: "files",
             action: "index-files",
@@ -819,6 +830,9 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     }
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
+    }
+    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Lessons, None));
     }
     for (wt_hash, view) in &scopes.files {
         if !view.healthy {
@@ -860,6 +874,9 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     }
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
+    }
+    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Lessons, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
