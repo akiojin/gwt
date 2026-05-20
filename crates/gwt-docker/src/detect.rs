@@ -30,12 +30,25 @@ impl DockerFiles {
 
 /// Run a docker sub-command and return whether it succeeded.
 fn docker_probe(args: &[&str], label: &str) -> bool {
+    // SPEC-2809 / SPEC-1924 Phase D-docker — route docker probes through
+    // `spawn_logged_blocking` so the docker tab of the Console window /
+    // Logs Process facet sees them. The `binary` may be a `GWT_DOCKER_BIN`
+    // override; pass it as the program directly.
     let binary = docker_binary();
     let attempted_binary = binary.to_string_lossy().into_owned();
-    let result = std::process::Command::new(&binary).args(args).output();
+    let hub = gwt_core::process_console::global();
+    let options =
+        gwt_core::process_console::SpawnOptions::new(format!("docker {}", args.join(" ")));
+    let result = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Docker,
+        &binary,
+        args,
+        options,
+    );
     match result {
         Ok(output) => {
-            let ok = output.status.success();
+            let ok = output.success();
             info!(
                 target: "gwt::launch::probe",
                 category = "docker",
@@ -45,8 +58,7 @@ fn docker_probe(args: &[&str], label: &str) -> bool {
                 "docker probe"
             );
             if !ok {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stderr = stderr.trim();
+                let stderr = output.stderr.trim();
                 if !stderr.is_empty() {
                     debug!(
                         target: "gwt::launch::probe",

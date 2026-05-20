@@ -80,6 +80,71 @@ fn docker_binary() -> OsString {
     std::env::var_os("GWT_DOCKER_BIN").unwrap_or_else(|| OsString::from("docker"))
 }
 
+// SPEC-2809 / SPEC-1924 Phase D-docker — per-spawn correlation id so the
+// Console window can render an invocation header between distinct docker
+// commands. Atomic so multiple compose calls from parallel handlers do not
+// collide.
+static DOCKER_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_docker_spawn_id() -> u64 {
+    DOCKER_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn emit_docker_start(spawn_id: u64, action: &str, args: &[&str]) {
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "docker",
+        spawn_id = spawn_id,
+        label = %format!("docker {}", args.join(" ")),
+        action = action,
+        phase = "start",
+        "process start",
+    );
+}
+
+fn emit_docker_end(spawn_id: u64, action: &str, exit_code: Option<i32>, duration_ms: u64) {
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "docker",
+        spawn_id = spawn_id,
+        action = action,
+        phase = "end",
+        exit_code = exit_code.map(|c| c as i64),
+        duration_ms = duration_ms,
+        "process end",
+    );
+}
+
+fn wrap_on_line_with_hub<F>(
+    mut original: F,
+    hub: gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+) -> impl FnMut(CommandOutputStream, &str)
+where
+    F: FnMut(CommandOutputStream, &str),
+{
+    move |stream, line| {
+        // Push the line through the existing callback first so callers
+        // still see their on_line emissions in their original ordering.
+        original(stream, line);
+        let process_stream = match stream {
+            CommandOutputStream::Stdout => gwt_core::process_console::ProcessStream::Stdout,
+            CommandOutputStream::Stderr => gwt_core::process_console::ProcessStream::Stderr,
+        };
+        // Apply the same `redact_line` + `strip_ansi` discipline the
+        // async `spawn_logged` path uses so secrets and ANSI escapes
+        // never reach the hub-facing buffer.
+        let sanitized =
+            gwt_core::process_console::redact_line(&gwt_core::process_console::strip_ansi(line));
+        hub.push(gwt_core::process_console::ProcessLine::new(
+            gwt_core::process_console::ProcessKind::Docker,
+            spawn_id,
+            process_stream,
+            sanitized,
+        ));
+    }
+}
+
 fn docker_timeout() -> Duration {
     const DEFAULT_TIMEOUT_MS: u64 = 5_000;
     std::env::var("GWT_DOCKER_TIMEOUT_MS")
@@ -196,11 +261,22 @@ fn run_docker_with_output_streaming_in_dir_and_timeout<F>(
     action: &str,
     current_dir: Option<&std::path::Path>,
     timeout: Duration,
-    mut on_line: F,
+    on_line: F,
 ) -> Result<Output>
 where
     F: FnMut(CommandOutputStream, &str),
 {
+    // SPEC-2809 / SPEC-1924 Phase D-docker — chain the existing callback
+    // with a `ProcessConsoleHub` push so the docker tab of the Console
+    // window and the Logs Process facet observe every line. The timeout
+    // / streaming loop below is unchanged because rewriting it as async
+    // would risk regressing compose timeout semantics.
+    let hub = gwt_core::process_console::global();
+    let spawn_id = next_docker_spawn_id();
+    emit_docker_start(spawn_id, action, args);
+    let started_at = Instant::now();
+    let mut on_line = wrap_on_line_with_hub(on_line, hub.clone(), spawn_id);
+
     let mut command = Command::new(docker_binary());
     command
         .args(args)
@@ -292,6 +368,13 @@ where
         &mut collected_stdout,
         &mut collected_stderr,
         &mut on_line,
+    );
+
+    emit_docker_end(
+        spawn_id,
+        action,
+        status.code(),
+        started_at.elapsed().as_millis() as u64,
     );
 
     Ok(Output {
