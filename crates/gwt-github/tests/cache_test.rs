@@ -404,3 +404,68 @@ fn apply_phase_change_does_not_disturb_body_or_sections() {
     let spec_section = fs::read_to_string(tmp.path().join("11/sections/spec.md")).unwrap();
     assert_eq!(spec_section, "immutable spec");
 }
+
+// Regression: When an Issue body contains gwt-spec marker patterns as prose
+// or code (e.g., a plain bug Issue describing the SPEC format), the loose
+// substring detection in `gwt::issue_cache::is_spec_issue` triggers
+// `gh issue view` and ends up calling `write_snapshot` with a body whose
+// header parses but whose sections index is malformed. Previously this
+// surfaced as `body parse error: broken index map: ...` and propagated up
+// to the GUI Issue refresh. The cache must now treat such bodies as plain
+// Issues: cache body + meta, leave sections/ empty.
+#[test]
+fn write_snapshot_falls_back_to_plain_when_sections_index_is_malformed() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+
+    // Body has a structurally valid gwt-spec header but the sections
+    // index is on a single line (as it would be when quoted in prose),
+    // which `parse_index_map` cannot disentangle.
+    let body = "Background:\n\
+<!-- gwt-spec id=42 version=1 -->\n\
+<!-- sections: plan=comment:777 spec=body tasks=body -->\n\
+\n\
+Rest of the body is human prose, not a real SPEC.\n"
+        .to_string();
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(123),
+        title: "Plain Issue with SPEC-looking prose".into(),
+        body: body.clone(),
+        labels: vec!["bug".into()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("t1"),
+        comments: Vec::new(),
+    };
+
+    cache
+        .write_snapshot(&snapshot)
+        .expect("write_snapshot must succeed even when SPEC parse fails");
+
+    // Body and meta should be present and verbatim.
+    let body_on_disk = fs::read_to_string(tmp.path().join("123/body.md")).unwrap();
+    assert_eq!(body_on_disk, body);
+    assert!(tmp.path().join("123/meta.json").is_file());
+
+    // Sections directory must exist but be empty.
+    let sections_dir = tmp.path().join("123/sections");
+    assert!(sections_dir.is_dir());
+    let leftover: Vec<_> = fs::read_dir(&sections_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "sections/ must be empty for fallback-cached plain Issue (got: {:?})",
+        leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+
+    // load_entry must still surface the issue (with empty sections),
+    // not silently drop it.
+    let entry = cache
+        .load_entry(IssueNumber(123))
+        .expect("load_entry must surface a plain-fallback entry");
+    assert_eq!(entry.snapshot.number, IssueNumber(123));
+    assert_eq!(entry.snapshot.body, body);
+    assert!(entry.spec_body.sections.is_empty());
+}
