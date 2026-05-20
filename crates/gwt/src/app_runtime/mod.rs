@@ -4746,15 +4746,6 @@ impl AppRuntime {
             )];
         };
 
-        // SPEC-2359 US-37 / FR-118: emit Done for the Workspace WorkItem whose
-        // git_details.branch matches the cleanup target before delegating to
-        // worktree/branch deletion. Idempotent per work_item_id.
-        let _ = gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
-            &tab.project_root,
-            branch,
-            chrono::Utc::now(),
-        );
-
         spawn_workspace_cleanup_async(
             self.proxy.clone(),
             client_id.to_string(),
@@ -4962,6 +4953,14 @@ fn spawn_workspace_cleanup_async(
                                     | gwt::BranchCleanupResultStatus::Partial
                             )
                     }) {
+                        // SPEC-2359 US-37 / FR-118: emit Done only after the
+                        // matching workspace cleanup actually succeeded.
+                        let _ =
+                            gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
+                                &project_root,
+                                &branch,
+                                chrono::Utc::now(),
+                            );
                         if let Some(event) =
                             clear_workspace_cleanup_git_details_event(&project_root)
                         {
@@ -10563,6 +10562,79 @@ exit 1
         assert!(
             invocations.trim().is_empty(),
             "active-work projection must not spawn git on the GUI hot path; invocations:\n{invocations}"
+        );
+    }
+
+    #[test]
+    fn workspace_cleanup_failure_does_not_emit_done_work_item() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let branch = "work/missing";
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(repo.join("work/missing")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(2828),
+            pr_state: Some("MERGED".to_string()),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/2828".to_string()),
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        let work_item_id = projection.id.clone();
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let start = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+            &work_item_id,
+            chrono::Utc::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+            .expect("record start");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        let immediate_events =
+            runtime.run_workspace_cleanup_events("client-1", branch, false, false);
+
+        assert!(immediate_events.is_empty());
+        wait_for_recorded_event("workspace cleanup failure", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(outbound_events)
+                        if outbound_events.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupResult { .. }
+                                | BackendEvent::BranchError { .. }
+                        ))
+                )
+            })
+        });
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("work item");
+
+        assert!(
+            !item
+                .events
+                .iter()
+                .any(|event| event.kind
+                    == gwt_core::workspace_projection::WorkspaceWorkEventKind::Done),
+            "failed cleanup must not mark the Workspace work item done"
         );
     }
 

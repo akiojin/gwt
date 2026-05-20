@@ -482,6 +482,7 @@ impl WorktreeManager {
                     self.prune()?;
                 }
                 Err(err) if force_filesystem_delete && is_filesystem_residue_error(&err) => {
+                    validate_force_filesystem_residue_path(&self.repo_path, branch, &path)?;
                     remove_worktree_filesystem_residue(&path)?;
                     self.prune()?;
                 }
@@ -521,6 +522,37 @@ fn remove_worktree_filesystem_residue(path: &Path) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(GwtError::Git(format!("inspect worktree residue: {err}"))),
     }
+}
+
+fn validate_force_filesystem_residue_path(
+    repo_path: &Path,
+    branch: &str,
+    path: &Path,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let expected_path = sibling_worktree_path(repo_path, branch);
+    let actual = std::fs::canonicalize(path)
+        .map_err(|e| GwtError::Git(format!("inspect worktree residue path: {e}")))?;
+    let expected = std::fs::canonicalize(&expected_path).map_err(|_| {
+        GwtError::Git(format!(
+            "refusing to force-delete worktree residue outside managed workspace: {} (expected {})",
+            path.display(),
+            expected_path.display()
+        ))
+    })?;
+
+    if actual != expected {
+        return Err(GwtError::Git(format!(
+            "refusing to force-delete worktree residue outside managed workspace: {} (expected {})",
+            path.display(),
+            expected_path.display()
+        )));
+    }
+
+    Ok(())
 }
 
 fn run_command_with_timeout(
@@ -1249,6 +1281,39 @@ prunable gitdir file points to non-existent location
         remove_worktree_filesystem_residue(&residue_path).unwrap();
 
         assert!(!residue_path.exists());
+    }
+
+    #[test]
+    fn force_filesystem_residue_path_validation_rejects_path_outside_expected_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let unrelated_path = tmp.path().join("unrelated").join("work").join("residue");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&unrelated_path).unwrap();
+
+        let err =
+            validate_force_filesystem_residue_path(&repo_path, "work/residue", &unrelated_path)
+                .expect_err("force residue cleanup must reject unrelated paths");
+
+        assert!(err
+            .to_string()
+            .contains("refusing to force-delete worktree residue outside managed workspace"));
+        assert!(
+            unrelated_path.exists(),
+            "validation must not remove unrelated paths"
+        );
+    }
+
+    #[test]
+    fn force_filesystem_residue_path_validation_accepts_expected_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let expected_path = sibling_worktree_path(&repo_path, "work/residue");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        std::fs::create_dir_all(&expected_path).unwrap();
+
+        validate_force_filesystem_residue_path(&repo_path, "work/residue", &expected_path)
+            .expect("expected sibling worktree path should be force-deletable");
     }
 
     #[test]
