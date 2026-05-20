@@ -33,7 +33,7 @@ mod issue_spec;
 mod pane;
 mod plan;
 mod pr;
-mod register;
+pub(crate) mod register;
 pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
@@ -378,10 +378,8 @@ pub type PlanCommand = SkillStateAction;
 /// SPEC-1942 family enum for `gwtd build ...`. Backed by [`SkillStateAction`].
 pub type BuildCommand = SkillStateAction;
 
-/// SPEC-2784 family enum for `gwtd register ...`. Backed by
-/// [`SkillStateAction`] — same lifecycle pattern as `plan` and `build`.
+/// SPEC-2784 family enum for `gwtd register ...`. Same skill-state lifecycle.
 pub type RegisterCommand = SkillStateAction;
-
 /// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane
 /// inspection and lifecycle operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,12 +680,7 @@ pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Build)
 }
 
-/// Parse `gwtd register <action> --spec <n> [...]` (SPEC-2784).
-pub fn parse_register_args(args: &[String]) -> Result<CliCommand, CliParseError> {
-    parse_skill_state_args(args).map(CliCommand::Register)
-}
-
-fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
+pub(crate) fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
         "start" => {

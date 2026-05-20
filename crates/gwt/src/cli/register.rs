@@ -16,7 +16,12 @@
 use gwt_github::SpecOpsError;
 
 use super::skill_state_runtime;
-use crate::cli::{CliEnv, SkillStateAction};
+use crate::cli::{parse_skill_state_args, CliCommand, CliEnv, CliParseError, SkillStateAction};
+
+/// Parse `gwtd register <action> --spec <n> [...]` (SPEC-2784).
+pub fn parse_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    parse_skill_state_args(args).map(CliCommand::Register)
+}
 
 pub const SKILL_NAME: &str = "register-spec";
 pub const SKILL_DISPLAY: &str = "gwt-register-spec";
