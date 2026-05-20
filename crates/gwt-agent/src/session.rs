@@ -546,7 +546,7 @@ display_name = "Claude Code"
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Gemini);
-        session.model = Some("gemini-2.5-pro".into());
+        session.model = Some("gemini-3-flash-preview".into());
         session.tool_version = Some("0.1.0".into());
         session.agent_session_id = Some("agent-abc".into());
         session.reasoning_level = Some("high".into());
@@ -573,7 +573,7 @@ display_name = "Claude Code"
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.branch, "feature/x");
         assert_eq!(loaded.agent_id, AgentId::Gemini);
-        assert_eq!(loaded.model, Some("gemini-2.5-pro".into()));
+        assert_eq!(loaded.model, Some("gemini-3-flash-preview".into()));
         assert_eq!(loaded.tool_version, Some("0.1.0".into()));
         assert_eq!(loaded.agent_session_id, Some("agent-abc".into()));
         assert_eq!(loaded.reasoning_level, Some("high".into()));

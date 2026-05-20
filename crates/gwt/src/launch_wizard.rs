@@ -3021,30 +3021,34 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     },
 ];
 
-const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 6] = [
+const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
         label: "Default (Auto)",
         description: "Use Gemini default model",
-    },
-    ModelDisplayOption {
-        label: "gemini-3-pro-preview",
-        description: "Preview pro model",
     },
     ModelDisplayOption {
         label: "gemini-3-flash-preview",
         description: "Preview flash model",
     },
     ModelDisplayOption {
-        label: "gemini-2.5-pro",
-        description: "Stable pro model",
+        label: "gemini-3.1-flash-lite-preview",
+        description: "Preview flash-lite model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash",
-        description: "Balanced speed and reasoning",
+        description: "Stable flash model",
     },
     ModelDisplayOption {
         label: "gemini-2.5-flash-lite",
-        description: "Fastest Gemini option",
+        description: "Stable flash-lite model",
+    },
+    ModelDisplayOption {
+        label: "gemma-4-31b-it",
+        description: "Gemma 4 31B instruction model",
+    },
+    ModelDisplayOption {
+        label: "gemma-4-26b-a4b-it",
+        description: "Gemma 4 26B A4B instruction model",
     },
 ];
 
@@ -6410,7 +6414,18 @@ mod tests {
                 "gpt-5.2",
             ]
         );
-        assert!(current_model_options("gemini").contains(&"gemini-2.5-pro"));
+        assert_eq!(
+            current_model_options("gemini"),
+            vec![
+                "Default (Auto)",
+                "gemini-3-flash-preview",
+                "gemini-3.1-flash-lite-preview",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemma-4-31b-it",
+                "gemma-4-26b-a4b-it",
+            ]
+        );
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());
