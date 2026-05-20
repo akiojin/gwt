@@ -49,11 +49,11 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "list", "--porcelain"],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -66,11 +66,11 @@ impl WorktreeManager {
 
     /// Fetch latest refs from `origin`.
     pub fn fetch_origin(&self) -> Result<()> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["fetch", "origin", "--prune"])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("fetch origin: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["fetch", "origin", "--prune"],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("fetch origin: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -112,11 +112,11 @@ impl WorktreeManager {
     }
 
     fn remote_default_branch(&self) -> Result<String> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["ls-remote", "--symref", "origin", "HEAD"])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("ls-remote origin HEAD: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["ls-remote", "--symref", "origin", "HEAD"],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("ls-remote origin HEAD: {e}")))?;
 
         if output.status.success() {
             if let Some(branch) = parse_ls_remote_head_symref(&output.stdout) {
@@ -124,16 +124,16 @@ impl WorktreeManager {
             }
         }
 
-        let local_head = gwt_core::process::hidden_command("git")
-            .args([
+        let local_head = gwt_core::process::run_git_logged(
+            &[
                 "symbolic-ref",
                 "--quiet",
                 "--short",
                 "refs/remotes/origin/HEAD",
-            ])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("symbolic-ref origin/HEAD: {e}")))?;
+            ],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("symbolic-ref origin/HEAD: {e}")))?;
         if local_head.status.success() {
             let branch = String::from_utf8_lossy(&local_head.stdout)
                 .trim()
@@ -160,11 +160,11 @@ impl WorktreeManager {
             return Err(GwtError::Git("remote branch name is empty".to_string()));
         }
         let refspec = format!("refs/heads/{branch}:refs/remotes/origin/{branch}");
-        let output = gwt_core::process::hidden_command("git")
-            .args(["fetch", "origin", "--prune", &refspec])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("fetch origin {refspec}: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["fetch", "origin", "--prune", &refspec],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("fetch origin {refspec}: {e}")))?;
 
         if !output.status.success() {
             return Err(GwtError::Git(format!(
@@ -183,11 +183,11 @@ impl WorktreeManager {
         let tracking_ref = to_tracking_ref(remote_ref)
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {remote_ref}")))?;
 
-        let output = gwt_core::process::hidden_command("git")
-            .args(["show-ref", "--verify", "--quiet", &tracking_ref])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("show-ref {tracking_ref}: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["show-ref", "--verify", "--quiet", &tracking_ref],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("show-ref {tracking_ref}: {e}")))?;
 
         match output.status.code() {
             Some(0) => Ok(true),
@@ -202,11 +202,11 @@ impl WorktreeManager {
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "add", path_arg.as_str(), branch])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree add: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "add", path_arg.as_str(), branch],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree add: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -226,18 +226,18 @@ impl WorktreeManager {
         }
 
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::hidden_command("git")
-            .args([
+        let output = gwt_core::process::run_git_logged(
+            &[
                 "worktree",
                 "add",
                 "-b",
                 new_branch,
                 path_arg.as_str(),
                 base_branch,
-            ])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree add -b: {e}")))?;
+            ],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree add -b: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -260,11 +260,11 @@ impl WorktreeManager {
     ) -> Result<()> {
         let base_ref = normalize_remote_ref(base_remote_ref);
         let push_refspec = format!("{base_ref}:refs/heads/{new_branch}");
-        let output = gwt_core::process::hidden_command("git")
-            .args(["push", "origin", &push_refspec])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("push origin {push_refspec}: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["push", "origin", &push_refspec],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("push origin {push_refspec}: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -325,29 +325,29 @@ impl WorktreeManager {
     ) -> Result<()> {
         let remote_ref = normalize_remote_ref(remote_ref);
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::hidden_command("git")
-            .args([
+        let output = gwt_core::process::run_git_logged(
+            &[
                 "worktree",
                 "add",
                 "-b",
                 local_branch,
                 path_arg.as_str(),
                 &remote_ref,
-            ])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree add -b from remote: {e}")))?;
+            ],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree add -b from remote: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
         }
 
-        let output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--set-upstream-to", &remote_ref, local_branch])
-            .current_dir(path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("set-upstream-to {remote_ref}: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["branch", "--set-upstream-to", &remote_ref, local_branch],
+            Some(path),
+        )
+        .map_err(|e| GwtError::Git(format!("set-upstream-to {remote_ref}: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
@@ -359,11 +359,11 @@ impl WorktreeManager {
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "remove", path_arg.as_str()])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree remove: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "remove", path_arg.as_str()],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree remove: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -378,11 +378,11 @@ impl WorktreeManager {
     /// untracked files can also be deleted by Branch Cleanup.
     pub fn remove_force(&self, path: &Path) -> Result<()> {
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "remove", "--force", path_arg.as_str()])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree remove --force: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "remove", "--force", path_arg.as_str()],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree remove --force: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -426,11 +426,11 @@ impl WorktreeManager {
     /// branch delete that follows inside [`Self::cleanup_branch`]. `--expire
     /// now` disables that grace period.
     pub fn prune(&self) -> Result<()> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["worktree", "prune", "--expire", "now"])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("worktree prune: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "prune", "--expire", "now"],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree prune: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -682,11 +682,11 @@ fn to_tracking_ref(remote_ref: &str) -> Option<String> {
 
 /// Resolve the main worktree root for a repository or linked worktree path.
 pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("rev-parse --git-common-dir: {e}")))?;
+    let output = gwt_core::process::run_git_logged(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("rev-parse --git-common-dir: {e}")))?;
 
     if !output.status.success() {
         if let Some(bare_child) = first_child_bare_repository(repo_path) {
@@ -851,18 +851,16 @@ mod tests {
             .expect("git init");
         assert!(output.status.success(), "git init failed");
 
-        let email = gwt_core::process::hidden_command("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config user.email");
+        let email = gwt_core::process::run_git_logged(
+            &["config", "user.email", "test@example.com"],
+            Some(path),
+        )
+        .expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
 
-        let name = gwt_core::process::hidden_command("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(path)
-            .output()
-            .expect("git config user.name");
+        let name =
+            gwt_core::process::run_git_logged(&["config", "user.name", "Test User"], Some(path))
+                .expect("git config user.name");
         assert!(name.status.success(), "git config user.name failed");
     }
 
@@ -931,11 +929,9 @@ mod tests {
     }
 
     fn git_push_branch(path: &Path, branch: &str) {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["push", "-u", "origin", branch])
-            .current_dir(path)
-            .output()
-            .expect("git push -u origin");
+        let output =
+            gwt_core::process::run_git_logged(&["push", "-u", "origin", branch], Some(path))
+                .expect("git push -u origin");
         assert!(
             output.status.success(),
             "git push -u origin failed: {}",
@@ -944,11 +940,11 @@ mod tests {
     }
 
     fn git_commit_allow_empty(path: &Path, message: &str) {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["commit", "--allow-empty", "-m", message])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
+        let output = gwt_core::process::run_git_logged(
+            &["commit", "--allow-empty", "-m", message],
+            Some(path),
+        )
+        .expect("git commit");
         assert!(
             output.status.success(),
             "git commit failed: {}",
@@ -957,10 +953,7 @@ mod tests {
     }
 
     fn git_checkout_new_branch(path: &Path, branch: &str) {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["checkout", "-b", branch])
-            .current_dir(path)
-            .output()
+        let output = gwt_core::process::run_git_logged(&["checkout", "-b", branch], Some(path))
             .expect("git checkout -b");
         assert!(
             output.status.success(),
@@ -1055,17 +1048,17 @@ prunable gitdir file points to non-existent location
         git_commit_allow_empty(&repo_path, "initial commit");
 
         let linked_worktree = tmp.path().join("develop");
-        let output = gwt_core::process::hidden_command("git")
-            .args([
+        let output = gwt_core::process::run_git_logged(
+            &[
                 "worktree",
                 "add",
                 "-b",
                 "develop",
                 linked_worktree.to_str().unwrap(),
-            ])
-            .current_dir(&repo_path)
-            .output()
-            .expect("git worktree add -b");
+            ],
+            Some(&repo_path),
+        )
+        .expect("git worktree add -b");
         assert!(
             output.status.success(),
             "git worktree add -b failed: {}",
@@ -1086,33 +1079,33 @@ prunable gitdir file points to non-existent location
 
         let bootstrap_path = tmp.path().join("bootstrap");
         git_clone_repo(&bare_repo_path, &bootstrap_path);
-        let email = gwt_core::process::hidden_command("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(&bootstrap_path)
-            .output()
-            .expect("git config user.email");
+        let email = gwt_core::process::run_git_logged(
+            &["config", "user.email", "test@example.com"],
+            Some(&bootstrap_path),
+        )
+        .expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
-        let name = gwt_core::process::hidden_command("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(&bootstrap_path)
-            .output()
-            .expect("git config user.name");
+        let name = gwt_core::process::run_git_logged(
+            &["config", "user.name", "Test User"],
+            Some(&bootstrap_path),
+        )
+        .expect("git config user.name");
         assert!(name.status.success(), "git config user.name failed");
         git_checkout_new_branch(&bootstrap_path, "develop");
         git_commit_allow_empty(&bootstrap_path, "initial commit");
         git_push_branch(&bootstrap_path, "develop");
 
         let linked_worktree = tmp.path().join("develop");
-        let output = gwt_core::process::hidden_command("git")
-            .args([
+        let output = gwt_core::process::run_git_logged(
+            &[
                 "worktree",
                 "add",
                 linked_worktree.to_str().unwrap(),
                 "develop",
-            ])
-            .current_dir(&bare_repo_path)
-            .output()
-            .expect("git worktree add");
+            ],
+            Some(&bare_repo_path),
+        )
+        .expect("git worktree add");
         assert!(
             output.status.success(),
             "git worktree add failed: {}",
@@ -1162,11 +1155,9 @@ prunable gitdir file points to non-existent location
             .unwrap();
 
         assert!(worktree_path.exists());
-        let branch_output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--show-current"])
-            .current_dir(&worktree_path)
-            .output()
-            .expect("git branch --show-current");
+        let branch_output =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&worktree_path))
+                .expect("git branch --show-current");
         assert!(branch_output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
@@ -1195,11 +1186,7 @@ prunable gitdir file points to non-existent location
         // Dirty the worktree (uncommitted + untracked).
         std::fs::write(worktree_path.join("dirty.txt"), "dirty\n").unwrap();
         std::fs::write(worktree_path.join("staged.txt"), "staged\n").unwrap();
-        gwt_core::process::hidden_command("git")
-            .args(["add", "staged.txt"])
-            .current_dir(&worktree_path)
-            .output()
-            .unwrap();
+        gwt_core::process::run_git_logged(&["add", "staged.txt"], Some(&worktree_path)).unwrap();
 
         // Plain remove() refuses; remove_force() succeeds.
         assert!(manager.remove(&worktree_path).is_err());
@@ -1362,10 +1349,7 @@ prunable gitdir file points to non-existent location
         git_commit_allow_empty(&repo_path, "initial commit");
 
         // Create a branch but no worktree.
-        gwt_core::process::hidden_command("git")
-            .args(["branch", "feature/no-worktree"])
-            .current_dir(&repo_path)
-            .output()
+        gwt_core::process::run_git_logged(&["branch", "feature/no-worktree"], Some(&repo_path))
             .unwrap();
 
         let manager = WorktreeManager::new(&repo_path);
@@ -1535,27 +1519,25 @@ prunable gitdir file points to non-existent location
             .unwrap();
         assert!(worktree_path.exists());
 
-        let branch_output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--show-current"])
-            .current_dir(&worktree_path)
-            .output()
-            .expect("git branch --show-current");
+        let branch_output =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&worktree_path))
+                .expect("git branch --show-current");
         assert!(branch_output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
             "feature/materialized"
         );
 
-        let upstream_output = gwt_core::process::hidden_command("git")
-            .args([
+        let upstream_output = gwt_core::process::run_git_logged(
+            &[
                 "rev-parse",
                 "--abbrev-ref",
                 "--symbolic-full-name",
                 "@{upstream}",
-            ])
-            .current_dir(&worktree_path)
-            .output()
-            .expect("git rev-parse @{upstream}");
+            ],
+            Some(&worktree_path),
+        )
+        .expect("git rev-parse @{upstream}");
         assert!(upstream_output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&upstream_output.stdout).trim(),
@@ -1571,10 +1553,7 @@ prunable gitdir file points to non-existent location
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        gwt_core::process::hidden_command("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(path)
-            .output()
+        gwt_core::process::run_git_logged(&["commit", "--allow-empty", "-m", "init"], Some(path))
             .unwrap();
 
         let mgr = WorktreeManager::new(path);
@@ -1584,11 +1563,11 @@ prunable gitdir file points to non-existent location
     }
 
     fn git_add_remote(path: &Path, name: &str, remote: &Path) {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["remote", "add", name, remote.to_str().unwrap()])
-            .current_dir(path)
-            .output()
-            .expect("git remote add");
+        let output = gwt_core::process::run_git_logged(
+            &["remote", "add", name, remote.to_str().unwrap()],
+            Some(path),
+        )
+        .expect("git remote add");
         assert!(
             output.status.success(),
             "git remote add failed: {}",
