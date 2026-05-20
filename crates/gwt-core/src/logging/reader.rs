@@ -25,7 +25,7 @@
 //! this reader; do not re-implement `serde_json::from_str::<LogEvent>` on
 //! disk lines (SPEC-1924 FR-037 / SC-011).
 //!
-//! See [`tracing_subscriber::fmt`] for the writer side; the relevant
+//! See [`mod@tracing_subscriber::fmt`] for the writer side; the relevant
 //! configuration lives in `crates/gwt-core/src/logging/fmt_layer.rs`.
 
 use std::{
