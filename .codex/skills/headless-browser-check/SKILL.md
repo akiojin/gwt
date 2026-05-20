@@ -51,8 +51,8 @@ not use it for CI-only Playwright runs or generic web app servers.
 7. Monitor until the user is done:
    - Keep the exec session running.
    - Poll output about every 30 seconds.
-   - Also tail recently modified structured logs:
-     `find ~/.gwt/projects -path "*/logs/gwt.log.$(date -u +%F)" -mmin -30`.
+   - Also locate and tail recently modified structured logs:
+     `find ~/.gwt/projects -path "*/logs/gwt.log.$(date -u +%F)" -mmin -30 -print | while IFS= read -r log; do tail -n 200 "$log"; done`.
    - Watch for `panic`, `ERROR`, `WARN`, `failed`, `refused`, `500`, WebSocket
      failures, asset load failures, and unexpected process exit.
    - Do not promise that every window open or click will be logged. Normal UI

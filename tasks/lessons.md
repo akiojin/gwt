@@ -5830,3 +5830,25 @@ Agent window 内の TTY 表示が白一色になった。
 2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
 3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
    frontend DOM の computed color、launch env の順に切り分ける。
+
+## URL をユーザー操作ログに出すときは authority までに正規化する
+
+### 事象
+
+`gwt_ui_action` の backend connection test ログで `api_key` は出力していなかったが、`base_url` を
+そのまま `ui_target` に入れていたため、userinfo や signed query を含む URL がログに残る可能性があった。
+
+### 原因
+
+既存の `sanitize_ui_action_field()` は改行や制御文字をログ向けに整形するだけで、URL の
+credential / path / query / fragment を機密情報として扱っていなかった。レビューでは
+`https://user:pass@example.com/v1?token=...` のような入力がそのまま残る点を指摘された。
+
+### 再発防止策
+
+1. ユーザー操作ログに外部 URL を入れるときは、既定で `scheme://authority` までに正規化し、
+   userinfo / path / query / fragment を落とす。
+2. `api_key` の非出力だけで安全と判断せず、URL 自体に credential や token が含まれるケースを
+   regression test に入れる。
+3. ログ sanitization の helper 名は「format sanitization」と「secret redaction」を区別し、
+   期待する保護範囲をテスト名で明示する。
