@@ -337,6 +337,64 @@ test("phase19: update_ready transitions modal to ready state with [Later] [Resta
   assert.ok(modal.querySelector("[data-update-modal-later]"));
 });
 
+test("phase19: repeated update_ready for the same version is idempotent (Playwright update-modal.spec.ts harness)", () => {
+  // Live backend re-polls update_state / re-emits update_ready while the
+  // Playwright spec is driving the post-click flow. The old implementation
+  // recreated the entire modal panel on every call, detaching the
+  // [Later] / [Restart now] buttons mid-click and exhausting Playwright's
+  // detach-retry. Pinning idempotency here keeps that harness path green
+  // and protects the production runtime from button churn on transient
+  // duplicate emissions from the update poller.
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+  const laterFirst = fixture.document.querySelector("[data-update-modal-later]");
+  assert.ok(laterFirst, "first ready render must produce a Later button");
+
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+  const laterSecond = fixture.document.querySelector("[data-update-modal-later]");
+  assert.strictEqual(
+    laterSecond,
+    laterFirst,
+    "duplicate update_ready with same version must reuse the existing Later button (no detach)",
+  );
+
+  // A new version, in contrast, MUST re-render the panel.
+  controller.handleUpdateReady({ version: "9.27.0", asset_path: "/x" });
+  const laterThird = fixture.document.querySelector("[data-update-modal-later]");
+  assert.notStrictEqual(
+    laterThird,
+    laterFirst,
+    "update_ready with new version must replace the Later button",
+  );
+});
+
+test("phase19: repeated downloading render for same version preserves [Cancel] button (Playwright update-modal.spec.ts harness)", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  const cancelFirst = fixture.document.querySelector("[data-update-modal-cancel]");
+  assert.ok(cancelFirst, "downloading render must produce a Cancel button");
+
+  // Same-version progress events used to trigger re-render via
+  // updateProgressDisplay paths in older revisions. Calling showAvailable
+  // again (live backend often re-broadcasts on reconnect) used to clear
+  // the modal too. Pin idempotency at the renderModalDownloading layer.
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  const cancelSecond = fixture.document.querySelector("[data-update-modal-cancel]");
+  assert.strictEqual(
+    cancelSecond,
+    cancelFirst,
+    "repeated downloading entry for same version must reuse the existing Cancel button",
+  );
+});
+
 test("SPEC-2780: ready modal exposes 'View release notes' when openReleaseNotes is wired", () => {
   const fixture = createFixture();
   const releaseNotesCalls = [];

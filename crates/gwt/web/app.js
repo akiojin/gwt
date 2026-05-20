@@ -797,6 +797,47 @@
         socketReceiveDispatcher.handle(event);
       }
 
+      // SPEC-2041 Phase 19 (Issue #2832 follow-up): synthetic event injection
+      // hook used by Playwright spec `update-modal.spec.ts` to drive the
+      // post-click update modal flow without a real GitHub release.
+      // Listeners forward `window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: <payload> }))`
+      // straight into `receive(...)`, which is the same entrypoint that
+      // processed WebSocket frames use. The event name is double-underscored
+      // by convention (internal hook) and the payload must be the same
+      // discriminated union the backend emits (e.g. `{ kind: "update_state", ... }`).
+      // No-op without `event.detail.kind` so accidental dispatches do not
+      // misbehave.
+      //
+      // When the test injects an `update_*` event, set the test-mode flag so
+      // subsequent live backend `update_*` messages are dropped — the live
+      // gwt server emits its own real update_state / update_apply_error from
+      // the periodic update checker, which used to race against the
+      // synthetic flow and clobber the modal's reason / detach buttons
+      // mid-click. The flag is page-scoped (no global state outlives the
+      // Playwright page) so it never leaks into the production runtime.
+      let __testInjectModeActive = false;
+      window.addEventListener("__gwt_test_inject", (event) => {
+        const payload = event && event.detail;
+        if (!payload || typeof payload.kind !== "string") {
+          return;
+        }
+        if (payload.kind.startsWith("update_")) {
+          __testInjectModeActive = true;
+        }
+        payload.__injected = true;
+        try {
+          receive(payload);
+        } catch (err) {
+          console.warn("[gwt_test_inject] receive failed", err);
+        }
+      });
+      function shouldDropLiveEventForTestMode(event) {
+        if (!__testInjectModeActive) return false;
+        if (!event || typeof event.kind !== "string") return false;
+        if (event.__injected) return false;
+        return event.kind.startsWith("update_");
+      }
+
       function handleSocketClose() {
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -10226,6 +10267,9 @@
       });
 
       function receive(event) {
+        if (shouldDropLiveEventForTestMode(event)) {
+          return;
+        }
         switch (event.kind) {
           case "workspace_state": {
             projectError = "";
