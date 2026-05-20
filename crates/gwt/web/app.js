@@ -615,6 +615,81 @@
         });
       }
 
+      // SPEC-2785 US-1 / FR-A〜G: server URL cell in op-status-strip. URL is
+      // derived from `window.location` (frontend is always loaded from the
+      // bound URL, so this is the canonical source) and matches the backend
+      // `AppRuntime::server_url` exactly. Clicking the URL value forwards an
+      // `OpenServerUrl` event to the backend which performs an exact
+      // same-origin check before invoking the OS opener. Clicking the copy
+      // glyph writes the URL to the clipboard with a transient `Copied`
+      // affordance; clipboard rejection downgrades to an inline error state
+      // (no modal) and logs to console for diagnostics.
+      const serverUrlValue = document.getElementById("op-strip-server-url");
+      const serverUrlCopy = document.getElementById("op-strip-server-url-copy");
+      if (serverUrlValue && !serverUrlValue.dataset.serverUrlBound) {
+        serverUrlValue.dataset.serverUrlBound = "true";
+        const serverUrl = new URL("/", window.location.href).toString();
+        serverUrlValue.textContent = serverUrl;
+        serverUrlValue.title = serverUrl;
+        if (serverUrlCopy) {
+          serverUrlCopy.dataset.url = serverUrl;
+        }
+        const openServerUrlInBrowser = () => {
+          send({ kind: "open_server_url", url: serverUrl });
+        };
+        serverUrlValue.addEventListener("click", openServerUrlInBrowser);
+        serverUrlValue.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openServerUrlInBrowser();
+          }
+        });
+
+        if (serverUrlCopy && !serverUrlCopy.dataset.serverUrlBound) {
+          serverUrlCopy.dataset.serverUrlBound = "true";
+          let copyResetTimer = 0;
+          const flashCopyState = (state, baseLabel) => {
+            serverUrlCopy.dataset.state = state;
+            serverUrlValue.dataset.state = state;
+            if (baseLabel) {
+              serverUrlCopy.setAttribute("aria-label", baseLabel);
+            }
+            if (copyResetTimer) {
+              window.clearTimeout(copyResetTimer);
+            }
+            copyResetTimer = window.setTimeout(() => {
+              serverUrlCopy.removeAttribute("data-state");
+              serverUrlValue.removeAttribute("data-state");
+              serverUrlCopy.setAttribute("aria-label", "Copy server URL");
+              copyResetTimer = 0;
+            }, 1500);
+          };
+          const copyServerUrl = () => {
+            if (!navigator.clipboard?.writeText) {
+              console.warn(
+                "navigator.clipboard.writeText unavailable; cannot copy server URL",
+              );
+              flashCopyState("error", "Copy failed; clipboard unavailable");
+              return;
+            }
+            navigator.clipboard
+              .writeText(serverUrl)
+              .then(() => flashCopyState("copied", "Copied server URL"))
+              .catch((error) => {
+                console.warn("clipboard.writeText rejected", error);
+                flashCopyState("error", "Copy failed; permission denied");
+              });
+          };
+          serverUrlCopy.addEventListener("click", copyServerUrl);
+          serverUrlCopy.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              copyServerUrl();
+            }
+          });
+        }
+      }
+
       const updateCtaController = createUpdateCtaController({
         document,
         send,

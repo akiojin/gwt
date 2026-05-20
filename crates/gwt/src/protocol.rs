@@ -405,6 +405,14 @@ pub enum FrontendEvent {
     OpenUpdateLog {
         log_path: Option<String>,
     },
+    /// SPEC-2785 US-1 / FR-C: user clicked the server URL cell in the status
+    /// strip. Backend opens the URL in the OS default browser only when it
+    /// matches the embedded server's bound URL (FR-E same-origin gate). The
+    /// renderer-supplied `url` is treated as untrusted and validated against
+    /// `AppRuntime::server_url` before any opener is spawned.
+    OpenServerUrl {
+        url: String,
+    },
     /// Settings > Custom Agents: list every stored custom agent. Response is
     /// [`BackendEvent::CustomAgentList`].
     ListCustomAgents,
@@ -2200,6 +2208,22 @@ mod tests {
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
         );
+    }
+
+    // SPEC-2785 US-1 AS-1 / FR-C: frontend → backend WS payload contract for
+    // opening the server URL in the OS default browser.
+    #[test]
+    fn frontend_event_accepts_open_server_url() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_server_url",
+            "url": "http://127.0.0.1:54321/"
+        }))
+        .expect("deserialize open_server_url");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::OpenServerUrl { ref url } if url == "http://127.0.0.1:54321/"
+        ));
     }
 
     #[test]
