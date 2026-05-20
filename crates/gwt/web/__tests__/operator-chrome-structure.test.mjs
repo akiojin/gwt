@@ -607,6 +607,29 @@ test("Branches remains a branch browser, not a planning workspace", () => {
   );
 });
 
+test("Branches loading state becomes recoverable when the WebSocket disconnects", () => {
+  assert.match(
+    appSource,
+    /function\s+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)/,
+    "expected a dedicated Branches loading connection-loss helper",
+  );
+  assert.match(
+    appSource,
+    /failLoadingBranchesOnConnectionLoss[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
+    "expected connection loss to clear stale Branches loading flags",
+  );
+  assert.match(
+    appSource,
+    /Connection lost while loading branches/,
+    "expected initial branch inventory loss to surface a retryable error",
+  );
+  assert.match(
+    appSource,
+    /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
+    "expected socket disconnect to re-render Branches after clearing stale loading",
+  );
+});
+
 test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
