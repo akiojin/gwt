@@ -1513,6 +1513,17 @@ kbd.op-kbd {
   border-color: var(--color-border);
 }
 
+/* SPEC-2780 — Release Notes window trigger affordance. The version badge
+   doubles as a button so make the cursor + hover state reflect that. */
+.app-version[role="button"] {
+  cursor: pointer;
+}
+:root[data-theme] .app-version[role="button"]:hover,
+:root[data-theme] .app-version[role="button"]:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-accent, var(--color-text-muted));
+}
+
 :root[data-theme] .hint {
   color: var(--color-text-muted);
   background: color-mix(in oklab, var(--color-surface) 80%, transparent);
