@@ -57,7 +57,8 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
 pub enum IndexRebuildScope {
     Issues,
     Specs,
-    Lessons,
+    #[serde(alias = "lessons")]
+    Memory,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -68,7 +69,7 @@ impl IndexRebuildScope {
         match self {
             Self::Issues => "issues",
             Self::Specs => "specs",
-            Self::Lessons => "lessons",
+            Self::Memory => "memory",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -160,8 +161,8 @@ pub struct ProjectIndexScopes {
     pub issues: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specs: Option<ScopeHealthView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lessons: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none", alias = "lessons")]
+    pub memory: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -176,7 +177,7 @@ impl ProjectIndexScopes {
     pub fn is_empty(&self) -> bool {
         self.issues.is_none()
             && self.specs.is_none()
-            && self.lessons.is_none()
+            && self.memory.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -339,9 +340,13 @@ pub fn build_aggregated_status_view(
                 scopes.specs = Some(view);
             }
         }
-        if scopes.lessons.is_none() {
-            if let Some(view) = status_obj.get("lessons").and_then(parse_scope_health) {
-                scopes.lessons = Some(view);
+        if scopes.memory.is_none() {
+            if let Some(view) = status_obj
+                .get("memory")
+                .or_else(|| status_obj.get("lessons"))
+                .and_then(parse_scope_health)
+            {
+                scopes.memory = Some(view);
             }
         }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
@@ -392,7 +397,7 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         count += 1;
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
         count += 1;
     }
     count += scopes.files.values().filter(|view| !view.healthy).count();
@@ -803,9 +808,9 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
-        IndexRebuildScope::Lessons => RebuildAction {
-            label: "lessons",
-            action: "index-lessons",
+        IndexRebuildScope::Memory => RebuildAction {
+            label: "memory",
+            action: "index-memory",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -839,8 +844,8 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
-        targets.push((IndexRebuildScope::Lessons, None));
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Memory, None));
     }
     for (wt_hash, view) in &scopes.files {
         if !view.healthy {
@@ -883,8 +888,8 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
-        targets.push((IndexRebuildScope::Lessons, None));
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Memory, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
@@ -1513,7 +1518,7 @@ detached
                 "status": {
                     "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
                     "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
-                    "lessons": {"healthy": true, "document_count": 243, "reason": "ready"},
+                    "memory": {"healthy": true, "document_count": 243, "reason": "ready"},
                     "files": {"healthy": true, "document_count": 310, "reason": "ready"},
                     "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
                 }
@@ -1527,11 +1532,11 @@ detached
         assert!(view.scopes.issues.is_some());
         assert!(view.scopes.specs.is_some());
         assert!(
-            view.scopes.lessons.is_some(),
-            "lessons scope must be present in aggregated view (SPEC-2805)"
+            view.scopes.memory.is_some(),
+            "memory scope must be present in aggregated view (SPEC-2805)"
         );
         assert_eq!(
-            view.scopes.lessons.as_ref().map(|view| view.document_count),
+            view.scopes.memory.as_ref().map(|view| view.document_count),
             Some(243),
         );
         assert_eq!(view.scopes.files.len(), 1);
@@ -1540,7 +1545,7 @@ detached
     }
 
     #[test]
-    fn build_aggregated_status_view_counts_lessons_in_unhealthy_summary() {
+    fn build_aggregated_status_view_counts_memory_in_unhealthy_summary() {
         let probes = vec![WorktreeProbeOutcome {
             input: WorktreeProbeInput {
                 worktree_hash: "wtAhash".to_string(),
@@ -1551,7 +1556,7 @@ detached
                 "status": {
                     "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
                     "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
-                    "lessons": {"healthy": false, "repair_required": true, "reason": "manifest_missing", "document_count": 0},
+                    "memory": {"healthy": false, "repair_required": true, "reason": "manifest_missing", "document_count": 0},
                     "files": {"healthy": true, "document_count": 310, "reason": "ready"},
                     "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
                 }
@@ -1563,7 +1568,7 @@ detached
         assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
         assert!(
             view.detail.contains("1 index scope(s)"),
-            "unhealthy lessons must be counted (SPEC-2805); detail: {}",
+            "unhealthy memory must be counted (SPEC-2805); detail: {}",
             view.detail
         );
     }

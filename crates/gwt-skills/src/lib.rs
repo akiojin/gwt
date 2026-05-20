@@ -534,6 +534,10 @@ mod tests {
             "missing gwt-arch-review skill dir"
         );
         assert!(dirs.contains(&"gwt-search"), "missing gwt-search skill dir");
+        assert!(
+            dirs.contains(&"gwt-memory-search"),
+            "missing gwt-memory-search skill dir"
+        );
         assert!(dirs.contains(&"gwt-agent"), "missing gwt-agent skill dir");
         assert!(
             dirs.contains(&"gwt-manage-pr"),
@@ -593,6 +597,10 @@ mod tests {
         assert!(
             files.contains(&"gwt-search.md"),
             "missing gwt-search.md command"
+        );
+        assert!(
+            files.contains(&"gwt-memory-search.md"),
+            "missing gwt-memory-search.md command"
         );
         assert!(
             files.contains(&"gwt-agent.md"),
@@ -1236,6 +1244,7 @@ mod tests {
             "gwt-build-spec",
             "gwt-arch-review",
             "gwt-search",
+            "gwt-memory-search",
             "gwt-agent",
             "gwt-manage-pr",
         ] {
@@ -1336,7 +1345,8 @@ mod tests {
                 content.contains("Mandatory preflight")
                     && content.contains("--specs")
                     && content.contains("--issues")
-                    && content.contains("--files"),
+                    && content.contains("--files")
+                    && content.contains("--memory"),
                 "expected unified search contract in {relative}"
             );
         }

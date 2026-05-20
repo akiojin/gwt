@@ -972,14 +972,22 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "lessons", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "lessons", "files", "files-docs")
+V2_CANONICAL_SCOPES = ("issues", "specs", "memory", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
+REPO_SCOPED = {"issues", "specs", "memory"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "specs"
 V2_ISSUES_COLLECTION = "issues"
-V2_LESSONS_COLLECTION = "lessons"
+V2_MEMORY_COLLECTION = "memory"
+V2_LESSONS_COLLECTION = V2_MEMORY_COLLECTION
+
+
+def _canonical_scope(scope: str) -> str:
+    """Return the storage scope name, preserving lessons as a public alias."""
+    return "memory" if scope == "lessons" else scope
 
 
 def gwt_index_root() -> Path:
@@ -995,18 +1003,19 @@ def resolve_db_path(
     db_root: Optional[Path] = None,
 ) -> Path:
     """Compute the on-disk DB directory for the given (repo, worktree, scope)."""
-    if scope not in V2_SCOPES:
+    canonical_scope = _canonical_scope(scope)
+    if canonical_scope not in V2_CANONICAL_SCOPES:
         raise ValueError(f"unknown scope: {scope}")
-    if scope in WORKTREE_SCOPED and not worktree_hash:
-        raise ValueError(f"scope {scope} requires worktree_hash")
+    if canonical_scope in WORKTREE_SCOPED and not worktree_hash:
+        raise ValueError(f"scope {canonical_scope} requires worktree_hash")
 
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "lessons"}:
-        return repo_dir / scope
+    if canonical_scope in REPO_SCOPED:
+        return repo_dir / canonical_scope
 
-    return repo_dir / "worktrees" / worktree_hash / scope
+    return repo_dir / "worktrees" / worktree_hash / canonical_scope
 
 
 # ---------------------------------------------------------------------
@@ -1255,9 +1264,10 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
-    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "lessons"):
-        return worktree_dir.parent / f"manifest-{scope}.json"
-    return worktree_dir / f"manifest-{scope}.json"
+    canonical_scope = _canonical_scope(scope)
+    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "memory", "lessons"):
+        return worktree_dir.parent / f"manifest-{canonical_scope}.json"
+    return worktree_dir / f"manifest-{canonical_scope}.json"
 
 
 def read_manifest(worktree_dir: Path, scope: str) -> List[Dict[str, Any]]:
@@ -1906,19 +1916,31 @@ def _parse_lesson_heading(heading: str) -> tuple[str, str]:
     return "", heading.strip()
 
 
-def _load_lessons_documents(
+def _select_memory_source_path(root: Path) -> tuple[Optional[Path], str]:
+    """Select the canonical memory file, falling back to legacy lessons.md."""
+    memory_path = root / "tasks" / "memory.md"
+    if memory_path.is_file():
+        return memory_path, "tasks/memory.md"
+    lessons_path = root / "tasks" / "lessons.md"
+    if lessons_path.is_file():
+        return lessons_path, "tasks/lessons.md"
+    return None, ""
+
+
+def _load_memory_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/tasks/lessons.md`` and chunk it into lesson units.
+    """Load ``tasks/memory.md`` and chunk it into reusable memory units.
 
-    Returns a tuple ``(lessons, manifest_entries)`` where ``manifest_entries``
-    contains at most one entry describing the source file's mtime/size.
-    Missing file → both empty. Empty file → empty lessons but a manifest
-    entry so that the runner can still detect future content additions.
+    Legacy ``tasks/lessons.md`` is accepted as a compatibility fallback.
+    Returns ``(memories, manifest_entries)`` where ``manifest_entries`` contains
+    at most one entry describing the selected source file's mtime/size.
+    Missing file -> both empty. Empty file -> empty memories but a manifest
+    entry so the runner can still detect future content additions.
     """
     root = Path(project_root)
-    source_path = root / "tasks" / "lessons.md"
-    if not source_path.is_file():
+    source_path, rel_path = _select_memory_source_path(root)
+    if source_path is None:
         return [], []
 
     try:
@@ -1932,7 +1954,7 @@ def _load_lessons_documents(
         return [], []
     manifest_entries = [
         {
-            "path": "tasks/lessons.md",
+            "path": rel_path,
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -1942,7 +1964,7 @@ def _load_lessons_documents(
     if not chunks:
         return [], manifest_entries
 
-    lessons: List[Dict[str, Any]] = []
+    memories: List[Dict[str, Any]] = []
     grouped: Dict[tuple[str, str], int] = {}
     for chunk in chunks:
         heading = chunk["heading"]
@@ -1957,10 +1979,12 @@ def _load_lessons_documents(
         chunk_idx = grouped.get(key, 0)
         grouped[key] = chunk_idx + 1
         digest_input = f"{heading}\n{body}".encode("utf-8")
-        lesson_id = hashlib.sha1(digest_input).hexdigest()[:12]
-        lessons.append(
+        memory_id = hashlib.sha1(digest_input).hexdigest()[:12]
+        memories.append(
             {
-                "lesson_id": lesson_id,
+                "memory_id": memory_id,
+                # Keep lesson_id for legacy callers and search output.
+                "lesson_id": memory_id,
                 "date": date,
                 "title": title,
                 "heading": heading,
@@ -1971,11 +1995,47 @@ def _load_lessons_documents(
             }
         )
 
-    for lesson in lessons:
-        key = (lesson["date"], lesson["title"])
-        lesson["total_chunks"] = grouped[key]
+    for memory in memories:
+        key = (memory["date"], memory["title"])
+        memory["total_chunks"] = grouped[key]
 
-    return lessons, manifest_entries
+    return memories, manifest_entries
+
+
+def _load_lessons_documents(
+    project_root: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Compatibility wrapper for the legacy lessons API."""
+    return _load_memory_documents(project_root)
+
+
+def _build_memory_records(
+    memories: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Materialize Chroma upsert records for the memory scope."""
+    records: List[Dict[str, Any]] = []
+    for memory in memories:
+        memory_id = memory.get("memory_id") or memory.get("lesson_id", "")
+        title = memory.get("title", "")
+        heading = memory.get("heading", "")
+        body = memory.get("body", "")
+        document = f"{title}\n{heading}\n{body}".strip()
+        records.append(
+            {
+                "id": f"memory-{memory_id}",
+                "document": document,
+                "metadata": {
+                    "memory_id": memory_id,
+                    "lesson_id": memory.get("lesson_id", memory_id),
+                    "date": memory.get("date", ""),
+                    "title": title,
+                    "heading": heading,
+                    "chunk_idx": int(memory.get("chunk_idx", 0)),
+                    "total_chunks": int(memory.get("total_chunks", 1)),
+                },
+            }
+        )
+    return records
 
 
 def _build_lesson_records(
@@ -2005,31 +2065,30 @@ def _build_lesson_records(
     return records
 
 
-def action_index_lessons_v2(
+def action_index_memory_v2(
     project_root: str,
     repo_hash: str,
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``tasks/lessons.md`` into the repo-scoped lessons Chroma store.
+    """Index ``tasks/memory.md`` into the repo-scoped memory Chroma store.
 
     `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — lessons is repo-scoped. Manifest diff degenerates to a single
-    entry; when the file changes (mtime or size), all chunks are re-upserted
-    after deleting prior records for the file.
+    ignored because memory is repo-scoped. Legacy ``tasks/lessons.md`` is used
+    only when ``tasks/memory.md`` is absent.
     """
     del worktree_hash  # repo-scoped scope does not consume the worktree hash
-    db_path = resolve_db_path(repo_hash, None, "lessons", db_root=db_root)
-    lessons, new_entries = _load_lessons_documents(project_root)
+    db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
+    memories, new_entries = _load_memory_documents(project_root)
 
     emit_progress(
         {
             "phase": "indexing",
-            "scope": "lessons",
+            "scope": "memory",
             "mode": mode,
             "done": 0,
-            "total": len(lessons),
+            "total": len(memories),
         }
     )
 
@@ -2042,9 +2101,9 @@ def action_index_lessons_v2(
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_LESSONS_COLLECTION)
+        client, collection = make_collection(db_path, V2_MEMORY_COLLECTION)
         try:
-            old_entries = read_manifest(db_path, scope="lessons")
+            old_entries = read_manifest(db_path, scope="memory")
             diff = compute_manifest_diff(old_entries, new_entries)
             file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
 
@@ -2055,24 +2114,24 @@ def action_index_lessons_v2(
                         collection.delete(ids=existing["ids"])
                 except Exception:
                     pass
-                lesson_records = _build_lesson_records(lessons)
+                memory_records = _build_memory_records(memories)
             else:
-                lesson_records = []
+                memory_records = []
 
             emit_progress(
                 {
                     "phase": "diff",
-                    "scope": "lessons",
+                    "scope": "memory",
                     "added": len(diff["added"]),
                     "changed": len(diff["changed"]),
                     "removed": len(diff["removed"]),
                 }
             )
 
-            if lesson_records:
-                ids = [r["id"] for r in lesson_records]
-                documents = [r["document"] for r in lesson_records]
-                metadatas = [r["metadata"] for r in lesson_records]
+            if memory_records:
+                ids = [r["id"] for r in memory_records]
+                documents = [r["document"] for r in memory_records]
+                metadatas = [r["metadata"] for r in memory_records]
                 batch = 100
                 for i in range(0, len(ids), batch):
                     collection.upsert(
@@ -2080,13 +2139,13 @@ def action_index_lessons_v2(
                         documents=documents[i : i + batch],
                         metadatas=metadatas[i : i + batch],
                     )
-                indexed = len(lesson_records)
+                indexed = len(memory_records)
 
-            write_manifest(db_path, scope="lessons", entries=new_entries)
+            write_manifest(db_path, scope="memory", entries=new_entries)
             _write_scope_meta(
                 repo_hash=repo_hash,
                 worktree_hash=None,
-                scope="lessons",
+                scope="memory",
                 db_root=db_root,
                 updates={
                     "last_repair_at": _now_utc().isoformat(),
@@ -2099,13 +2158,30 @@ def action_index_lessons_v2(
     emit_progress(
         {
             "phase": "complete",
-            "scope": "lessons",
+            "scope": "memory",
             "mode": mode,
             "indexed": indexed,
             "total": indexed,
         }
     )
-    return {"ok": True, "scope": "lessons", "indexed": indexed}
+    return {"ok": True, "scope": "memory", "indexed": indexed}
+
+
+def action_index_lessons_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+) -> dict:
+    """Compatibility wrapper for the legacy lessons index action."""
+    return action_index_memory_v2(
+        project_root=project_root,
+        repo_hash=repo_hash,
+        worktree_hash=worktree_hash,
+        mode=mode,
+        db_root=db_root,
+    )
 
 
 def _format_lessons_results(
@@ -2124,6 +2200,37 @@ def _format_lessons_results(
         seen.add(key)
         formatted.append(
             {
+                "date": date,
+                "title": title,
+                "heading": meta.get("heading", ""),
+                "chunk_idx": int(meta.get("chunk_idx", 0)),
+                "distance": it.get("distance"),
+            }
+        )
+        if len(formatted) >= n_results:
+            break
+    return formatted
+
+
+def _format_memory_results(
+    items: List[Dict[str, Any]], n_results: int = 10
+) -> List[Dict[str, Any]]:
+    """Collapse chunked memory results so each (date, title) appears once."""
+    formatted: List[Dict[str, Any]] = []
+    seen: set = set()
+    for it in items:
+        meta = it.get("metadata") or {}
+        date = meta.get("date", "")
+        title = meta.get("title", "")
+        key = (date, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        memory_id = meta.get("memory_id") or meta.get("lesson_id", "")
+        formatted.append(
+            {
+                "memory_id": memory_id,
+                "lesson_id": meta.get("lesson_id", memory_id),
                 "date": date,
                 "title": title,
                 "heading": meta.get("heading", ""),
@@ -2203,10 +2310,11 @@ def _scope_meta_path(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Path:
+    scope = _canonical_scope(scope)
     if scope == "specs":
         return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
-    if scope == "lessons":
-        return resolve_db_path(repo_hash, None, "lessons", db_root=db_root) / META_FILENAME
+    if scope == "memory":
+        return resolve_db_path(repo_hash, None, "memory", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -2241,6 +2349,7 @@ def _read_scope_meta(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    scope = _canonical_scope(scope)
     payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
     scopes = payload.get("scopes") or {}
     scope_payload = scopes.get(scope, {})
@@ -2254,6 +2363,7 @@ def _write_scope_meta(
     db_root: Optional[Path] = None,
     updates: Optional[Dict[str, Any]] = None,
 ) -> None:
+    scope = _canonical_scope(scope)
     meta_path = _scope_meta_path(repo_hash, worktree_hash, scope, db_root=db_root)
     payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
     payload["schema_version"] = INDEX_SCHEMA_VERSION
@@ -2271,12 +2381,13 @@ def _write_scope_meta(
 
 
 def _scope_collection_name(scope: str) -> str:
+    scope = _canonical_scope(scope)
     return {
         "files": V2_FILES_CODE_COLLECTION,
         "files-docs": V2_FILES_DOCS_COLLECTION,
         "specs": V2_SPECS_COLLECTION,
         "issues": V2_ISSUES_COLLECTION,
-        "lessons": V2_LESSONS_COLLECTION,
+        "memory": V2_MEMORY_COLLECTION,
     }[scope]
 
 
@@ -2319,6 +2430,7 @@ def _scope_status_v2(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    scope = _canonical_scope(scope)
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
@@ -2348,11 +2460,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "lessons") and document_count < manifest_count:
+    elif scope in ("specs", "memory") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "lessons") and document_count != manifest_count:
+    elif scope not in ("specs", "memory") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -2625,11 +2737,12 @@ def action_search_v2(
         "search-files-docs": "files-docs",
         "search-specs": "specs",
         "search-issues": "issues",
+        "search-memory": "memory",
         "search-lessons": "lessons",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
-    scope = scope_for_action[action]
+    scope = _canonical_scope(scope_for_action[action])
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     if scope == "issues":
@@ -2675,8 +2788,8 @@ def action_search_v2(
                 mode="full" if needs_build else "incremental",
                 db_root=db_root,
             )
-        elif scope == "lessons":
-            build = action_index_lessons_v2(
+        elif scope == "memory":
+            build = action_index_memory_v2(
                 project_root=project_root,
                 repo_hash=repo_hash,
                 worktree_hash=None,
@@ -2699,9 +2812,9 @@ def action_search_v2(
     with acquire_lock(db_path, exclusive=False):
         client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
         try:
-            # SPECs / Lessons are chunked, so a single owner can span many
+            # SPECs / Memory are chunked, so a single owner can span many
             # Chroma records. Over-fetch by 5x then collapse in the formatter.
-            fetch_n = n_results * 5 if scope in ("specs", "lessons") else n_results
+            fetch_n = n_results * 5 if scope in ("specs", "memory") else n_results
             items = _search_collection_v2(collection, query, fetch_n)
         finally:
             _close_chroma_client(client)
@@ -2710,8 +2823,15 @@ def action_search_v2(
         return {"ok": True, "results": _format_file_results(items)}
     if scope == "specs":
         return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
-    if scope == "lessons":
-        return {"ok": True, "lessonResults": _format_lessons_results(items, n_results)}
+    if scope == "memory":
+        memory_results = _format_memory_results(items, n_results)
+        if action == "search-lessons":
+            return {
+                "ok": True,
+                "memoryResults": memory_results,
+                "lessonResults": _format_lessons_results(items, n_results),
+            }
+        return {"ok": True, "memoryResults": memory_results}
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
@@ -2742,7 +2862,7 @@ def action_status_v2(
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
-        "lessons": _scope_status_v2(repo_hash, None, "lessons", db_root=db_root),
+        "memory": _scope_status_v2(repo_hash, None, "memory", db_root=db_root),
     }
     if worktree_hash:
         for scope in ("files", "files-docs"):
@@ -2773,6 +2893,8 @@ def parse_args() -> argparse.Namespace:
             "search-issues",
             "index-specs",
             "search-specs",
+            "index-memory",
+            "search-memory",
             "index-lessons",
             "search-lessons",
         ],
@@ -2787,7 +2909,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "lessons"],
+        choices=["", "issues", "specs", "memory", "files", "files-docs", "lessons"],
     )
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
@@ -2848,12 +2970,12 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
-        if action == "index-lessons":
+        if action in ("index-memory", "index-lessons"):
             if not args.project_root:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
                 return 2
             emit(
-                action_index_lessons_v2(
+                action_index_memory_v2(
                     project_root=args.project_root,
                     repo_hash=repo_hash,
                     worktree_hash=None,
@@ -2867,6 +2989,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             "search-files-docs",
             "search-specs",
             "search-issues",
+            "search-memory",
             "search-lessons",
         ):
             if not args.query:

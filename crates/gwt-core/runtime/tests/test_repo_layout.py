@@ -75,8 +75,30 @@ class ResolveDbPathTests(unittest.TestCase):
             worktree_hash=None,
             scope="lessons",
         )
-        expected = (".gwt", "index", "abc1234567890def", "lessons")
+        expected = (".gwt", "index", "abc1234567890def", "memory")
         self.assertEqual(path.parts[-len(expected) :], expected)
+
+    def test_memory_scope_is_repo_scoped(self):
+        path = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash=None,
+            scope="memory",
+        )
+        expected = (".gwt", "index", "abc1234567890def", "memory")
+        self.assertEqual(path.parts[-len(expected) :], expected)
+
+    def test_lessons_scope_aliases_memory_scope(self):
+        memory = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash=None,
+            scope="memory",
+        )
+        lessons = runner.resolve_db_path(
+            repo_hash="abc1234567890def",
+            worktree_hash=None,
+            scope="lessons",
+        )
+        self.assertEqual(lessons, memory)
 
     def test_lessons_scope_ignores_worktree_hash(self):
         with_wt = runner.resolve_db_path(
@@ -152,6 +174,25 @@ class CliArgumentTests(unittest.TestCase):
         ):
             args = runner.parse_args()
             self.assertEqual(args.scope, "files-docs")
+
+    def test_parse_args_accepts_memory_scope(self):
+        with mock.patch.object(
+            runner.sys,
+            "argv",
+            [
+                "chroma_index_runner.py",
+                "--action",
+                "search-memory",
+                "--repo-hash",
+                "abc1234567890def",
+                "--query",
+                "reusable learning",
+                "--scope",
+                "memory",
+            ],
+        ):
+            args = runner.parse_args()
+            self.assertEqual(args.scope, "memory")
 
     def test_parse_args_accepts_no_auto_build(self):
         with mock.patch.object(

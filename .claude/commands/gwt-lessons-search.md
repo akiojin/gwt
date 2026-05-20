@@ -1,15 +1,14 @@
 ---
-description: Semantic search over the project's `tasks/lessons.md` post-mortem entries
+description: Legacy alias for semantic search over reusable project memory
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
-# Lessons Search Command
+# Lessons Search Command (Legacy Alias)
 
-Run a vector-embedded semantic search over the post-mortem lessons recorded
-at `tasks/lessons.md`. Use before starting work that resembles a past
-failure, when you want to reuse a previously-verified prevention strategy,
-or when you suspect the current bug has already been documented.
+Run the legacy lessons search path against the canonical memory index. New
+guidance should prefer `/gwt:gwt-memory-search`; this command remains for older
+requests that use lessons terminology.
 
 ## Usage
 
@@ -20,7 +19,7 @@ or when you suspect the current bug has already been documented.
 ## Steps
 
 1. Load `.claude/skills/gwt-lessons-search/SKILL.md` and follow the workflow.
-2. Execute the search query against the lessons index.
+2. Execute the search query against the memory index via the lessons alias.
 3. Return ranked results with `date`, `title`, `heading`, `chunk_idx`, and
    `distance`. Lower distance values are more relevant.
 
@@ -31,9 +30,8 @@ or when you suspect the current bug has already been documented.
 ```
 
 ```text
-/gwt:gwt-lessons-search "spec section マーカー"
+/gwt:gwt-lessons-search "spec section marker"
 ```
 
-For a unified search that also includes SPECs, Issues, and project files,
-use `/gwt:gwt-search "query"` (default merge) or `/gwt:gwt-search --lessons
-"query"` to keep only lesson results.
+For new usage, prefer `/gwt:gwt-memory-search "query"` or
+`/gwt:gwt-search --memory "query"`.

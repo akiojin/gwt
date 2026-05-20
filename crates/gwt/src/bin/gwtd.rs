@@ -265,7 +265,7 @@ fn format_index_help() -> String {
         "",
         "Subcommands:",
         "  status                                  Show index runtime + asset status",
-        "  rebuild [--scope all|issues|specs|files|files-docs]",
+        "  rebuild [--scope all|issues|specs|files|files-docs|memory|lessons]",
         "                                          Rebuild a specific scope",
         "",
     ]

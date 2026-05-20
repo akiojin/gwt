@@ -200,7 +200,7 @@ fn is_builtin_skip(worktree: &Path, path: &Path) -> bool {
 /// participate in the watcher even when their parent directory would normally
 /// be skipped. Keep the list intentionally small — every entry weakens the
 /// builtin skip guarantee.
-const WATCHER_BUILTIN_ALLOWLIST: &[&str] = &["tasks/lessons.md"];
+const WATCHER_BUILTIN_ALLOWLIST: &[&str] = &["tasks/memory.md", "tasks/lessons.md"];
 
 fn is_allowlisted(worktree: &Path, path: &Path) -> bool {
     let rel = path.strip_prefix(worktree).unwrap_or(path);
@@ -255,6 +255,15 @@ mod tests {
     fn tasks_lessons_md_is_watched_despite_tasks_skip() {
         let root = Path::new("/repo");
         let path = root.join("tasks/lessons.md");
+
+        let gi = build_gitignore(root);
+        assert!(!is_ignored(&gi, root, &path));
+    }
+
+    #[test]
+    fn tasks_memory_md_is_watched_despite_tasks_skip() {
+        let root = Path::new("/repo");
+        let path = root.join("tasks/memory.md");
 
         let gi = build_gitignore(root);
         assert!(!is_ignored(&gi, root, &path));

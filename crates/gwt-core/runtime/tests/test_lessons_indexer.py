@@ -1,6 +1,17 @@
-"""Tests for the lessons (post-mortem) scope indexer.
+"""Tests for the memory (post-mortem learning) scope indexer.
 
-Lessons live in `tasks/lessons.md` as H2 sections with the canonical shape:
+Memory lives in `tasks/memory.md` as H2 sections with the canonical shape:
+
+    ## YYYY-MM-DD — title
+    Type: lesson
+    Context: ...
+    Learning: ...
+    Future Action: ...
+
+Legacy `tasks/lessons.md` files are still accepted as a compatibility
+fallback so older worktrees remain searchable.
+
+Historical lessons used this shape:
 
     ## YYYY-MM-DD — title
     ### 事象
@@ -49,6 +60,66 @@ beta cause.
 
 This section omits the date prefix and uses a single paragraph format.
 """
+
+SAMPLE_MEMORY = """# Memory
+
+## 2026-05-20 — canonical memory entry
+
+Type: lesson
+Context: Hook reminders did not mention persistent memory.
+Learning: Agents do not update memory unless the hook guidance makes the file visible.
+Future Action: Remind agents to update tasks/memory.md when reusable learning appears.
+
+## 2026-05-19 — second memory entry
+
+Type: decision
+Context: lessons.md was too narrow a name.
+Learning: memory.md describes reusable project knowledge more accurately.
+Future Action: Keep lessons as a legacy alias only.
+"""
+
+
+class LoadMemoryDocumentsTests(unittest.TestCase):
+    def _write_memory_file(self, contents: str) -> Path:
+        tmp = tempfile.mkdtemp()
+        root = Path(tmp)
+        tasks = root / "tasks"
+        tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / "memory.md").write_text(contents, encoding="utf-8")
+        return root
+
+    def _write_lessons_file(self, contents: str) -> Path:
+        tmp = tempfile.mkdtemp()
+        root = Path(tmp)
+        tasks = root / "tasks"
+        tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / "lessons.md").write_text(contents, encoding="utf-8")
+        return root
+
+    def test_memory_file_is_canonical_source(self):
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        memories, manifest = runner._load_memory_documents(str(root))
+        self.assertEqual(len(memories), 2)
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0]["path"], "tasks/memory.md")
+        self.assertEqual(memories[0]["memory_id"], memories[0]["lesson_id"])
+        self.assertIn("canonical memory entry", memories[0]["title"])
+
+    def test_legacy_lessons_file_is_fallback(self):
+        root = self._write_lessons_file(SAMPLE_LESSONS)
+        memories, manifest = runner._load_memory_documents(str(root))
+        self.assertEqual(len(memories), 3)
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0]["path"], "tasks/lessons.md")
+
+    def test_memory_file_wins_when_both_sources_exist(self):
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        (root / "tasks" / "lessons.md").write_text(SAMPLE_LESSONS, encoding="utf-8")
+        memories, manifest = runner._load_memory_documents(str(root))
+        titles = [memory["title"] for memory in memories]
+        self.assertEqual(manifest[0]["path"], "tasks/memory.md")
+        self.assertIn("canonical memory entry", titles)
+        self.assertNotIn("alpha section title", titles)
 
 
 class LoadLessonsDocumentsTests(unittest.TestCase):
@@ -105,6 +176,27 @@ class LoadLessonsDocumentsTests(unittest.TestCase):
 
 
 class BuildLessonRecordsTests(unittest.TestCase):
+    def test_build_memory_records_returns_memory_ids(self):
+        memories = [
+            {
+                "memory_id": "abc123def456",
+                "lesson_id": "abc123def456",
+                "date": "2026-05-20",
+                "title": "alpha",
+                "heading": "## 2026-05-20 — alpha",
+                "body": "Type: lesson\nContext: alpha symptom.",
+                "chunk_idx": 0,
+                "total_chunks": 1,
+            }
+        ]
+        records = runner._build_memory_records(memories)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["id"], "memory-abc123def456")
+        meta = records[0]["metadata"]
+        self.assertEqual(meta["memory_id"], "abc123def456")
+        self.assertEqual(meta["lesson_id"], "abc123def456")
+        self.assertEqual(meta["title"], "alpha")
+
     def test_returns_chroma_records_with_metadata(self):
         lessons = [
             {
@@ -128,6 +220,51 @@ class BuildLessonRecordsTests(unittest.TestCase):
 
 
 class ActionIndexLessonsTests(unittest.TestCase):
+    def test_index_memory_writes_manifest_and_chunks(self):
+        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
+            root = Path(wt)
+            tasks = root / "tasks"
+            tasks.mkdir(parents=True, exist_ok=True)
+            (tasks / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
+
+            result = runner.action_index_memory_v2(
+                project_root=str(root),
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                mode="full",
+                db_root=Path(db_root_dir),
+            )
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result["scope"], "memory")
+            self.assertGreaterEqual(result["indexed"], 2)
+
+            db_path = runner.resolve_db_path(
+                "abc1234567890def", None, "memory", db_root=Path(db_root_dir)
+            )
+            manifest_file = runner._manifest_path(db_path, "memory")
+            self.assertTrue(manifest_file.is_file(), f"missing manifest at {manifest_file}")
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["path"], "tasks/memory.md")
+
+    def test_index_lessons_alias_writes_memory_scope(self):
+        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
+            root = Path(wt)
+            tasks = root / "tasks"
+            tasks.mkdir(parents=True, exist_ok=True)
+            (tasks / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
+
+            result = runner.action_index_lessons_v2(
+                project_root=str(root),
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                mode="full",
+                db_root=Path(db_root_dir),
+            )
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result["scope"], "memory")
+
     def test_full_mode_writes_manifest_and_chunks(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
             root = Path(wt)
@@ -143,7 +280,7 @@ class ActionIndexLessonsTests(unittest.TestCase):
                 db_root=Path(db_root_dir),
             )
             self.assertTrue(result.get("ok"), result)
-            self.assertEqual(result["scope"], "lessons")
+            self.assertEqual(result["scope"], "memory")
             self.assertGreaterEqual(result["indexed"], 3)
 
             db_path = runner.resolve_db_path(
@@ -170,6 +307,40 @@ class ActionIndexLessonsTests(unittest.TestCase):
 
 
 class FormatLessonsResultsTests(unittest.TestCase):
+    def test_format_memory_results_collapses_chunks_by_date_title(self):
+        items = [
+            {
+                "id": "memory-aaa",
+                "distance": 0.12,
+                "metadata": {
+                    "memory_id": "aaa",
+                    "lesson_id": "aaa",
+                    "date": "2026-05-20",
+                    "title": "alpha",
+                    "heading": "## 2026-05-20 — alpha",
+                    "chunk_idx": 0,
+                    "total_chunks": 2,
+                },
+            },
+            {
+                "id": "memory-aaa-2",
+                "distance": 0.15,
+                "metadata": {
+                    "memory_id": "aaa-2",
+                    "lesson_id": "aaa-2",
+                    "date": "2026-05-20",
+                    "title": "alpha",
+                    "heading": "## 2026-05-20 — alpha [2]",
+                    "chunk_idx": 1,
+                    "total_chunks": 2,
+                },
+            },
+        ]
+        out = runner._format_memory_results(items, n_results=10)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["memory_id"], "aaa")
+        self.assertEqual(out[0]["lesson_id"], "aaa")
+
     def test_collapses_chunks_by_date_title_and_limits_to_n(self):
         items = [
             {

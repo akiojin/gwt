@@ -48,6 +48,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
           document_count: 5,
           reason: "count_mismatch",
         },
+        memory: { healthy: true, document_count: 12, repair_required: false, reason: "ready" },
         files: {
           wtAhash: { healthy: true, document_count: 310, repair_required: false, reason: "ready" },
           wtBhash: {
@@ -82,7 +83,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
 
   const scopeRows = Array.from(table.querySelectorAll("tbody tr"));
   const scopes = scopeRows.map((tr) => tr.dataset.scope);
-  assert.deepEqual(scopes, ["issues", "specs", "lessons", "files", "files-docs"]);
+  assert.deepEqual(scopes, ["issues", "specs", "memory", "files", "files-docs"]);
 
   // Repo-shared issues row spans all worktree columns and reports ready.
   const issuesCell = scopeRows[0].querySelector(".settings-index-cell");
@@ -94,9 +95,9 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.match(specsCell.textContent, /count_mismatch/);
   assert.ok(specsCell.classList.contains("unhealthy"));
 
-  // lessons row is repo-shared and renders a single column-spanning cell.
-  const lessonsCell = scopeRows[2].querySelector(".settings-index-cell");
-  assert.equal(lessonsCell.colSpan, 2);
+  // memory row is repo-shared and renders a single column-spanning cell.
+  const memoryCell = scopeRows[2].querySelector(".settings-index-cell");
+  assert.equal(memoryCell.colSpan, 2);
 
   // files row has one cell per worktree, in worktree-hash sort order.
   const filesCells = scopeRows[3].querySelectorAll(".settings-index-cell");

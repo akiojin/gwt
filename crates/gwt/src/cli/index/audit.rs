@@ -77,7 +77,14 @@ fn audit_health(payload: &Value) -> AuditHealth {
     };
 
     let mut unhealthy_scopes = Vec::new();
-    for scope in ["issues", "specs", "lessons", "files", "files-docs"] {
+    for scope in [
+        "issues",
+        "specs",
+        "memory",
+        "lessons",
+        "files",
+        "files-docs",
+    ] {
         let Some(scope_status) = status.get(scope) else {
             continue;
         };
