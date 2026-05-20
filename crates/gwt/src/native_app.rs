@@ -51,12 +51,26 @@ pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {
     }
 }
 
-#[cfg(target_os = "windows")]
-pub fn windows_app_icon() -> Option<tao::window::Icon> {
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn native_window_icon() -> Option<tao::window::Icon> {
     let image = image::load_from_memory(include_bytes!("../../../assets/icons/icon.png")).ok()?;
     let image = image.into_rgba8();
     let (width, height) = image.dimensions();
     tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
+#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_window_icon_loads_embedded_png() {
+        let icon = native_window_icon();
+        assert!(
+            icon.is_some(),
+            "native_window_icon must decode assets/icons/icon.png at build time"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

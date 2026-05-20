@@ -309,6 +309,7 @@ jobs:
       - name: Create app bundle
         run: |
           mkdir -p dist/GWT.app/Contents/MacOS
+          mkdir -p dist/GWT.app/Contents/Resources
           cat > dist/GWT.app/Contents/Info.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -318,6 +319,8 @@ jobs:
             <string>GWT</string>
             <key>CFBundleExecutable</key>
             <string>gwt</string>
+            <key>CFBundleIconFile</key>
+            <string>icon</string>
             <key>CFBundleIdentifier</key>
             <string>io.github.akiojin.gwt</string>
             <key>CFBundleName</key>
@@ -333,6 +336,7 @@ jobs:
           EOF
           cp dist/gwt dist/GWT.app/Contents/MacOS/gwt
           cp dist/gwtd dist/GWT.app/Contents/MacOS/gwtd
+          cp assets/icons/icon.icns dist/GWT.app/Contents/Resources/icon.icns
           chmod +x dist/GWT.app/Contents/MacOS/gwt
           chmod +x dist/GWT.app/Contents/MacOS/gwtd
       - name: Prepare macOS signing keychain

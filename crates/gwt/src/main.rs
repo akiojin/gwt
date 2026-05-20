@@ -6027,11 +6027,14 @@ fn main() -> wry::Result<()> {
     // renders into. Binding the pair in a tuple keeps the Rust ownership of
     // `Window` until the closure (and therefore the process) ends.
     let webview_surface: Option<(Window, wry::WebView)> = if serve_args.is_none() {
-        let window = WindowBuilder::new()
+        let builder = WindowBuilder::new()
             .with_title(APP_NAME)
-            .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
-            .build(&event_loop)
-            .expect("window");
+            .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0));
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let window_icon = gwt::native_window_icon();
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let builder = builder.with_window_icon(window_icon);
+        let window = builder.build(&event_loop).expect("window");
         let builder = WebViewBuilder::new().with_url(front_door.webview_url);
 
         #[cfg(any(

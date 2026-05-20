@@ -84,6 +84,69 @@ run("release workflow packages gwtd alongside gwt", () => {
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
 });
 
+run("native_window_icon wires tao window icon on Windows and Linux", () => {
+  const nativeApp = fs.readFileSync(
+    path.join(__dirname, "..", "crates", "gwt", "src", "native_app.rs"),
+    "utf8"
+  );
+  const mainRs = fs.readFileSync(
+    path.join(__dirname, "..", "crates", "gwt", "src", "main.rs"),
+    "utf8"
+  );
+  const libRs = fs.readFileSync(
+    path.join(__dirname, "..", "crates", "gwt", "src", "lib.rs"),
+    "utf8"
+  );
+
+  assert.match(
+    nativeApp,
+    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\npub fn native_window_icon\(\) -> Option<tao::window::Icon>/,
+    "native_app.rs must expose native_window_icon() for Windows and Linux"
+  );
+  assert.match(
+    nativeApp,
+    /include_bytes!\("\.\.\/\.\.\/\.\.\/assets\/icons\/icon\.png"\)/,
+    "native_window_icon must embed assets/icons/icon.png at compile time"
+  );
+  assert.match(
+    libRs,
+    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\npub use native_app::native_window_icon;/,
+    "lib.rs must re-export native_window_icon for Windows and Linux"
+  );
+  assert.match(
+    mainRs,
+    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\n\s*let window_icon = gwt::native_window_icon\(\);/,
+    "main.rs must resolve the native_window_icon for Windows and Linux"
+  );
+  assert.match(
+    mainRs,
+    /\.with_window_icon\(window_icon\)/,
+    "main.rs WindowBuilder must call .with_window_icon(window_icon) so Windows and Linux pick up the GWT icon"
+  );
+});
+
+run("macOS app bundle declares and ships the CFBundleIconFile resource", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  assert.match(
+    workflow,
+    /<key>CFBundleIconFile<\/key>\s*\n\s*<string>icon<\/string>/,
+    "build-dmg Info.plist must declare CFBundleIconFile=icon so macOS resolves the bundle icon"
+  );
+  assert.match(
+    workflow,
+    /mkdir -p dist\/GWT\.app\/Contents\/Resources/,
+    "build-dmg must create Contents/Resources before copying icon.icns"
+  );
+  assert.match(
+    workflow,
+    /cp assets\/icons\/icon\.icns dist\/GWT\.app\/Contents\/Resources\/icon\.icns/,
+    "build-dmg must copy assets/icons/icon.icns into Contents/Resources/icon.icns"
+  );
+});
+
 run("package scripts keep the GUI front door and release contract explicit", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
   assert.equal(pkg.bin.gwt, "bin/gwt.cjs");

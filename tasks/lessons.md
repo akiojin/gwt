@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-05-20 — SPEC の FR で platform scope を限定すると、サイレントな regression を生む（macOS app icon）
+
+### 事象
+
+`v9.38.0` の `/Applications/GWT.app` で Dock / Finder / `⌘Tab` の GWT アイコンが macOS デフォルトに戻っていた。`/Applications/GWT.app/Contents/Info.plist` には `CFBundleIconFile` が無く、`Contents/Resources/` も空だった。`assets/icons/icon.icns` はリポジトリに存在していたが、リリースワークフローが bundle へ wire していなかった（Issue #2799）。
+
+### 原因
+
+旧 Tauri bundler は macOS bundle / icns binding を自動で担当していた。SPEC-1776 で gwt-tauri を削除した時点でこの binding が失われたが、`.github/workflows/release.yml` の手作り `GWT.app` 生成ステップは未追加のまま。後続の SPEC #2041 FR-027 は「**Windows build は**……」と platform を限定して icon assets を再配線したため、Windows 側だけが復活し macOS 側は CI logs にも明示的なエラーが出ないまま落ちたまま継続した。FR の文言から `macOS` の文字が抜けていたことが silent regression を許した直接原因。
+
+### 再発防止策
+
+1. **FR は platform scope を limit するときに必ず明示的に列挙する**: 「Windows build は…」のように一つの platform に限定する FR を書く場合、同じ要件が他の platform でも必要かどうかをレビュー時に必ずチェックする。テンプレートに「OS scope: windows / macos / linux / all」を入れて選択漏れを防ぐ。
+2. **bundle resource を扱う変更は test_release_assets.cjs に静的検証を追加する**: release.yml が macOS bundle に `CFBundleIconFile` を書き、`Contents/Resources/icon.icns` を copy しているかは `node scripts/test_release_assets.cjs` で静的にチェックできる。`assert.match(workflow, /<key>CFBundleIconFile<\/key>\s*\n\s*<string>icon<\/string>/)` の様な regex で CI 回帰防止。
+3. **routing: バグは plain Issue で扱う**: `gwt-spec` ラベルは仕様用なので、FR scope 漏れによる regression のような bug 修正は plain Issue として登録し `gwt-fix-issue` で TDD 修正する。SPEC を再 open するのは「設計判断を伴う」場合のみに限定する（feedback memory: `feedback-spec-is-for-specifications-not-bugs`）。
+4. **app icon は OS ごとに別経路で配線される。1 OS の修正で完結したと判断しない**: macOS は bundle `Info.plist::CFBundleIconFile` + `Contents/Resources/icon.icns`、Windows は `winresource::set_icon`（.exe 埋込）と `wix/main.wxs` の `<Icon>`（installer / Start Menu / ARP）に加えて runtime の `WindowBuilder::with_window_icon` (HWND `WM_SETICON`)、Linux は X11 / Wayland 用の `WindowBuilder::with_window_icon`。冗長に見えても各経路を独立に配線し、各 OS で table を埋めて配線抜けを目視確認する。
+
+---
+
 ## 2026-05-20 — Unit / Playwright snapshot tests は E2E ではない
 
 ### 事象

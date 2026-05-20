@@ -91,6 +91,8 @@ pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
     refresh_managed_gwt_assets_for_worktree,
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub use native_app::native_window_icon;
 #[cfg(target_os = "macos")]
 pub use native_app::MacosNativeMenu;
 pub use native_app::{
