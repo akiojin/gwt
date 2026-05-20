@@ -1,6 +1,6 @@
 //! ANSI escape sequence stripping for process console lines.
 //!
-//! Applied in [`super::spawn::forward_stream`] right after
+//! Applied in `super::spawn::forward_stream` right after
 //! [`super::redact::redact_line`] so that lines pushed into the hub
 //! ring buffer and broadcast channel are plain text (SPEC-2809 FR-008).
 //!
