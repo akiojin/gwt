@@ -41,7 +41,10 @@ pub enum LaunchWizardMode {
 }
 
 pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {
-    format!("feature/{}-{number}", kind.branch_kind_segment())
+    match kind {
+        LinkedIssueKind::Issue => format!("work/issue-{number}"),
+        LinkedIssueKind::Spec => format!("feature/spec-{number}"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5242,14 +5245,14 @@ mod tests {
         assert_eq!(state.step, LaunchWizardStep::LaunchTarget);
         assert_eq!(view.title, "Launch Agent");
         assert_eq!(view.mode, LaunchWizardMode::Knowledge);
-        assert_eq!(view.branch_name, "feature/issue-7");
+        assert_eq!(view.branch_name, "work/issue-7");
         assert_eq!(view.branch_mode, "create_new");
         assert!(!view.show_branch_controls);
         assert!(state.is_new_branch);
         assert_eq!(state.base_branch_name.as_deref(), Some("develop"));
 
         let config = state.build_launch_config().expect("launch config");
-        assert_eq!(config.branch.as_deref(), Some("feature/issue-7"));
+        assert_eq!(config.branch.as_deref(), Some("work/issue-7"));
         assert_eq!(config.base_branch.as_deref(), Some("develop"));
         assert!(config.working_dir.is_none());
         assert_eq!(config.linked_issue_number, Some(7));
