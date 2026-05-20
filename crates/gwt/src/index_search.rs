@@ -134,8 +134,7 @@ fn run_scope_search(
     if !output.status.success() {
         return Err(format_runner_failure(&output));
     }
-    let payload: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("parse project index search result: {error}"))?;
+    let payload = parse_runner_payload(&output.stdout)?;
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return Err(payload_error(&payload));
     }
@@ -349,6 +348,28 @@ fn format_runner_failure(output: &std::process::Output) -> String {
     format!("runner exited with {}", output.status)
 }
 
+fn parse_runner_payload(stdout: &[u8]) -> Result<Value, String> {
+    match serde_json::from_slice(stdout) {
+        Ok(payload) => Ok(payload),
+        Err(full_error) => {
+            let text = String::from_utf8_lossy(stdout);
+            for line in text.lines().rev() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let Ok(payload) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if payload.get("ok").is_some() || payload.get("error").is_some() {
+                    return Ok(payload);
+                }
+            }
+            Err(format!("parse project index search result: {full_error}"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +564,24 @@ mod tests {
             &workspace,
             &BoardAudienceScope::Workspace("workspace-b".to_string())
         ));
+    }
+
+    #[test]
+    fn parse_runner_payload_accepts_jsonl_progress_before_final_result() {
+        let payload = parse_runner_payload(
+            br#"{"phase":"indexing","scope":"board","done":0,"total":0}
+{"phase":"complete","scope":"board","total":0}
+{"ok":true,"boardResults":[{"entry_id":"entry-1"}]}"#,
+        )
+        .expect("final ok payload");
+
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            payload
+                .get("boardResults")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
     }
 }

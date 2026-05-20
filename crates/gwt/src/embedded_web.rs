@@ -2119,6 +2119,29 @@ mod tests {
             "expected Index window to host the existing health/rebuild table",
         );
         assert!(
+            html.contains(".index-search-panel[hidden]")
+                && html.contains(".index-health-panel[hidden]")
+                && html.contains("display: none !important"),
+            "Index tabs must hide inactive Search/Health panels even when panel CSS sets display"
+        );
+        assert!(
+            html.contains("index-search-toolbar")
+                && html.contains("index-health-toolbar")
+                && html.contains("index-health-table"),
+            "Index Search and Health controls must be visually separated instead of sharing one toolbar"
+        );
+        assert!(
+            html.contains("classList.toggle(\"is-empty\"")
+                && html.contains(".index-search-layout.is-empty")
+                && html.contains(".index-search-layout.is-empty .index-result-detail"),
+            "Index Search must collapse the unused detail pane when there are no results"
+        );
+        assert!(
+            html.contains("INDEX_SEARCH_DEFAULT_SCOPES")
+                && html.contains("selectedScopes: new Set(INDEX_SEARCH_DEFAULT_SCOPES)"),
+            "Index Search must default to lightweight scopes while leaving files/docs opt-in"
+        );
+        assert!(
             !html.contains("buildSettingsTab(\"index\""),
             "Settings must no longer expose its own Index tab",
         );

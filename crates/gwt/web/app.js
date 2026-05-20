@@ -556,13 +556,19 @@
         { id: "files-docs", label: "Docs" },
         { id: "lessons", label: "Lessons" },
       ]);
+      const INDEX_SEARCH_DEFAULT_SCOPES = Object.freeze([
+        "issues",
+        "specs",
+        "board",
+        "lessons",
+      ]);
 
       function ensureIndexSearchState(windowId) {
         if (!indexSearchStateMap.has(windowId)) {
           indexSearchStateMap.set(windowId, {
             activeTab: "search",
             query: "",
-            selectedScopes: new Set(INDEX_SEARCH_SCOPES.map((scope) => scope.id)),
+            selectedScopes: new Set(INDEX_SEARCH_DEFAULT_SCOPES),
             selectedWorktreeHash: "",
             searchTimer: 0,
             requestId: 0,
@@ -667,6 +673,7 @@
         const status = activeIndexStatus();
         const searchPanel = root.querySelector("[data-index-panel='search']");
         const healthPanel = root.querySelector("[data-index-panel='health']");
+        const healthTable = root.querySelector(".index-health-table");
         const tabs = root.querySelectorAll("[data-index-tab]");
         tabs.forEach((tab) => {
           const active = tab.dataset.indexTab === state.activeTab;
@@ -681,9 +688,9 @@
         }
         renderProjectIndexSearchControls(root, state, status);
         renderProjectIndexSearchResults(root, state);
-        if (healthPanel) {
+        if (healthTable) {
           renderIndexSettingsPanel({
-            panel: healthPanel,
+            panel: healthTable,
             status,
             projectRoot: activeProjectTab()?.project_root || "",
             send,
@@ -737,11 +744,13 @@
       }
 
       function renderProjectIndexSearchResults(root, state) {
+        const layout = root.querySelector(".index-search-layout");
         const list = root.querySelector(".index-result-list");
         const detail = root.querySelector(".index-result-detail");
         if (!list || !detail) return;
         clearChildren(list);
         clearChildren(detail);
+        layout?.classList.toggle("is-empty", state.results.length === 0);
         if (!state.query.trim()) {
           list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "Search indexed content." }));
         } else if (state.searching && state.results.length === 0) {
@@ -9151,21 +9160,25 @@
         if (surface === "index") {
           body.innerHTML = `
             <div class="index-search-root">
-              <div class="workspace-toolbar is-stacked">
-                <div class="workspace-toolbar-main">
+              <div class="index-window-header">
+                <div class="index-window-title">
                   <div class="knowledge-heading">Index</div>
-                  <input class="index-search-input" type="search" placeholder="Search indexed content" />
+                  <div class="index-window-subtitle">Search indexed project content</div>
                 </div>
-                <div class="workspace-toolbar-actions">
+                <div class="workspace-toolbar-actions index-window-tabs">
                   <button class="settings-tab active" type="button" role="tab" aria-selected="true" data-index-tab="search">Search</button>
                   <button class="settings-tab" type="button" role="tab" aria-selected="false" data-index-tab="health">Health</button>
-                  <button class="icon-button" data-action="refresh-index-status" aria-label="Refresh index status">↻</button>
                 </div>
               </div>
               <section class="index-search-panel" data-index-panel="search">
-                <div class="index-filter-bar">
-                  <div class="index-scope-list" role="group" aria-label="Search scopes"></div>
-                  <select class="index-worktree-select" aria-label="Files and Docs worktree"></select>
+                <div class="index-search-toolbar">
+                  <label class="index-search-box">
+                    <input class="index-search-input" type="search" placeholder="Search indexed content" aria-label="Search indexed content" />
+                  </label>
+                  <div class="index-filter-bar">
+                    <div class="index-scope-list" role="group" aria-label="Search scopes"></div>
+                    <select class="index-worktree-select" aria-label="Files and Docs worktree"></select>
+                  </div>
                 </div>
                 <div class="index-search-status"></div>
                 <div class="index-search-layout workspace-split">
@@ -9173,7 +9186,16 @@
                   <div class="index-result-detail workspace-scroll"></div>
                 </div>
               </section>
-              <section class="index-health-panel workspace-scroll" data-index-panel="health" hidden></section>
+              <section class="index-health-panel" data-index-panel="health" hidden>
+                <div class="index-health-toolbar">
+                  <div>
+                    <div class="index-health-title">Project index health</div>
+                    <div class="index-health-subtitle">Repair indexed sources without leaving this window.</div>
+                  </div>
+                  <button class="icon-button" data-action="refresh-index-status" aria-label="Refresh index status">↻</button>
+                </div>
+                <div class="index-health-table workspace-scroll"></div>
+              </section>
             </div>
           `;
           body.addEventListener("mousedown", () => {
