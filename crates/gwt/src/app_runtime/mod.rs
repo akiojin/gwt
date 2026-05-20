@@ -2237,11 +2237,24 @@ impl AppRuntime {
                 id,
                 branches,
                 delete_remote,
-            } => self.run_branch_cleanup_events(&client_id, &id, &branches, delete_remote),
+                force_filesystem_delete,
+            } => self.run_branch_cleanup_events(
+                &client_id,
+                &id,
+                &branches,
+                delete_remote,
+                force_filesystem_delete,
+            ),
             FrontendEvent::RunWorkspaceCleanup {
                 branch,
                 delete_remote,
-            } => self.run_workspace_cleanup_events(&client_id, &branch, delete_remote),
+                force_filesystem_delete,
+            } => self.run_workspace_cleanup_events(
+                &client_id,
+                &branch,
+                delete_remote,
+                force_filesystem_delete,
+            ),
             FrontendEvent::RebuildIndexCell {
                 project_root,
                 scope,
@@ -4615,6 +4628,7 @@ impl AppRuntime {
         id: &str,
         branches: &[String],
         delete_remote: bool,
+        force_filesystem_delete: bool,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -4661,7 +4675,10 @@ impl AppRuntime {
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
             branches.to_vec(),
-            delete_remote,
+            BranchCleanupOptions {
+                delete_remote,
+                force_filesystem_delete,
+            },
         );
         Vec::new()
     }
@@ -4671,6 +4688,7 @@ impl AppRuntime {
         client_id: &str,
         branch: &str,
         delete_remote: bool,
+        force_filesystem_delete: bool,
     ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.as_deref() else {
             return vec![OutboundEvent::reply(
@@ -4706,7 +4724,10 @@ impl AppRuntime {
             tab.project_root.clone(),
             self.active_session_branches_for_tab(tab_id),
             branch.to_string(),
-            delete_remote,
+            BranchCleanupOptions {
+                delete_remote,
+                force_filesystem_delete,
+            },
         );
         Vec::new()
     }
@@ -4783,18 +4804,35 @@ fn spawn_branch_cleanup_async(
     project_root: PathBuf,
     active_session_branches: std::collections::HashSet<String>,
     branches: Vec<String>,
-    delete_remote: bool,
+    options: BranchCleanupOptions,
 ) {
     thread::spawn(move || {
         let events =
             match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
             {
                 Ok(entries) => {
-                    let results = cleanup_selected_branches(
+                    let progress_proxy = proxy.clone();
+                    let progress_client_id = client_id.clone();
+                    let progress_window_id = window_id.clone();
+                    let results = cleanup_selected_branches_with_progress(
                         &project_root,
                         &entries,
                         &branches,
-                        delete_remote,
+                        options,
+                        move |progress| {
+                            progress_proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                                progress_client_id.clone(),
+                                BackendEvent::BranchCleanupProgress {
+                                    id: progress_window_id.clone(),
+                                    branch: progress.branch,
+                                    execution_branch: progress.execution_branch,
+                                    index: progress.index,
+                                    total: progress.total,
+                                    phase: progress.phase,
+                                    message: progress.message,
+                                },
+                            )]));
+                        },
                     );
                     let mut events = vec![OutboundEvent::reply(
                         client_id.clone(),
@@ -4843,18 +4881,34 @@ fn spawn_workspace_cleanup_async(
     project_root: PathBuf,
     active_session_branches: std::collections::HashSet<String>,
     branch: String,
-    delete_remote: bool,
+    options: BranchCleanupOptions,
 ) {
     thread::spawn(move || {
         let events =
             match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
             {
                 Ok(entries) => {
-                    let results = cleanup_selected_branches(
+                    let progress_proxy = proxy.clone();
+                    let progress_client_id = client_id.clone();
+                    let results = cleanup_selected_branches_with_progress(
                         &project_root,
                         &entries,
                         std::slice::from_ref(&branch),
-                        delete_remote,
+                        options,
+                        move |progress| {
+                            progress_proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                                progress_client_id.clone(),
+                                BackendEvent::BranchCleanupProgress {
+                                    id: WORKSPACE_CLEANUP_EVENT_ID.to_string(),
+                                    branch: progress.branch,
+                                    execution_branch: progress.execution_branch,
+                                    index: progress.index,
+                                    total: progress.total,
+                                    phase: progress.phase,
+                                    message: progress.message,
+                                },
+                            )]));
+                        },
                     );
                     let mut events = vec![OutboundEvent::reply(
                         client_id.clone(),

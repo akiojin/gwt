@@ -14,14 +14,14 @@ use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
-    cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
-    list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state, read_binary_chunk, read_text_file,
-    refresh_managed_gwt_assets_for_agent, resolve_launch_spec, workspace_state_path, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    cleanup_selected_branches_with_progress, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    read_binary_chunk, read_text_file, refresh_managed_gwt_assets_for_agent, resolve_launch_spec,
+    workspace_state_path, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, BranchListEntry,
+    ContentLimits, DockerWizardContext, FileContentError, FrontendEvent, HookForwardTarget,
+    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -2897,7 +2897,8 @@ mod tests {
                 if message == "Window is not a knowledge bridge"
         ));
 
-        let cleanup_missing = runtime.run_branch_cleanup_events("client-1", "missing", &[], false);
+        let cleanup_missing =
+            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false);
         assert_eq!(cleanup_missing.len(), 1);
         assert!(matches!(
             cleanup_missing[0].event,
@@ -2905,7 +2906,7 @@ mod tests {
         ));
 
         let cleanup_wrong =
-            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false);
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false);
         assert_eq!(cleanup_wrong.len(), 1);
         assert!(matches!(
             cleanup_wrong[0].event,
@@ -3228,8 +3229,21 @@ mod tests {
             &branches_id,
             &[String::from("feature/prune-me")],
             false,
+            false,
         );
         assert!(cleanup_events.is_empty());
+        wait_for_recorded_event("branch cleanup progress dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupProgress { .. }
+                        ))
+                )
+            })
+        });
         wait_for_recorded_event("branch cleanup dispatch", &events, |events| {
             events.iter().any(|event| {
                 matches!(
@@ -3529,6 +3543,7 @@ mod tests {
                 id: branches_id.clone(),
                 branches: vec!["feature/missing".to_string()],
                 delete_remote: false,
+                force_filesystem_delete: false,
             },
         );
         assert!(cleanup_events.is_empty());
