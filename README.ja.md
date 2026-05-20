@@ -55,6 +55,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 - GUI 向けの主配布物: `gwt-windows-x86_64.msi`
 - portable bundle: `gwt-windows-x86_64.zip`
 - public front door は `gwt.exe` で、`gwtd.exe` は内部 runtime 用の companion binary です
+- MSI をダブルクリックしても何も起きないように見える場合は、PowerShell から
+  診断スクリプトを実行し、生成された出力ディレクトリを Issue 報告に添付してください。
+
+```powershell
+$diag = "$env:TEMP\diagnose-windows-msi.ps1"
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/akiojin/gwt/main/scripts/diagnose-windows-msi.ps1 `
+  -OutFile $diag
+powershell -ExecutionPolicy Bypass -File $diag `
+  -MsiPath "$env:USERPROFILE\Downloads\gwt-windows-x86_64.msi"
+```
+
+このスクリプトは MSI の SHA256、Authenticode 署名、Zone.Identifier
+download marker、Windows Installer の `msiexec` verbose log、インストール後の
+ファイル配置、基本的な `gwt.exe` 起動証跡を記録します。
 
 ### Linux
 
