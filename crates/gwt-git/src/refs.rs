@@ -33,14 +33,9 @@ pub fn list_existing_refs(repo_path: &Path, candidates: &[&str]) -> Result<HashS
         return Ok(HashSet::new());
     }
 
-    let mut command = gwt_core::process::hidden_command("git");
-    command
-        .arg("for-each-ref")
-        .arg("--format=%(refname)")
-        .args(&trimmed)
-        .current_dir(repo_path);
-    let output = command
-        .output()
+    let mut args: Vec<&str> = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(trimmed.iter().copied());
+    let output = gwt_core::process::run_git_logged(&args, Some(repo_path))
         .map_err(|error| GwtError::Git(format!("for-each-ref: {error}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
