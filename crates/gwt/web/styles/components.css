@@ -1568,6 +1568,152 @@ kbd.op-kbd {
   border-color: var(--color-border);
 }
 
+/* SPEC-2780 — Release Notes window trigger affordance. The version badge
+   doubles as a button so make the cursor + hover state reflect that. */
+.app-version[role="button"] {
+  cursor: pointer;
+}
+:root[data-theme] .app-version[role="button"]:hover,
+:root[data-theme] .app-version[role="button"]:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-accent, var(--color-text-muted));
+}
+
+/* SPEC-2780 — Release Notes floating window. Without explicit fixed
+   positioning the element flows in document order and ends up below the
+   viewport when appended to document.body (observed live: y=741, mounted
+   but invisible to the user). */
+.release-notes-window {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10050;
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 92vw);
+  height: min(640px, 86vh);
+  background: var(--color-surface, #1c1f24);
+  color: var(--color-text, #e8eaed);
+  border: 1px solid var(--color-border, #3a3f47);
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.release-notes-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border, #3a3f47);
+  flex: 0 0 auto;
+}
+.release-notes-window-header h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted, #aab0b8);
+}
+.release-notes-close {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted, #aab0b8);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.release-notes-close:hover,
+.release-notes-close:focus-visible {
+  background: var(--color-surface-elevated, #2a2e35);
+  color: var(--color-text, #e8eaed);
+}
+.release-notes-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.release-notes-sidebar {
+  flex: 0 0 200px;
+  border-right: 1px solid var(--color-border, #3a3f47);
+  overflow-y: auto;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.release-notes-sidebar-item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  color: var(--color-text, #e8eaed);
+  cursor: pointer;
+  text-align: left;
+  padding: 6px 14px;
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.release-notes-sidebar-item:hover,
+.release-notes-sidebar-item:focus-visible {
+  background: var(--color-surface-elevated, #2a2e35);
+}
+.release-notes-sidebar-item.is-selected {
+  background: var(--color-surface-elevated, #2a2e35);
+  border-left-color: var(--color-accent, #7aa2f7);
+}
+.release-notes-sidebar-version {
+  font-weight: 600;
+}
+.release-notes-sidebar-date {
+  font-size: 11px;
+  color: var(--color-text-muted, #aab0b8);
+}
+.release-notes-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 22px;
+}
+.release-notes-content h2 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  display: inline-block;
+}
+.release-notes-version-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.release-notes-date {
+  color: var(--color-text-muted, #aab0b8);
+  font-size: 12px;
+}
+.release-notes-content h3 {
+  margin: 14px 0 6px 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted, #aab0b8);
+}
+.release-notes-content ul {
+  margin: 0;
+  padding-left: 20px;
+}
+.release-notes-content li {
+  margin: 2px 0;
+  line-height: 1.5;
+}
+.release-notes-empty {
+  padding: 24px;
+  color: var(--color-text-muted, #aab0b8);
+}
+
 :root[data-theme] .hint {
   color: var(--color-text-muted);
   background: color-mix(in oklab, var(--color-surface) 80%, transparent);

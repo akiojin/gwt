@@ -31,7 +31,8 @@ SPEC #2780 (Release Notes Window) 実装で、以下のテストが全て GREEN 
 
 ### 検証
 
-- `crates/gwt/playwright/tests/release-notes-live.spec.ts` を新規追加 (live backend、`installEmbeddedRoutes` 不使用)。最初は 8/8 RED で embedded_web.rs の欠落と splash auto-dismiss bug を可視化。embedded_web.rs を修正後、4/4 GREEN。
+- `crates/gwt/playwright/tests/release-notes-live.spec.ts` を新規追加 (live backend、`installEmbeddedRoutes` 不使用)。最初は 8/8 RED で embedded_web.rs の欠落と splash auto-dismiss bug を可視化。embedded_web.rs 修正後、8/8 GREEN (chromium-dark 4 + chromium-light 4、serial)。
+- embedded_web.rs 本体の fix は **別 agent の PR #2797** (work/20260520-0409 / cb25afc1) が canonical で develop に merge 済み。並行調査していて重複検出した。PR #2797 は `every_root_js_module_import_in_app_assets_is_registered` 回帰防止 unit test を含む。私の PR #2798 は live E2E spec と本 lessons の追記のみに縮小して PR #2797 の補完に位置付けた。
 
 ---
 

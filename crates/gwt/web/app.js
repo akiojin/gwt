@@ -484,9 +484,7 @@
         const label = formatVersionLabel();
         appVersionLabel.hidden = !label;
         appVersionLabel.textContent = label;
-        appVersionLabel.title = label
-          ? `${label} — click to view release notes`
-          : "";
+        appVersionLabel.title = label;
       }
 
       function setVersionState(current, latest = null) {
