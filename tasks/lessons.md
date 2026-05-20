@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-05-20 — User 観察と code 上の強制機構の方向が逆だった時は salience asymmetry を疑う (title-summary content / Codex vs Claude Code)
+
+### 事象
+
+User が「Codex は agent window の `title_summary` をよく更新するが、Claude Code はあまり更新しない」と報告。しかも更新内容が `PR チェック中` のような activity descriptor (作業内容) になっていて、複数 pane を監視する user が agent の goal を把握できない状態だった。
+
+### 原因
+
+1. **観察と code 上の強制機構が逆向き**だった。Claude Code 側には dual-path 強制 (skill + `board_reminder` empty-trigger reminder) が `.claude/settings.local.json` の 5 hook events 経由で機能していたのに、Codex 側は `.codex/skills/gwt-coordination/SKILL.md` も `.codex/hooks.json` も worktree に materialize されていなかった。code 上の強制機構の配置だけ見ると Claude Code の方が title 更新は強制されるはずだが、実観察は逆。
+2. **真因は salience asymmetry**: Claude Code は CLAUDE.md → AGENTS.md import + skills + hook reminders + Board reminder + 永続化 SessionStart context 等の中で title 規則が reminder fatigue で normalized as noise になる。Codex は AGENTS.md を primary system instruction として読むため、競合する context が少なく title 規則が salient に残る。
+3. **canonical guidance の Bad 例不足**: `coordination_guidance.rs::SKILL_BODY_EN` の Bad 例は `done` / `Working on X` の 2 つだけで、`PR チェック中` / `verifying tests` / `fixing bug` のような phase/activity descriptor を明示的に Bad と書いていなかったため agent が許容と解釈していた。
+4. **empty-trigger reminder が one-shot だった**: `title_summary_required_reminder()` は title が empty の時だけ fire し、初期 set 後 phase が進んでも再注入されない (stale 化)。
+
+### 再発防止策
+
+1. **User 観察と code 上の強制機構が逆向きを示唆する時は code-side enforcement を信じず salience を疑う**: コードに hook + skill + validation が完備されていても、agent がそれを surface しないなら enforcement は無効。reminder fatigue / 競合 context / 長すぎる system prompt は salience を破壊する。仮説検証時は「強い強制が無い側」の方が良く動く可能性を等しく扱う。
+2. **content validation は activity descriptor では成立しない**: 「中」/「verifying」/「checking」/「working on」のような activity 系語尾は無限のバリエーションを持ち、string matching ベースの reject / warning は false positive が多すぎて運用に耐えない。代わりに canonical guidance の Bad 例 + auto-derive from owner + per-turn stale reminder の defense-in-depth で対処する (SPEC-2359 Phase U-9 / US-45)。
+3. **dual-language SKILL body を扱う時は両方更新を強制する**: `SKILL_BODY_EN` と `SKILL_BODY_JA` がある場合、`render_skill_md` test が EN-only emit を強制するなら、JA-only の Bad 例 (例: `〜中`) は JA-speaking agent に届かない。`required_phrases()` drift guard には EN の representative phrase を入れ、JA body には `skill_body_ja_contains_*` の独立 test で drift を検出する。
+4. **一度設定された state の stale 化は empty-trigger reminder では検知できない**: `title_summary` のような「初期 set 後は更新が agent 任せ」になる field は、N turn 連続で同 value + 関連 field (`current_focus` / Board kind 等) の drift を検出する stale-detection reminder を追加する。state は `RemindersState` 等 既存 sidecar に `#[serde(default)]` で field 追加すれば legacy state 後方互換。
+5. **`.codex/` 配下 asset の missing は worktree 状態次第で発生する**: managed asset generator (`generate_coordination_guidance_for_codex`, `generate_codex_hooks`) が code にあっても、worktree が generator 追加前に作られていれば materialize されていない。SessionStart hook で missing 検出 → `refresh_existing_managed_gwt_assets_for_worktree` 呼び出しの idempotent re-materialization を追加すると old worktree も自己修復できる (FR-177)。
+
+---
+
 ## 2026-05-20 — SPEC の FR で platform scope を限定すると、サイレントな regression を生む（macOS app icon）
 
 ### 事象
