@@ -58,17 +58,23 @@ pub(super) fn fetch_actions_run_log_via_gh(
     repo_path: &std::path::Path,
     run_id: u64,
 ) -> io::Result<String> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["run", "view", &run_id.to_string(), "--log"])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let hub = gwt_core::process_console::global();
+    let run_str = run_id.to_string();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &["run", "view", run_str.as_str(), "--log"],
+        gwt_core::process_console::SpawnOptions::new(format!("gh run view {run_id} --log"))
+            .current_dir(repo_path),
+    )?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh run view --log: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
 
 pub(super) fn fetch_actions_job_log_via_gh(
@@ -78,23 +84,28 @@ pub(super) fn fetch_actions_job_log_via_gh(
     job_id: u64,
 ) -> io::Result<String> {
     let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["api", &endpoint])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &["api", endpoint.as_str()],
+        gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}"))
+            .current_dir(repo_path),
+    )?;
+    if !output.success() {
         return Err(io::Error::other(format!(
             "gh api {endpoint}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
-    if output.stdout.starts_with(b"PK") {
+    if output.stdout.as_bytes().starts_with(b"PK") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "job logs returned a zip archive; unable to parse",
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
 
 #[cfg(test)]

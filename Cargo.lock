@@ -1447,6 +1447,7 @@ dependencies = [
  "ignore",
  "notify",
  "notify-debouncer-mini",
+ "regex",
  "reqwest",
  "semver",
  "serde",
