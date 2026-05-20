@@ -315,6 +315,65 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
+  test("Settings.Index renders the lessons scope row and dispatches rebuild_index_cell (SPEC-2805)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "repair_required",
+      scopes: {
+        lessons: {
+          healthy: false,
+          repair_required: true,
+          document_count: 0,
+          reason: "manifest_missing",
+        },
+      },
+    });
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await page.evaluate(() => {
+      document.dispatchEvent(
+        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+      );
+    });
+
+    const lessonsRow = page
+      .locator("[data-settings-panel='index'] tr[data-scope='lessons']")
+      .first();
+    await expect(lessonsRow).toBeVisible({ timeout: 10_000 });
+    await expect(lessonsRow.locator(".settings-index-cell.unhealthy")).toContainText(
+      "manifest_missing",
+    );
+
+    const rebuildAll = lessonsRow.locator(".settings-index-rebuild-all[data-scope='lessons']");
+    await rebuildAll.click();
+
+    const lastRebuild = await page.evaluate(() => {
+      const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
+      return sends
+        .map((raw) => {
+          try {
+            return JSON.parse(raw);
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter((m) => m && m.kind === "rebuild_index_cell")
+        .pop();
+    });
+
+    expect(lastRebuild).toMatchObject({
+      kind: "rebuild_index_cell",
+      project_root: "/fixture",
+      scope: "lessons",
+    });
+    // Lessons is repo-scoped just like issues/specs, so worktree_hash must
+    // not be included in the dispatched IPC payload.
+    expect(lastRebuild).not.toHaveProperty("worktree_hash");
+  });
+
   test("Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
     page,
   }) => {
