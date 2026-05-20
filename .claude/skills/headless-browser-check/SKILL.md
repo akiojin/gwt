@@ -30,10 +30,14 @@ not use it for CI-only Playwright runs or generic web app servers.
    - Read the URL from `GWT_BROWSER_URL_FILE` first.
    - Fall back to the log line `gwt browser URL: <url>`.
    - Verify the URL with `curl -fsS -I <url>` or an equivalent HTTP 200 check.
-5. If the browser did not open automatically, open the URL:
-   - macOS: `open <url>`
-   - Linux: `xdg-open <url>`
-   - Windows: `cmd /c start "" <url>`
+5. Do not manually open the URL after a normal startup. `gwt serve` opens the
+   browser by default, and running an additional platform opener will create a
+   duplicate browser tab or window.
+   - Only run a platform opener if the user says no browser opened, or if the
+     log clearly says auto-open failed.
+   - macOS fallback: `open <url>`
+   - Linux fallback: `xdg-open <url>`
+   - Windows fallback: `cmd /c start "" <url>`
 6. Tell the user:
    - The URL.
    - The log file path.
