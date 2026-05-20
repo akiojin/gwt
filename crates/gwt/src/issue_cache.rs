@@ -21,6 +21,12 @@ use serde_json::Value;
 
 const DETACHED_REPO_CACHE_DIR: &str = "__detached__";
 const SPEC_LABEL: &str = "gwt-spec";
+/// Substring that uniquely identifies a SPEC body header. We do not run the
+/// full regex here because callers only need to decide whether to fetch
+/// comments — a positive substring match is enough to trigger the comment
+/// fetch path. The actual structural parse still happens later in
+/// [`gwt_github::body::SpecBody::parse`].
+const SPEC_BODY_HEADER_MARKER: &str = "<!-- gwt-spec id=";
 const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
 pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -95,11 +101,7 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
 
     let cache = Cache::new(cache_root.to_path_buf());
     for listed_snapshot in &snapshots {
-        let snapshot = if listed_snapshot
-            .labels
-            .iter()
-            .any(|label| label == SPEC_LABEL)
-        {
+        let snapshot = if is_spec_issue(listed_snapshot) {
             fetch_issue_snapshot(repo_path, listed_snapshot.number)?
         } else {
             listed_snapshot.clone()
@@ -126,6 +128,18 @@ pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
                 .to_str()
                 .is_some_and(|name| name.parse::<u64>().is_ok())
     })
+}
+
+/// Decide whether an Issue should be fetched as a SPEC (with comments) during
+/// `sync_issue_cache_from_remote`. The label `gwt-spec` is the primary signal,
+/// but the body header is also authoritative — without this fallback, an
+/// Issue whose `gwt-spec` label has been removed (or was never applied) but
+/// whose body still carries section markers referencing comments would be
+/// cached without those comments, and the next [`gwt_github::cache::Cache::write_snapshot`]
+/// would fail with `MissingComment`.
+fn is_spec_issue(snapshot: &IssueSnapshot) -> bool {
+    snapshot.labels.iter().any(|label| label == SPEC_LABEL)
+        || snapshot.body.contains(SPEC_BODY_HEADER_MARKER)
 }
 
 fn gh_executable() -> std::ffi::OsString {
@@ -397,7 +411,7 @@ fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> 
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", unix))]
     use std::env;
     use std::fs;
 
@@ -607,6 +621,84 @@ exit /b 1\r\n",
             Some(value) => env::set_var("GWT_TEST_GH", value),
             None => env::remove_var("GWT_TEST_GH"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_remote_detects_spec_via_body_header_when_label_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let body_escaped = "<!-- gwt-spec id=42 version=1 -->\\n\
+            <!-- sections:\\nplan=comment:777\\nspec=body\\ntasks=body\\n-->\\n\\n\
+            <!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n\
+            <!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->";
+        let list_json = format!(
+            r#"[{{"number":42,"title":"Stripped label spec","body":"{body_escaped}","labels":[],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"2026-05-20T00:00:00Z"}}]"#,
+        );
+        let view_json = format!(
+            r#"{{"number":42,"title":"Stripped label spec","body":"{body_escaped}","labels":[],"state":"OPEN","updatedAt":"2026-05-20T00:00:00Z","comments":[{{"id":"IC_kwDOTest","url":"https://github.com/example/repo/issues/42#issuecomment-777","body":"<!-- artifact:plan BEGIN -->\nPlan body for stripped\n<!-- artifact:plan END -->","createdAt":"2026-05-20T00:00:00Z"}}]}}"#,
+        );
+        let fake_gh = repo_path.join("fake-gh");
+        let script = format!(
+            "#!/bin/sh\n\
+if [ \"$1 $2\" = \"issue list\" ]; then\n\
+  cat <<'JSON'\n\
+{list_json}\n\
+JSON\n\
+  exit 0\n\
+fi\n\
+if [ \"$1 $2\" = \"issue view\" ]; then\n\
+  cat <<'JSON'\n\
+{view_json}\n\
+JSON\n\
+  exit 0\n\
+fi\n\
+echo \"unexpected gh invocation $*\" >&2\n\
+exit 1\n",
+        );
+        fs::write(&fake_gh, script).expect("write fake gh");
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+
+        gwt_core::process::hidden_command("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .status()
+            .expect("git init");
+
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        let result = sync_issue_cache_from_remote(&repo_path, &cache_root);
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+
+        result.expect("sync should succeed when body header marks the issue as a spec");
+
+        let cache = Cache::new(cache_root);
+        let entry = cache
+            .load_entry(IssueNumber(42))
+            .expect("cached entry must exist");
+        assert_eq!(
+            entry
+                .spec_body
+                .sections
+                .get(&gwt_github::SectionName("plan".to_string())),
+            Some(&"Plan body for stripped".to_string()),
+            "plan section content from comment must be present even without gwt-spec label"
+        );
+        assert_eq!(entry.snapshot.comments.len(), 1);
+        assert_eq!(entry.snapshot.comments[0].id, gwt_github::CommentId(777));
     }
 
     #[test]
