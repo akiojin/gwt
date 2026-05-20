@@ -112,6 +112,36 @@ export function viewportEligibleForRefresh({ element, workspaceWindow }) {
 }
 
 /**
+ * SPEC-2008 Phase 26.A regression fix (Issue #2832): a window can be
+ * structurally visible (`.hidden = false`, not minimized) yet still have
+ * no layout box at the moment the initial-fit `requestAnimationFrame`
+ * fires — flex/grid layout has not propagated to the descendants, custom
+ * fonts have not loaded, or the workspace is mid-render. In that state
+ * `fitAddon.fit()` resolves against a 0-sized parent and silently leaves
+ * xterm at its default 80×24 grid; flipping `isReady = true` then flushes
+ * `deferredWrites` into that broken grid, producing the Claude-Code
+ * startup corruption that ships until the next resize/move.
+ *
+ * The handshake should defer until the container has a real layout box.
+ * `clientWidth` / `clientHeight` is preferred over `getBoundingClientRect`
+ * because it ignores transforms and is cheap to read in a rAF callback.
+ * `null` / missing elements fall through to `true` so non-DOM callers
+ * (e.g. test fixtures without a workspace window registered) do not
+ * regress.
+ */
+export function elementHasLayoutBox(element) {
+  if (!element) return true;
+  if (typeof element.clientWidth === "number" && typeof element.clientHeight === "number") {
+    return element.clientWidth > 0 && element.clientHeight > 0;
+  }
+  if (typeof element.getBoundingClientRect === "function") {
+    const rect = element.getBoundingClientRect();
+    return !!rect && rect.width > 0 && rect.height > 0;
+  }
+  return true;
+}
+
+/**
  * SPEC-2008 Phase 26.B / FR-056 — terminal activation must render BEFORE
  * fit. Phase 24 activation called fitAddon.fit() first, then scheduled a
  * later viewport refresh. But fitAddon.proposeDimensions() returns

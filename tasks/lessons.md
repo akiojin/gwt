@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-05-20 — Phase 26 の visibility 述語だけでは silent no-op を防げない: layout box が立つまで `isReady` を flip しない (Issue #2832 / SPEC-2008 Phase 26.A regression)
+
+### 事象
+
+SPEC-2008 Phase 26 で導入した `runTerminalActivationSequence` (refresh→layout flush→fit) と `createTerminalRuntime` の `isReady` / `deferredWrites` handshake は intact だったにも関わらず、Claude Code を gwt agent pane で起動した直後にテキストをペーストすると terminal 表示全体が崩れる症状がユーザー報告 (`work/20260520-1050`) で再発した。resize / window move で復活する。スクリーンショット `.gwt/paste-images/1779274308833-11-image.png` で確認済み。
+
+### 原因
+
+`completeInitialFitHandshake` は `canRefreshTerminalViewport(windowId)` が true を返した時点で `runTerminalActivationSequence` を呼び、結果に関係なく `runtime.isReady = true` を立てて deferredWrites を flush していた。`viewportEligibleForRefresh` は `element.hidden` と `workspaceWindow.minimized` のみ確認するため、**構造的には visible だが parent の flex/grid layout が rAF 時点で propagate していない (clientWidth/clientHeight=0)** 状態を素通りする。この状態で `fitAddon.fit()` を呼ぶと `_renderService.dimensions.css.cell.width` 自体は font metrics 経由で populate されても、`proposeDimensions` が `getComputedStyle(parent).width / cell.width` を計算する段で 0÷n=0 cols になり、fit が silent no-op するか xterm default 80×24 にロックされる。直後の `isReady = true` で deferredWrites が誤グリッドへ flush され、ユーザーには Claude Code splash と paste 直後の表示が崩れて見える。OS resize で fan-out が走るとそこで初めて正しい cols/rows に fit されるため、resize で復活する signature になる。
+
+Phase 26.A の `isReady` handshake は「writes を fit 完了まで buffer する」ことは保証していたが、「fit が valid cols/rows を返した」ことを保証しておらず、layout が settle するまでの race window がそのまま残っていた。
+
+### 再発防止策
+
+1. **handshake は `isReady=true` を flip する前に container の layout box (`clientWidth/clientHeight > 0`) を確認する。** `terminal-viewport-reflow.js::elementHasLayoutBox` で predicate を export し、`completeInitialFitHandshake` から `terminalContainerHasLayoutBox(windowId)` 経由で gate する (Issue #2832 fix)。
+2. **layout box が無い場合は rAF retry を上限付き (`HANDSHAKE_RETRY_LIMIT = 60` ≒ 1 秒 @ 60Hz) でループさせる。** 上限超過時は `console.warn` で観測可能にしつつ fall-through して activation を強制する (perma-hidden window が deferred writes を永久に pin しない保険)。
+3. **Rust source-string contract で wiring を pin する。** `crates/gwt/src/embedded_web.rs` の `embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake` に `terminalContainerHasLayoutBox` / `handshakeAttempts` / `HANDSHAKE_RETRY_LIMIT` regex を追加し、将来 helper を drop する refactor が CI で即座に炎上するようにする。
+4. **frontend behaviour test に 0-size container の判定を pin する。** `__tests__/terminal-viewport-reflow.test.mjs` の `elementHasLayoutBox blocks 0-size containers` で clientWidth/clientHeight = 0、getBoundingClientRect fallback、null defensive の各分岐を直接 assert する。
+
+`viewportEligibleForRefresh` 自体を破壊的に書き換えると、host resize fan-out / project tab switch / dock target 等の既存 caller が hidden short-circuit に依存している側面を壊しうるため、predicate を増やす形で blast radius を最小化した (Phase 26 が Phase 24 を上書きせずに helper を増やしたのと同じ方針)。
+
+### 関連 PR / Issue
+
+- Issue #2832 (本件 bug Issue)
+- SPEC-2008 Phase 26 / FR-056 / FR-057 / FR-059 (lineage)
+- 過去の closed regressions: #2096 / #2091 / #2668 / #2513
+
 ## 2026-05-20 — develop merge ≠ 既存 session で動く: hook 経路 binary は `installed gwtd` で固定される (Phase U-9 self-bench で発見)
 
 ### 事象
