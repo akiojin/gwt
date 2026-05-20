@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-05-20 — develop merge ≠ 既存 session で動く: hook 経路 binary は `installed gwtd` で固定される (Phase U-9 self-bench で発見)
+
+### 事象
+
+SPEC-2359 Phase U-9 (PR #2819) を develop に merge 後、self-bench として live Claude Code session の `title_summary` を activity descriptor (`PR チェック中`) に書き換え、RemindersState を stale threshold 直前まで prime したが、次の UserPromptSubmit で stale reminder (`# Agent Title Stale`) は context に注入されず、prime した新 field (`last_title_summary_seen` / `unchanged_turn_count` / `phase_changed_in_window`) はすべて wipe された。
+
+### 原因
+
+`.claude/settings.local.json` の hook command は `'/Applications/GWT.app/Contents/MacOS/gwtd' hook event UserPromptSubmit` のように **installed gwtd binary を絶対 path で固定** している。私のセッションが起動した時点の installed binary は `gwtd 9.40.0` 直前の `gwtd 9.38.0` で、Phase U-9 (FR-178 stale detection / 新 RemindersState field) を含まない。
+
+差分検証で確定 (同 primed state + 同 UserPromptSubmit payload):
+
+- 旧 v9.38.0: `additionalContext` 2825 bytes / `Agent Title Stale` 不在 / RemindersState 新 field を null に wipe
+- 新 v9.40.0 (`target/debug/gwtd`, PR #2819 を含む): 3268 bytes (+443) / `Agent Title Stale` 注入 / `unchanged_turn_count: 8→9`, `last_title_summary_seen: 'PR チェック中'`, `phase_changed_in_window: true` を保持
+
+Phase U-9 のコード自体は正しく動作するが、live session に reach するのは「次に gwt release を切って installed binary が新版に置き換わるか、`.claude/settings.local.json` を手で `target/debug/gwtd` に向ける」のいずれかが必要。
+
+### 再発防止策
+
+1. **hook 経路の binary は worktree 起動時の `installed gwtd` で固定されると認識する**: `.claude/settings.local.json` / `.codex/hooks.json` は generator が `installed_gwt_candidates()` で resolve した path をハードコードする。一度書き出されたら手で書き換えない限り変化しない。`refresh_existing_managed_gwt_assets_for_worktree` が再生成する時も同じ installed path を使う。development fallback の `target/debug/gwtd` に向くのは installed binary が見つからない時だけ。
+2. **release を切らずに動作観測が必要な変更は development binary 経由で test する**: 新 hook 機能の動作観測は `target/debug/gwtd hook event <Event>` を **直接** 投入して output を見るのが正本経路。live session の system-reminder block に injection されるのを待つのは installed binary に依存するため不確実。
+3. **「PR merge = 既存 user の挙動が変わる」と誤解しない**: code が `develop` に届いたタイミングと、user の installed binary が新版になるタイミングはずれる。release ワークフロー (`/release` skill 等) を回して app bundle / installer を新版に bump しないと、既存 session の挙動は変わらない。完了報告で「次回 session から効く」と書く時、それが「次回 SessionStart hook の発火」を指すのか「次回 release 配布後の新 session」を指すのかを区別する。Phase U-9 の場合、新規 worktree の materialization は installed binary が呼ぶ generator の話なので、generator が新バージョンを emit するには installed binary 自体の更新が必要。
+4. **gwt-verify の Overall PASS は live session 動作の証明ではない**: gwt-verify の test matrix は `target/debug/gwtd` を使って unit / integration test を走らせる。これは「コードが正しい」ことの証明であって「user の live session で動く」ことの証明ではない。視認系 verification (E2E headed / live-session dogfooding) は installed binary deploy 後に追加で必要。
+
+---
+
 ## 2026-05-20 — User 観察と code 上の強制機構の方向が逆だった時は salience asymmetry を疑う (title-summary content / Codex vs Claude Code)
 
 ### 事象
