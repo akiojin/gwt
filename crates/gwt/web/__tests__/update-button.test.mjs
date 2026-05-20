@@ -337,6 +337,38 @@ test("phase19: update_ready transitions modal to ready state with [Later] [Resta
   assert.ok(modal.querySelector("[data-update-modal-later]"));
 });
 
+test("SPEC-2780: ready modal exposes 'View release notes' when openReleaseNotes is wired", () => {
+  const fixture = createFixture();
+  const releaseNotesCalls = [];
+  const controller = createUpdateCtaController({
+    ...fixture.options,
+    openReleaseNotes: (version) => releaseNotesCalls.push(version),
+  });
+  controller.showAvailable("9.40.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.40.0", asset_path: "/x" });
+
+  const link = fixture.document.querySelector(
+    "[data-update-modal-release-notes]",
+  );
+  assert.ok(link, "release notes link must be present when wired");
+  link.click();
+  assert.deepEqual(releaseNotesCalls, ["9.40.0"]);
+});
+
+test("SPEC-2780: ready modal omits release notes link when openReleaseNotes is absent", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.40.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.40.0", asset_path: "/x" });
+
+  const link = fixture.document.querySelector(
+    "[data-update-modal-release-notes]",
+  );
+  assert.equal(link, null);
+});
+
 test("phase19: [Restart now] sends apply_update_restart_now without confirmation", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);

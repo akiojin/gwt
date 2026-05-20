@@ -520,6 +520,16 @@ pub enum FrontendEvent {
     SaveUiTrace {
         trace: UiTracePayload,
     },
+    /// SPEC #2780 Release Notes window. Request the bundled CHANGELOG entries
+    /// and ask the frontend to open / focus the Release Notes window on
+    /// `focus_version` when set (otherwise the newest entry). Backend replies
+    /// with [`BackendEvent::ReleaseNotesPayload`] on success or
+    /// [`BackendEvent::ReleaseNotesError`] when no entries could be produced.
+    OpenReleaseNotes {
+        id: String,
+        #[serde(default)]
+        focus_version: Option<String>,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -1238,6 +1248,22 @@ pub enum BackendEvent {
     UiTraceError {
         message: String,
     },
+    /// SPEC #2780 Release Notes window payload. Carries the parsed entries
+    /// from the bundled `CHANGELOG.md` so the frontend can render the
+    /// sidebar + content pane without further round-trips.
+    ReleaseNotesPayload {
+        id: String,
+        entries: Vec<gwt_core::release_notes::ReleaseEntry>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        focus_version: Option<String>,
+    },
+    /// SPEC #2780 Release Notes window error. Emitted only when the bundled
+    /// changelog yielded no entries; the UI renders an error pane pointing
+    /// to the canonical CHANGELOG location.
+    ReleaseNotesError {
+        id: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1650,6 +1676,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
+    BackendEventPolicy::new(
+        "release_notes_payload",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "release_notes_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
 ];
 
 pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
@@ -1741,6 +1777,8 @@ impl BackendEvent {
             }
             BackendEvent::UiTraceSaved { .. } => "ui_trace_saved",
             BackendEvent::UiTraceError { .. } => "ui_trace_error",
+            BackendEvent::ReleaseNotesPayload { .. } => "release_notes_payload",
+            BackendEvent::ReleaseNotesError { .. } => "release_notes_error",
         }
     }
 

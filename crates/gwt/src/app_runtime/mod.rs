@@ -2330,7 +2330,35 @@ impl AppRuntime {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
             FrontendEvent::SaveUiTrace { trace } => self.save_ui_trace_events(client_id, trace),
+            FrontendEvent::OpenReleaseNotes { id, focus_version } => {
+                self.release_notes_events(client_id, id, focus_version)
+            }
         }
+    }
+
+    /// SPEC #2780: serve the bundled `CHANGELOG.md` to the Release Notes
+    /// window. The parse runs once per process (cached) so this handler is
+    /// effectively a copy from a static slice.
+    fn release_notes_events(
+        &self,
+        client_id: ClientId,
+        id: String,
+        focus_version: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let entries = gwt_core::release_notes::bundled_releases();
+        let event = if entries.is_empty() {
+            BackendEvent::ReleaseNotesError {
+                id,
+                message: "Release notes could not be loaded.".to_string(),
+            }
+        } else {
+            BackendEvent::ReleaseNotesPayload {
+                id,
+                entries: entries.to_vec(),
+                focus_version,
+            }
+        };
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     fn save_ui_trace_events(

@@ -13,6 +13,10 @@ export function createUpdateCtaController({
   // The option survives only so existing callers do not break.
   confirmUpdate: _confirmUpdate,
   setVersionState = () => {},
+  // SPEC #2780 — when present, the "View release notes" button in the
+  // ready/failed modal calls this with the latest version, letting the
+  // user inspect the changelog before committing to a restart.
+  openReleaseNotes = null,
 }) {
   const shellId = "update-cta-shell";
   const modalId = "update-modal";
@@ -331,21 +335,36 @@ export function createUpdateCtaController({
       onClick: onApplyRestartNow,
     });
 
+    // SPEC #2780 — let users preview release notes before they commit.
+    const releaseNotesLink = openReleaseNotes
+      ? el("button", {
+          type: "button",
+          className: "update-modal__link",
+          text: "View release notes",
+          data: { updateModalReleaseNotes: "true" },
+          onClick: () => openReleaseNotes(version),
+        })
+      : null;
+
+    const actionChildren = [later, restartNow];
+    const panelChildren = [
+      el("h2", { id: "update-modal-title", text: "Update ready" }),
+      el("p", {
+        className: "update-modal__version",
+        text: `v${version} is ready to install.`,
+      }),
+      el("p", {
+        className: "update-modal__hint",
+        text: "Restart now to launch the new version.",
+      }),
+      releaseNotesLink,
+      el("div", { className: "update-modal__actions" }, actionChildren),
+    ].filter(Boolean);
+
     const panel = el(
       "div",
       { className: "update-modal__panel", data: { state: "ready" } },
-      [
-        el("h2", { id: "update-modal-title", text: "Update ready" }),
-        el("p", {
-          className: "update-modal__version",
-          text: `v${version} is ready to install.`,
-        }),
-        el("p", {
-          className: "update-modal__hint",
-          text: "Restart now to launch the new version.",
-        }),
-        el("div", { className: "update-modal__actions" }, [later, restartNow]),
-      ],
+      panelChildren,
     );
     modal.appendChild(panel);
   }
