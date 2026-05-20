@@ -230,13 +230,11 @@ impl Cache {
             .collect();
         let spec_body = match SpecBody::parse(&snapshot.body, &parsed_comments) {
             Ok(spec_body) => spec_body,
-            Err(_) => SpecBody {
-                // Mirror the lenient policy from `write_snapshot`: any body
-                // that fails to parse as a SPEC (no header, malformed
-                // sections index, missing referenced comment, etc.) is
-                // surfaced as a plain Issue entry rather than silently
-                // dropped. UI consumers always see the cached body and
-                // metadata; only the structured sections map is empty.
+            Err(ParseError::MissingHeader) => SpecBody {
+                // Plain Issue (no `<!-- gwt-spec id=... -->` header at all):
+                // synthesize an empty SpecBody so the entry still surfaces
+                // to UI consumers as a regular Issue. This mirrors the
+                // existing `write_snapshot` path for plain Issues.
                 meta: SpecMeta {
                     id: meta.number.to_string(),
                     version: 1,
@@ -244,6 +242,22 @@ impl Cache {
                 sections_index: crate::body::SectionsIndex::default(),
                 sections: std::collections::BTreeMap::new(),
             },
+            Err(_) => {
+                // Body carries a SPEC header but the structural parse fails
+                // (malformed sections index, missing referenced comment,
+                // etc.). We intentionally do NOT downgrade these to an
+                // empty SpecBody: a subsequent `SpecOps::write_section`
+                // would recompute the routing from the empty section map
+                // and rewrite the body's index, orphaning content stored in
+                // comments referenced only by the original (malformed)
+                // index. Returning `None` keeps such entries out of UI
+                // lists until the next refresh either repairs the body or
+                // proves it is truly a plain Issue. The on-disk cache is
+                // still populated (write_snapshot is lenient), so the
+                // body / meta survive in `~/.gwt/cache/issues/<n>/` for
+                // diagnostics.
+                return None;
+            }
         };
         Some(CacheEntry {
             snapshot,
