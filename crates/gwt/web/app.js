@@ -613,6 +613,81 @@
         });
       }
 
+      // SPEC-2785 US-1 / FR-A〜G: server URL cell in op-status-strip. URL is
+      // derived from `window.location` (frontend is always loaded from the
+      // bound URL, so this is the canonical source) and matches the backend
+      // `AppRuntime::server_url` exactly. Clicking the URL value forwards an
+      // `OpenServerUrl` event to the backend which performs an exact
+      // same-origin check before invoking the OS opener. Clicking the copy
+      // glyph writes the URL to the clipboard with a transient `Copied`
+      // affordance; clipboard rejection downgrades to an inline error state
+      // (no modal) and logs to console for diagnostics.
+      const serverUrlValue = document.getElementById("op-strip-server-url");
+      const serverUrlCopy = document.getElementById("op-strip-server-url-copy");
+      if (serverUrlValue && !serverUrlValue.dataset.serverUrlBound) {
+        serverUrlValue.dataset.serverUrlBound = "true";
+        const serverUrl = new URL("/", window.location.href).toString();
+        serverUrlValue.textContent = serverUrl;
+        serverUrlValue.title = serverUrl;
+        if (serverUrlCopy) {
+          serverUrlCopy.dataset.url = serverUrl;
+        }
+        const openServerUrlInBrowser = () => {
+          send({ kind: "open_server_url", url: serverUrl });
+        };
+        serverUrlValue.addEventListener("click", openServerUrlInBrowser);
+        serverUrlValue.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openServerUrlInBrowser();
+          }
+        });
+
+        if (serverUrlCopy && !serverUrlCopy.dataset.serverUrlBound) {
+          serverUrlCopy.dataset.serverUrlBound = "true";
+          let copyResetTimer = 0;
+          const flashCopyState = (state, baseLabel) => {
+            serverUrlCopy.dataset.state = state;
+            serverUrlValue.dataset.state = state;
+            if (baseLabel) {
+              serverUrlCopy.setAttribute("aria-label", baseLabel);
+            }
+            if (copyResetTimer) {
+              window.clearTimeout(copyResetTimer);
+            }
+            copyResetTimer = window.setTimeout(() => {
+              serverUrlCopy.removeAttribute("data-state");
+              serverUrlValue.removeAttribute("data-state");
+              serverUrlCopy.setAttribute("aria-label", "Copy server URL");
+              copyResetTimer = 0;
+            }, 1500);
+          };
+          const copyServerUrl = () => {
+            if (!navigator.clipboard?.writeText) {
+              console.warn(
+                "navigator.clipboard.writeText unavailable; cannot copy server URL",
+              );
+              flashCopyState("error", "Copy failed; clipboard unavailable");
+              return;
+            }
+            navigator.clipboard
+              .writeText(serverUrl)
+              .then(() => flashCopyState("copied", "Copied server URL"))
+              .catch((error) => {
+                console.warn("clipboard.writeText rejected", error);
+                flashCopyState("error", "Copy failed; permission denied");
+              });
+          };
+          serverUrlCopy.addEventListener("click", copyServerUrl);
+          serverUrlCopy.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              copyServerUrl();
+            }
+          });
+        }
+      }
+
       const updateCtaController = createUpdateCtaController({
         document,
         send,
@@ -6862,35 +6937,23 @@
           panel.appendChild(section);
         }
 
-        if (showSetupForms && launchWizard.show_agent_settings) {
+        // SPEC-2014 Amendment 2026-05-20 (FR-057 / FR-058):
+        // The Linked issue section renders only when the wizard was opened
+        // through the Knowledge Issue Bridge. The issue number is shown as
+        // read-only text instead of an editable input.
+        if (showSetupForms && launchWizard.show_linked_issue) {
           const section = createLaunchSection(
             "Linked issue",
-            "Optional: Link an issue to this launch session.",
+            "Read-only: this agent will be linked to the originating issue.",
           );
           const grid = createNode("div", "launch-form-grid");
           const field = createLaunchField("Issue number", false);
-          const input = createNode("input", "launch-input");
-          input.type = "number";
-          input.min = "1";
-          // SPEC-2356 — see createLaunchField comment: aria-label is the
-          // programmatic name since launch-field labels are non-<label> divs.
-          input.setAttribute("aria-label", "Issue number");
-          input.value = launchWizard.linked_issue_number
-            ? launchWizard.linked_issue_number.toString()
-            : "";
-          input.placeholder = "e.g., 1938";
-          input.addEventListener("change", () => {
-            const value = input.value.trim();
-            if (value) {
-              sendWizardAction({
-                kind: "set_linked_issue",
-                issue_number: parseInt(value, 10),
-              });
-            } else {
-              sendWizardAction({ kind: "clear_linked_issue" });
-            }
-          });
-          field.appendChild(input);
+          // The launch-field label already announces "Issue number"; the
+          // static value div is read alongside that label so SR users hear
+          // "Issue number, #N" without needing a per-value aria-label.
+          const value = createNode("div", "launch-static-value");
+          value.textContent = `#${launchWizard.linked_issue_number}`;
+          field.appendChild(value);
           grid.appendChild(field);
           section.appendChild(grid);
           panel.appendChild(section);

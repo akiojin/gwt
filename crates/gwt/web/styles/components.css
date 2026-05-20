@@ -875,6 +875,61 @@ body::after {
   color: var(--color-state-blocked);
 }
 
+/* SPEC-2785 FR-A / FR-B / FR-G: server URL cell sits immediately right of
+   the LIVE indicator with the full http://host:port/ URL. The value is
+   clickable (opens external browser via backend IPC) and a sibling copy
+   icon writes the URL to the clipboard. The value is constrained with
+   ellipsis so a long URL cannot crowd out the other status cells. */
+.op-status-strip__cell--server-url {
+  min-width: 0;
+}
+
+.op-status-strip__server-url-value {
+  color: var(--color-state-active);
+  cursor: pointer;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  outline: none;
+}
+
+.op-status-strip__server-url-value:hover,
+.op-status-strip__server-url-value:focus-visible {
+  text-decoration: underline;
+}
+
+.op-status-strip__server-url-value[data-state="copied"] {
+  color: var(--color-state-idle);
+}
+
+.op-status-strip__server-url-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: color-mix(in oklab, var(--color-status-strip-fg) 75%, transparent);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.op-status-strip__server-url-copy:hover,
+.op-status-strip__server-url-copy:focus-visible {
+  border-color: color-mix(in oklab, var(--color-status-strip-fg) 40%, transparent);
+  color: var(--color-status-strip-fg);
+  outline: none;
+}
+
+.op-status-strip__server-url-copy[data-state="copied"] {
+  color: var(--color-state-active);
+  border-color: color-mix(in oklab, var(--color-state-active) 60%, transparent);
+}
+
 /* ============================================================
    Canvas area — Operator overrides on existing layout
    ============================================================ */

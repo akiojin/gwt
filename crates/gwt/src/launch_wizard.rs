@@ -225,6 +225,10 @@ pub struct LaunchWizardView {
     pub show_branch_controls: bool,
     pub show_manual_setup: bool,
     pub show_runtime_confirmation: bool,
+    // SPEC-2014 Amendment 2026-05-20 (FR-057): gate the Linked issue section
+    // so it only renders when the wizard was opened through the Knowledge
+    // Issue Bridge (linked_issue_kind == Some(Issue) AND number is some).
+    pub show_linked_issue: bool,
     pub runtime_resolution_pending: bool,
     pub runtime_resolution_message: Option<String>,
     pub primary_action_label: String,
@@ -1006,6 +1010,10 @@ impl LaunchWizardState {
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
             show_manual_setup,
             show_runtime_confirmation,
+            show_linked_issue: matches!(
+                self.context.linked_issue_kind,
+                Some(LinkedIssueKind::Issue)
+            ) && self.linked_issue_number.is_some(),
             runtime_resolution_pending: self.runtime_resolution_pending,
             runtime_resolution_message: self.runtime_resolution_message.clone(),
             primary_action_label: self.primary_action_label(),
@@ -6099,6 +6107,69 @@ mod tests {
         let config = state.build_launch_config().expect("config");
 
         assert_eq!(config.linked_issue_number, Some(1234));
+    }
+
+    // SPEC-2014 Amendment 2026-05-20 (US-25 / FR-057 / SC-031)
+    // Launch Wizard view should gate the "Linked issue" section so it only
+    // appears when the wizard was opened through the Knowledge Issue Bridge
+    // (`linked_issue_kind == Some(Issue)` AND `linked_issue_number.is_some()`).
+    // SPEC Bridge, Active Work Add-Agent, Workspace Resume, and Branches paths
+    // must hide the section.
+    #[test]
+    fn view_shows_linked_issue_only_for_issue_kind() {
+        // Case 1: Knowledge Issue Bridge — kind=Issue + number=Some => true.
+        let issue_state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 1938),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        assert!(
+            issue_state.view().show_linked_issue,
+            "Issue Bridge (kind=Issue, number=Some) should set show_linked_issue=true"
+        );
+        assert_eq!(issue_state.view().linked_issue_number, Some(1938));
+
+        // Case 2: Knowledge SPEC Bridge — kind=Spec + number=Some => false.
+        let spec_state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        assert!(
+            !spec_state.view().show_linked_issue,
+            "SPEC Bridge (kind=Spec) should set show_linked_issue=false"
+        );
+
+        // Case 3: Active Work Add-Agent / Workspace Resume — kind=None + number=Some => false.
+        let mut active_ctx = context(branch("develop"), "develop");
+        active_ctx.linked_issue_number = Some(1234);
+        let active_state =
+            LaunchWizardState::open_with(active_ctx, sample_agent_options(), Vec::new());
+        assert!(
+            !active_state.view().show_linked_issue,
+            "kind=None pre-fill (Active Work / Workspace Resume) should set show_linked_issue=false"
+        );
+
+        // Case 4: No number at all => false even for nominal Issue kind.
+        let mut no_number_ctx = context(branch("develop"), "develop");
+        no_number_ctx.linked_issue_kind = Some(LinkedIssueKind::Issue);
+        let no_number_state =
+            LaunchWizardState::open_with(no_number_ctx, sample_agent_options(), Vec::new());
+        assert!(
+            !no_number_state.view().show_linked_issue,
+            "linked_issue_number=None should always set show_linked_issue=false"
+        );
+
+        // Case 5: Default empty context (Branches / direct launch) => false.
+        let empty_state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        assert!(
+            !empty_state.view().show_linked_issue,
+            "default context (Branches / direct launch) should set show_linked_issue=false"
+        );
     }
 
     #[test]

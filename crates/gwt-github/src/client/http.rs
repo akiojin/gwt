@@ -18,7 +18,6 @@
 
 use std::sync::Mutex;
 
-use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 
 use crate::client::{
@@ -340,14 +339,19 @@ fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
 }
 
 fn resolve_gh_token() -> Result<String, ApiError> {
-    let output = hidden_command("gh")
-        .args(["auth", "token"])
-        .output()
-        .map_err(|e| ApiError::Network(format!("gh auth token: {e}")))?;
-    if !output.status.success() {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &["auth", "token"],
+        gwt_core::process_console::SpawnOptions::new("gh auth token"),
+    )
+    .map_err(|e| ApiError::Network(format!("gh auth token: {e}")))?;
+    if !output.success() {
         return Err(ApiError::Unauthorized);
     }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let token = output.stdout.trim().to_string();
     if token.is_empty() {
         return Err(ApiError::Unauthorized);
     }
