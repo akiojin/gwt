@@ -849,7 +849,7 @@ mod tests {
         // `isReady` flip while the window is still hidden, defeating the
         // deferredWrites buffer (CodeRabbit PR #2693 concern).
         let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
         )
         .expect("valid regex");
         // The helper itself must (a) bail when canRefreshTerminalViewport
@@ -905,6 +905,38 @@ mod tests {
         assert!(
             !legacy_sync_replay.is_match(html),
             "legacy synchronous snapshot replay before initial fit must be removed (FR-057 regression guard)",
+        );
+
+        // Issue #2832 — SPEC-2008 Phase 26.A regression fix: the
+        // visibility predicate (canRefreshTerminalViewport) only checks
+        // `.hidden` and `.minimized`. It does NOT catch the case where
+        // the element is structurally visible but layout has not yet
+        // propagated, leaving the parent container at 0×0 at the moment
+        // the initial-fit rAF fires. In that state fitAddon.fit() resolves
+        // against the 0-sized box and silently leaves xterm at the
+        // default 80×24 grid; flushing deferredWrites then renders the
+        // post-launch Claude Code output corrupted, with the
+        // resize-recovers-on-move signature documented in
+        // tasks/lessons.md 2026-05-13.
+        let layout_box_gate = regex::Regex::new(
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*runtime\.handshakeAttempts = \(runtime\.handshakeAttempts \|\| 0\) \+ 1;[\s\S]*?if \(runtime\.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT\) \{\s*requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+        assert!(
+            layout_box_gate.is_match(html),
+            "expected completeInitialFitHandshake to defer (and rAF-retry) while terminalContainerHasLayoutBox returns false so deferredWrites do not flush into xterm's default 80x24 grid before fit can resolve real cols/rows (Issue #2832)",
+        );
+        assert!(
+            html.contains("elementHasLayoutBox,"),
+            "expected app.js to import elementHasLayoutBox from terminal-viewport-reflow.js (Issue #2832)",
+        );
+        assert!(
+            html.contains("function terminalContainerHasLayoutBox(windowId)"),
+            "expected app.js to expose terminalContainerHasLayoutBox so the handshake can gate on layout (Issue #2832)",
+        );
+        assert!(
+            html.contains("const HANDSHAKE_RETRY_LIMIT ="),
+            "expected app.js to declare HANDSHAKE_RETRY_LIMIT so the retry loop has a ceiling (Issue #2832)",
         );
     }
 

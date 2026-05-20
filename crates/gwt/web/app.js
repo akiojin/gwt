@@ -43,6 +43,7 @@
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        elementHasLayoutBox,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -2025,6 +2026,23 @@
         });
       }
 
+      // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
+      // must verify the container has a real layout box before flipping
+      // `isReady` true, otherwise fit resolves against a 0-sized parent
+      // and the deferredWrites flush into xterm's default 80×24 grid.
+      // 60 frames at the default 60Hz cap retries to ~1 s, after which we
+      // fall through so a permanently 0-size window can not pin Claude
+      // Code output forever.
+      const HANDSHAKE_RETRY_LIMIT = 60;
+
+      function terminalContainerHasLayoutBox(windowId) {
+        const element = windowMap.get(windowId);
+        // Fall through to true when the element is not registered yet — the
+        // initial-fit handshake is gated by canRefreshTerminalViewport which
+        // already short-circuits the no-element case.
+        return elementHasLayoutBox(element);
+      }
+
       function fitTerminal(windowId, persist = false) {
         return traceMeasure(
           UI_TRACE_EVENT.fitTerminal,
@@ -3374,6 +3392,8 @@
           // producing the post-launch corruption symptom.
           isReady: false,
           deferredWrites: [],
+          // Issue #2832: see completeInitialFitHandshake.
+          handshakeAttempts: 0,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -3407,6 +3427,31 @@
           // will call back into this helper.
           return;
         }
+        // SPEC-2008 Phase 26.A / FR-057 (regression fix, Issue #2832): the
+        // visibility predicate above only checks `.hidden` / `.minimized`.
+        // It does not catch the case where the element is structurally
+        // visible but the parent has not yet been laid out (e.g. a freshly
+        // appended workspace window whose CSS width/height has not
+        // propagated by the time `requestAnimationFrame` fires). In that
+        // state `fitAddon.fit()` resolves cell-grid dimensions against a
+        // 0-sized container and silently leaves the terminal at the xterm
+        // default 80×24 grid. The previous code then flipped
+        // `isReady = true` and flushed `deferredWrites` into that broken
+        // grid, producing the post-launch corruption that resize/move
+        // recovered from. Re-schedule via rAF until the container has a
+        // non-zero box, with an attempt ceiling so a perma-hidden window
+        // can not pin the loop.
+        if (!terminalContainerHasLayoutBox(windowId)) {
+          runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
+          if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
+            requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+            return;
+          }
+          console.warn(
+            `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; container stayed 0-size. Falling back to immediate activation.`,
+          );
+        }
+
         runTerminalActivationSequence({
           runtime,
           windowId,
