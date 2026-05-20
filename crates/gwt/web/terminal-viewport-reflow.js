@@ -141,6 +141,25 @@ export function elementHasLayoutBox(element) {
   return true;
 }
 
+function currentTerminalGrid(terminal) {
+  return {
+    cols: typeof terminal?.cols === "number" ? terminal.cols : 0,
+    rows: typeof terminal?.rows === "number" ? terminal.rows : 0,
+  };
+}
+
+function fitAddonCanResolveDimensions(fitAddon) {
+  if (typeof fitAddon?.proposeDimensions !== "function") return true;
+  const dimensions = fitAddon.proposeDimensions();
+  return (
+    !!dimensions &&
+    Number.isFinite(dimensions.cols) &&
+    Number.isFinite(dimensions.rows) &&
+    dimensions.cols > 0 &&
+    dimensions.rows > 0
+  );
+}
+
 /**
  * SPEC-2008 Phase 26.B / FR-056 — terminal activation must render BEFORE
  * fit. Phase 24 activation called fitAddon.fit() first, then scheduled a
@@ -181,11 +200,18 @@ export function runTerminalActivationSequence({
     return { ran: false, cols: 0, rows: 0 };
   }
   const { terminal, fitAddon } = runtime;
+  const currentGrid = currentTerminalGrid(terminal);
+  const parent = terminal.element && terminal.element.parentElement;
+  if (parent && !elementHasLayoutBox(parent)) {
+    return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
+  }
   const rowsForRefresh = Math.max((terminal.rows || 1) - 1, 0);
   terminal.refresh(0, rowsForRefresh);
-  const parent = terminal.element && terminal.element.parentElement;
   if (parent && typeof parent.getBoundingClientRect === "function") {
     parent.getBoundingClientRect();
+  }
+  if (!fitAddonCanResolveDimensions(fitAddon)) {
+    return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   fitAddon.fit();
   if (shouldPersistGeometry && typeof sendGeometry === "function") {

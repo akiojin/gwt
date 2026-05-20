@@ -956,7 +956,10 @@ test("xterm content stays on the dark Operator palette across app theme changes"
 
 test("xterm developer readability defaults use larger font metrics", () => {
   assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
-  assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
+  assert.ok(
+    terminalOptionNumber("lineHeight") >= 1.3,
+    "xterm lineHeight must be at least 1.30 to avoid cramped SS.mov output",
+  );
 });
 
 test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
