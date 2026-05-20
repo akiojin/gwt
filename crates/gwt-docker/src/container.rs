@@ -100,6 +100,16 @@ fn docker_compose_up_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
 }
 
+fn docker_compose_exec_timeout() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+    std::env::var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
 fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
     run_docker_with_timeout_in_dir(args, action, None)
 }
@@ -636,10 +646,11 @@ pub fn compose_service_exec_capture_with_files(
     docker_args.extend(args.iter().cloned());
     let arg_refs = docker_args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    run_docker_with_timeout_in_dir(
+    run_docker_with_timeout_in_dir_and_timeout(
         &arg_refs,
         "docker compose exec",
         Some(compose_parent_dir_for_files(compose_files)),
+        docker_compose_exec_timeout(),
     )
 }
 
@@ -1445,6 +1456,39 @@ mod tests {
                     compose_path.display()
                 )
             );
+        });
+    }
+
+    #[test]
+    fn compose_service_exec_capture_uses_longer_timeout_than_default_docker_commands() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ]; then\n  sleep 0.1\n  printf 'ok\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
+            let previous_exec_timeout = std::env::var_os("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS");
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
+            std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", "500");
+
+            let result =
+                compose_service_exec_capture(&compose_path, "app", None, &["true".to_string()]);
+
+            match previous_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_TIMEOUT_MS"),
+            }
+            match previous_exec_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS"),
+            }
+
+            result.expect("compose exec capture should use compose-exec timeout");
         });
     }
 

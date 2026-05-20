@@ -1,0 +1,306 @@
+//! Bundled CHANGELOG.md release notes for the gwt GUI Release Notes window.
+//!
+//! SPEC #2780 — Release Notes Window. This module bundles the repository
+//! root `CHANGELOG.md` at build time via `include_str!` and exposes a
+//! permissive Keep a Changelog parser. All parsing is best-effort and
+//! defensive: malformed input never panics, it yields a partial or empty
+//! result so the UI can render a graceful empty / error state.
+//!
+//! The parser intentionally recognises only the markdown subset that
+//! `CHANGELOG.md` actually uses today (Keep a Changelog with `git-cliff`
+//! output):
+//!
+//! - `## [X.Y.Z] - YYYY-MM-DD` — version header
+//! - `### Heading`             — category heading inside a version
+//! - `- item text`             — list item under a heading
+//!
+//! Anything else is skipped silently. The frontend renderer matches this
+//! same subset.
+
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Repository `CHANGELOG.md` bundled into the binary at build time.
+pub const CHANGELOG_RAW: &str = include_str!("../../../CHANGELOG.md");
+
+/// One released version with its categorised notes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseEntry {
+    pub version: String,
+    pub date: String,
+    pub sections: Vec<Section>,
+}
+
+/// One category inside a [`ReleaseEntry`] (e.g. `Bug Fixes`, `Features`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Section {
+    pub heading: String,
+    pub items: Vec<String>,
+}
+
+/// Parse a Keep a Changelog formatted string into release entries.
+///
+/// Returns an empty vector when the input contains no recognisable version
+/// header. Malformed sections are skipped rather than rejected.
+pub fn parse_changelog(input: &str) -> Vec<ReleaseEntry> {
+    let mut entries: Vec<ReleaseEntry> = Vec::new();
+    let mut current_entry: Option<ReleaseEntry> = None;
+    let mut current_section: Option<Section> = None;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end();
+
+        if let Some((version, date)) = parse_version_header(line) {
+            if let Some(mut entry) = current_entry.take() {
+                if let Some(section) = current_section.take() {
+                    entry.sections.push(section);
+                }
+                entries.push(entry);
+            }
+            current_entry = Some(ReleaseEntry {
+                version,
+                date,
+                sections: Vec::new(),
+            });
+            continue;
+        }
+
+        if current_entry.is_none() {
+            continue;
+        }
+
+        if let Some(heading) = parse_section_heading(line) {
+            if let Some(section) = current_section.take() {
+                if let Some(entry) = current_entry.as_mut() {
+                    entry.sections.push(section);
+                }
+            }
+            current_section = Some(Section {
+                heading,
+                items: Vec::new(),
+            });
+            continue;
+        }
+
+        if let Some(item) = parse_list_item(line) {
+            if current_section.is_none() {
+                current_section = Some(Section {
+                    heading: String::new(),
+                    items: Vec::new(),
+                });
+            }
+            if let Some(section) = current_section.as_mut() {
+                section.items.push(item);
+            }
+        }
+    }
+
+    if let Some(mut entry) = current_entry.take() {
+        if let Some(section) = current_section.take() {
+            entry.sections.push(section);
+        }
+        entries.push(entry);
+    }
+
+    entries
+}
+
+fn parse_version_header(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("## [")?;
+    let (version, after_version) = rest.split_once(']')?;
+    let date = after_version
+        .trim_start()
+        .strip_prefix('-')
+        .map(|s| s.trim())
+        .unwrap_or("")
+        .to_string();
+    let version = version.trim().to_string();
+    if version.is_empty() {
+        return None;
+    }
+    Some((version, date))
+}
+
+fn parse_section_heading(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("### ")?;
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_list_item(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("- ")?;
+    let text = rest.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// Cached parse of the bundled `CHANGELOG.md`.
+///
+/// Parsing runs at most once per process; subsequent calls return the
+/// cached slice. The slice is sorted newest-first because `CHANGELOG.md`
+/// is generated newest-first by `git-cliff`.
+pub fn bundled_releases() -> &'static [ReleaseEntry] {
+    static CACHE: OnceLock<Vec<ReleaseEntry>> = OnceLock::new();
+    CACHE.get_or_init(|| parse_changelog(CHANGELOG_RAW))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n## [9.38.0] - 2026-05-19\n\n### Bug Fixes\n\n- **gui:** Keep tao::Window alive for the event_loop lifetime\n- **installer:** Pin gwt.exe / gwtd.exe Name in WiX manifest\n\n### Features\n\n- **serve:** Open default browser unless --no-open is passed\n\n## [9.37.0] - 2026-05-19\n\n### Bug Fixes\n\n- Stabilize terminal resize\n\n### Features\n\n- **file-tree:** Add file content read domain\n";
+
+    #[test]
+    fn parses_two_versions_with_sections() {
+        let entries = parse_changelog(FIXTURE);
+        assert_eq!(entries.len(), 2, "expected two version entries");
+
+        let first = &entries[0];
+        assert_eq!(first.version, "9.38.0");
+        assert_eq!(first.date, "2026-05-19");
+        assert_eq!(first.sections.len(), 2);
+        assert_eq!(first.sections[0].heading, "Bug Fixes");
+        assert_eq!(first.sections[0].items.len(), 2);
+        assert_eq!(
+            first.sections[0].items[0],
+            "**gui:** Keep tao::Window alive for the event_loop lifetime"
+        );
+        assert_eq!(first.sections[1].heading, "Features");
+        assert_eq!(first.sections[1].items.len(), 1);
+
+        let second = &entries[1];
+        assert_eq!(second.version, "9.37.0");
+        assert_eq!(second.date, "2026-05-19");
+        assert_eq!(second.sections.len(), 2);
+    }
+
+    #[test]
+    fn returns_empty_for_empty_input() {
+        assert!(parse_changelog("").is_empty());
+    }
+
+    #[test]
+    fn returns_empty_when_no_version_header() {
+        let input = "# Random title\n\nSome text without version headers.\n- a stray bullet\n";
+        assert!(parse_changelog(input).is_empty());
+    }
+
+    #[test]
+    fn version_without_sections_is_kept() {
+        let input = "## [1.0.0] - 2025-01-01\n";
+        let entries = parse_changelog(input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, "1.0.0");
+        assert_eq!(entries[0].date, "2025-01-01");
+        assert!(entries[0].sections.is_empty());
+    }
+
+    #[test]
+    fn version_without_date_is_kept() {
+        let input = "## [2.0.0]\n\n### Features\n\n- something\n";
+        let entries = parse_changelog(input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, "2.0.0");
+        assert_eq!(entries[0].date, "");
+        assert_eq!(entries[0].sections.len(), 1);
+    }
+
+    #[test]
+    fn malformed_lines_do_not_panic() {
+        let input = "## [\n## []\n##  - 2026-01-01\n### \n- \n";
+        let entries = parse_changelog(input);
+        // Nothing valid; result is empty.
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn bold_markdown_is_preserved_verbatim() {
+        let input =
+            "## [3.0.0] - 2025-02-02\n\n### Features\n\n- **scope:** body with **bold** text\n";
+        let entries = parse_changelog(input);
+        assert_eq!(entries.len(), 1);
+        let item = &entries[0].sections[0].items[0];
+        assert!(
+            item.contains("**bold**"),
+            "bold markup must be preserved: {item}"
+        );
+    }
+
+    #[test]
+    fn list_item_before_heading_uses_implicit_section() {
+        let input = "## [4.0.0] - 2025-03-03\n- orphan item without heading\n";
+        let entries = parse_changelog(input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sections.len(), 1);
+        assert_eq!(entries[0].sections[0].heading, "");
+        assert_eq!(
+            entries[0].sections[0].items[0],
+            "orphan item without heading"
+        );
+    }
+
+    #[test]
+    fn unknown_lines_are_skipped() {
+        let input = "## [5.0.0] - 2025-04-04\n\n### Features\n\nSome prose between heading and list.\n- valid item\n#### sub-heading\n- another item\n";
+        let entries = parse_changelog(input);
+        assert_eq!(entries.len(), 1);
+        let section = &entries[0].sections[0];
+        assert_eq!(section.heading, "Features");
+        assert_eq!(section.items, vec!["valid item", "another item"]);
+    }
+
+    #[test]
+    fn fuzz_random_inputs_do_not_panic() {
+        // Hand-rolled edge inputs in lieu of a proptest dependency.
+        let cases = [
+            "",
+            "\n",
+            "\r\n",
+            "##",
+            "## []",
+            "## [x] -",
+            "### ",
+            "- ",
+            "## [1] - 2025\n### \n- \n## [2] - 2025\n",
+            "garbage\n## [valid] - 2025-01-01\n### H\n- item\nmore garbage\n",
+            &"## [1.0.0] - 2025-01-01\n### F\n- x\n".repeat(50),
+        ];
+        for case in cases {
+            let _ = parse_changelog(case); // must not panic
+        }
+    }
+
+    #[test]
+    fn bundled_releases_is_non_empty_and_cached() {
+        let first = bundled_releases();
+        assert!(
+            !first.is_empty(),
+            "CHANGELOG.md should yield at least one release entry"
+        );
+        let second = bundled_releases();
+        assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
+    }
+
+    #[test]
+    fn bundled_releases_contain_recent_versions() {
+        let entries = bundled_releases();
+        let recent_versions: Vec<&str> =
+            entries.iter().take(3).map(|e| e.version.as_str()).collect();
+        // Sanity: the first three entries should look like semver-ish strings
+        // and the newest one should be present somewhere in raw bundled text.
+        for v in &recent_versions {
+            assert!(
+                CHANGELOG_RAW.contains(&format!("## [{v}]")),
+                "version {v} should be present in CHANGELOG_RAW"
+            );
+        }
+    }
+}

@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.39.0] - 2026-05-20
+
+### Bug Fixes
+
+- **docker:** Avoid quick timeout for compose exec capture
+
+### Documentation
+
+- **lessons:** Record SPEC creation pitfall with `gwtd issue spec create`
+
+### Features
+
+- **gui:** Add release notes window with version selector (SPEC-2780)
+
 ## [9.38.0] - 2026-05-19
 
 ### Bug Fixes

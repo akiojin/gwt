@@ -27,6 +27,7 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
+      import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
@@ -483,7 +484,9 @@
         const label = formatVersionLabel();
         appVersionLabel.hidden = !label;
         appVersionLabel.textContent = label;
-        appVersionLabel.title = label;
+        appVersionLabel.title = label
+          ? `${label} — click to view release notes`
+          : "";
       }
 
       function setVersionState(current, latest = null) {
@@ -593,12 +596,32 @@
         });
       }
 
+      const releaseNotesWindow = createReleaseNotesWindow({
+        document,
+        send,
+      });
+
+      if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
+        appVersionLabel.dataset.releaseNotesBound = "true";
+        const openReleaseNotesFromLabel = () => {
+          releaseNotesWindow.open(versionState.current || null);
+        };
+        appVersionLabel.addEventListener("click", openReleaseNotesFromLabel);
+        appVersionLabel.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openReleaseNotesFromLabel();
+          }
+        });
+      }
+
       const updateCtaController = createUpdateCtaController({
         document,
         send,
         setVersionState,
         confirmUpdate: (version) =>
           window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
+        openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
 
       function setConnectionState(connected) {
@@ -10013,6 +10036,12 @@
             break;
           case "ui_trace_error":
             window.alert(`UI trace error: ${event.message}`);
+            break;
+          case "release_notes_payload":
+            releaseNotesWindow.handlePayload(event);
+            break;
+          case "release_notes_error":
+            releaseNotesWindow.handleError(event.message);
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
