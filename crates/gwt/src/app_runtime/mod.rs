@@ -3985,13 +3985,24 @@ impl AppRuntime {
         }
 
         match load_log_entries_from_dir(&self.log_dir) {
-            Ok(entries) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::LogEntries {
-                    id: id.to_string(),
-                    entries,
-                },
-            )],
+            Ok(outcome) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::LogEntries {
+                        id: id.to_string(),
+                        entries: outcome.entries,
+                    },
+                )];
+                if outcome.diagnostics.skipped > 0 {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::LogEntryAppended {
+                            entry: skipped_lines_warning(&outcome.diagnostics),
+                        },
+                    ));
+                }
+                events
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::LogError {
@@ -4629,43 +4640,35 @@ impl AppRuntime {
     }
 }
 
-fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
+/// Read the active canonical log file via the SPEC-1924 FR-035 reader.
+///
+/// Returns the decoded snapshot together with `ReadDiagnostics` so the caller
+/// can surface a non-blocking warning when malformed lines were skipped
+/// (FR-036 / SC-010). IO errors other than `NotFound` are forwarded as a
+/// human-readable message so the Logs window can switch to an error state
+/// without crashing the agent.
+fn load_log_entries_from_dir(log_dir: &Path) -> Result<gwt_core::logging::ReadOutcome, String> {
     let path = gwt_core::logging::current_log_file(log_dir);
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "Failed to open log file {}: {error}",
-                path.display()
-            ))
-        }
-    };
-    let reader = std::io::BufReader::new(file);
-    let mut entries = Vec::new();
-    for (index, line) in std::io::BufRead::lines(reader).enumerate() {
-        let line = line.map_err(|error| {
-            format!(
-                "Failed to read log line {} from {}: {error}",
-                index + 1,
-                path.display()
-            )
-        })?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let entry =
-            serde_json::from_str::<gwt_core::logging::LogEvent>(trimmed).map_err(|error| {
-                format!(
-                    "Failed to parse log line {} from {}: {error}",
-                    index + 1,
-                    path.display()
-                )
-            })?;
-        entries.push(entry);
-    }
-    Ok(entries)
+    gwt_core::logging::read_log_file(&path)
+        .map_err(|error| format!("Failed to read log file {}: {error}", path.display()))
+}
+
+/// Build the synthetic warning event surfaced when `read_log_file` skipped
+/// malformed lines. Keeps the message phrasing consistent with the Logs
+/// window expectation of a single notice per load (FR-036 / SC-010).
+fn skipped_lines_warning(
+    diagnostics: &gwt_core::logging::ReadDiagnostics,
+) -> gwt_core::logging::LogEvent {
+    let count = diagnostics.skipped;
+    let plural = if count == 1 { "line" } else { "lines" };
+    gwt_core::logging::LogEvent::new(
+        gwt_core::logging::LogLevel::Warn,
+        "gwt_core::logging::reader",
+        format!(
+            "Skipped {count} malformed {plural} while reading {}",
+            diagnostics.path.display()
+        ),
+    )
 }
 
 fn spawn_branch_cleanup_async(
@@ -6487,7 +6490,7 @@ mod tests {
             coordination_events_path, load_snapshot, post_entry, AuthorKind, BoardAudienceScope,
             BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind, CoordinationEvent,
         },
-        logging::{current_log_file, LogEvent, LogLevel},
+        logging::{current_log_file, LogLevel},
         paths::gwt_cache_dir,
         repo_hash::detect_repo_hash,
     };
@@ -11806,14 +11809,16 @@ exit 1
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "logs-1");
         let log_path = current_log_file(&runtime.log_dir);
-        let entry =
-            LogEvent::new(LogLevel::Warn, "pty", "runtime stalled").with_detail("retrying read");
+        // Write the canonical on-disk JSONL shape produced by
+        // `tracing_subscriber::fmt::layer().json()` (see
+        // `crates/gwt-core/src/logging/fmt_layer.rs`) so the reader exercises
+        // the production format end-to-end (SPEC-1924 FR-035).
         fs::write(
             &log_path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&entry).expect("serialize log event")
-            ),
+            "{\"timestamp\":\"2026-05-20T09:00:00.000000+00:00\",\
+             \"level\":\"WARN\",\
+             \"fields\":{\"message\":\"runtime stalled\",\"detail\":\"retrying read\"},\
+             \"target\":\"pty\"}\n",
         )
         .expect("write log snapshot");
 
@@ -11833,8 +11838,80 @@ exit 1
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].message == "runtime stalled"
+                && entries[0].detail.as_deref() == Some("retrying read")
+                && entries[0].source == "pty"
                 && matches!(entries[0].severity, LogLevel::Warn)
         ));
+    }
+
+    /// SPEC-1924 US-14 / FR-036 / SC-010 — when canonical log file contains
+    /// malformed lines, the Logs window receives the surviving entries plus
+    /// exactly one Warning notice via `LogEntryAppended`.
+    #[test]
+    fn app_runtime_load_logs_emits_warning_for_skipped_lines() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "logs-1",
+            repo,
+            WindowPreset::Logs,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "logs-1");
+        let log_path = current_log_file(&runtime.log_dir);
+        let good = "{\"timestamp\":\"2026-05-20T09:00:00.000000+00:00\",\
+            \"level\":\"INFO\",\"fields\":{\"message\":\"ok\"},\"target\":\"gwt\"}";
+        let malformed = "{\"foo\":\"bar\"}";
+        fs::write(&log_path, format!("{good}\n{malformed}\n{good}\n")).expect("write log snapshot");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadLogs {
+                id: window_id.clone(),
+            },
+        );
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected LogEntries + LogEntryAppended for skipped notice, got {:?}",
+            events
+        );
+
+        let entries_match = matches!(
+            &events[0],
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::LogEntries { id, entries },
+            } if client_id == "client-1"
+                && id == &window_id
+                && entries.len() == 2
+                && entries.iter().all(|e| e.message == "ok")
+        );
+        assert!(
+            entries_match,
+            "first event must be LogEntries: {:?}",
+            events[0]
+        );
+
+        let warning_match = matches!(
+            &events[1],
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::LogEntryAppended { entry },
+            } if client_id == "client-1"
+                && entry.severity == LogLevel::Warn
+                && entry.source == "gwt_core::logging::reader"
+                && entry.message.contains("Skipped 1 malformed line")
+        );
+        assert!(
+            warning_match,
+            "second event must be a Warn LogEntryAppended notice: {:?}",
+            events[1]
+        );
     }
 
     #[test]
@@ -14889,5 +14966,86 @@ exit 1
                 .map(|i| (i.id.clone(), i.status_category.clone()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    // SPEC-1924 US-14 FR-035 / FR-036 / SC-010 / SC-011 — verify the Logs
+    // window snapshot reader goes through `gwt_core::logging::read_log_file`
+    // and that the synthetic warning event is well-formed when malformed
+    // lines are skipped.
+
+    const PROD_LINE_INFO: &str = r#"{"timestamp":"2026-05-20T09:00:00.015355+09:00","level":"INFO","fields":{"message":"PTY resize completed","outcome":"ok"},"target":"gwt::resize::pty"}"#;
+    const MALFORMED_LINE: &str = r#"{"foo":"bar"}"#;
+
+    fn write_canonical_log_file(log_dir: &Path, lines: &[&str]) {
+        fs::create_dir_all(log_dir).expect("create log dir");
+        let log_path = current_log_file(log_dir);
+        let mut file = fs::File::create(&log_path).expect("create log file");
+        for line in lines {
+            file.write_all(line.as_bytes()).expect("write line");
+            file.write_all(b"\n").expect("write newline");
+        }
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_returns_outcome_with_no_skipped_lines() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_log_file(dir.path(), &[PROD_LINE_INFO]);
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(outcome.entries[0].message, "PTY resize completed");
+        assert_eq!(outcome.diagnostics.skipped, 0);
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_counts_skipped_lines() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_log_file(
+            dir.path(),
+            &[PROD_LINE_INFO, MALFORMED_LINE, PROD_LINE_INFO],
+        );
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert_eq!(outcome.entries.len(), 2);
+        assert_eq!(outcome.diagnostics.skipped, 1);
+    }
+
+    #[test]
+    fn load_log_entries_from_dir_returns_empty_outcome_when_file_missing() {
+        let dir = tempdir().expect("tempdir");
+
+        let outcome = super::load_log_entries_from_dir(dir.path()).expect("read ok");
+
+        assert!(outcome.entries.is_empty());
+        assert_eq!(outcome.diagnostics.skipped, 0);
+    }
+
+    #[test]
+    fn skipped_lines_warning_is_warn_severity_and_includes_count_and_path() {
+        let diagnostics = gwt_core::logging::ReadDiagnostics {
+            path: PathBuf::from("/tmp/gwt.log.2026-05-20"),
+            skipped: 3,
+        };
+
+        let event = super::skipped_lines_warning(&diagnostics);
+
+        assert_eq!(event.severity, LogLevel::Warn);
+        assert_eq!(event.source, "gwt_core::logging::reader");
+        assert!(event.message.contains("Skipped 3 malformed lines"));
+        assert!(event.message.contains("/tmp/gwt.log.2026-05-20"));
+    }
+
+    #[test]
+    fn skipped_lines_warning_singular_for_one_line() {
+        let diagnostics = gwt_core::logging::ReadDiagnostics {
+            path: PathBuf::from("/tmp/x.log"),
+            skipped: 1,
+        };
+
+        let event = super::skipped_lines_warning(&diagnostics);
+
+        assert!(event.message.contains("Skipped 1 malformed line "));
     }
 }
