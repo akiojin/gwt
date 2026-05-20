@@ -23,15 +23,11 @@ pub struct CommitEntry {
 /// Returns up to `count` commits from HEAD.
 pub fn recent_commits(repo_path: &Path, count: usize) -> Result<Vec<CommitEntry>> {
     let format = "%h\t%s\t%an\t%aI";
-    let output = gwt_core::process::hidden_command("git")
-        .args([
-            "log",
-            &format!("--max-count={count}"),
-            &format!("--format={format}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| GwtError::Git(format!("log: {e}")))?;
+    let max_count = format!("--max-count={count}");
+    let format_arg = format!("--format={format}");
+    let output =
+        gwt_core::process::run_git_logged(&["log", &max_count, &format_arg], Some(repo_path))
+            .map_err(|e| GwtError::Git(format!("log: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
