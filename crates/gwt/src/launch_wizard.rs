@@ -1130,6 +1130,7 @@ impl LaunchWizardState {
         // preferred agent identity の適用は constructor (apply_preferred_agent_profile)
         // と set_agent_id 経由の明示的 agent 切替に限定する。
         if refreshed_previous_profiles && self.launch_path != LaunchWizardLaunchPath::QuickStart {
+            self.save_current_agent_draft();
             self.restore_agent_draft_or_defaults();
         }
         self.sync_docker_lifecycle_default();
@@ -5585,6 +5586,46 @@ mod tests {
             .build_launch_config()
             .expect("launch config builds for user-selected agent");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+    }
+
+    #[test]
+    fn apply_runtime_context_preserves_user_execution_mode_after_settings_step() {
+        for mode in ["resume", "continue", "normal"] {
+            let codex_session = sample_session_record(
+                "feature/old",
+                Path::new("/tmp/old-repo"),
+                gwt_agent::AgentId::Codex,
+                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                None,
+            );
+            let previous_profiles =
+                previous_launch_profiles_from_sessions(std::slice::from_ref(&codex_session));
+            let mut state = LaunchWizardState::open_with_previous_profiles(
+                context(branch("feature/current"), "feature/current"),
+                sample_agent_options(),
+                Vec::new(),
+                previous_profiles.clone(),
+            );
+
+            state.apply(LaunchWizardAction::SetExecutionMode {
+                mode: mode.to_string(),
+            });
+            assert_eq!(state.view().selected_execution_mode, mode);
+
+            state.apply_runtime_context(LaunchWizardHydration {
+                selected_branch: Some(branch("feature/current")),
+                normalized_branch_name: "feature/current".to_string(),
+                worktree_path: Some(PathBuf::from("/tmp/current-repo")),
+                quick_start_root: PathBuf::from("/tmp/current-repo"),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::Unknown,
+                agent_options: sample_agent_options(),
+                quick_start_entries: Vec::new(),
+                previous_profiles: Some(previous_profiles),
+            });
+
+            assert_eq!(state.view().selected_execution_mode, mode);
+        }
     }
 
     #[test]

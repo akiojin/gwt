@@ -1947,6 +1947,7 @@ mod tests {
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -5062,15 +5063,19 @@ mod tests {
         let mut base_branch = None;
         let mut detached_dir = None;
         let mut detached_env = HashMap::new();
-        let err = super::resolve_launch_worktree_request(
+        super::resolve_launch_worktree_request(
             &repo,
             Some("feature/detached"),
             &mut base_branch,
             &mut detached_dir,
             &mut detached_env,
         )
-        .expect_err("repo branch resolution failure should not silently skip");
-        assert!(err.contains("git branch --show-current"));
+        .expect("detached repo still resolves branch worktree through worktree metadata");
+        let detached_dir = detached_dir.expect("detached branch worktree dir");
+        assert!(detached_dir.exists());
+        assert!(detached_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &detached_dir)));
 
         let attach = gwt_core::process::hidden_command("git")
             .args(["checkout", "develop"])
@@ -5090,7 +5095,9 @@ mod tests {
             &mut current_env,
         )
         .expect("current branch worktree");
-        assert_eq!(current_dir.as_deref(), Some(repo.as_path()));
+        assert!(current_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &repo)));
         assert!(current_env
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &repo)));
@@ -5289,6 +5296,56 @@ mod tests {
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "feature/existing";
+        let create_branch = gwt_core::process::hidden_command("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .status()
+            .expect("create branch");
+        assert!(create_branch.success(), "create branch failed");
+        let existing_worktree = temp.path().join("feature-existing");
+        let add_worktree = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q"])
+            .arg(&existing_worktree)
+            .arg(branch)
+            .current_dir(&repo)
+            .status()
+            .expect("add worktree");
+        assert!(add_worktree.success(), "git worktree add failed");
+        let detach = gwt_core::process::hidden_command("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .expect("detach head");
+        assert!(detach.success(), "git checkout --detach failed");
+
+        let mut base_branch = None;
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let result = super::resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        );
+        assert!(
+            result.is_ok(),
+            "selected branch should resolve through git worktree list before current-branch probe: {result:?}"
+        );
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
     }
 
     #[test]

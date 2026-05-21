@@ -1816,6 +1816,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render() {
+        let html = frontend_bundle_source();
+        let readiness_flow = regex::Regex::new(
+            r#"case\s+"workspace_state":\s*\{[\s\S]*?projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function sendStartupAutoResumeReady()"),
+            "expected a named one-shot startup auto-resume readiness helper",
+        );
+        assert!(
+            html.contains("kind: \"startup_auto_resume_ready\"")
+                && html.contains("bounds: visibleBounds()"),
+            "expected readiness payload to carry the current visible canvas bounds",
+        );
+        assert!(
+            readiness_flow.is_match(html),
+            "expected workspace_state hydration to render before announcing startup auto-resume readiness",
+        );
+    }
+
+    #[test]
     fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
         let html = frontend_bundle_source();
         let websocket_url = regex::Regex::new(

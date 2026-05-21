@@ -136,6 +136,9 @@ pub enum WorkspaceResumeSource {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    StartupAutoResumeReady {
+        bounds: WindowGeometry,
+    },
     OpenProjectDialog,
     SelectCloneProjectParent,
     GithubRepositorySearch {
@@ -2025,6 +2028,27 @@ mod tests {
                 base_geometry_revision: Some(7),
                 ..
             } if id == "w-1"
+        ));
+    }
+
+    #[test]
+    fn frontend_event_startup_auto_resume_ready_deserializes_visible_bounds() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "startup_auto_resume_ready",
+            "bounds": { "x": 8.0, "y": 16.0, "width": 1200.0, "height": 800.0 }
+        }))
+        .expect("deserialize startup auto-resume readiness");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::StartupAutoResumeReady {
+                bounds: WindowGeometry {
+                    x: 8.0,
+                    y: 16.0,
+                    width: 1200.0,
+                    height: 800.0,
+                }
+            }
         ));
     }
 

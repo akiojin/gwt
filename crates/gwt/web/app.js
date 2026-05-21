@@ -181,6 +181,7 @@
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
+      let startupAutoResumeReadySent = false;
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
       // backing state today. New helpers should mutate state through the owning
@@ -2377,6 +2378,19 @@
           width: canvas.clientWidth / viewport.zoom,
           height: canvas.clientHeight / viewport.zoom,
         };
+      }
+
+      function sendStartupAutoResumeReady() {
+        if (startupAutoResumeReadySent) {
+          return;
+        }
+        startupAutoResumeReadySent = true;
+        requestAnimationFrame(() => {
+          send({
+            kind: "startup_auto_resume_ready",
+            bounds: visibleBounds(),
+          });
+        });
       }
 
       function topmostWindowId(workspace) {
@@ -10828,6 +10842,7 @@
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            sendStartupAutoResumeReady();
             break;
           }
           case "workspace_projection_prune_result": {
