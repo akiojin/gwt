@@ -24,7 +24,7 @@
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
-      import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
+      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
@@ -5205,7 +5205,7 @@
         getResumeBounds: () => visibleBounds(),
       });
 
-      const workspaceKanbanSurface = createWorkspaceKanbanSurface({
+      const workspaceOverviewSurface = createWorkspaceOverviewSurface({
         activeWorkspace,
         agentStatusLabel,
         appendMeta,
@@ -9038,7 +9038,7 @@
         }
 
         if (surface === "workspace") {
-          workspaceKanbanSurface.mount(body, windowData, {
+          workspaceOverviewSurface.mount(body, windowData, {
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
@@ -10149,7 +10149,7 @@
               boardStateMap.delete(windowId);
               logStateMap.delete(windowId);
               clearKnowledgeBridgeState(windowId);
-              workspaceKanbanSurface.deleteState(windowId);
+              workspaceOverviewSurface.deleteState(windowId);
               if (branchCleanupWindowId === windowId) {
                 branchCleanupWindowId = null;
                 renderBranchCleanupModal();
@@ -10375,7 +10375,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
-            workspaceKanbanSurface.renderWindows();
+            workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -10914,7 +10914,7 @@
             branchCleanupWindowId = event.id;
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
-              workspaceKanbanSurface.renderWindows();
+              workspaceOverviewSurface.renderWindows();
               break;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
