@@ -212,6 +212,32 @@ test("Index search UI exposes explicit search controls and readable result scori
   );
 });
 
+test("Index search clears invalidate any in-flight request immediately", () => {
+  assert.ok(
+    appSource.includes("function clearProjectIndexSearchState(state)") &&
+      appSource.includes("invalidateProjectIndexSearchRequest(state);"),
+    "clearing the query should invalidate stale backend responses through a shared helper",
+  );
+  assert.ok(
+    appSource.includes("if (!state.query.trim()) {\n              clearProjectIndexSearchState(state);"),
+    "the input handler must clear and invalidate immediately instead of waiting for debounce",
+  );
+});
+
+test("Index result Open uses target numbers for Issue and SPEC hits", () => {
+  assert.ok(
+    appSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
+      appSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
+      appSource.includes("pendingIndexOpenTargetsByPreset.set(preset"),
+    "Issue/SPEC result Open should select the indexed target number, including newly created windows",
+  );
+  assert.ok(
+    appSource.includes('openKnowledgeIndexResultTarget("issue", target)') &&
+      appSource.includes('openKnowledgeIndexResultTarget("spec", target)'),
+    "Issue and SPEC index results must use target-aware navigation",
+  );
+});
+
 test("Index search tab does not trigger full health refresh on mount", () => {
   const refreshCallCount = (
     appSource.match(/requestFullIndexStatusRefresh\(\);/g) || []

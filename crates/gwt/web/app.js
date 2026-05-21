@@ -178,6 +178,7 @@
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
       const indexSearchStateMap = new Map();
+      const pendingIndexOpenTargetsByPreset = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
@@ -589,6 +590,29 @@
         return indexSearchStateMap.get(windowId);
       }
 
+      function invalidateProjectIndexSearchRequest(state) {
+        state.requestId += 1;
+        state.inFlightRequestId = 0;
+        state.inFlightSignature = "";
+      }
+
+      function clearProjectIndexSearchState(state) {
+        if (state.searchTimer) {
+          clearTimeout(state.searchTimer);
+          state.searchTimer = 0;
+        }
+        invalidateProjectIndexSearchRequest(state);
+        state.results = [];
+        state.selectedResultIndex = -1;
+        state.searching = false;
+        state.error = "";
+      }
+
+      function markProjectIndexSearchPending(state) {
+        invalidateProjectIndexSearchRequest(state);
+        state.error = "";
+      }
+
       function activeIndexStatus() {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
         return (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
@@ -655,16 +679,13 @@
         const state = ensureIndexSearchState(windowId);
         const query = state.query.trim();
         if (!query) {
-          state.results = [];
-          state.selectedResultIndex = -1;
-          state.searching = false;
-          state.inFlightSignature = "";
-          state.error = "";
+          clearProjectIndexSearchState(state);
           renderProjectIndexSearch(windowId);
           return;
         }
         const scopes = Array.from(state.selectedScopes);
         if (scopes.length === 0) {
+          invalidateProjectIndexSearchRequest(state);
           state.error = "Select at least one scope.";
           state.searching = false;
           renderProjectIndexSearch(windowId);
@@ -882,6 +903,7 @@
           return;
         }
         state.searching = false;
+        state.inFlightRequestId = 0;
         state.inFlightSignature = "";
         state.error = "";
         state.results = Array.isArray(event.results) ? event.results : [];
@@ -895,6 +917,7 @@
           return;
         }
         state.searching = false;
+        state.inFlightRequestId = 0;
         state.inFlightSignature = "";
         state.error = event.message || "Project index search failed.";
         renderProjectIndexSearch(event.id);
@@ -921,10 +944,10 @@
         const target = result?.target || {};
         switch (target.kind) {
           case "issue":
-            focusOrSpawnPreset("issue");
+            openKnowledgeIndexResultTarget("issue", target);
             return;
           case "spec":
-            focusOrSpawnPreset("spec");
+            openKnowledgeIndexResultTarget("spec", target);
             return;
           case "board":
             focusOrSpawnPreset("board");
@@ -938,6 +961,30 @@
           default:
             return;
         }
+      }
+
+      function indexResultTargetNumber(target) {
+        const rawNumber = target?.number ?? target?.spec_id ?? target?.id;
+        const number = Number(rawNumber);
+        if (!Number.isInteger(number) || number <= 0) {
+          return null;
+        }
+        return number;
+      }
+
+      function openKnowledgeIndexResultTarget(preset, target) {
+        const knowledgeKind = knowledgeKindForPreset(preset);
+        const number = indexResultTargetNumber(target);
+        const windowId = focusOrSpawnPreset(preset);
+        if (!knowledgeKind || number === null) {
+          return;
+        }
+        if (windowId) {
+          requestKnowledgeDetail(windowId, knowledgeKind, number);
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number });
       }
 
       function send(message) {
@@ -9533,6 +9580,12 @@
           input.value = state.query;
           input.addEventListener("input", () => {
             state.query = input.value;
+            if (!state.query.trim()) {
+              clearProjectIndexSearchState(state);
+              renderProjectIndexSearch(windowData.id);
+              return;
+            }
+            markProjectIndexSearchPending(state);
             renderProjectIndexSearch(windowData.id);
             scheduleProjectIndexSearch(windowData.id);
           });
@@ -9553,11 +9606,18 @@
             } else {
               state.selectedScopes.add(scope);
             }
+            if (state.query.trim()) {
+              markProjectIndexSearchPending(state);
+            }
             renderProjectIndexSearch(windowData.id);
             scheduleProjectIndexSearch(windowData.id);
           });
           body.querySelector(".index-worktree-select").addEventListener("change", (event) => {
             state.selectedWorktreeHash = event.target.value || "";
+            if (state.query.trim()) {
+              markProjectIndexSearchPending(state);
+              renderProjectIndexSearch(windowData.id);
+            }
             scheduleProjectIndexSearch(windowData.id);
           });
           for (const tab of body.querySelectorAll("[data-index-tab]")) {
@@ -9700,6 +9760,14 @@
             windowData.id,
             knowledgeKind,
           );
+          const pendingIndexTarget = pendingIndexOpenTargetsByPreset.get(windowData.preset);
+          if (
+            pendingIndexTarget
+            && pendingIndexTarget.knowledgeKind === knowledgeKind
+          ) {
+            state.selectedNumber = pendingIndexTarget.number;
+            pendingIndexOpenTargetsByPreset.delete(windowData.preset);
+          }
           const search = body.querySelector(".knowledge-search");
           search.value = state.query;
           search.addEventListener("input", () => {
@@ -12749,7 +12817,7 @@
             message.bounds = visibleBounds();
           }
           frontendUnits.socketTransport.send(message);
-          return;
+          return existing.id;
         }
         const message = {
           kind: "create_window",
@@ -12757,6 +12825,7 @@
           bounds: visibleBounds(),
         };
         frontendUnits.socketTransport.send(message);
+        return null;
       }
 
       document.addEventListener("op:command", (event) => {
