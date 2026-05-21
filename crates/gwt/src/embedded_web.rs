@@ -1649,6 +1649,25 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_agent_runtime_maps_not_started_separately() {
+        let js = app_js();
+        let html = frontend_styles_bundle();
+
+        assert!(
+            js.contains("not_started: \"Not Started\""),
+            "expected embedded js to expose a Not Started runtime label",
+        );
+        assert!(
+            js.contains("case \"not_started\":") && js.contains("return \"not_started\";"),
+            "expected embedded js to keep pre-lifecycle agent telemetry separate",
+        );
+        assert!(
+            html.contains(".status-chip.not_started .status-dot"),
+            "expected embedded html to define a not_started status chip variant",
+        );
+    }
+
+    #[test]
     fn embedded_web_window_role_badges_identify_every_window_surface() {
         let html = frontend_styles_bundle();
         let js = app_js();

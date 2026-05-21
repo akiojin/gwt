@@ -1051,6 +1051,12 @@ body::after {
   opacity: 0.82;
 }
 
+[data-agent-state="not_started"] {
+  --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 35%, var(--color-border));
+  box-shadow: 0 0 0 1px var(--agent-color);
+  opacity: 0.72;
+}
+
 [data-agent-state="blocked"] {
   --agent-color: var(--color-state-blocked);
   box-shadow: 0 0 0 1px var(--agent-color),
@@ -1844,6 +1850,7 @@ kbd.op-kbd {
 }
 :root[data-theme] .status-chip.starting,
 :root[data-theme] .status-chip.running { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .status-chip.not_started,
 :root[data-theme] .status-chip.ready,
 :root[data-theme] .status-chip.idle,
 :root[data-theme] .status-chip.waiting { color: var(--color-state-idle); border-color: var(--color-state-idle); }

@@ -389,6 +389,7 @@ fn resolve_window_id<'a>(
 fn status_label(status: WindowState) -> &'static str {
     match status {
         WindowState::Running => "running",
+        WindowState::NotStarted => "not-started",
         WindowState::Idle => "idle",
         WindowState::Waiting => "waiting",
         WindowState::Stopped => "stopped",
@@ -502,6 +503,16 @@ mod tests {
         assert!(!rendered.contains("shell-1"));
         assert!(rendered.contains("tab-1::codex-1\trunning\tcodex"));
         assert!(rendered.contains("tab-1::agent-1\trunning\tcustom"));
+    }
+
+    #[test]
+    fn render_pane_list_labels_pre_lifecycle_agents_not_started() {
+        let mut windows = vec![window("tab-1::codex-1", WindowPreset::Codex, Some("codex"))];
+        windows[0].status = WindowState::NotStarted;
+
+        let rendered = render_pane_list(&windows);
+
+        assert!(rendered.contains("tab-1::codex-1\tnot-started\tcodex"));
     }
 
     #[test]

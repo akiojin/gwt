@@ -14,7 +14,7 @@ pub fn compose_window_state(
         return pty_state;
     }
     if uses_agent_hook_state(preset) {
-        return hook_state.unwrap_or(WindowState::Idle);
+        return hook_state.unwrap_or(WindowState::NotStarted);
     }
     pty_state
 }
@@ -60,6 +60,9 @@ pub fn window_state_for_hook_event(event: &str) -> Option<WindowState> {
 fn parse_runtime_status(status: &str) -> Option<WindowState> {
     match status.trim().to_ascii_lowercase().as_str() {
         "running" | "starting" | "ready" => Some(WindowState::Running),
+        "notstarted" | "not_started" | "not-started" | "not started" => {
+            Some(WindowState::NotStarted)
+        }
         "idle" => Some(WindowState::Idle),
         "waiting" | "waitinginput" | "waiting_input" => Some(WindowState::Waiting),
         "stopped" | "exited" => Some(WindowState::Stopped),
@@ -125,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             compose_window_state(WindowState::Running, WindowPreset::Agent, None),
-            WindowState::Idle
+            WindowState::NotStarted
         );
         assert_eq!(
             compose_window_state(
@@ -167,10 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn compose_window_state_defaults_live_agent_without_hook_state_to_idle() {
+    fn compose_window_state_defaults_live_agent_without_hook_state_to_not_started() {
         let composed = compose_window_state(WindowState::Running, WindowPreset::Agent, None);
 
-        assert_eq!(serde_json::to_string(&composed).unwrap(), "\"idle\"");
+        assert_eq!(composed, WindowState::NotStarted);
+        assert_eq!(serde_json::to_string(&composed).unwrap(), "\"not_started\"");
     }
 
     #[test]

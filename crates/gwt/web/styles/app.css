@@ -736,6 +736,10 @@ body {
   background: var(--color-state-active);
 }
 
+.status-chip.not_started .status-dot {
+  background: var(--color-state-idle);
+}
+
 .status-chip.idle .status-dot {
   background: var(--color-state-idle);
 }

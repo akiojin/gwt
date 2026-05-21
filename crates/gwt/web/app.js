@@ -1154,6 +1154,7 @@
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
+        not_started: "Not Started",
         idle: "Idle",
         waiting: "Waiting",
         stopped: "Stopped",
@@ -1162,6 +1163,8 @@
 
       const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
         starting: "running",
+        notstarted: "not_started",
+        "not-started": "not_started",
         ready: "idle",
         exited: "stopped",
       });
@@ -2807,6 +2810,8 @@
           case "starting":
           case "running":
             return "active";
+          case "not_started":
+            return "not_started";
           case "ready":
           case "idle":
           case "waiting":
@@ -2833,6 +2838,7 @@
               detailMap.set(windowId, detail);
             } else if (
               runtimeState === "running" ||
+              runtimeState === "not_started" ||
               runtimeState === "idle" ||
               runtimeState === "waiting"
             ) {
@@ -2851,6 +2857,7 @@
             chip.classList.remove(
               "starting",
               "running",
+              "not_started",
               "ready",
               "idle",
               "waiting",
