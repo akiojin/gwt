@@ -19,6 +19,7 @@
  * `release-notes-live.spec.ts` (PR #2780 follow-up).
  */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -28,32 +29,13 @@ test.describe.serial("Console window (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
   test.beforeEach(async ({ page }) => {
-    // Same splash-bypass pattern as release-notes-live.spec.ts (Issue
-    // tracked separately): force the briefing overlay hidden before the
-    // first frame so the rest of the test never collides with it.
-    await page.addInitScript(() => {
-      try {
-        window.sessionStorage.setItem("gwt:ui:briefing", "1");
-      } catch {
-        /* no-op */
-      }
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      keepPresetModal: true,
     });
-    await page.goto(BASE);
-    // Hide the splash + every backdrop EXCEPT the Add Window picker, which
-    // this spec must interact with. release-notes-live.spec.ts hides every
-    // modal-backdrop because it only clicks the title bar; here we need the
-    // preset modal to be reachable.
-    await page.addStyleTag({
-      content: `
-        #op-briefing { display: none !important; pointer-events: none !important; }
-        .modal-backdrop:not(#preset-modal) { display: none !important; pointer-events: none !important; }
-      `,
-    });
-    await page.evaluate(() => {
-      const overlay = document.getElementById("op-briefing");
-      if (overlay) overlay.hidden = true;
-    });
+    await openLiveGwtProject(page);
     await expect(page.locator("#op-briefing")).toBeHidden();
+    await expect(page.locator("#project-picker")).toBeHidden();
   });
 
   async function surfacePresetModal(page) {
@@ -74,11 +56,40 @@ test.describe.serial("Console window (live backend)", () => {
     return presetModal;
   }
 
+  async function consoleWindowIds(page) {
+    return await page.evaluate(() =>
+      Array.from(document.querySelectorAll(".workspace-window"))
+        .filter((node) => node.querySelector(".console-window"))
+        .map((node) => (node as HTMLElement).dataset.id)
+        .filter(Boolean),
+    );
+  }
+
+  async function waitForNewConsoleWindow(page, beforeIds) {
+    const id = await page
+      .waitForFunction(
+        ({ beforeIds }) => {
+          const seen = new Set(beforeIds);
+          const node = Array.from(document.querySelectorAll(".workspace-window"))
+            .find((candidate) =>
+              candidate.querySelector(".console-window") &&
+              !seen.has((candidate as HTMLElement).dataset.id || ""),
+            );
+          return node ? (node as HTMLElement).dataset.id || "" : "";
+        },
+        { beforeIds },
+      )
+      .then((handle) => handle.jsonValue());
+    return page.locator(`.workspace-window[data-id="${id}"]`);
+  }
+
   async function openConsoleWindow(page) {
+    const beforeIds = await consoleWindowIds(page);
     const presetModal = await surfacePresetModal(page);
     const consoleButton = presetModal.locator("[data-preset='console']");
     await expect(consoleButton).toBeVisible();
     await consoleButton.click();
+    return await waitForNewConsoleWindow(page, beforeIds);
   }
 
   test("Add Window picker exposes the Console preset", async ({ page }) => {
@@ -111,9 +122,9 @@ test.describe.serial("Console window (live backend)", () => {
       };
     });
 
-    await openConsoleWindow(page);
+    const windowRoot = await openConsoleWindow(page);
 
-    const consoleRoot = page.locator(".console-window").first();
+    const consoleRoot = windowRoot.locator(".console-window");
     await expect(consoleRoot).toBeVisible();
 
     const tabs = consoleRoot.locator(".console-window__tab");
@@ -125,12 +136,38 @@ test.describe.serial("Console window (live backend)", () => {
 
     const panes = consoleRoot.locator(".console-window__pane");
     await expect(panes).toHaveCount(KINDS.length);
-    for (const kind of KINDS) {
+    // After SPEC-2809 ConsoleTeeLayer wiring (commit a94015c7b), the
+    // runner tab starts populating as soon as gwt startup emits
+    // `gwt::index` tracing events (project index status runner /
+    // bootstrap helper / repository reconcile). The other four kinds
+    // remain idle until the user opens a project or launches an agent,
+    // so they keep the empty hint. Assert per-kind to reflect that
+    // observable startup behaviour rather than blanket-empty.
+    const IDLE_KINDS = ["gh", "git", "docker", "agent"];
+    for (const kind of IDLE_KINDS) {
       const hint = consoleRoot.locator(
         `.console-window__pane[data-kind='${kind}'] .console-window__empty`,
       );
       await expect(hint).toHaveText(new RegExp(`Waiting for ${kind} process output`));
     }
+    // Runner: either the empty hint is still visible (timing-lucky case
+    // where the snapshot reaches the controller before the first
+    // gwt::index event) or at least one line/header has been rendered
+    // by ConsoleTeeLayer. Both states pass.
+    const runnerPane = consoleRoot.locator(
+      ".console-window__pane[data-kind='runner']",
+    );
+    await expect
+      .poll(async () =>
+        await runnerPane.evaluate((node) => {
+          const empty = node.querySelector(".console-window__empty");
+          const hasLine = node.querySelector(
+            ".console-window__line, .console-window__invocation-header",
+          );
+          return Boolean(empty) || Boolean(hasLine);
+        }),
+      )
+      .toBe(true);
 
     // SPEC-2809 Phase F2 snapshot handshake — the controller must emit
     // `load_process_console` once it mounts so historical lines are
@@ -147,11 +184,9 @@ test.describe.serial("Console window (live backend)", () => {
   });
 
   test("clicking a tab activates it and hides the others", async ({ page }) => {
-    await openConsoleWindow(page);
+    const windowRoot = await openConsoleWindow(page);
 
-    // Use the most recently mounted Console window; tests share the
-    // backend session so any earlier instance can linger in the DOM.
-    const consoleRoot = page.locator(".console-window").last();
+    const consoleRoot = windowRoot.locator(".console-window");
     await expect(consoleRoot).toBeVisible();
 
     const dockerTab = consoleRoot.locator(".console-window__tab[data-kind='docker']");

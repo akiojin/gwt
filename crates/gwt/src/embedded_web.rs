@@ -66,6 +66,10 @@ pub fn terminal_wheel_scroll_js() -> &'static str {
     include_str!("../web/terminal-wheel-scroll.js")
 }
 
+pub fn canvas_wheel_gesture_js() -> &'static str {
+    include_str!("../web/canvas-wheel-gesture.js")
+}
+
 pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -258,6 +262,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-wheel-scroll.js",
         source: terminal_wheel_scroll_js,
         marker: "createTerminalWheelScrollController",
+    },
+    RootJsModuleAsset {
+        path: "/canvas-wheel-gesture.js",
+        source: canvas_wheel_gesture_js,
+        marker: "createCanvasWheelGestureClassifier",
     },
     RootJsModuleAsset {
         path: "/theme-manager.js",
@@ -840,14 +849,14 @@ mod tests {
         // `isReady` flip while the window is still hidden, defeating the
         // deferredWrites buffer (CodeRabbit PR #2693 concern).
         let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
         )
         .expect("valid regex");
         // The helper itself must (a) bail when canRefreshTerminalViewport
         // is false so we do not flip isReady while hidden, and (b) only
         // mark the runtime ready after activation succeeds.
         let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
         )
         .expect("valid regex");
         // Hidden → visible activation path also needs to drive the
@@ -896,6 +905,43 @@ mod tests {
         assert!(
             !legacy_sync_replay.is_match(html),
             "legacy synchronous snapshot replay before initial fit must be removed (FR-057 regression guard)",
+        );
+
+        // Issue #2832 — SPEC-2008 Phase 26.A regression fix: the
+        // visibility predicate (canRefreshTerminalViewport) only checks
+        // `.hidden` and `.minimized`. It does NOT catch the case where
+        // the element is structurally visible but layout has not yet
+        // propagated, leaving the parent container at 0×0 at the moment
+        // the initial-fit rAF fires. In that state fitAddon.fit() resolves
+        // against the 0-sized box and silently leaves xterm at the
+        // default 80×24 grid; flushing deferredWrites then renders the
+        // post-launch Claude Code output corrupted, with the
+        // resize-recovers-on-move signature documented in
+        // tasks/lessons.md 2026-05-13.
+        let layout_box_gate = regex::Regex::new(
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
+        )
+        .expect("valid regex");
+        assert!(
+            layout_box_gate.is_match(html),
+            "expected completeInitialFitHandshake to defer (and rAF-retry) while terminalContainerHasLayoutBox returns false so deferredWrites do not flush into xterm's default 80x24 grid before fit can resolve real cols/rows (Issue #2832)",
+        );
+        assert!(
+            html.contains("elementHasLayoutBox,"),
+            "expected app.js to import elementHasLayoutBox from terminal-viewport-reflow.js (Issue #2832)",
+        );
+        assert!(
+            html.contains("function terminalContainerHasLayoutBox(windowId)"),
+            "expected app.js to expose terminalContainerHasLayoutBox so the handshake can gate on layout (Issue #2832)",
+        );
+        assert!(
+            html.contains("const terminalHost = runtime?.terminal?.element?.parentElement;")
+                && html.contains("return elementHasLayoutBox(terminalHost);"),
+            "expected terminalContainerHasLayoutBox to measure the actual xterm host before falling back to the outer workspace window (Issue #2839)",
+        );
+        assert!(
+            html.contains("const HANDSHAKE_RETRY_LIMIT ="),
+            "expected app.js to declare HANDSHAKE_RETRY_LIMIT so the retry loop has a ceiling (Issue #2832)",
         );
     }
 
@@ -1334,6 +1380,25 @@ mod tests {
         assert!(
             html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
             "expected capture-phase wheel routing to be installed through the named handler",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_wheel_gesture_classifier_is_served_and_imported() {
+        let js = app_js();
+        let asset = root_js_module_assets()
+            .iter()
+            .find(|asset| asset.path == "/canvas-wheel-gesture.js")
+            .expect("expected canvas wheel gesture classifier asset");
+
+        assert_eq!(asset.marker, "createCanvasWheelGestureClassifier");
+        assert!(
+            js.contains("from \"/canvas-wheel-gesture.js\""),
+            "expected app.js to import the canvas wheel gesture classifier",
+        );
+        assert!(
+            js.contains("canvasWheelGestureClassifier.classify(event)"),
+            "expected canvas wheel routing to classify the whole wheel gesture before routing",
         );
     }
 

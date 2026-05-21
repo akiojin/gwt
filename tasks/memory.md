@@ -4,6 +4,98 @@ This file is the canonical gwt memory log. Older entries may use the historical
 lesson format (`### 事象 / ### 原因 / ### 再発防止策`). New entries should use
 `Type`, `Context`, `Learning`, and `Future Action` fields.
 
+## 2026-05-21 — PR 作成前に `User Verification Result: confirmed` を必ず取得する
+
+### 事象
+
+SPEC-2809（Console window）の修正で、`gwt-verify --mode pre-pr` の自動テストが全 PASS した
+段階で、ユーザーの視覚確認が click-blocking regression によって実行不能だった。
+エージェントは独断で `User Verification Result: skipped(reason: develop 側 picker regression)`
+に倒して `gwtd pr create` を実行。PR #2857 がユーザー承認なしに作成された。
+ユーザーから「私のチェック前に PR を出した」と指摘された。
+
+### 原因
+
+1. `gwt-verify` skill contract は `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`
+   を要求するが、`skipped` は **ユーザーが明示的に選択した場合のみ** 許容される。エージェントが
+   「自動テスト全 PASS だから skip 妥当」と判断して skip に倒したのは contract 違反。
+2. 視覚検証の動線がブロックされた（Open Project picker click 不能 / app_runtime panic）状態を
+   エージェントが skipped の reason として記録するだけで、ブロッカーそのものを解消せずに次の
+   ステップに進めた。「verification が実行不能」は skip 理由ではなく、解消すべき blocker である。
+3. 「進めて」というユーザー指示を、verification 自体の skip 承認と誤解釈した。本来は
+   「verification 結果が出ている作業を完了まで進めて」という意味で、verification をスキップ
+   する許可ではない。
+
+### 再発防止策
+
+1. AGENTS.md "PR 作成ルール（必須）" セクションを新設し、`gwt-verify` の
+   `User Verification Result` が `confirmed` / `n/a` になるまで `gwtd pr create` / `gwtd pr edit`
+   を呼ばないことを明文化した。`pending` / エージェント独断の `skipped` は禁止。
+2. 視覚検証動線がブロックされた場合は、`skipped` に倒す前にブロッカーの根本原因を特定して
+   解消する。今回のケースなら Open Project picker の panic 修正を先にやり、再起動後に
+   verification を依頼する順番にすべきだった。
+3. 「進めて」を解釈する際は、現在の作業 phase で何が `pending` なのかを明確にしてから動く。
+   verification 待ちなら verification を完了させる作業（= ブロッカー解消）に進む。
+4. 万一誤って PR を作成してしまった場合の rollback 手順: タイトルへ
+   `[DO NOT MERGE — user verification pending]` を即座に付与し、PR comment で
+   `gwtd pr comment <n>` を使ってブロックの理由とブロッカー解消予定を告知する。
+   verification が `confirmed` になった後にタイトルを戻し、ブロック comment を resolve する。
+
+## 2026-05-21 — startup CPU / power は「起動プロセス数」と「hot payload サイズ」を同時に見る
+
+### 事象
+
+gwt 起動中に CPU 使用率と消費電力が高く、macOS ではファンが異様に回るという報告があった。
+`sample` / `ps` / gwt logs を見ると、単一の busy loop ではなく、startup auto-resume、
+project index full status refresh、頻繁な `workspace_state` broadcast が同時に負荷を作っていた。
+
+### 原因
+
+- 起動時の auto-resume が recoverable session を無条件に再開し、同一 native
+  agent session 由来の重複や古い session まで launch 対象になり得た。
+- Settings.Index の full refresh が、startup current-worktree bootstrap と衝突した後の
+  retry だけでなく、同時 full refresh 同士でも二重 probe を起こせる in-flight key になっていた。
+- hot path の `workspace_state` が workspace work item 履歴を毎回含み、履歴が増えるほど
+  serialize / WebSocket / frontend state update のコストが膨らんだ。
+
+### 再発防止策
+
+1. startup の自動再開は、件数上限で復元を落とさない。fresh かつ unique な exact-resumable
+   session は全件復元し、native session id dedupe と staleness gate で不要な二重起動だけを抑える。
+2. startup current-only probe と Settings.Index full refresh は別 key にしつつ、full refresh 同士は
+   single-flight で潰す。retry を許すのは startup bootstrap と衝突した場合だけに限定する。
+3. 高頻度 broadcast には履歴 payload を載せない。workspace history は
+   `active_work_projection` のような用途特化 payload に寄せ、shell state は構造情報だけに保つ。
+4. CPU / power 調査では CPU% だけで結論を出さず、`sample`、子プロセス数、runner 起動ログ、
+   WebSocket payload の大きさを同じタイムラインで見る。
+
+## 2026-05-20 — Phase 26 の visibility 述語だけでは silent no-op を防げない: layout box が立つまで `isReady` を flip しない (Issue #2832 / SPEC-2008 Phase 26.A regression)
+
+### 事象
+
+SPEC-2008 Phase 26 で導入した `runTerminalActivationSequence` (refresh→layout flush→fit) と `createTerminalRuntime` の `isReady` / `deferredWrites` handshake は intact だったにも関わらず、Claude Code を gwt agent pane で起動した直後にテキストをペーストすると terminal 表示全体が崩れる症状がユーザー報告 (`work/20260520-1050`) で再発した。resize / window move で復活する。スクリーンショット `.gwt/paste-images/1779274308833-11-image.png` で確認済み。
+
+### 原因
+
+`completeInitialFitHandshake` は `canRefreshTerminalViewport(windowId)` が true を返した時点で `runTerminalActivationSequence` を呼び、結果に関係なく `runtime.isReady = true` を立てて deferredWrites を flush していた。`viewportEligibleForRefresh` は `element.hidden` と `workspaceWindow.minimized` のみ確認するため、**構造的には visible だが parent の flex/grid layout が rAF 時点で propagate していない (clientWidth/clientHeight=0)** 状態を素通りする。この状態で `fitAddon.fit()` を呼ぶと `_renderService.dimensions.css.cell.width` 自体は font metrics 経由で populate されても、`proposeDimensions` が `getComputedStyle(parent).width / cell.width` を計算する段で 0÷n=0 cols になり、fit が silent no-op するか xterm default 80×24 にロックされる。直後の `isReady = true` で deferredWrites が誤グリッドへ flush され、ユーザーには Claude Code splash と paste 直後の表示が崩れて見える。OS resize で fan-out が走るとそこで初めて正しい cols/rows に fit されるため、resize で復活する signature になる。
+
+Phase 26.A の `isReady` handshake は「writes を fit 完了まで buffer する」ことは保証していたが、「fit が valid cols/rows を返した」ことを保証しておらず、layout が settle するまでの race window がそのまま残っていた。
+
+### 再発防止策
+
+1. **handshake は `isReady=true` を flip する前に container の layout box (`clientWidth/clientHeight > 0`) を確認する。** `terminal-viewport-reflow.js::elementHasLayoutBox` で predicate を export し、`completeInitialFitHandshake` から `terminalContainerHasLayoutBox(windowId)` 経由で gate する (Issue #2832 fix)。
+2. **layout box が無い場合は rAF retry を上限付き (`HANDSHAKE_RETRY_LIMIT = 60` ≒ 1 秒 @ 60Hz) でループさせる。** 上限超過時は `console.warn` で観測可能にしつつ fall-through して activation を強制する (perma-hidden window が deferred writes を永久に pin しない保険)。
+3. **Rust source-string contract で wiring を pin する。** `crates/gwt/src/embedded_web.rs` の `embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake` に `terminalContainerHasLayoutBox` / `handshakeAttempts` / `HANDSHAKE_RETRY_LIMIT` regex を追加し、将来 helper を drop する refactor が CI で即座に炎上するようにする。
+4. **frontend behaviour test に 0-size container の判定を pin する。** `__tests__/terminal-viewport-reflow.test.mjs` の `elementHasLayoutBox blocks 0-size containers` で clientWidth/clientHeight = 0、getBoundingClientRect fallback、null defensive の各分岐を直接 assert する。
+
+`viewportEligibleForRefresh` 自体を破壊的に書き換えると、host resize fan-out / project tab switch / dock target 等の既存 caller が hidden short-circuit に依存している側面を壊しうるため、predicate を増やす形で blast radius を最小化した (Phase 26 が Phase 24 を上書きせずに helper を増やしたのと同じ方針)。
+
+### 関連 PR / Issue
+
+- Issue #2832 (本件 bug Issue)
+- SPEC-2008 Phase 26 / FR-056 / FR-057 / FR-059 (lineage)
+- 過去の closed regressions: #2096 / #2091 / #2668 / #2513
+
 ## 2026-05-20 — memory 更新は検索導線だけでなく hook reminder で可視化する
 
 Type: workflow

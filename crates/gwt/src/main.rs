@@ -1946,6 +1946,7 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -5418,6 +5419,9 @@ mod tests {
 
     #[test]
     fn docker_launch_plan_and_helper_logic_cover_defaults_and_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         let devcontainer_dir = project.join(".devcontainer");
@@ -5547,6 +5551,9 @@ mod tests {
     fn wizard_docker_context_detection_does_not_spawn_docker_cli() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project dir");
@@ -5592,6 +5599,9 @@ mod tests {
 
     #[test]
     fn finalize_docker_agent_launch_config_wraps_runtime_command_in_compose_exec() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");
@@ -5636,6 +5646,9 @@ mod tests {
 
     #[test]
     fn finalize_docker_agent_launch_config_includes_override_file_when_present() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");

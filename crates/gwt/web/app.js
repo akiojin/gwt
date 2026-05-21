@@ -24,7 +24,7 @@
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
-      import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
+      import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
@@ -43,6 +43,7 @@
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        elementHasLayoutBox,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -59,6 +60,7 @@
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createInteractionGuard } from "/interaction-guard.js";
+      import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
       import { createViewportSyncState } from "/viewport-sync.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
@@ -326,6 +328,9 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       const viewportSyncState = createViewportSyncState({
         initialViewport: viewport,
+      });
+      const canvasWheelGestureClassifier = createCanvasWheelGestureClassifier({
+        idleMs: 300,
       });
       let viewportRasterTimer = null;
       let launchWizard = null;
@@ -742,13 +747,20 @@
           strip.classList.toggle("op-status-strip--offline", !connected);
         }
         if (!connected) {
-          for (const [windowId] of branchListStateMap.entries()) {
+          for (const [windowId, state] of branchListStateMap.entries()) {
+            let shouldRenderBranches = false;
             if (
               failRunningBranchCleanup(
                 windowId,
                 "Connection lost while cleaning up branches",
               )
             ) {
+              shouldRenderBranches = true;
+            }
+            if (failLoadingBranchesOnConnectionLoss(windowId, state)) {
+              shouldRenderBranches = true;
+            }
+            if (shouldRenderBranches) {
               renderBranches(windowId);
             }
           }
@@ -790,6 +802,47 @@
           return;
         }
         socketReceiveDispatcher.handle(event);
+      }
+
+      // SPEC-2041 Phase 19 (Issue #2832 follow-up): synthetic event injection
+      // hook used by Playwright spec `update-modal.spec.ts` to drive the
+      // post-click update modal flow without a real GitHub release.
+      // Listeners forward `window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: <payload> }))`
+      // straight into `receive(...)`, which is the same entrypoint that
+      // processed WebSocket frames use. The event name is double-underscored
+      // by convention (internal hook) and the payload must be the same
+      // discriminated union the backend emits (e.g. `{ kind: "update_state", ... }`).
+      // No-op without `event.detail.kind` so accidental dispatches do not
+      // misbehave.
+      //
+      // When the test injects an `update_*` event, set the test-mode flag so
+      // subsequent live backend `update_*` messages are dropped — the live
+      // gwt server emits its own real update_state / update_apply_error from
+      // the periodic update checker, which used to race against the
+      // synthetic flow and clobber the modal's reason / detach buttons
+      // mid-click. The flag is page-scoped (no global state outlives the
+      // Playwright page) so it never leaks into the production runtime.
+      let __testInjectModeActive = false;
+      window.addEventListener("__gwt_test_inject", (event) => {
+        const payload = event && event.detail;
+        if (!payload || typeof payload.kind !== "string") {
+          return;
+        }
+        if (payload.kind.startsWith("update_")) {
+          __testInjectModeActive = true;
+        }
+        payload.__injected = true;
+        try {
+          receive(payload);
+        } catch (err) {
+          console.warn("[gwt_test_inject] receive failed", err);
+        }
+      });
+      function shouldDropLiveEventForTestMode(event) {
+        if (!__testInjectModeActive) return false;
+        if (!event || typeof event.kind !== "string") return false;
+        if (event.__injected) return false;
+        return event.kind.startsWith("update_");
       }
 
       function handleSocketClose() {
@@ -2021,6 +2074,39 @@
         });
       }
 
+      // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
+      // must verify the container has a real layout box before flipping
+      // `isReady` true, otherwise fit resolves against a 0-sized parent
+      // and the deferredWrites flush into xterm's default 80×24 grid.
+      // 60 frames at the default 60Hz cap retries to ~1 s, after which we
+      // fall through so a permanently 0-size window can not pin Claude
+      // Code output forever.
+      const HANDSHAKE_RETRY_LIMIT = 60;
+
+      function terminalContainerHasLayoutBox(windowId) {
+        const runtime = terminalMap.get(windowId);
+        const terminalHost = runtime?.terminal?.element?.parentElement;
+        if (terminalHost) {
+          return elementHasLayoutBox(terminalHost);
+        }
+        const element = windowMap.get(windowId);
+        // Fall through to true when the element is not registered yet — the
+        // initial-fit handshake is gated by canRefreshTerminalViewport which
+        // already short-circuits the no-element case.
+        return elementHasLayoutBox(element);
+      }
+
+      function retryInitialFitHandshake(windowId, runtime, reason) {
+        runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
+        if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
+          requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+          return;
+        }
+        console.warn(
+          `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; ${reason}.`,
+        );
+      }
+
       function fitTerminal(windowId, persist = false) {
         return traceMeasure(
           UI_TRACE_EVENT.fitTerminal,
@@ -2037,11 +2123,13 @@
               }
               return;
             }
-            runtime.fitAddon.fit();
-            if (!persist) {
-              return;
-            }
-            sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+            runTerminalActivationSequence({
+              runtime,
+              windowId,
+              shouldFocus: false,
+              shouldPersistGeometry: persist,
+              sendGeometry,
+            });
           }
         );
       }
@@ -3310,7 +3398,7 @@
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 14,
-          lineHeight: 1.28,
+          lineHeight: 1.3,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
@@ -3370,6 +3458,8 @@
           // producing the post-launch corruption symptom.
           isReady: false,
           deferredWrites: [],
+          // Issue #2832: see completeInitialFitHandshake.
+          handshakeAttempts: 0,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -3403,13 +3493,37 @@
           // will call back into this helper.
           return;
         }
-        runTerminalActivationSequence({
+        // SPEC-2008 Phase 26.A / FR-057 (regression fix, Issue #2832): the
+        // visibility predicate above only checks `.hidden` / `.minimized`.
+        // It does not catch the case where the element is structurally
+        // visible but the parent has not yet been laid out (e.g. a freshly
+        // appended workspace window whose CSS width/height has not
+        // propagated by the time `requestAnimationFrame` fires). In that
+        // state `fitAddon.fit()` resolves cell-grid dimensions against a
+        // 0-sized container and silently leaves the terminal at the xterm
+        // default 80×24 grid. The previous code then flipped
+        // `isReady = true` and flushed `deferredWrites` into that broken
+        // grid, producing the post-launch corruption that resize/move
+        // recovered from. Re-schedule via rAF until the container has a
+        // non-zero box, with an attempt ceiling so a perma-hidden window
+        // can not pin the loop.
+        if (!terminalContainerHasLayoutBox(windowId)) {
+          retryInitialFitHandshake(windowId, runtime, "terminal host stayed 0-size");
+          return;
+        }
+
+        const activation = runTerminalActivationSequence({
           runtime,
           windowId,
           shouldFocus: false,
           shouldPersistGeometry: true,
           sendGeometry,
         });
+        if (!activation.ran) {
+          retryInitialFitHandshake(windowId, runtime, "xterm fit dimensions stayed unavailable");
+          return;
+        }
+        runtime.handshakeAttempts = 0;
         runtime.isReady = true;
 
         const snapshot = pendingSnapshotMap.get(windowId);
@@ -5091,7 +5205,7 @@
         getResumeBounds: () => visibleBounds(),
       });
 
-      const workspaceKanbanSurface = createWorkspaceKanbanSurface({
+      const workspaceOverviewSurface = createWorkspaceOverviewSurface({
         activeWorkspace,
         agentStatusLabel,
         appendMeta,
@@ -7426,6 +7540,7 @@
         syncBranchSelectionState(state);
         const list = element.querySelector(".branch-list");
         const notice = element.querySelector(".branch-notice");
+        const resumeButton = element.querySelector("[data-action='open-branch-resume']");
         const launchButton = element.querySelector("[data-action='open-branch-launch']");
         const cleanupButton = element.querySelector("[data-action='open-branch-cleanup']");
         if (!list) {
@@ -7434,6 +7549,9 @@
 
         for (const button of element.querySelectorAll("[data-branch-filter]")) {
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
+        }
+        if (resumeButton) {
+          resumeButton.disabled = !state.selectedBranchName;
         }
         if (launchButton) {
           launchButton.disabled = !state.selectedBranchName;
@@ -8202,6 +8320,23 @@
         return state.entries.length === 0 ? "" : "Loading branch details";
       }
 
+      function failLoadingBranchesOnConnectionLoss(windowId, state) {
+        if (!state || !state.loading) {
+          return false;
+        }
+        state.loading = false;
+        state.receivedFreshEntries = false;
+        if (state.entries.length === 0) {
+          state.error = "Connection lost while loading branches";
+          state.notice = "";
+        } else {
+          state.error = "";
+          state.notice = "Connection lost while loading branch details";
+        }
+        syncBranchSelectionState(state);
+        return true;
+      }
+
       function branchCleanupPendingText(state) {
         return state.loading ? "Loading cleanup status" : "Cleanup status unavailable";
       }
@@ -8592,6 +8727,7 @@
                   </div>
                 </div>
                 <div class="branch-toolbar-actions workspace-toolbar-actions">
+                  <button class="wizard-button branch-resume-trigger" type="button" data-action="open-branch-resume" disabled>Resume</button>
                   <button class="wizard-button primary branch-launch-trigger" type="button" data-action="open-branch-launch" disabled>Launch Agent</button>
                   <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
@@ -8629,6 +8765,23 @@
               frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
+          body
+            .querySelector("[data-action='open-branch-resume']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+                windowData.id,
+              );
+              if (!state.selectedBranchName) {
+                return;
+              }
+              send({
+                kind: "resume_branch_latest_agent",
+                id: windowData.id,
+                branch_name: state.selectedBranchName,
+                bounds: visibleBounds(),
+              });
+            });
           body
             .querySelector("[data-action='open-branch-launch']")
             .addEventListener("click", (event) => {
@@ -8885,7 +9038,7 @@
         }
 
         if (surface === "workspace") {
-          workspaceKanbanSurface.mount(body, windowData, {
+          workspaceOverviewSurface.mount(body, windowData, {
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
@@ -9996,7 +10149,7 @@
               boardStateMap.delete(windowId);
               logStateMap.delete(windowId);
               clearKnowledgeBridgeState(windowId);
-              workspaceKanbanSurface.deleteState(windowId);
+              workspaceOverviewSurface.deleteState(windowId);
               if (branchCleanupWindowId === windowId) {
                 branchCleanupWindowId = null;
                 renderBranchCleanupModal();
@@ -10177,41 +10330,13 @@
       });
 
       function receive(event) {
+        if (shouldDropLiveEventForTestMode(event)) {
+          return;
+        }
         switch (event.kind) {
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
-            // SPEC-2359 US-37: populate the Workspace Overview Completed
-            // column directly from workspace_state because the
-            // active_work_projection broadcast only fires on tab switch,
-            // user event, title sync, and window ops. Without this, the
-            // Completed column stays empty on startup until the user
-            // happens to switch tabs.
-            const activeTabId = event.workspace && event.workspace.active_tab_id;
-            const activeTab = Array.isArray(event.workspace && event.workspace.tabs)
-              ? event.workspace.tabs.find((tab) => tab.id === activeTabId)
-              : null;
-            const tabWorkItems = activeTab && activeTab.workspace && Array.isArray(activeTab.workspace.work_items)
-              ? activeTab.workspace.work_items
-              : [];
-            if (tabWorkItems.length > 0) {
-              if (!activeWorkProjection) {
-                activeWorkProjection = {
-                  id: activeTabId || "active-tab",
-                  title: (activeTab && activeTab.title) || "Workspace",
-                  workspaces: tabWorkItems,
-                };
-              } else if (
-                !Array.isArray(activeWorkProjection.workspaces) ||
-                activeWorkProjection.workspaces.length === 0
-              ) {
-                activeWorkProjection = {
-                  ...activeWorkProjection,
-                  workspaces: tabWorkItems,
-                };
-              }
-              workspaceKanbanSurface.renderWindows();
-            }
             break;
           }
           case "workspace_projection_prune_result": {
@@ -10250,7 +10375,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
-            workspaceKanbanSurface.renderWindows();
+            workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -10789,7 +10914,7 @@
             branchCleanupWindowId = event.id;
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
-              workspaceKanbanSurface.renderWindows();
+              workspaceOverviewSurface.renderWindows();
               break;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
@@ -11652,26 +11777,25 @@
         if (!targetElement || !canvas.contains(targetElement)) {
           return;
         }
+        const wheelMode = canvasWheelGestureClassifier.classify(event);
         // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
         // `.surface-terminal`; every other workspace-window forwards plain
         // wheel to the DOM so panel scroll regions (Knowledge / Profile /
         // Logs / Board / Issue / SPEC / Settings ...) and modal
         // content scroll natively without registering a per-class whitelist.
         if (
-          !event.ctrlKey &&
-          !event.metaKey &&
+          wheelMode !== "zoom" &&
           targetElement.closest(".surface-terminal")
         ) {
           return;
         }
         if (
-          !event.ctrlKey &&
-          !event.metaKey &&
+          wheelMode !== "zoom" &&
           targetElement.closest(".workspace-window")
         ) {
           return;
         }
-        if (event.ctrlKey || event.metaKey) {
+        if (wheelMode === "zoom") {
           // Ctrl/Cmd + wheel = zoom
           event.preventDefault();
           event.stopPropagation();
@@ -12136,6 +12260,31 @@
         }
       });
 
+      function installPlaywrightTestBridge() {
+        if (window.__gwtPlaywrightTestBridge !== true) {
+          return;
+        }
+        if (window.__gwtPlaywrightTestBridgeInstalled === true) {
+          return;
+        }
+        window.__gwtPlaywrightTestBridgeInstalled = true;
+        window.addEventListener("__gwt_test_inject", (event) => {
+          const detail = event && event.detail;
+          if (!detail || typeof detail.kind !== "string") {
+            return;
+          }
+          receive(detail);
+        });
+        window.addEventListener("__gwt_test_send", (event) => {
+          const detail = event && event.detail;
+          if (!detail || typeof detail.kind !== "string") {
+            return;
+          }
+          send(detail);
+        });
+      }
+
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
+      installPlaywrightTestBridge();
       renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();

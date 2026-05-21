@@ -343,6 +343,11 @@ control in the Project Bar lets you choose `auto`, `dark`, or `light`. The
 choice is persisted in browser storage and survives restarts. xterm terminal
 content stays on the Dark Operator palette with larger developer-readable font
 metrics, while the terminal window chrome follows the overall theme.
+Quiet Work UI surfaces such as Workspace Overview and Release Notes avoid
+status-board layouts, bespoke fixed overlays, and display-font body copy:
+Workspace Overview uses a List + Detail work surface, and Release Notes uses the
+shared app-global window chrome. These guardrails are covered by SPEC-2356 and
+the frontend UI contract tests.
 `prefers-reduced-motion: reduce`
 disables the Living Telemetry pulse rim, status strip ticking, and Mission
 Briefing intro reveal so the UI stays usable in motion-sensitive environments.
@@ -437,19 +442,19 @@ cargo test -p gwt-core -p gwt --all-features
 ### Release Asset Contract
 
 ```bash
-npm run test:release-assets
+node scripts/test_release_assets.cjs
 ```
 
 ### Frontend Bundle Contract
 
 ```bash
-npm run test:frontend-bundle
+bash scripts/check-frontend-bundle.sh
 ```
 
 ### Release Flow Checks
 
 ```bash
-npm run test:release-flow
+bash scripts/check-release-flow.sh
 ```
 
 ### Lint
@@ -472,7 +477,7 @@ cargo fmt
 │   ├── gwt/            # Desktop GUI + WebView server + CLI dispatch
 │   ├── gwt-core/       # Core library
 │   └── gwt-github/     # GitHub Issue SPEC cache / update layer
-└── package.json        # npm package metadata and postinstall
+└── scripts/            # Release, verification, and maintenance scripts
 ```
 
 ## Specs

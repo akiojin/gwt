@@ -183,35 +183,38 @@ test("Kanban shell lets column bodies own vertical scrolling", () => {
   assert.match(columnBodyRule[0], /min-height:\s*0/);
 });
 
-test("Workspace Overview contains Unassigned overflow without clipping columns", () => {
-  const unassignedRule = componentsCss.match(/\.workspace-unassigned\s*\{[^}]+\}/);
+test("Workspace Overview List + Detail panes own their scroll boundaries", () => {
+  const listPaneRule = componentsCss.match(/\.workspace-overview-list-pane\s*\{[^}]+\}/);
   assert.ok(
-    unassignedRule,
-    "expected .workspace-unassigned rule in components.css",
+    listPaneRule,
+    "expected .workspace-overview-list-pane rule in components.css",
   );
   assert.match(
-    unassignedRule[0],
-    /max-height:/,
-    "Unassigned Agents must have a bounded height inside the Kanban list pane",
-  );
-  assert.match(
-    unassignedRule[0],
-    /overflow-y:\s*auto/,
-    "Unassigned Agents must own their scroll when many Agents are listed",
-  );
-  assert.match(
-    unassignedRule[0],
-    /flex-shrink:\s*0/,
-    "Unassigned section must not collapse the Workspace columns",
+    listPaneRule[0],
+    /overflow:\s*auto/,
+    "Workspace list pane must own overflow for long Workspace and agent lists",
   );
 
-  const detailRule = componentsCss.match(/\.workspace-kanban-detail-pane\s*\{[^}]+\}/);
+  const queueRule = componentsCss.match(/\.workspace-agent-queue\s*\{[^}]+\}/);
+  assert.ok(queueRule, "expected .workspace-agent-queue rule in components.css");
+  assert.match(
+    queueRule[0],
+    /border-top:/,
+    "Unassigned Agents must remain visually separated from Workspace rows",
+  );
+
+  const detailRule = componentsCss.match(/\.workspace-overview-detail-pane\s*\{[^}]+\}/);
   assert.ok(
     detailRule,
-    "expected .workspace-kanban-detail-pane rule in components.css",
+    "expected .workspace-overview-detail-pane rule in components.css",
   );
   assert.match(detailRule[0], /min-height:\s*0/);
-  assert.match(detailRule[0], /overflow:\s*hidden/);
+  assert.match(detailRule[0], /overflow:\s*auto/);
+  assert.doesNotMatch(
+    componentsCss,
+    /\.workspace-kanban-board|\.workspace-unassigned\b|\.workspace-kanban-detail-pane/,
+    "Workspace Overview must not keep retired Workspace-specific Kanban CSS hooks",
+  );
 });
 
 test("components.css declares column and card classes", () => {

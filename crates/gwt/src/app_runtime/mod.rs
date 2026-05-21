@@ -1,4 +1,5 @@
 use super::*;
+use gwt::LaunchWizardAction;
 
 #[derive(Clone)]
 pub enum AppEventProxy {
@@ -168,6 +169,654 @@ fn dispatch_agent_launch_success<F>(
         result: Ok(completion),
     });
     spawn_project_index_bootstrap(proxy, project_index_root);
+}
+
+fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_agent::LaunchConfig {
+    let agent_id = session.agent_id.clone();
+    let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+    builder = builder.working_dir(session.worktree_path.clone());
+    if !session.branch.is_empty() {
+        builder = builder.branch(session.branch.clone());
+    }
+    if let Some(model) = session.model.clone() {
+        builder = builder.model(model);
+    }
+    if let Some(version) = session.tool_version.clone() {
+        builder = builder.version(version);
+    }
+    if let Some(level) = session.reasoning_level.clone() {
+        builder = builder.reasoning_level(level);
+    }
+    if session.skip_permissions {
+        builder = builder.skip_permissions(true);
+    }
+    if session.codex_fast_mode {
+        builder = builder.fast_mode(true);
+    }
+    builder = builder.runtime_target(session.runtime_target);
+    if let Some(service) = session.docker_service.clone() {
+        builder = builder.docker_service(service);
+    }
+    builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
+    if let Some(shell) = session.windows_shell {
+        builder = builder.windows_shell(shell);
+    }
+    if let Some(linked) = session.linked_issue_number {
+        builder = builder.linked_issue_number(linked);
+    }
+
+    if let Some(resume_id) = session.exact_resume_session_id() {
+        builder = builder
+            .session_mode(gwt_agent::SessionMode::Resume)
+            .resume_session_id(resume_id.to_string());
+    } else {
+        builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+    }
+
+    let mut config = builder.build();
+    if let Some(version) = session.tool_version.clone() {
+        config.tool_version = Some(version);
+    }
+    if !session.display_name.is_empty() {
+        config.display_name = session.display_name.clone();
+    }
+    config
+}
+
+const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
+
+fn auto_resume_window_bounds(index: usize) -> gwt::WindowGeometry {
+    let offset = ((index % 6) as f64) * 28.0;
+    gwt::WindowGeometry {
+        x: 48.0 + offset,
+        y: 48.0 + offset,
+        width: 960.0,
+        height: 620.0,
+    }
+}
+
+fn session_project_scope_hash(session: &gwt_agent::Session) -> Option<String> {
+    session
+        .repo_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            session
+                .worktree_path
+                .exists()
+                .then(|| gwt_core::paths::project_scope_hash(&session.worktree_path).to_string())
+        })
+}
+
+fn startup_auto_resume_is_fresh(
+    session: &gwt_agent::Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now.signed_duration_since(session.last_activity_at)
+        <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
+}
+
+fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let Ok(mut session) = gwt_agent::Session::load_and_migrate(&path) else {
+        return;
+    };
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    let _ = session.save(sessions_dir);
+}
+
+#[derive(Default)]
+struct FrontendUserActionLog {
+    action: &'static str,
+    surface: &'static str,
+    window_id: String,
+    ui_target: String,
+    profile_name: String,
+    env_keys: String,
+    env_var_count: usize,
+    disabled_env_count: usize,
+    agent_id: String,
+    count: usize,
+    mode: String,
+    forced: bool,
+}
+
+impl FrontendUserActionLog {
+    fn new(action: &'static str, surface: &'static str) -> Self {
+        Self {
+            action,
+            surface,
+            ..Default::default()
+        }
+    }
+
+    fn window(mut self, id: &str) -> Self {
+        self.window_id = sanitize_ui_action_field(id);
+        self
+    }
+
+    fn target(mut self, value: impl AsRef<str>) -> Self {
+        self.ui_target = sanitize_ui_action_field(value.as_ref());
+        self
+    }
+
+    fn profile(mut self, name: impl AsRef<str>) -> Self {
+        self.profile_name = sanitize_ui_action_field(name.as_ref());
+        self
+    }
+
+    fn agent(mut self, id: impl AsRef<str>) -> Self {
+        self.agent_id = sanitize_ui_action_field(id.as_ref());
+        self
+    }
+
+    fn mode(mut self, value: impl AsRef<str>) -> Self {
+        self.mode = sanitize_ui_action_field(value.as_ref());
+        self
+    }
+
+    fn count(mut self, value: usize) -> Self {
+        self.count = value;
+        self
+    }
+
+    fn force(mut self, value: bool) -> Self {
+        self.forced = value;
+        self
+    }
+
+    fn env_keys<'a>(mut self, values: impl IntoIterator<Item = &'a str>) -> Self {
+        let keys: Vec<_> = values.into_iter().collect();
+        self.env_var_count = keys.len();
+        self.env_keys = summarize_ui_action_values(keys);
+        self
+    }
+
+    fn disabled_env_count(mut self, value: usize) -> Self {
+        self.disabled_env_count = value;
+        self
+    }
+}
+
+fn sanitize_ui_action_field(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect()
+}
+
+fn sanitize_ui_action_url(value: &str) -> String {
+    let sanitized = sanitize_ui_action_field(value);
+    let Some((scheme, rest)) = sanitized.split_once("://") else {
+        return sanitized;
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        sanitized
+    } else {
+        format!("{scheme}://{authority}")
+    }
+}
+
+fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let mut items: Vec<String> = values
+        .into_iter()
+        .map(sanitize_ui_action_field)
+        .filter(|value| !value.is_empty())
+        .collect();
+    items.sort();
+    items.dedup();
+    let truncated = items.len() > 12;
+    items.truncate(12);
+    let mut summary = items.join(",");
+    if truncated {
+        if !summary.is_empty() {
+            summary.push_str(",...");
+        } else {
+            summary.push_str("...");
+        }
+    }
+    summary
+}
+
+fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
+    let log = match event {
+        FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::OpenProjectDialog => {
+            FrontendUserActionLog::new("open_project_dialog", "project")
+        }
+        FrontendEvent::SelectCloneProjectParent => {
+            FrontendUserActionLog::new("select_clone_project_parent", "project")
+        }
+        FrontendEvent::GithubRepositorySearch { query } => {
+            FrontendUserActionLog::new("github_repository_search", "project").count(query.len())
+        }
+        FrontendEvent::CloneProjectStart { url, parent_path } => {
+            FrontendUserActionLog::new("clone_project_start", "project")
+                .count(url.len())
+                .mode(parent_path)
+        }
+        FrontendEvent::ReopenRecentProject { path } => {
+            FrontendUserActionLog::new("reopen_recent_project", "project").target(path)
+        }
+        FrontendEvent::SelectProjectTab { tab_id } => {
+            FrontendUserActionLog::new("select_project_tab", "project").target(tab_id)
+        }
+        FrontendEvent::CloseProjectTab { tab_id } => {
+            FrontendUserActionLog::new("close_project_tab", "project").target(tab_id)
+        }
+        FrontendEvent::CreateWindow { preset, .. } => {
+            FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))
+        }
+        FrontendEvent::LoadProcessConsole { id } => {
+            FrontendUserActionLog::new("load_process_console", "console").window(id)
+        }
+        FrontendEvent::FocusWindow { id, .. } => {
+            FrontendUserActionLog::new("focus_window", "window").window(id)
+        }
+        FrontendEvent::CycleFocus { direction, .. } => {
+            FrontendUserActionLog::new("cycle_focus", "window").mode(format!("{direction:?}"))
+        }
+        FrontendEvent::ArrangeWindows { mode, .. } => {
+            FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
+        }
+        FrontendEvent::MaximizeWindow { id, .. } => {
+            FrontendUserActionLog::new("maximize_window", "window").window(id)
+        }
+        FrontendEvent::MinimizeWindow { id } => {
+            FrontendUserActionLog::new("minimize_window", "window").window(id)
+        }
+        FrontendEvent::RestoreWindow { id } => {
+            FrontendUserActionLog::new("restore_window", "window").window(id)
+        }
+        FrontendEvent::DockWindowTab { id, target_id } => {
+            FrontendUserActionLog::new("dock_window_tab", "window")
+                .window(id)
+                .target(target_id)
+        }
+        FrontendEvent::ActivateWindowTab { id } => {
+            FrontendUserActionLog::new("activate_window_tab", "window").window(id)
+        }
+        FrontendEvent::DetachWindowTab { id, .. } => {
+            FrontendUserActionLog::new("detach_window_tab", "window").window(id)
+        }
+        FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
+        FrontendEvent::CloseWindow { id } => {
+            FrontendUserActionLog::new("close_window", "window").window(id)
+        }
+        FrontendEvent::LoadFileTree { id, path } => {
+            FrontendUserActionLog::new("load_file_tree", "file")
+                .window(id)
+                .target(path.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::ListFileTreeWorktrees { id } => {
+            FrontendUserActionLog::new("list_file_tree_worktrees", "file").window(id)
+        }
+        FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
+            FrontendUserActionLog::new("select_file_tree_worktree", "file")
+                .window(id)
+                .target(worktree_id)
+        }
+        FrontendEvent::LoadFileContent { id, path, mode, .. } => {
+            FrontendUserActionLog::new("load_file_content", "file")
+                .window(id)
+                .target(path)
+                .mode(format!("{mode:?}"))
+        }
+        FrontendEvent::SaveFileContent { id, path, mode, .. } => {
+            FrontendUserActionLog::new("save_file_content", "file")
+                .window(id)
+                .target(path)
+                .mode(format!("{mode:?}"))
+        }
+        FrontendEvent::LoadBranches { id } => {
+            FrontendUserActionLog::new("load_branches", "branches").window(id)
+        }
+        FrontendEvent::RunBranchCleanup {
+            id,
+            branches,
+            delete_remote,
+            force_filesystem_delete,
+        } => FrontendUserActionLog::new("run_branch_cleanup", "branches")
+            .window(id)
+            .target(summarize_ui_action_values(
+                branches.iter().map(String::as_str),
+            ))
+            .count(branches.len())
+            .mode(if *delete_remote {
+                "delete_remote"
+            } else {
+                "local_only"
+            })
+            .force(*force_filesystem_delete),
+        FrontendEvent::RunWorkspaceCleanup {
+            branch,
+            delete_remote,
+            force_filesystem_delete,
+        } => FrontendUserActionLog::new("run_workspace_cleanup", "workspace")
+            .target(branch)
+            .count(1)
+            .mode(if *delete_remote {
+                "delete_remote"
+            } else {
+                "local_only"
+            })
+            .force(*force_filesystem_delete),
+        FrontendEvent::LoadBoard { id, all } => FrontendUserActionLog::new("load_board", "board")
+            .window(id)
+            .mode(if *all { "all" } else { "workspace" }),
+        FrontendEvent::LoadBoardHistory { id, all, limit, .. } => {
+            FrontendUserActionLog::new("load_board_history", "board")
+                .window(id)
+                .count(*limit)
+                .mode(if *all { "all" } else { "workspace" })
+        }
+        FrontendEvent::PostBoardEntry {
+            id,
+            entry_kind,
+            body,
+            ..
+        } => FrontendUserActionLog::new("post_board_entry", "board")
+            .window(id)
+            .mode(format!("{entry_kind:?}"))
+            .count(body.len()),
+        FrontendEvent::OpenBoardOriginAgent {
+            id,
+            origin_session_id,
+            ..
+        } => FrontendUserActionLog::new("open_board_origin_agent", "board")
+            .window(id)
+            .target(origin_session_id),
+        FrontendEvent::LoadProfile { id } => {
+            FrontendUserActionLog::new("load_profile", "profile").window(id)
+        }
+        FrontendEvent::SelectProfile { id, profile_name } => {
+            FrontendUserActionLog::new("select_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::CreateProfile { id, name } => {
+            FrontendUserActionLog::new("create_profile", "profile")
+                .window(id)
+                .profile(name)
+        }
+        FrontendEvent::SetActiveProfile { id, profile_name } => {
+            FrontendUserActionLog::new("set_active_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::SaveProfile {
+            id,
+            name,
+            env_vars,
+            disabled_env,
+            ..
+        } => FrontendUserActionLog::new("save_profile", "profile")
+            .window(id)
+            .profile(name)
+            .env_keys(env_vars.iter().map(|entry| entry.key.as_str()))
+            .disabled_env_count(disabled_env.len()),
+        FrontendEvent::DeleteProfile { id, profile_name } => {
+            FrontendUserActionLog::new("delete_profile", "profile")
+                .window(id)
+                .profile(profile_name)
+        }
+        FrontendEvent::LoadLogs { id } => {
+            FrontendUserActionLog::new("load_logs", "logs").window(id)
+        }
+        FrontendEvent::LoadKnowledgeBridge {
+            id,
+            knowledge_kind,
+            refresh,
+            ..
+        } => FrontendUserActionLog::new("load_knowledge_bridge", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .force(*refresh),
+        FrontendEvent::SearchKnowledgeBridge {
+            id,
+            knowledge_kind,
+            query,
+            ..
+        } => FrontendUserActionLog::new("search_knowledge_bridge", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .count(query.len()),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id,
+            knowledge_kind,
+            number,
+            ..
+        } => FrontendUserActionLog::new("select_knowledge_bridge_entry", "knowledge")
+            .window(id)
+            .mode(format!("{knowledge_kind:?}"))
+            .target(number.to_string()),
+        FrontendEvent::UpdateKnowledgeBridgePhase {
+            id,
+            issue_number,
+            target_phase,
+            ..
+        } => FrontendUserActionLog::new("update_knowledge_bridge_phase", "knowledge")
+            .window(id)
+            .target(issue_number.to_string())
+            .mode(target_phase.as_deref().unwrap_or("backlog")),
+        FrontendEvent::RebuildIndexCell {
+            project_root,
+            scope,
+            worktree_hash,
+        } => FrontendUserActionLog::new("rebuild_index_cell", "index")
+            .target(project_root)
+            .mode(format!("{scope:?}"))
+            .agent(worktree_hash.as_deref().unwrap_or_default()),
+        FrontendEvent::RefreshIndexStatus { project_root } => {
+            FrontendUserActionLog::new("refresh_index_status", "index").target(project_root)
+        }
+        FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
+            FrontendUserActionLog::new("open_issue_launch_wizard", "launch")
+                .window(id)
+                .target(issue_number.to_string())
+        }
+        FrontendEvent::OpenStartWork => FrontendUserActionLog::new("open_start_work", "launch"),
+        FrontendEvent::ResumeWorkspace { source, .. } => {
+            FrontendUserActionLog::new("resume_workspace", "workspace").mode(format!("{source:?}"))
+        }
+        FrontendEvent::ListResumableAgents { workspace_id } => {
+            FrontendUserActionLog::new("list_resumable_agents", "workspace")
+                .target(workspace_id.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => {
+            FrontendUserActionLog::new("resume_workspace_agent", "workspace").target(session_id)
+        }
+        FrontendEvent::ResumeBranchLatestAgent {
+            id, branch_name, ..
+        } => FrontendUserActionLog::new("resume_branch_latest_agent", "launch")
+            .window(id)
+            .target(branch_name),
+        FrontendEvent::OpenLaunchWizard {
+            id,
+            branch_name,
+            linked_issue_number,
+        } => FrontendUserActionLog::new("open_launch_wizard", "launch")
+            .window(id)
+            .target(branch_name)
+            .count(linked_issue_number.unwrap_or_default() as usize),
+        FrontendEvent::OpenActiveWorkLaunchWizard {
+            branch_name,
+            linked_issue_number,
+        } => FrontendUserActionLog::new("open_active_work_launch_wizard", "launch")
+            .target(branch_name)
+            .count(linked_issue_number.unwrap_or_default() as usize),
+        FrontendEvent::LaunchWizardAction { action, .. } => {
+            let mut log = FrontendUserActionLog::new("launch_wizard_action", "launch")
+                .mode(AppRuntime::launch_wizard_action_label(action));
+            match action {
+                LaunchWizardAction::SetAgent { agent_id } => {
+                    log = log.agent(agent_id);
+                }
+                LaunchWizardAction::SetBranchName { value }
+                | LaunchWizardAction::SetBranchType { prefix: value }
+                | LaunchWizardAction::SetModel { model: value }
+                | LaunchWizardAction::SetReasoning { reasoning: value }
+                | LaunchWizardAction::SetVersion { version: value }
+                | LaunchWizardAction::SetExecutionMode { mode: value }
+                | LaunchWizardAction::SetDockerService { service: value } => {
+                    log = log.target(value);
+                }
+                LaunchWizardAction::SubmitText { value } => {
+                    log = log.count(value.len());
+                }
+                LaunchWizardAction::SetSkipPermissions { enabled }
+                | LaunchWizardAction::SetCodexFastMode { enabled } => {
+                    log = log.force(*enabled);
+                }
+                LaunchWizardAction::SetLinkedIssue { issue_number } => {
+                    log = log.target(issue_number.to_string());
+                }
+                _ => {}
+            }
+            log
+        }
+        FrontendEvent::ApplyUpdate => FrontendUserActionLog::new("apply_update", "update"),
+        FrontendEvent::ApplyUpdateStart => {
+            FrontendUserActionLog::new("apply_update_start", "update")
+        }
+        FrontendEvent::CancelUpdateDownload => {
+            FrontendUserActionLog::new("cancel_update_download", "update")
+        }
+        FrontendEvent::ApplyUpdateLater => {
+            FrontendUserActionLog::new("apply_update_later", "update")
+        }
+        FrontendEvent::ApplyUpdateRestartNow => {
+            FrontendUserActionLog::new("apply_update_restart_now", "update")
+        }
+        FrontendEvent::OpenUpdateLog { log_path } => {
+            FrontendUserActionLog::new("open_update_log", "update")
+                .target(log_path.as_deref().unwrap_or_default())
+        }
+        FrontendEvent::OpenServerUrl { .. } => {
+            FrontendUserActionLog::new("open_server_url", "status")
+        }
+        FrontendEvent::ListCustomAgents => {
+            FrontendUserActionLog::new("list_custom_agents", "custom_agents")
+        }
+        FrontendEvent::ListCustomAgentPresets => {
+            FrontendUserActionLog::new("list_custom_agent_presets", "custom_agents")
+        }
+        FrontendEvent::AddCustomAgentFromPreset { input } => {
+            FrontendUserActionLog::new("add_custom_agent_from_preset", "custom_agents")
+                .agent(&input.id)
+                .profile(&input.display_name)
+        }
+        FrontendEvent::UpdateCustomAgent { agent } => {
+            FrontendUserActionLog::new("update_custom_agent", "custom_agents")
+                .agent(&agent.id)
+                .profile(&agent.display_name)
+                .env_keys(agent.env.keys().map(String::as_str))
+        }
+        FrontendEvent::DeleteCustomAgent { agent_id } => {
+            FrontendUserActionLog::new("delete_custom_agent", "custom_agents").agent(agent_id)
+        }
+        FrontendEvent::TestBackendConnection { base_url, .. } => {
+            FrontendUserActionLog::new("test_backend_connection", "custom_agents")
+                .target(sanitize_ui_action_url(base_url))
+        }
+        FrontendEvent::ListAgentBackends { agent } => {
+            FrontendUserActionLog::new("list_agent_backends", "agent_backends")
+                .agent(agent.as_str())
+        }
+        FrontendEvent::AddAgentBackend { agent, profile } => {
+            FrontendUserActionLog::new("add_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(&profile.id)
+        }
+        FrontendEvent::UpdateAgentBackend { agent, id, .. } => {
+            FrontendUserActionLog::new("update_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(id)
+        }
+        FrontendEvent::DeleteAgentBackend { agent, id } => {
+            FrontendUserActionLog::new("delete_agent_backend", "agent_backends")
+                .agent(agent.as_str())
+                .profile(id)
+        }
+        FrontendEvent::TestAgentBackendConnection {
+            agent, base_url, ..
+        } => FrontendUserActionLog::new("test_agent_backend_connection", "agent_backends")
+            .agent(agent.as_str())
+            .target(sanitize_ui_action_url(base_url)),
+        FrontendEvent::StartMigration { tab_id } => {
+            FrontendUserActionLog::new("start_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::SkipMigration { tab_id } => {
+            FrontendUserActionLog::new("skip_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::QuitMigration { tab_id } => {
+            FrontendUserActionLog::new("quit_migration", "migration").target(tab_id)
+        }
+        FrontendEvent::GetSystemSettings => {
+            FrontendUserActionLog::new("get_system_settings", "settings")
+        }
+        FrontendEvent::UpdateSystemSettings {
+            language,
+            codex_trust_managed_hooks,
+        } => FrontendUserActionLog::new("update_system_settings", "settings")
+            .target(language)
+            .force(codex_trust_managed_hooks.unwrap_or(false)),
+        FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
+            FrontendUserActionLog::new("workspace_projection_prune", "workspace")
+                .mode(if *dry_run { "dry_run" } else { "apply" })
+                .count(ids.len())
+        }
+        FrontendEvent::SaveUiTrace { trace } => {
+            let entries = trace.entries().map(|entries| entries.len()).unwrap_or(0);
+            FrontendUserActionLog::new("save_ui_trace", "diagnostics")
+                .target(trace.session_id().unwrap_or_default())
+                .count(entries)
+        }
+        FrontendEvent::OpenReleaseNotes { focus_version, .. } => {
+            FrontendUserActionLog::new("open_release_notes", "release_notes")
+                .target(focus_version.as_deref().unwrap_or_default())
+        }
+        // These events can contain high-volume, high-frequency, or sensitive
+        // payloads. They are handled by more specific logs or diagnostics.
+        FrontendEvent::UpdateViewport { .. }
+        | FrontendEvent::UpdateWindowGeometry { .. }
+        | FrontendEvent::TerminalInput { .. }
+        | FrontendEvent::PasteImage { .. } => return None,
+    };
+    Some(log)
+}
+
+fn log_frontend_user_action(client_id: &str, event: &FrontendEvent) {
+    let Some(log) = frontend_user_action_log(event) else {
+        return;
+    };
+    tracing::info!(
+        target: "gwt_ui_action",
+        client_id = %client_id,
+        action = %log.action,
+        surface = %log.surface,
+        window_id = %log.window_id,
+        ui_target = %log.ui_target,
+        profile_name = %log.profile_name,
+        env_keys = %log.env_keys,
+        env_var_count = log.env_var_count as u64,
+        disabled_env_count = log.disabled_env_count as u64,
+        agent_id = %log.agent_id,
+        count = log.count as u64,
+        mode = %log.mode,
+        forced = log.forced,
+        "frontend user action"
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +1060,21 @@ impl LaunchWizardMemoryCache {
         )
     }
 
+    fn latest_resumable_branch_session(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Option<gwt_agent::Session> {
+        let entry = self
+            .quick_start_entries(repo_path, branch_name)
+            .into_iter()
+            .find(|entry| entry.resume_session_id.is_some())?;
+        self.sessions
+            .iter()
+            .find(|session| session.id == entry.session_id)
+            .cloned()
+    }
+
     fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
         gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
     }
@@ -477,6 +1141,43 @@ impl OutboundEvent {
             event,
         }
     }
+}
+
+// SPEC-2809 — per-spawn correlation id for Launch Wizard stages so the
+// Console window's `agent` tab can group multiple stage events (binary
+// resolve / env prep / worktree create / PTY handoff) under one
+// invocation header. Atomic so parallel wizard sessions do not collide.
+static AGENT_LAUNCH_STAGE_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_agent_launch_stage_id() -> u64 {
+    AGENT_LAUNCH_STAGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Emit a `gwt.process.summary` event for one Launch Wizard stage so the
+/// Console window's `agent` tab surfaces the pipeline that ends in the
+/// PTY spawn. Stage semantics (`start`, `done`, `error`) follow the same
+/// vocabulary as the `spawn_logged` summary contract.
+pub(crate) fn emit_agent_launch_stage(spawn_id: u64, stage: &str, detail: &str) {
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "agent",
+        spawn_id = spawn_id,
+        stage = stage,
+        detail = detail,
+        "agent launch stage",
+    );
+    // Also push a synthetic line into the hub so the agent tab shows the
+    // stage banner in real time (the summary event alone lives in
+    // canonical log + Logs window only).
+    let hub = gwt_core::process_console::global();
+    let label = format!("[{stage}] {detail}");
+    hub.push(gwt_core::process_console::ProcessLine::new(
+        gwt_core::process_console::ProcessKind::AgentBootstrap,
+        spawn_id,
+        gwt_core::process_console::ProcessStream::Stdout,
+        label,
+    ));
 }
 
 fn knowledge_error_event(
@@ -1842,6 +2543,7 @@ pub struct AppRuntime {
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
+    pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
@@ -1937,6 +2639,7 @@ impl AppRuntime {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -1987,6 +2690,8 @@ impl AppRuntime {
             );
         }
 
+        self.auto_resume_recoverable_agent_sessions();
+
         let windows = self
             .tabs
             .iter()
@@ -2009,6 +2714,127 @@ impl AppRuntime {
         let _ = self.persist();
     }
 
+    fn auto_resume_recoverable_agent_sessions(&mut self) {
+        let mut sessions = self.load_recovery_sessions();
+        sessions.sort_by(|left, right| {
+            right
+                .last_activity_at
+                .cmp(&left.last_activity_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let now = chrono::Utc::now();
+        let mut launched = 0usize;
+        let mut resumed_native_sessions = std::collections::HashSet::new();
+        for session in sessions {
+            if !session.exact_auto_resume_candidate() {
+                continue;
+            }
+            if !startup_auto_resume_is_fresh(&session, now) {
+                continue;
+            }
+            let Some(native_session_id) = session.exact_resume_session_id() else {
+                continue;
+            };
+            if !resumed_native_sessions.insert(native_session_id.to_string()) {
+                continue;
+            }
+            if self
+                .active_agent_sessions
+                .values()
+                .any(|active| active.session_id == session.id)
+            {
+                continue;
+            }
+            let Some(tab_id) = self.auto_resume_tab_id_for_session(&session) else {
+                continue;
+            };
+            let Some(tab) = self.tab(&tab_id) else {
+                continue;
+            };
+            if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
+                continue;
+            }
+            let config = launch_config_from_persisted_session(&session);
+            if config.session_mode != gwt_agent::SessionMode::Resume {
+                continue;
+            }
+            let existing_windows = self
+                .window_lookup
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            let workspace_resume_context =
+                gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
+                    .ok()
+                    .flatten()
+                    .map(|projection| workspace_resume_context_from_projection(&projection));
+            if self
+                .spawn_agent_window(
+                    &tab_id,
+                    config,
+                    auto_resume_window_bounds(launched),
+                    workspace_resume_context,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            if let Some(window_id) = self
+                .window_lookup
+                .keys()
+                .find(|window_id| !existing_windows.contains(*window_id))
+                .cloned()
+            {
+                self.pending_auto_resume_sources
+                    .insert(window_id, session.id.clone());
+            }
+            launched += 1;
+        }
+    }
+
+    fn auto_resume_tab_id_for_session(&self, session: &gwt_agent::Session) -> Option<String> {
+        if let Some(tab) = self.tabs.iter().find(|tab| {
+            tab.kind == gwt::ProjectKind::Git
+                && !tab.migration_pending
+                && same_worktree_path(&tab.project_root, &session.worktree_path)
+        }) {
+            return Some(tab.id.clone());
+        }
+
+        let session_scope = session_project_scope_hash(session)?;
+        self.tabs
+            .iter()
+            .find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && !tab.migration_pending
+                    && gwt_core::paths::project_scope_hash(&tab.project_root).to_string()
+                        == session_scope
+            })
+            .map(|tab| tab.id.clone())
+    }
+
+    fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+            .filter_map(|path| {
+                let mut session = gwt_agent::Session::load_and_migrate(&path).ok()?;
+                if session.worktree_path.exists()
+                    && session.should_mark_interrupted_from_lifecycle()
+                {
+                    session.update_status(gwt_agent::AgentStatus::Interrupted);
+                }
+                let _ = session.save(&self.sessions_dir);
+                Some(session)
+            })
+            .collect()
+    }
+
     pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
         self.hook_forward_target = Some(target);
     }
@@ -2025,6 +2851,7 @@ impl AppRuntime {
         client_id: ClientId,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
+        log_frontend_user_action(&client_id, &event);
         match event {
             FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
@@ -2333,6 +3160,11 @@ impl AppRuntime {
             FrontendEvent::ResumeWorkspaceAgent { session_id, bounds } => {
                 self.resume_workspace_agent_events(&client_id, session_id, bounds)
             }
+            FrontendEvent::ResumeBranchLatestAgent {
+                id,
+                branch_name,
+                bounds,
+            } => self.resume_branch_latest_agent_events(&client_id, &id, &branch_name, bounds),
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
@@ -3871,7 +4703,6 @@ impl AppRuntime {
 
         spawn_branch_load_async(
             self.proxy.clone(),
-            client_id.to_string(),
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
@@ -4709,15 +5540,6 @@ impl AppRuntime {
             )];
         };
 
-        // SPEC-2359 US-37 / FR-118: emit Done for the Workspace WorkItem whose
-        // git_details.branch matches the cleanup target before delegating to
-        // worktree/branch deletion. Idempotent per work_item_id.
-        let _ = gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
-            &tab.project_root,
-            branch,
-            chrono::Utc::now(),
-        );
-
         spawn_workspace_cleanup_async(
             self.proxy.clone(),
             client_id.to_string(),
@@ -4925,6 +5747,14 @@ fn spawn_workspace_cleanup_async(
                                     | gwt::BranchCleanupResultStatus::Partial
                             )
                     }) {
+                        // SPEC-2359 US-37 / FR-118: emit Done only after the
+                        // matching workspace cleanup actually succeeded.
+                        let _ =
+                            gwt_core::workspace_projection::emit_workspace_done_event_for_branch(
+                                &project_root,
+                                &branch,
+                                chrono::Utc::now(),
+                            );
                         if let Some(event) =
                             clear_workspace_cleanup_git_details_event(&project_root)
                         {
@@ -4997,6 +5827,16 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
 }
 
 impl AppRuntime {
+    fn latest_resumable_branch_session(
+        &self,
+        project_root: &Path,
+        branch_name: &str,
+    ) -> Option<gwt_agent::Session> {
+        let normalized_branch_name = normalize_branch_name(branch_name);
+        self.launch_wizard_cache
+            .latest_resumable_branch_session(project_root, &normalized_branch_name)
+    }
+
     pub(crate) fn live_sessions_for_branch(
         &self,
         tab_id: &str,
@@ -5040,6 +5880,7 @@ impl AppRuntime {
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
+        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         match result {
             Ok((
                 process_launch,
@@ -5081,10 +5922,39 @@ impl AppRuntime {
                         tab_id: tab_id.clone(),
                     },
                 );
+                if let Some(source_session_id) = auto_resume_source_session_id {
+                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
-                match self.spawn_process_window(&window_id, geometry, process_launch) {
+                // SPEC-2809 — Launch Wizard always spawns an AI agent
+                // launch sequence (binary resolve / env prep / PTY
+                // spawn) so the Console window's `agent` tab shows the
+                // wizard pipeline up to the moment xterm.js takes over.
+                let stage_id = next_agent_launch_stage_id();
+                emit_agent_launch_stage(
+                    stage_id,
+                    "resolve_binary",
+                    &format!("wizard launch {}", process_launch.command),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "prepare_env",
+                    &format!("worktree={}", worktree_path.display()),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "spawn_pty",
+                    &format!("argv=[{}]", process_launch.args.join(" ")),
+                );
+                match self.spawn_process_window_with_console_kind(
+                    &window_id,
+                    geometry,
+                    process_launch,
+                    Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
+                ) {
                     Ok(()) => {
+                        emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let linkage_result = match linked_issue_number {
                             Some(issue_number) => record_issue_branch_link_with_cache_dir(
                                 &worktree_path,
@@ -5200,8 +6070,30 @@ impl AppRuntime {
                 };
                 let geometry = window.geometry.clone();
 
-                match self.spawn_process_window(&window_id, geometry, process_launch) {
+                // SPEC-2809 (revised) — second Launch Wizard exit path
+                // emits the same launch banner sequence as the primary
+                // handler so the Console window's `agent` tab is
+                // consistent regardless of which wizard outcome the user
+                // came in through.
+                let stage_id = next_agent_launch_stage_id();
+                emit_agent_launch_stage(
+                    stage_id,
+                    "resolve_binary",
+                    &format!("wizard launch {}", process_launch.command),
+                );
+                emit_agent_launch_stage(
+                    stage_id,
+                    "prepare_env",
+                    &format!("argv=[{}]", process_launch.args.join(" ")),
+                );
+                match self.spawn_process_window_with_console_kind(
+                    &window_id,
+                    geometry,
+                    process_launch,
+                    Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
+                ) {
                     Ok(()) => {
+                        emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let mut events = vec![self.workspace_state_broadcast()];
                         events.extend(Self::status_events(
                             window_id,
@@ -5210,7 +6102,10 @@ impl AppRuntime {
                         ));
                         events
                     }
-                    Err(error) => self.launch_error_events(window_id, error),
+                    Err(error) => {
+                        emit_agent_launch_stage(stage_id, "error", &error);
+                        self.launch_error_events(window_id, error)
+                    }
                 }
             }
             Err(error) => self.launch_error_events(window_id, error),
@@ -5269,7 +6164,36 @@ impl AppRuntime {
         .with_project_root(&project_root);
         let (env, remove_env) = effective_env.into_parts();
 
-        match self.spawn_process_window(
+        // SPEC-2809 (revised) — Surface the launch pipeline for AI
+        // agent presets (Codex / Claude / Gemini / Agent) so the Console
+        // window's `agent` tab shows what gwt is doing leading up to the
+        // PTY spawn. Plain `Shell` panes do not emit launch banners
+        // because nothing distinguishes them from arbitrary terminals.
+        let is_agent_preset = matches!(
+            preset,
+            WindowPreset::Claude | WindowPreset::Codex | WindowPreset::Agent
+        );
+        let console_kind =
+            is_agent_preset.then_some(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        let stage_id = is_agent_preset.then(next_agent_launch_stage_id);
+        if let Some(id) = stage_id {
+            emit_agent_launch_stage(
+                id,
+                "resolve_binary",
+                &format!("{} ({})", preset.title(), launch.command),
+            );
+            emit_agent_launch_stage(
+                id,
+                "prepare_env",
+                &format!("project_root={}", project_root.display()),
+            );
+            emit_agent_launch_stage(
+                id,
+                "spawn_pty",
+                &format!("argv=[{}]", launch.args.join(" ")),
+            );
+        }
+        match self.spawn_process_window_with_console_kind(
             &window_id,
             geometry,
             ProcessLaunch {
@@ -5279,9 +6203,18 @@ impl AppRuntime {
                 remove_env,
                 cwd: Some(project_root),
             },
+            console_kind,
         ) {
-            Ok(()) => Self::status_events(window_id, WindowProcessStatus::Running, None),
+            Ok(()) => {
+                if let Some(id) = stage_id {
+                    emit_agent_launch_stage(id, "ready", "PTY handoff complete");
+                }
+                Self::status_events(window_id, WindowProcessStatus::Running, None)
+            }
             Err(error) => {
+                if let Some(id) = stage_id {
+                    emit_agent_launch_stage(id, "error", &error);
+                }
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
                 Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
@@ -5289,11 +6222,22 @@ impl AppRuntime {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn spawn_process_window(
         &mut self,
         id: &str,
         geometry: WindowGeometry,
         launch: ProcessLaunch,
+    ) -> Result<(), String> {
+        self.spawn_process_window_with_console_kind(id, geometry, launch, None)
+    }
+
+    pub(crate) fn spawn_process_window_with_console_kind(
+        &mut self,
+        id: &str,
+        geometry: WindowGeometry,
+        launch: ProcessLaunch,
+        console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
         let pane = Pane::new_with_spawn_config(
@@ -5311,7 +6255,7 @@ impl AppRuntime {
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
 
-        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
+        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone(), console_kind);
         let status_thread = self.spawn_status_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
@@ -5501,6 +6445,9 @@ impl AppRuntime {
             session.launch_command = config.command.clone();
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
+            if session.session_mode == gwt_agent::SessionMode::Resume {
+                session.agent_session_id = config.resume_session_id.clone();
+            }
             session.update_status(gwt_agent::AgentStatus::Running);
 
             let session_id = session.id.clone();
@@ -5747,7 +6694,23 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+    pub(crate) fn spawn_output_thread(
+        &self,
+        id: String,
+        pane: Arc<Mutex<Pane>>,
+        _console_kind: Option<gwt_core::process_console::ProcessKind>,
+    ) -> JoinHandle<()> {
+        // SPEC-2809 (revised) — the Console window is the gwt-side
+        // equivalent of VS Code's Output panel. It surfaces what gwt
+        // itself spawns in the background (gh / git / docker / agent
+        // bootstrap stages / Python index runner) per kind. The agent
+        // tab is for the **Launch Wizard pipeline** that culminates in
+        // the PTY spawn — not the agent's own runtime stdout. That
+        // runtime stdout already lives in the workspace terminal pane
+        // (xterm.js) and would only duplicate noise here. `_console_kind`
+        // is retained on the API for forward compatibility with future
+        // kind-aware hooks (e.g. recording the PTY exit code as a
+        // summary at thread end).
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let reader = match pane
@@ -6622,6 +7585,74 @@ fn file_content_error_to_event(id: &str, path: &str, err: FileContentError) -> B
 }
 
 #[cfg(test)]
+mod agent_launch_stage_tests {
+    //! SPEC-2809 (revised) — Tests for the Launch Wizard -> Console
+    //! `agent` tab stage emission. Confirms that `emit_agent_launch_stage`
+    //! pushes a banner line to the ProcessConsoleHub under the
+    //! `AgentBootstrap` kind so the Console window surfaces the launch
+    //! pipeline before the PTY pane takes over.
+    use super::{emit_agent_launch_stage, next_agent_launch_stage_id};
+    use gwt_core::process_console::{ProcessConsoleHub, ProcessKind, ProcessStream};
+
+    fn drain_lines(hub: &ProcessConsoleHub) -> Vec<String> {
+        hub.snapshot_kind(ProcessKind::AgentBootstrap)
+            .into_iter()
+            .map(|line| line.message)
+            .collect()
+    }
+
+    #[test]
+    fn launch_stage_ids_are_unique_per_caller() {
+        let a = next_agent_launch_stage_id();
+        let b = next_agent_launch_stage_id();
+        assert!(b > a, "stage ids must strictly increase: {a} -> {b}");
+    }
+
+    #[test]
+    fn emit_agent_launch_stage_pushes_a_banner_line_to_global_hub() {
+        // The global hub is installed lazily by `gwt_core::logging::init`
+        // in production, but tests run without that bootstrap. Install
+        // a hub before exercising the emit helper so the snapshot read
+        // observes the same instance the helper writes to. `set_global`
+        // succeeds at most once per process; ignore the result so this
+        // test cooperates with peers that also install the hub.
+        let _ = gwt_core::process_console::set_global(ProcessConsoleHub::new());
+        let spawn_id = next_agent_launch_stage_id();
+        emit_agent_launch_stage(spawn_id, "resolve_binary", "claude");
+        let hub = gwt_core::process_console::global();
+        let recent = hub.snapshot_kind(ProcessKind::AgentBootstrap);
+        assert!(
+            recent.iter().any(|line| line.spawn_id == spawn_id
+                && line.message == "[resolve_binary] claude"
+                && line.stream == ProcessStream::Stdout),
+            "expected a banner for the resolve_binary stage, got: {recent:?}",
+        );
+    }
+
+    #[test]
+    fn launch_stage_banner_includes_stage_label_in_message() {
+        let hub = ProcessConsoleHub::new();
+        for stage in ["prepare_env", "spawn_pty", "ready"] {
+            hub.push(gwt_core::process_console::ProcessLine::new(
+                ProcessKind::AgentBootstrap,
+                42,
+                ProcessStream::Stdout,
+                format!("[{stage}] codex"),
+            ));
+        }
+        let lines = drain_lines(&hub);
+        assert_eq!(
+            lines,
+            vec![
+                "[prepare_env] codex".to_string(),
+                "[spawn_pty] codex".to_string(),
+                "[ready] codex".to_string(),
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,
@@ -6637,6 +7668,7 @@ mod tests {
     use tempfile::tempdir;
 
     use base64::Engine;
+    use chrono::{TimeZone, Utc};
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
@@ -7407,6 +8439,7 @@ exit 1
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -10025,6 +11058,491 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let mut older =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        older.id = "session-older".to_string();
+        older.agent_session_id = Some("native-older".to_string());
+        older.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap();
+        older.updated_at = older.last_activity_at;
+        older.created_at = older.last_activity_at;
+        older.save(&sessions_dir).expect("save older session");
+
+        let mut newer =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        newer.id = "session-newer".to_string();
+        newer.agent_session_id = Some("native-newer".to_string());
+        newer.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap();
+        newer.updated_at = newer.last_activity_at;
+        newer.created_at = newer.last_activity_at;
+        newer.save(&sessions_dir).expect("save newer session");
+
+        let mut metadata_only =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        metadata_only.id = "session-metadata-only".to_string();
+        metadata_only.agent_session_id = None;
+        metadata_only.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap();
+        metadata_only.updated_at = metadata_only.last_activity_at;
+        metadata_only.created_at = metadata_only.last_activity_at;
+        metadata_only
+            .save(&sessions_dir)
+            .expect("save metadata-only session");
+
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        let selected = runtime
+            .latest_resumable_branch_session(&repo, "work/manual-resume")
+            .expect("latest resumable session");
+
+        assert_eq!(selected.id, "session-newer");
+        assert_eq!(selected.agent_session_id.as_deref(), Some("native-newer"));
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_shows_multiple_resume_candidates_latest_first() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        for (session_id, native_session_id, hour) in [
+            ("session-older", "native-older", 9),
+            ("session-newer", "native-newer", 10),
+        ] {
+            let mut session =
+                gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+            session.updated_at = session.last_activity_at;
+            session.created_at = session.last_activity_at;
+            session.save(&sessions_dir).expect("save session");
+        }
+
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "branches-1",
+            repo,
+            WindowPreset::Branches,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "branches-1");
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: window_id,
+                branch_name: "work/manual-resume".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard")
+            .wizard
+            .view();
+        assert_eq!(
+            view.quick_start_entries
+                .iter()
+                .map(|entry| entry.resume_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("native-newer"), Some("native-older")]
+        );
+    }
+
+    #[test]
+    fn app_runtime_resume_branch_latest_returns_branch_error_when_no_resumable_session_exists() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "branches-1",
+            repo,
+            WindowPreset::Branches,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "branches-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeBranchLatestAgent {
+                id: window_id.clone(),
+                branch_name: "work/manual-resume".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::BranchError { id, message })
+                if id == &window_id && message.contains("No resumable session")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("auto-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/auto-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab(
+            "tab-auto",
+            "Auto Resume",
+            worktree.clone(),
+            ProjectKind::Git,
+            &[],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
+        for (session_id, native_session_id) in [
+            ("session-auto-one", "native-session-one"),
+            ("session-auto-two", "native-session-two"),
+        ] {
+            let mut session =
+                gwt_agent::Session::new(&worktree, "work/auto-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session
+                .save(&runtime.sessions_dir)
+                .expect("save resumable session");
+        }
+
+        runtime.bootstrap();
+
+        assert_eq!(
+            runtime.tabs.len(),
+            1,
+            "bootstrap should reopen the worktree tab"
+        );
+        assert!(same_worktree_path(&runtime.tabs[0].project_root, &worktree));
+        let agent_windows = runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 2,
+            "all exact-resumable sessions for a worktree should restart"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_project_tab() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("same-repo-session");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/same-repo-session",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/same-repo-session",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-same-repo-worktree".to_string();
+        session.agent_session_id = Some("native-same-repo-worktree".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+
+        runtime.bootstrap();
+
+        assert_eq!(
+            runtime.tabs.len(),
+            1,
+            "bootstrap should keep the restored project tab instead of opening a hidden worktree tab"
+        );
+        assert!(same_worktree_path(&runtime.tabs[0].project_root, &repo));
+        let agent_windows = runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 1,
+            "resumable sessions from local worktrees in the restored repo should restart inside the project tab"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_ignores_same_repo_worktree_session_without_lifecycle() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("no-lifecycle-session");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/no-lifecycle-session",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab("tab-repo", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/no-lifecycle-session",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-same-repo-no-lifecycle".to_string();
+        session.agent_session_id = Some("native-no-lifecycle".to_string());
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save stale session");
+
+        runtime.bootstrap();
+
+        let agent_windows = runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 0,
+            "same-repo fallback must still require lifecycle evidence so old session history does not mass launch"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_ignores_same_repo_worktree_session_with_placeholder_resume_id() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("placeholder-session");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/placeholder-session",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab("tab-repo", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/placeholder-session",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-same-repo-placeholder".to_string();
+        session.agent_session_id = Some("agent-session".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save placeholder session");
+
+        runtime.bootstrap();
+
+        let agent_windows = runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 0,
+            "placeholder Codex hook ids must not launch `codex resume agent-session`"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("unlisted-auto-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/unlisted-auto-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/unlisted-auto-resume",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-unlisted-auto".to_string();
+        session.agent_session_id = Some("native-unlisted-auto".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+
+        runtime.bootstrap();
+
+        assert!(
+            runtime.tabs.is_empty(),
+            "bootstrap must not open project tabs from old session TOMLs that were not restored from session.json"
+        );
+        assert!(
+            runtime.pending_auto_resume_sources.is_empty(),
+            "unlisted sessions must remain manual resume candidates instead of launching hidden agent windows"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("auto-resume-guard");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/auto-resume-guard",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab(
+            "tab-worktree",
+            "Worktree",
+            worktree.clone(),
+            ProjectKind::Git,
+            &[],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-worktree"));
+        let now = chrono::Utc::now();
+        let cases = [
+            ("session-fresh-1", "native-one", 1_i64),
+            ("session-duplicate-native-one", "native-one", 2_i64),
+            ("session-fresh-2", "native-two", 3_i64),
+            ("session-fresh-3", "native-three", 4_i64),
+            ("session-fresh-4", "native-four", 5_i64),
+            ("session-stale", "native-stale", 60 * 60 * 48_i64),
+        ];
+        for (session_id, native_session_id, age_secs) in cases {
+            let mut session = gwt_agent::Session::new(
+                &worktree,
+                "work/auto-resume-guard",
+                gwt_agent::AgentId::Codex,
+            );
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session.last_activity_at = now - chrono::Duration::seconds(age_secs);
+            session.updated_at = session.last_activity_at;
+            session
+                .save(&runtime.sessions_dir)
+                .expect("save resumable session");
+        }
+
+        runtime.bootstrap();
+
+        assert_eq!(
+            runtime.pending_auto_resume_sources.len(),
+            4,
+            "startup auto-resume must restore every fresh unique exact-resumable session"
+        );
+        let resumed_sources = runtime
+            .pending_auto_resume_sources
+            .values()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            !resumed_sources.contains("session-duplicate-native-one"),
+            "duplicate native agent session ids must not launch twice"
+        );
+        assert!(
+            !resumed_sources.contains("session-stale"),
+            "stale persisted sessions must stay available for manual resume instead of auto-launching"
+        );
+        assert!(
+            resumed_sources.contains("session-fresh-4"),
+            "startup auto-resume must not drop fresh unique sessions due to an arbitrary count cap"
+        );
+    }
+
+    #[test]
     fn app_runtime_resume_workspace_journal_populates_quick_start_entries_from_prior_sessions() {
         // SPEC-2359 US-44 (Issue #2757) follow-on: when the user clicks
         // `Resume` on a Workspace journal card whose branch already has a
@@ -10342,6 +11860,79 @@ exit 1
         assert!(
             invocations.trim().is_empty(),
             "active-work projection must not spawn git on the GUI hot path; invocations:\n{invocations}"
+        );
+    }
+
+    #[test]
+    fn workspace_cleanup_failure_does_not_emit_done_work_item() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let branch = "work/missing";
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(repo.join("work/missing")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(2828),
+            pr_state: Some("MERGED".to_string()),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/2828".to_string()),
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        let work_item_id = projection.id.clone();
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let start = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+            &work_item_id,
+            chrono::Utc::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
+            .expect("record start");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        let immediate_events =
+            runtime.run_workspace_cleanup_events("client-1", branch, false, false);
+
+        assert!(immediate_events.is_empty());
+        wait_for_recorded_event("workspace cleanup failure", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(outbound_events)
+                        if outbound_events.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupResult { .. }
+                                | BackendEvent::BranchError { .. }
+                        ))
+                )
+            })
+        });
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("work item");
+
+        assert!(
+            !item
+                .events
+                .iter()
+                .any(|event| event.kind
+                    == gwt_core::workspace_projection::WorkspaceWorkEventKind::Done),
+            "failed cleanup must not mark the Workspace work item done"
         );
     }
 
@@ -11952,6 +13543,94 @@ exit 1
             .profiles
             .iter()
             .any(|profile| profile.name == "review" && profile.description == "Review profile"));
+    }
+
+    #[test]
+    fn app_runtime_logs_profile_save_user_action_without_env_values() {
+        let temp = tempdir().expect("tempdir");
+        let _config_home = ScopedEnvVar::set("GWT_CONFIG_HOME", temp.path());
+        Settings::default()
+            .save(&temp.path().join("config.toml"))
+            .expect("save settings");
+
+        let mut runtime = sample_runtime(temp.path(), vec![], None);
+        let events = capture_tracing_events(|| {
+            let _ = runtime.handle_frontend_event(
+                "client-1".to_string(),
+                FrontendEvent::SaveProfile {
+                    id: "profile-window".to_string(),
+                    current_name: "default".to_string(),
+                    name: "default".to_string(),
+                    description: String::new(),
+                    env_vars: vec![ProfileEnvEntryView {
+                        key: "Test".to_string(),
+                        value: "must-not-leak".to_string(),
+                    }],
+                    disabled_env: vec![],
+                },
+            );
+        });
+
+        let action = events
+            .iter()
+            .find(|event| event.target == "gwt_ui_action")
+            .expect("profile save user action log");
+        assert_eq!(action.level, Level::INFO);
+        assert_eq!(
+            action.fields.get("action").map(String::as_str),
+            Some("save_profile")
+        );
+        assert_eq!(
+            action.fields.get("profile_name").map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            action.fields.get("env_keys").map(String::as_str),
+            Some("Test")
+        );
+        assert_eq!(
+            action.fields.get("env_var_count").map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            !action
+                .fields
+                .values()
+                .any(|value| value.contains("must-not-leak")),
+            "env values must not be written to the user action log: {action:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_user_action_redacts_backend_test_url_secrets() {
+        let custom_agent_log =
+            super::frontend_user_action_log(&FrontendEvent::TestBackendConnection {
+                base_url: "https://user:pass@example.com/v1?token=secret#frag".to_string(),
+                api_key: "api-key-must-not-leak".to_string(),
+            })
+            .expect("custom agent backend test action log");
+        assert_eq!(custom_agent_log.ui_target, "https://example.com");
+
+        let builtin_agent_log =
+            super::frontend_user_action_log(&FrontendEvent::TestAgentBackendConnection {
+                agent: gwt_agent::BuiltinAgentId::Codex,
+                base_url: "http://token@example.net:11434/openai?signed=secret".to_string(),
+                api_key: "agent-key-must-not-leak".to_string(),
+            })
+            .expect("builtin agent backend test action log");
+        assert_eq!(builtin_agent_log.ui_target, "http://example.net:11434");
+
+        let logged_values = [
+            custom_agent_log.ui_target.as_str(),
+            builtin_agent_log.ui_target.as_str(),
+        ];
+        assert!(
+            !logged_values.iter().any(|value| value.contains("user")
+                || value.contains("pass")
+                || value.contains("token")
+                || value.contains("secret")),
+            "backend test URLs must not leak credentials or query strings: {logged_values:?}"
+        );
     }
 
     #[test]
@@ -15135,10 +16814,11 @@ exit 1
     }
 
     #[test]
-    fn workspace_view_for_tab_includes_done_work_items_from_disk() {
-        // SPEC-2359 US-37: workspace_state broadcast must carry work_items so
-        // the Workspace Overview Completed column renders without depending on
-        // the limited-trigger active_work_projection broadcast.
+    fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
+        // SPEC-2359 CPU/power follow-up: workspace_state is broadcast frequently
+        // and must stay structural. Workspace history/work items are carried by
+        // active_work_projection so every window/status update does not serialize
+        // the full work item event log.
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -15189,14 +16869,8 @@ exit 1
 
         let view = crate::runtime_support::workspace_view_for_tab(&tab);
         assert!(
-            view.work_items
-                .iter()
-                .any(|item| item.id == "work-item-done" && item.status_category == "done"),
-            "WorkspaceView.work_items must include the Done work item persisted on disk so workspace_state broadcast renders the Completed column on startup; got {:?}",
-            view.work_items
-                .iter()
-                .map(|i| (i.id.clone(), i.status_category.clone()))
-                .collect::<Vec<_>>()
+            view.work_items.is_empty(),
+            "WorkspaceView.work_items must stay empty because workspace_state is a hot broadcast path; active_work_projection owns Workspace history"
         );
     }
 

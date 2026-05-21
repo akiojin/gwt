@@ -1,6 +1,109 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.42.2] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Recover Branches refresh after reconnect
+
+## [9.42.1] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Keep project actions visible with many tabs
+- **workspace:** Scope auto resume to restored tabs
+- **test:** Pin visual runner playwright resolution
+- **workspace:** Restore codex sessions by project scope
+- Gwt起動時のCPUと電力負荷を抑制する
+- Auto-resumeの件数上限を外す
+- Worktree ResumeをLaunch Agentから分離する
+
+## [9.42.0] - 2026-05-21
+
+### Bug Fixes
+
+- **start-work:** Resolve reservation refs from workspace home
+- **release:** Remove npm distribution path
+- **release:** Remove remaining npm tooling references
+- **release:** Align release instructions with GitHub assets
+
+### Features
+
+- **workspace:** 復元可能なエージェントセッションを自動再開する
+
+## [9.41.1] - 2026-05-21
+
+### Bug Fixes
+
+- Frontend user actionsを構造化ログに出力
+- **gui:** Latch canvas wheel gesture mode
+- **gui:** Claude Code 起動直後の terminal 表示崩れを修正 (Issue #2832, SPEC-2008 Phase 26.A regression)
+- **e2e:** Headed live Playwright を安定化
+- **gui:** Live headed E2E の update modal 4 failures を解消する
+- **gui:** Redact frontend action log urls
+- **gui:** Recover Branches loading after reconnect
+- **gui:** Stabilize terminal initial fit
+
+### Documentation
+
+- Remove continuous log watch from headless check
+
+### Miscellaneous Tasks
+
+- **skills:** Headless browser check skillを追加
+- **skills:** Prevent duplicate browser open
+- **skills:** Monitor structured gwt logs
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin/develop into work branch
+
+### Testing
+
+- Serialize docker runtime env tests
+
+## [9.41.0] - 2026-05-20
+
+### Features
+
+- **workspace:** Title-summary content policy and agent parity (SPEC-2359 Phase U-9 / US-45)
+- **gui:** Add Process kind chip filter to Logs window (SPEC-2019 Phase G)
+- **git:** Migrate high-visibility git callers to run_git_logged (SPEC-1924 Phase C-visible-1)
+- **gui:** ブランチクリーンアップの進捗表示と強制削除を追加 (SPEC-2009)
+- Migrate docker/agent/runner callers to spawn_logged surface (SPEC-1924 Phase D)
+- **skills:** gwt-verify を project-agnostic 化しユーザー確認フェーズを追加
+- **index:** Add Lessons semantic search scope (SPEC #2805)
+- **gui:** Add independent Console window for external process live tail (SPEC-2809)
+
+### Bug Fixes
+
+- **workspace:** Unassigned session でも初回 UserPromptSubmit で identity auto-derive する (SPEC-2359 Phase U-10 / US-46)
+- Scope board reminder to hook cwd (Issue #2811)
+- **gui:** Populate lessons scope in aggregated project_index_status
+- Issue Launch を work branch で起動する
+- Knowledge Launch を専用 Worktree で起動する
+- **docs:** Drop broken rustdoc intra-doc link in strip_ansi module (SPEC-2809)
+- **gui:** Console window snapshot replay + empty-state hint (SPEC-2809)
+- **gui:** Add Console button to Add Window picker (SPEC-2809)
+- **agent:** Use official Gemini CLI package
+
+### Documentation
+
+- **lessons:** Record binary mismatch / deployment lag finding from Phase U-9 self-bench
+- **lessons:** Record salience asymmetry + activity-descriptor lessons from SPEC-2359 Phase U-9
+- **lessons:** Record process console wrapper raw-buffer-vs-redaction split
+
+### Testing
+
+- **gui:** ブランチクリーンアップ E2E を追加 (SPEC-2009)
+- **index:** Add E2E coverage for lessons scope (Closes #2815)
+- **gui:** Console window DOM unit + live Playwright E2E (SPEC-2809)
+
+### Miscellaneous Tasks
+
+- **installer:** Add Windows MSI diagnostics
+
 ## [9.40.0] - 2026-05-20
 
 ### Bug Fixes

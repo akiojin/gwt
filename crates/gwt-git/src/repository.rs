@@ -243,10 +243,9 @@ fn clone_project_as_nested_bare_inner(
             target.bare_repo_path.display()
         ))
     })?;
-    let clone_output = gwt_core::process::hidden_command("git")
-        .args(["clone", "--bare", url, bare_path])
-        .output()
-        .map_err(|error| GwtError::Git(format!("git clone --bare: {error}")))?;
+    let clone_output =
+        gwt_core::process::run_git_logged(&["clone", "--bare", url, bare_path], None)
+            .map_err(|error| GwtError::Git(format!("git clone --bare: {error}")))?;
     if !clone_output.status.success() {
         return Err(GwtError::Git(format!(
             "failed to clone repository as bare repo: {}",
@@ -298,19 +297,18 @@ pub fn clone_repo(url: &str, target_dir: &Path) -> Result<PathBuf> {
         .ok_or_else(|| GwtError::Git(format!("Invalid target path: {}", target_dir.display())))?;
 
     // Try with -b develop first
-    let output = gwt_core::process::hidden_command("git")
-        .args(["clone", "--depth=1", "-b", "develop", url, target])
-        .output()
-        .map_err(|e| GwtError::Git(format!("git clone: {e}")))?;
+    let output = gwt_core::process::run_git_logged(
+        &["clone", "--depth=1", "-b", "develop", url, target],
+        None,
+    )
+    .map_err(|e| GwtError::Git(format!("git clone: {e}")))?;
 
     if output.status.success() {
         return Ok(target_dir.to_path_buf());
     }
 
     // Fallback: clone without -b develop (uses default branch)
-    let output = gwt_core::process::hidden_command("git")
-        .args(["clone", "--depth=1", url, target])
-        .output()
+    let output = gwt_core::process::run_git_logged(&["clone", "--depth=1", url, target], None)
         .map_err(|e| GwtError::Git(format!("git clone: {e}")))?;
 
     if output.status.success() {
@@ -497,11 +495,11 @@ impl Repository {
     ///
     /// Returns `None` for detached HEAD.
     pub fn current_branch(&self) -> Result<Option<String>> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .current_dir(&self.path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("symbolic-ref: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["symbolic-ref", "--short", "HEAD"],
+            Some(&self.path),
+        )
+        .map_err(|e| GwtError::Git(format!("symbolic-ref: {e}")))?;
 
         if output.status.success() {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -514,11 +512,11 @@ impl Repository {
 
     /// List local and remote branch names.
     pub fn branches(&self) -> Result<Vec<String>> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["branch", "-a", "--format=%(refname:short)"])
-            .current_dir(&self.path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("branch: {e}")))?;
+        let output = gwt_core::process::run_git_logged(
+            &["branch", "-a", "--format=%(refname:short)"],
+            Some(&self.path),
+        )
+        .map_err(|e| GwtError::Git(format!("branch: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -536,10 +534,10 @@ impl Repository {
 
     /// Check if this repository is bare.
     pub fn is_bare(&self) -> bool {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["rev-parse", "--is-bare-repository"])
-            .current_dir(&self.path)
-            .output();
+        let output = gwt_core::process::run_git_logged(
+            &["rev-parse", "--is-bare-repository"],
+            Some(&self.path),
+        );
 
         match output {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "true",
@@ -549,10 +547,10 @@ impl Repository {
 
     /// Check if the current directory is inside a worktree.
     pub fn is_worktree(&self) -> bool {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .current_dir(&self.path)
-            .output();
+        let output = gwt_core::process::run_git_logged(
+            &["rev-parse", "--is-inside-work-tree"],
+            Some(&self.path),
+        );
 
         match output {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "true",

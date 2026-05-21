@@ -19,6 +19,7 @@ use crate::{
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
+const CODEX_PLACEHOLDER_SESSION_ID: &str = "agent-session";
 
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
@@ -85,6 +86,12 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hook_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hook_event_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_completed_stop_at: Option<DateTime<Utc>>,
     pub display_name: String,
 }
 
@@ -113,7 +120,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -153,6 +160,9 @@ impl Session {
             created_at: now,
             updated_at: now,
             last_activity_at: now,
+            last_hook_event: None,
+            last_hook_event_at: None,
+            last_completed_stop_at: None,
             display_name,
         }
     }
@@ -194,6 +204,76 @@ impl Session {
         if status == AgentStatus::Running || status == AgentStatus::WaitingInput {
             self.last_activity_at = now;
         }
+    }
+
+    /// Persist that a managed runtime hook was observed for this session.
+    pub fn record_hook_event(&mut self, event: &str) {
+        let now = Utc::now();
+        self.last_hook_event = Some(event.to_string());
+        self.last_hook_event_at = Some(now);
+        self.updated_at = now;
+        if let Some(status) = hook_event_status(event) {
+            self.update_status(status);
+        }
+    }
+
+    /// Persist that the latest Stop hook was allowed to complete.
+    pub fn record_completed_stop(&mut self) {
+        let now = Utc::now();
+        self.last_completed_stop_at = Some(now);
+        self.updated_at = now;
+        if self.last_hook_event.as_deref() != Some("Stop") {
+            self.last_hook_event = Some("Stop".to_string());
+            self.last_hook_event_at = Some(now);
+        }
+        self.update_status(AgentStatus::WaitingInput);
+    }
+
+    /// Whether the latest hook lifecycle indicates the session did not reach a
+    /// completed Stop boundary.
+    pub fn should_mark_interrupted_from_lifecycle(&self) -> bool {
+        if self.status == AgentStatus::Stopped {
+            return false;
+        }
+        let Some(last_hook_event_at) = self.last_hook_event_at else {
+            return false;
+        };
+        if self.last_hook_event.as_deref() != Some("Stop") {
+            return true;
+        }
+        self.last_completed_stop_at
+            .is_none_or(|completed_at| completed_at < last_hook_event_at)
+    }
+
+    pub fn interrupted_recovery_candidate(&self) -> bool {
+        self.status == AgentStatus::Interrupted && self.worktree_path.exists()
+    }
+
+    pub fn exact_auto_resume_candidate(&self) -> bool {
+        matches!(
+            self.status,
+            AgentStatus::Running | AgentStatus::WaitingInput | AgentStatus::Interrupted
+        ) && self.has_lifecycle_recovery_evidence()
+            && self.worktree_path.exists()
+            && self.has_exact_resume_session_id()
+    }
+
+    fn has_lifecycle_recovery_evidence(&self) -> bool {
+        self.last_hook_event_at.is_some() || self.last_completed_stop_at.is_some()
+    }
+
+    pub fn exact_resume_session_id(&self) -> Option<&str> {
+        self.agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                !(matches!(self.agent_id, AgentId::Codex) && *value == CODEX_PLACEHOLDER_SESSION_ID)
+            })
+    }
+
+    fn has_exact_resume_session_id(&self) -> bool {
+        self.exact_resume_session_id().is_some()
     }
 
     /// Check if the session should be marked as stopped due to idle timeout.
@@ -253,6 +333,13 @@ impl Session {
         if self.schema_version < 2 {
             scrub_legacy_codex_hooks_enablement(&self.agent_id, &mut self.launch_args);
             self.schema_version = 2;
+        }
+
+        if self.schema_version < 3 {
+            if self.worktree_path.exists() {
+                self.status = AgentStatus::Interrupted;
+            }
+            self.schema_version = 3;
         }
     }
 }
@@ -399,6 +486,27 @@ pub fn persist_session_status(
     session.update_status(status);
     session.save(sessions_dir)?;
     SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
+}
+
+pub fn persist_session_hook_event(
+    sessions_dir: &Path,
+    session_id: &str,
+    event: &str,
+) -> std::io::Result<()> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = Session::load_and_migrate(&session_path)?;
+    session.record_hook_event(event);
+    session.save(sessions_dir)
+}
+
+pub fn persist_session_completed_stop(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> std::io::Result<()> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = Session::load_and_migrate(&session_path)?;
+    session.record_completed_stop();
+    session.save(sessions_dir)
 }
 
 /// Persist the backing agent session id into the session TOML so quick-start
@@ -1127,6 +1235,92 @@ display_name = "Claude Code"
         assert_eq!(session.windows_shell, Some(WindowsShellKind::PowerShell7));
         assert_eq!(session.launch_command, "pwsh");
         assert_eq!(session.launch_args, config.args);
+    }
+
+    #[test]
+    fn load_and_migrate_marks_legacy_existing_worktree_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let path = dir.path().join("legacy.toml");
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+        session.status = AgentStatus::Running;
+        session.agent_session_id = Some("legacy-native-session".to_string());
+        session.schema_version = 2;
+        let mut value = toml::Value::try_from(&session)
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .clone();
+        value.remove("last_hook_event");
+        value.remove("last_hook_event_at");
+        value.remove("last_completed_stop_at");
+        std::fs::write(&path, toml::to_string(&value).unwrap()).unwrap();
+
+        let loaded = Session::load_and_migrate(&path).unwrap();
+
+        assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(loaded.status, AgentStatus::Interrupted);
+        assert!(loaded.interrupted_recovery_candidate());
+        assert!(
+            !loaded.exact_auto_resume_candidate(),
+            "legacy sessions without lifecycle evidence remain manually recoverable but must not be eagerly auto-resumed"
+        );
+    }
+
+    #[test]
+    fn lifecycle_events_drive_interrupted_recovery_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+
+        session.record_hook_event("UserPromptSubmit");
+        assert!(session.should_mark_interrupted_from_lifecycle());
+
+        session.record_hook_event("Stop");
+        assert!(session.should_mark_interrupted_from_lifecycle());
+
+        session.record_completed_stop();
+        assert!(!session.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn completed_stop_session_remains_exact_auto_resume_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+        session.agent_session_id = Some("codex-native-session".to_string());
+
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(!session.should_mark_interrupted_from_lifecycle());
+        assert!(session.exact_auto_resume_candidate());
+
+        std::fs::remove_dir_all(&worktree).unwrap();
+        assert!(!session.exact_auto_resume_candidate());
+        std::fs::create_dir_all(&worktree).unwrap();
+        session.update_status(AgentStatus::Stopped);
+        assert!(!session.exact_auto_resume_candidate());
+    }
+
+    #[test]
+    fn placeholder_agent_session_id_is_not_exact_auto_resume_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+        session.agent_session_id = Some(CODEX_PLACEHOLDER_SESSION_ID.to_string());
+
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(
+            !session.exact_auto_resume_candidate(),
+            "Codex hook placeholder ids are not valid `codex resume <id>` targets"
+        );
     }
 
     #[test]

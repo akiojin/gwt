@@ -14,6 +14,7 @@
  * release-notes-live and console-window-live specs).
  */
 import { test, expect } from "@playwright/test";
+import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -23,28 +24,44 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
-      try {
-        window.sessionStorage.setItem("gwt:ui:briefing", "1");
-      } catch {
-        /* no-op */
-      }
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      keepPresetModal: true,
     });
-    await page.goto(BASE);
-    await page.addStyleTag({
-      content: `
-        #op-briefing { display: none !important; pointer-events: none !important; }
-        .modal-backdrop:not(#preset-modal) { display: none !important; pointer-events: none !important; }
-      `,
-    });
-    await page.evaluate(() => {
-      const overlay = document.getElementById("op-briefing");
-      if (overlay) overlay.hidden = true;
-    });
+    await openLiveGwtProject(page);
     await expect(page.locator("#op-briefing")).toBeHidden();
+    await expect(page.locator("#project-picker")).toBeHidden();
   });
 
+  async function logsWindowIds(page) {
+    return await page.evaluate(() =>
+      Array.from(document.querySelectorAll(".workspace-window"))
+        .filter((node) => node.querySelector(".logs-process-kind-select"))
+        .map((node) => (node as HTMLElement).dataset.id)
+        .filter(Boolean),
+    );
+  }
+
+  async function waitForNewLogsWindow(page, beforeIds) {
+    const id = await page
+      .waitForFunction(
+        ({ beforeIds }) => {
+          const seen = new Set(beforeIds);
+          const node = Array.from(document.querySelectorAll(".workspace-window"))
+            .find((candidate) =>
+              candidate.querySelector(".logs-process-kind-select") &&
+              !seen.has((candidate as HTMLElement).dataset.id || ""),
+            );
+          return node ? (node as HTMLElement).dataset.id || "" : "";
+        },
+        { beforeIds },
+      )
+      .then((handle) => handle.jsonValue());
+    return page.locator(`.workspace-window[data-id="${id}"]`);
+  }
+
   async function openLogsWindow(page) {
+    const beforeIds = await logsWindowIds(page);
     await page.evaluate(() => {
       const modal = document.getElementById("preset-modal");
       if (modal) {
@@ -57,16 +74,17 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
     const logsButton = presetModal.locator("[data-preset='logs']");
     await expect(logsButton).toBeVisible();
     await logsButton.click();
+    return await waitForNewLogsWindow(page, beforeIds);
   }
 
   test("Logs window exposes the Process kind chip with canonical options", async ({
     page,
   }) => {
-    await openLogsWindow(page);
+    const windowRoot = await openLogsWindow(page);
 
     // The Logs window scaffold lives inside `app.js` and is rendered once
     // the preset click flows through `create_window` -> workspace state.
-    const chip = page.locator(".logs-process-kind-select").last();
+    const chip = windowRoot.locator(".logs-process-kind-select");
     await expect(chip).toBeVisible();
 
     const optionValues = await chip.evaluate((select) =>
@@ -78,15 +96,15 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
   test("Selecting a kind preserves the value through renderLogs", async ({
     page,
   }) => {
-    await openLogsWindow(page);
+    const windowRoot = await openLogsWindow(page);
 
-    const chip = page.locator(".logs-process-kind-select").last();
+    const chip = windowRoot.locator(".logs-process-kind-select");
     await chip.selectOption("docker");
     await expect(chip).toHaveValue("docker");
 
     // Toggling another filter forces a render; the chip should keep
     // its value because the controller now syncs from `state.processKind`.
-    const severity = page.locator(".logs-severity-select").last();
+    const severity = windowRoot.locator(".logs-severity-select");
     await severity.selectOption("warn");
     await expect(chip).toHaveValue("docker");
   });
