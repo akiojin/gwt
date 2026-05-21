@@ -154,12 +154,14 @@ pub fn reserve_start_work_branch_name_for_project(
     repo_path: &Path,
     now: DateTime<Utc>,
 ) -> Result<String, StartWorkError> {
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
     let reservations_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
         .join("workspace")
         .join("start-work-reservations");
     reserve_start_work_branch_name_with_reservations(
         now,
-        |candidate| local_or_remote_branch_exists(repo_path, candidate),
+        |candidate| local_or_remote_branch_exists(&git_root, candidate),
         &reservations_dir,
     )
 }

@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use gwt::worktree_inventory::{enumerate_worktrees, WorktreeEntryKind};
+use gwt::worktree_inventory::{
+    enumerate_worktrees, enumerate_worktrees_with_sessions_dir, WorktreeEntryKind,
+};
 use tempfile::tempdir;
 
 fn git(args: &[&str], cwd: &Path) {
@@ -99,4 +101,43 @@ fn enumerate_worktrees_skips_prunable_entries() {
     let entries = enumerate_worktrees(&repo, None).expect("inventory");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, WorktreeEntryKind::BareMain);
+}
+
+#[test]
+fn enumerate_worktrees_includes_session_ids_for_each_worktree() {
+    let dir = tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    init_repo(&repo);
+
+    let worktree_path = dir.path().join("worktrees").join("feature-a");
+    git(
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/a",
+            worktree_path.to_str().expect("path str"),
+        ],
+        &repo,
+    );
+    let sessions_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    for session_id in ["session-b", "session-a"] {
+        let mut session =
+            gwt_agent::Session::new(&worktree_path, "feature/a", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.save(&sessions_dir).expect("save session");
+    }
+    let mut main_session = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::ClaudeCode);
+    main_session.id = "session-main".to_string();
+    main_session.save(&sessions_dir).expect("save main session");
+
+    let entries = enumerate_worktrees_with_sessions_dir(&repo, Some(&worktree_path), &sessions_dir)
+        .expect("inventory");
+
+    assert_eq!(entries[0].session_ids, vec!["session-main".to_string()]);
+    assert_eq!(
+        entries[1].session_ids,
+        vec!["session-a".to_string(), "session-b".to_string()]
+    );
 }

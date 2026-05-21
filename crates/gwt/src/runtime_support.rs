@@ -34,7 +34,9 @@ pub fn close_window_from_workspace(
 }
 
 pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
-    window.preset.requires_process() && window.status == WindowProcessStatus::Running
+    window.preset.requires_process()
+        && window.preset != WindowPreset::Agent
+        && window.status == WindowProcessStatus::Running
 }
 
 // SPEC-2013 FR-011: `cli::pane::is_agent_pane` と同じ判定 (`agent_id` 設定済み

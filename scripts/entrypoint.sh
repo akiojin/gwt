@@ -65,8 +65,8 @@ else
 fi
 
 echo "🚀 Docker development environment is ready!"
-echo "   You can now build the project with: bun run build"
-echo "   Or start development with: bun run dev"
+echo "   You can now build the project with: cargo build --release -p gwt --bin gwt --bin gwtd"
+echo "   Or start development with: cargo run -p gwt --bin gwt"
 echo ""
 
 # コマンドの実行（デフォルトはbash）

@@ -56,7 +56,6 @@ DEFAULT_IGNORE_PATTERNS = [
     "*.map",
     "*.lock",
     "package-lock.json",
-    "pnpm-lock.yaml",
     "yarn.lock",
     "Cargo.lock",
 ]

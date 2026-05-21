@@ -8,7 +8,6 @@
 
 - Bun 1.3.1+（推奨: 最新版）
 - Node.js 18+（任意、Node製開発ツール利用時）
-- pnpm（Corepack経由、任意。CIのcommitlintはpnpmを使用）
 - Git 2.25+
 - GitHub CLI (オプション、PRクリーンアップ機能のテストに必要)
 
@@ -23,24 +22,16 @@ git clone https://github.com/YOUR_USERNAME/gwt.git
 cd gwt
 ```
 
-1. 依存関係をインストール
-
-```bash
-bun install
-```
-
-> Note: Nodeベースのツールチェーン（CIのcommitlint等）はpnpm（Corepack）を使用します。ロックファイルは `pnpm-lock.yaml` を正とし、`package-lock.json` は使用しません。
-
 1. ビルド
 
 ```bash
-bun run build
+cargo build -p gwt --bin gwt --bin gwtd
 ```
 
 1. ローカルで実行
 
 ```bash
-bunx .
+cargo run -p gwt --bin gwt
 ```
 
 ## Project Structure
@@ -330,7 +321,7 @@ describe("Module/Feature", () => {
 
 1. `/release` コマンドで Release PR を作成
 2. Release PR が main にマージされると release-please がタグ・GitHub Release を作成
-3. npmに自動公開
+3. GitHub Release に installer / portable bundle を公開
 4. main → develop への自動バックマージ
 
 ## Questions?

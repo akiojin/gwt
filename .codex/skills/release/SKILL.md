@@ -18,7 +18,7 @@ Follow the release flow defined in `.claude/commands/release.md`. Treat that com
 ```
 develop (バージョン更新・CHANGELOG更新) → main (PR)
                                             ↓
-                                  GitHub Release & npm publish (自動)
+                                  GitHub Release assets (自動)
 ```
 
 ### Preconditions
@@ -35,7 +35,7 @@ develop (バージョン更新・CHANGELOG更新) → main (PR)
 3. Identify the latest `v*` tag and confirm there are unreleased commits.
 4. Classify the next version from commits after the latest tag: breaking change -> major, `feat` -> minor, `fix` -> patch, otherwise patch. Do not use `git-cliff --bumped-version`.
 5. Present the computed version, changelog preview, and commit list to the user, then wait for explicit approval.
-6. Update `Cargo.toml`, `package.json`, `Cargo.lock`, and `CHANGELOG.md`.
+6. Update `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
 7. Create `chore(release): v{VERSION}` on `develop` and push it.
 8. Collect Closing Issues with `scripts/release_issue_refs.py`; keep `gwt-spec` Issues reference-only.
 9. Create or update the `develop -> main` Release PR and report the result.

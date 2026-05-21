@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+node --check crates/gwt/web/app.js
+node --check crates/gwt/web/branch-cleanup-modal.js
+node --check crates/gwt/web/migration-modal.js
+node --check crates/gwt/web/project-clone-modal.js
+node --check crates/gwt/web/board-surface.js
+node --check crates/gwt/web/workspace-kanban-surface.js
+node --check crates/gwt/web/theme-manager.js
+node --check crates/gwt/web/theme-toggle.js
+node --check crates/gwt/web/hotkey.js
+node --check crates/gwt/web/operator-shell.js
+node --check crates/gwt/web/focus-trap.js
+node --check crates/gwt/web/window-docking.js
+node --check crates/gwt/web/update-cta.js
+node --check crates/gwt/web/terminal-context-menu.js
+node --check crates/gwt/web/terminal-wheel-scroll.js
+node --check crates/gwt/web/canvas-wheel-gesture.js
+node --check crates/gwt/web/window-geometry-sync.js
+node --check crates/gwt/web/custom-agent-env-editor.js
+node --check crates/gwt/web/socket-receive-dispatcher.js
+node --check crates/gwt/web/interaction-guard.js
+node --check crates/gwt/web/viewport-persist-throttle.js
+node --check crates/gwt/web/viewport-sync.js
+node --check crates/gwt/web/project-tabs-renderer.js
+node --check crates/gwt/web/clone-modal-focus-guard.js
+node --check crates/gwt/web/ui-trace-profiler.js
+node --check crates/gwt/web/ui-trace-wiring.js
+node --check crates/gwt/web/close-project-tab-confirm-modal.js
+node --check crates/gwt/web/release-notes-window.js
+node --check crates/gwt/web/console-window.js

@@ -297,6 +297,44 @@ fn start_work_resolves_main_only_bare_workspace_home_by_creating_remote_develop(
 }
 
 #[test]
+fn start_work_reserves_branch_name_from_workspace_home_with_child_bare_repo() {
+    let temp = tempdir().expect("tempdir");
+    let workspace_home = temp.path().join("sample");
+    let (bare_repo, _origin) = init_main_only_bare_workspace_home(&workspace_home);
+    let now = Utc
+        .with_ymd_and_hms(2026, 5, 21, 1, 39, 0)
+        .single()
+        .expect("timestamp");
+    run_git(&bare_repo, &["branch", "work/20260521-0139", "main"]);
+
+    let reserved =
+        gwt::start_work::reserve_start_work_branch_name_for_project(&workspace_home, now)
+            .expect("reserve Start Work branch from Workspace Home");
+    let second = gwt::start_work::reserve_start_work_branch_name_for_project(&workspace_home, now)
+        .expect("reserve suffixed Start Work branch from Workspace Home");
+
+    assert_eq!(reserved, "work/20260521-0139-2");
+    assert_eq!(second, "work/20260521-0139-3");
+    let work_refs = git_output(
+        &bare_repo,
+        &[
+            "for-each-ref",
+            "refs/heads/work",
+            "refs/remotes/origin/work",
+        ],
+    );
+    assert!(
+        work_refs.contains("refs/heads/work/20260521-0139"),
+        "test fixture should keep the existing work ref visible"
+    );
+    assert!(
+        !work_refs.contains("refs/heads/work/20260521-0139-2")
+            && !work_refs.contains("refs/heads/work/20260521-0139-3"),
+        "Start Work open/reservation must not create reserved work refs"
+    );
+}
+
+#[test]
 fn start_work_launch_fails_without_work_branch_when_remote_develop_creation_fails() {
     let temp = tempdir().expect("tempdir");
     let workspace_home = temp.path().join("sample");

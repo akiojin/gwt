@@ -149,6 +149,8 @@ pub struct ResumableAgentView {
     /// for that id), so a fresh agent will be started while preserving
     /// the Workspace title / owner.
     pub resume_kind: ResumableAgentResumeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_status: Option<ResumableAgentLifecycleStatus>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
@@ -156,6 +158,13 @@ pub struct ResumableAgentView {
 pub enum ResumableAgentResumeKind {
     Session,
     MetadataOnly,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumableAgentLifecycleStatus {
+    Active,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
