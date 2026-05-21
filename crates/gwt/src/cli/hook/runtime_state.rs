@@ -216,17 +216,39 @@ mod tests {
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::{coordination_events_segments_dir, load_snapshot};
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     use super::*;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
+        crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn runtime_state_env_lock_shares_crate_wide_env_lock() {
+        let global = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).expect("send lock attempt started");
+            let _lock = env_lock();
+            tx.send(()).expect("send lock acquired");
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("env lock probe thread started");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "runtime_state tests must wait on the crate-wide env lock"
+        );
+        drop(global);
+        handle.join().expect("env lock probe thread");
     }
 
     struct EnvGuard {
