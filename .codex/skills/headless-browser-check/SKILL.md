@@ -1,12 +1,12 @@
 ---
 name: headless-browser-check
-description: Use when a user needs a manual browser check of this gwt project, asks to launch gwt in headless or serve mode, or wants the agent to monitor logs while they inspect the UI.
+description: Use when a user needs a manual browser check of this gwt project, asks to launch gwt in headless or serve mode, or needs a served browser URL for UI inspection.
 ---
 
 # Headless Browser Check
 
 Run the gwt GUI as a headless browser-served app, hand the browser URL to the
-user, and stay on log watch while the user checks the UI.
+user, and wait for the user's visual confirmation.
 
 ## Scope
 
@@ -44,29 +44,19 @@ not use it for CI-only Playwright runs or generic web app servers.
    - The URL.
    - The log file path.
    - That the startup/stdout log may stay quiet during normal UI actions.
-   - That the agent is also watching recent project structured logs under
-     `~/.gwt/projects/*/logs/gwt.log.<date>` for backend events, access logs,
-     warnings, and errors.
    - Ask them to report what they see, or say when they are done.
-7. Monitor until the user is done:
+7. Wait until the user is done:
    - Keep the exec session running.
-   - Poll output about every 30 seconds.
-   - Also locate and tail recently modified structured logs:
-     `find ~/.gwt/projects -path "*/logs/gwt.log.$(date -u +%F)" -mmin -30 -print | while IFS= read -r log; do tail -n 200 "$log"; done`.
-   - Watch for `panic`, `ERROR`, `WARN`, `failed`, `refused`, `500`, WebSocket
-     failures, asset load failures, and unexpected process exit.
-   - Do not promise that every window open or click will be logged. Normal UI
-     actions may show only HTTP/WebSocket/access activity, not semantic window
-     names.
-   - Summarize only meaningful new log events. If nothing changed, say so
-     briefly.
-   - If the user reports a UI problem, immediately inspect recent server output
-     and the log file before proposing fixes.
+   - Do not poll or tail logs on a timer while the user inspects the UI.
+   - Do not run periodic structured-log checks under
+     `~/.gwt/projects/*/logs/gwt.log.<date>`.
+   - If the user reports a UI problem, inspect recent server output, the
+     startup/stdout log file, and then relevant structured logs before
+     proposing fixes.
 8. Shutdown:
    - When the user says the check is finished, send Ctrl-C to the headless
      process and wait for it to exit.
-   - Report any observed log issues, the tested URL, and whether shutdown was
-     clean.
+   - Report the tested URL and whether shutdown was clean.
 
 ## Guardrails
 
