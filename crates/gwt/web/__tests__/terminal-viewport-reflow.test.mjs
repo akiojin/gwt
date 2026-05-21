@@ -172,6 +172,8 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
   const callOrder = [];
   let layoutFlushed = 0;
   const parent = {
+    clientWidth: 800,
+    clientHeight: 480,
     getBoundingClientRect: () => {
       callOrder.push("flush-layout");
       layoutFlushed += 1;
@@ -238,6 +240,80 @@ test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry 
   // sendGeometry / focus are suppressed by the flags.
   assert.deepEqual(callOrder, ["refresh", "fit"]);
   assert.equal(result.ran, true);
+});
+
+test("runTerminalActivationSequence waits for the terminal host layout box before fitting (#2839)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: {
+        parentElement: {
+          clientWidth: 0,
+          clientHeight: 360,
+          getBoundingClientRect: () => {
+            callOrder.push("flush-layout");
+            return { width: 0, height: 360 };
+          },
+        },
+      },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => ({ cols: 100, rows: 28 }),
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-layout-pending",
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, [], "0-size terminal host must not fit, send geometry, or focus");
+  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
+});
+
+test("runTerminalActivationSequence waits when xterm fit dimensions are unavailable (#2839)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: {
+        parentElement: {
+          clientWidth: 800,
+          clientHeight: 420,
+          getBoundingClientRect: () => {
+            callOrder.push("flush-layout");
+            return { width: 800, height: 420 };
+          },
+        },
+      },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => undefined,
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-cell-pending",
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(
+    callOrder,
+    ["refresh", "flush-layout"],
+    "unresolved xterm cell metrics must not fit, send geometry, or focus",
+  );
+  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
 });
 
 test("runTerminalActivationSequence is a no-op when runtime is missing pieces (T-199)", () => {
@@ -387,6 +463,11 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /terminalContainerHasLayoutBox\(windowId\)/,
     "completeInitialFitHandshake must consult terminalContainerHasLayoutBox",
+  );
+  assert.match(
+    appSource,
+    /function terminalContainerHasLayoutBox\(windowId\) \{[\s\S]*?terminalMap\.get\(windowId\)[\s\S]*?parentElement[\s\S]*?elementHasLayoutBox/,
+    "terminalContainerHasLayoutBox must measure the actual xterm host, not only the outer workspace window",
   );
   assert.match(
     appSource,

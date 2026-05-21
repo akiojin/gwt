@@ -2084,11 +2084,27 @@
       const HANDSHAKE_RETRY_LIMIT = 60;
 
       function terminalContainerHasLayoutBox(windowId) {
+        const runtime = terminalMap.get(windowId);
+        const terminalHost = runtime?.terminal?.element?.parentElement;
+        if (terminalHost) {
+          return elementHasLayoutBox(terminalHost);
+        }
         const element = windowMap.get(windowId);
         // Fall through to true when the element is not registered yet — the
         // initial-fit handshake is gated by canRefreshTerminalViewport which
         // already short-circuits the no-element case.
         return elementHasLayoutBox(element);
+      }
+
+      function retryInitialFitHandshake(windowId, runtime, reason) {
+        runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
+        if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
+          requestAnimationFrame(() => completeInitialFitHandshake(windowId));
+          return;
+        }
+        console.warn(
+          `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; ${reason}.`,
+        );
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -2107,11 +2123,13 @@
               }
               return;
             }
-            runtime.fitAddon.fit();
-            if (!persist) {
-              return;
-            }
-            sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+            runTerminalActivationSequence({
+              runtime,
+              windowId,
+              shouldFocus: false,
+              shouldPersistGeometry: persist,
+              sendGeometry,
+            });
           }
         );
       }
@@ -3380,7 +3398,7 @@
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 14,
-          lineHeight: 1.28,
+          lineHeight: 1.3,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
@@ -3490,23 +3508,22 @@
         // non-zero box, with an attempt ceiling so a perma-hidden window
         // can not pin the loop.
         if (!terminalContainerHasLayoutBox(windowId)) {
-          runtime.handshakeAttempts = (runtime.handshakeAttempts || 0) + 1;
-          if (runtime.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT) {
-            requestAnimationFrame(() => completeInitialFitHandshake(windowId));
-            return;
-          }
-          console.warn(
-            `[gwt] terminal ${windowId} initial-fit handshake gave up after ${HANDSHAKE_RETRY_LIMIT} attempts; container stayed 0-size. Falling back to immediate activation.`,
-          );
+          retryInitialFitHandshake(windowId, runtime, "terminal host stayed 0-size");
+          return;
         }
 
-        runTerminalActivationSequence({
+        const activation = runTerminalActivationSequence({
           runtime,
           windowId,
           shouldFocus: false,
           shouldPersistGeometry: true,
           sendGeometry,
         });
+        if (!activation.ran) {
+          retryInitialFitHandshake(windowId, runtime, "xterm fit dimensions stayed unavailable");
+          return;
+        }
+        runtime.handshakeAttempts = 0;
         runtime.isReady = true;
 
         const snapshot = pendingSnapshotMap.get(windowId);
