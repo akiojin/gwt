@@ -2694,12 +2694,6 @@ impl AppRuntime {
             {
                 continue;
             }
-            if self
-                .open_project_path(session.worktree_path.clone())
-                .is_err()
-            {
-                continue;
-            }
             let Some(tab_id) = self
                 .tabs
                 .iter()
@@ -11001,7 +10995,14 @@ exit 1
                 worktree.to_str().expect("worktree path"),
             ],
         );
-        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let tab = sample_project_tab(
+            "tab-auto",
+            "Auto Resume",
+            worktree.clone(),
+            ProjectKind::Git,
+            &[],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
         for (session_id, native_session_id) in [
             ("session-auto-one", "native-session-one"),
             ("session-auto-two", "native-session-two"),
@@ -11035,6 +11036,53 @@ exit 1
         assert_eq!(
             agent_windows, 2,
             "all exact-resumable sessions for a worktree should restart"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("unlisted-auto-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/unlisted-auto-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/unlisted-auto-resume",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = "session-unlisted-auto".to_string();
+        session.agent_session_id = Some("native-unlisted-auto".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+
+        runtime.bootstrap();
+
+        assert!(
+            runtime.tabs.is_empty(),
+            "bootstrap must not open project tabs from old session TOMLs that were not restored from session.json"
+        );
+        assert!(
+            runtime.pending_auto_resume_sources.is_empty(),
+            "unlisted sessions must remain manual resume candidates instead of launching hidden agent windows"
         );
     }
 

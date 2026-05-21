@@ -252,12 +252,17 @@ impl Session {
         matches!(
             self.status,
             AgentStatus::Running | AgentStatus::WaitingInput | AgentStatus::Interrupted
-        ) && self.worktree_path.exists()
+        ) && self.has_lifecycle_recovery_evidence()
+            && self.worktree_path.exists()
             && self
                 .agent_session_id
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
+    }
+
+    fn has_lifecycle_recovery_evidence(&self) -> bool {
+        self.last_hook_event_at.is_some() || self.last_completed_stop_at.is_some()
     }
 
     /// Check if the session should be marked as stopped due to idle timeout.
@@ -1229,6 +1234,7 @@ display_name = "Claude Code"
         let path = dir.path().join("legacy.toml");
         let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
         session.status = AgentStatus::Running;
+        session.agent_session_id = Some("legacy-native-session".to_string());
         session.schema_version = 2;
         let mut value = toml::Value::try_from(&session)
             .unwrap()
@@ -1245,6 +1251,10 @@ display_name = "Claude Code"
         assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
         assert_eq!(loaded.status, AgentStatus::Interrupted);
         assert!(loaded.interrupted_recovery_candidate());
+        assert!(
+            !loaded.exact_auto_resume_candidate(),
+            "legacy sessions without lifecycle evidence remain manually recoverable but must not be eagerly auto-resumed"
+        );
     }
 
     #[test]
