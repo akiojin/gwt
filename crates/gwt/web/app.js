@@ -747,13 +747,20 @@
           strip.classList.toggle("op-status-strip--offline", !connected);
         }
         if (!connected) {
-          for (const [windowId] of branchListStateMap.entries()) {
+          for (const [windowId, state] of branchListStateMap.entries()) {
+            let shouldRenderBranches = false;
             if (
               failRunningBranchCleanup(
                 windowId,
                 "Connection lost while cleaning up branches",
               )
             ) {
+              shouldRenderBranches = true;
+            }
+            if (failLoadingBranchesOnConnectionLoss(windowId, state)) {
+              shouldRenderBranches = true;
+            }
+            if (shouldRenderBranches) {
               renderBranches(windowId);
             }
           }
@@ -8307,6 +8314,23 @@
           return "";
         }
         return state.entries.length === 0 ? "" : "Loading branch details";
+      }
+
+      function failLoadingBranchesOnConnectionLoss(windowId, state) {
+        if (!state || !state.loading) {
+          return false;
+        }
+        state.loading = false;
+        state.receivedFreshEntries = false;
+        if (state.entries.length === 0) {
+          state.error = "Connection lost while loading branches";
+          state.notice = "";
+        } else {
+          state.error = "";
+          state.notice = "Connection lost while loading branch details";
+        }
+        syncBranchSelectionState(state);
+        return true;
       }
 
       function branchCleanupPendingText(state) {

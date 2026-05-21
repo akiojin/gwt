@@ -92,5 +92,5 @@ jobs:
         run: cargo test -p gwt-core terminal::pty
         timeout-minutes: 15
       - name: Run release asset contract tests
-        run: npm run --silent test:release-assets
+        run: node scripts/test_release_assets.cjs
         timeout-minutes: 15

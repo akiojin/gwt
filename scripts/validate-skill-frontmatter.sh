@@ -86,16 +86,27 @@ for index in "${!SKILL_FILES[@]}"; do
 done
 
 if [ -s "$MANIFEST" ]; then
-  if ! MANIFEST="$MANIFEST" pnpm dlx -s --package js-yaml -c '
-    status=0
-    while IFS="$(printf "\t")" read -r yaml_file source_path; do
-      if ! output=$(js-yaml -c "$yaml_file" 2>&1 >/dev/null); then
-        printf "%s: invalid YAML frontmatter: %s\n" "$source_path" "$output" >&2
-        status=1
-      fi
-    done < "$MANIFEST"
-    exit "$status"
-  '; then
+  if command -v ruby >/dev/null 2>&1; then
+    if ! MANIFEST="$MANIFEST" ruby <<'RUBY'
+require "yaml"
+
+status = 0
+File.readlines(ENV.fetch("MANIFEST"), chomp: true).each do |line|
+  yaml_file, source_path = line.split("\t", 2)
+  begin
+    YAML.safe_load(File.read(yaml_file), permitted_classes: [], aliases: false)
+  rescue StandardError => e
+    warn "#{source_path}: invalid YAML frontmatter: #{e.message}"
+    status = 1
+  end
+end
+exit status
+RUBY
+    then
+      FAILURES=1
+    fi
+  else
+    echo "ruby is required to validate SKILL.md YAML frontmatter." >&2
     FAILURES=1
   fi
 fi

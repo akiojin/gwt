@@ -31,18 +31,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10.29.2
-          run_install: false
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Enable Corepack (pnpm)
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.29.2 --activate
-          pnpm --version
       - name: Run Clippy
         run: cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings
       - name: Check formatting
@@ -56,9 +47,9 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps --document-private-items
       - name: Check frontend bundle syntax
-        run: npm run --silent test:frontend-bundle
+        run: bash scripts/check-frontend-bundle.sh
       - name: Check release flow contract
-        run: npm run --silent test:release-flow
+        run: bash scripts/check-release-flow.sh
       - name: Run Markdownlint
         uses: nosborn/github-action-markdown-cli@v3.5.0
         with:
@@ -68,7 +59,7 @@ jobs:
             target/
             CHANGELOG.md
       - name: Validate SKILL.md frontmatter
-        run: pnpm lint:skills
+        run: bash scripts/validate-skill-frontmatter.sh
 
   commitlint:
     name: Commit Message Lint
@@ -78,28 +69,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # actions/setup-node's pnpm cache requires pnpm to be available.
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10.29.2
-          run_install: false
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: 'pnpm'
-          cache-dependency-path: pnpm-lock.yaml
-      - name: Enable Corepack (pnpm)
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.29.2 --activate
-          pnpm --version
-      - name: Ensure pnpm store dir exists (for setup-node cache)
-        run: |
-          STORE_PATH="$(pnpm store path --silent || true)"
-          if [ -n "$STORE_PATH" ]; then
-            mkdir -p "$STORE_PATH"
-            echo "pnpm store: $STORE_PATH"
-          fi
+      - uses: oven-sh/setup-bun@v2
       - name: Validate commit messages
         continue-on-error: true
         env:
@@ -119,7 +89,7 @@ jobs:
           FROM_SHA=${LAST_BASE_MERGE:-${MERGE_BASE:-$BASE_SHA}}
           COMMIT_COUNT=$(git rev-list --count "$FROM_SHA".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
-            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
+            bunx --package @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
+            bunx --package @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi

@@ -12,8 +12,6 @@ const {
   primaryReleaseAssetName,
   releaseAssetName,
 } = require("./release-assets.cjs");
-const postinstall = require("./postinstall.cjs");
-const launcher = require("../bin/gwt.cjs");
 
 let failed = false;
 
@@ -57,15 +55,6 @@ run("release helper keeps bundle binary names stable", () => {
   assert.deepEqual(bundleBinaryNamesForPlatform("win32"), ["gwt.exe", "gwtd.exe"]);
   assert.deepEqual(bundleBinaryNamesForPlatform("linux"), ["gwt", "gwtd"]);
   assert.deepEqual(bundleBinaryNamesForPlatform("darwin"), ["gwt", "gwtd"]);
-});
-
-run("installer entrypoints are loadable under package type module", () => {
-  const daemonLauncher = require("../bin/gwtd.cjs");
-
-  assert.equal(typeof postinstall.main, "function");
-  assert.equal(typeof launcher.main, "function");
-  assert.equal(typeof daemonLauncher.main, "function");
-  assert.equal(typeof daemonLauncher.readVersion, "function");
 });
 
 run("windows installer definition includes the gwtd companion binary", () => {
@@ -147,11 +136,28 @@ run("macOS app bundle declares and ships the CFBundleIconFile resource", () => {
   );
 });
 
-run("package scripts keep the GUI front door and release contract explicit", () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
-  assert.equal(pkg.bin.gwt, "bin/gwt.cjs");
-  assert.equal(pkg.bin.gwtd, "bin/gwtd.cjs");
-  assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
+run("repository does not expose gwt through npm package metadata", () => {
+  for (const relativePath of [
+    "package.json",
+    "pnpm-lock.yaml",
+    "scripts/postinstall.cjs",
+    "bin/gwt.cjs",
+    "bin/gwtd.cjs",
+    "bin/launcher.cjs",
+  ]) {
+    assert.equal(
+      fs.existsSync(path.join(__dirname, "..", relativePath)),
+      false,
+      `${relativePath} must not exist after npm distribution removal`
+    );
+  }
+});
+
+run("frontend bundle check keeps the GUI front door explicit", () => {
+  const bundleScript = fs.readFileSync(
+    path.join(__dirname, "check-frontend-bundle.sh"),
+    "utf8"
+  );
   // SPEC-2356 — the frontend bundle now also covers Operator Design System
   // ESM modules (theme-manager / hotkey / operator-shell). The contract is
   // expressed as required substrings so future modules can extend the chain
@@ -168,13 +174,10 @@ run("package scripts keep the GUI front door and release contract explicit", () 
     "node --check crates/gwt/web/focus-trap.js",
   ]) {
     assert.ok(
-      pkg.scripts["test:frontend-bundle"].includes(required),
-      `test:frontend-bundle must include "${required}", got: ${pkg.scripts["test:frontend-bundle"]}`
+      bundleScript.includes(required),
+      `check-frontend-bundle.sh must include "${required}"`
     );
   }
-  assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
-  assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
-  assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
 });
 
 run("macos install scripts install and remove both public command shims", () => {
@@ -204,11 +207,11 @@ run("test all script keeps rust tests plus frontend release checks", () => {
 run("release flow helper checks the shared frontend bundle and release assets", () => {
   const releaseFlow = fs.readFileSync(path.join(__dirname, "check-release-flow.sh"), "utf8");
   assert.match(releaseFlow, /scripts\/test_release_assets\.cjs/);
-  assert.match(releaseFlow, /node --check \"\$APP_JS\"/);
+  assert.match(releaseFlow, /scripts\/check-frontend-bundle\.sh/);
   assert.match(releaseFlow, /script type=\"module\" src=\"\/app\.js\"/);
 });
 
-run("CI workflows call the named frontend and release verification scripts", () => {
+run("CI workflows call direct verification scripts and skip npm publish", () => {
   const lintWorkflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "lint.yml"),
     "utf8"
@@ -217,10 +220,35 @@ run("CI workflows call the named frontend and release verification scripts", () 
     path.join(__dirname, "..", ".github", "workflows", "test.yml"),
     "utf8"
   );
+  const releaseWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  const visualWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "visual-regression.yml"),
+    "utf8"
+  );
+  const smokeTests = fs.readFileSync(
+    path.join(__dirname, "run-frontend-smoke-tests.sh"),
+    "utf8"
+  );
+  const unitTests = fs.readFileSync(
+    path.join(__dirname, "run-frontend-unit-tests.sh"),
+    "utf8"
+  );
+  const visualTests = fs.readFileSync(
+    path.join(__dirname, "run-visual-tests.sh"),
+    "utf8"
+  );
 
-  assert.match(lintWorkflow, /test:frontend-bundle/);
-  assert.match(lintWorkflow, /test:release-flow/);
-  assert.match(testWorkflow, /test:release-assets/);
+  assert.match(lintWorkflow, /bash scripts\/check-frontend-bundle\.sh/);
+  assert.match(lintWorkflow, /bash scripts\/check-release-flow\.sh/);
+  assert.match(testWorkflow, /node scripts\/test_release_assets\.cjs/);
+  assert.doesNotMatch(releaseWorkflow, /publish-npm|npm publish|registry\.npmjs\.org|NPM_TOKEN/);
+  assert.match(visualWorkflow, /oven-sh\/setup-bun@v2/);
+  for (const content of [visualWorkflow, smokeTests, unitTests, visualTests]) {
+    assert.doesNotMatch(content, /pnpm(?:\/action-setup| dlx|\b)/);
+  }
 });
 
 run("README install guidance points to GUI-first release assets", () => {
@@ -231,8 +259,8 @@ run("README install guidance points to GUI-first release assets", () => {
     assert.match(doc, /gwt-macos-universal\.dmg/);
     assert.match(doc, /gwt-windows-x86_64\.msi/);
     assert.match(doc, /gwt-linux-x86_64\.tar\.gz/);
-    assert.match(doc, /test:frontend-bundle|node --check crates\/gwt\/web\/app\.js/);
-    assert.match(doc, /test:release-flow|bash scripts\/check-release-flow\.sh/);
+    assert.match(doc, /bash scripts\/check-frontend-bundle\.sh/);
+    assert.match(doc, /bash scripts\/check-release-flow\.sh/);
   }
 });
 

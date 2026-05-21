@@ -5877,3 +5877,27 @@ exact auto resume 候補として扱える余地があった。
    exact auto resume 候補にはしない。
 3. 復元系の修正では、実HOMEに近い「多数の古い session TOML がある」ケースをテストまたは
    headed browser smoke で確認し、URL 出力前に大量の agent/version process が起動しないことを見る。
+
+## Hook runtime state の env mutation test は crate-wide lock を共有する
+
+### 事象
+
+Release PR の `cargo test -p gwt-core -p gwt --all-features` で、
+`handle_user_prompt_submit_uses_hook_cwd_for_board_scope` が `HookOutput::Silent` になり、
+後続の workspace tests が `PoisonError` で連鎖失敗した。
+
+### 原因
+
+`runtime_state` tests が独自の `ENV_LOCK` を持っており、crate-wide の `env_test_lock()` で保護された
+`board_reminder` / workspace tests と同時に `GWT_SESSION_ID` などの process-wide env を変更できた。
+そのため並列 test 実行時に hook session env が消え、最初の panic が shared lock を poison した。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `GWT_SESSION_ID` / `GWT_SESSION_RUNTIME_PATH` などの process-wide env を触る
+   gwt tests は、ローカル mutex を作らず必ず `crate::env_test_lock()` を共有する。
+2. lock 共有の regression test では、保持中に取得できないことだけを短い timeout で確認し、
+   lock 解除後の取得完了は固定 timeout ではなく thread join で待つ。全体並列実行では他の env tests が
+   先に lock を取る可能性がある。
+3. env lock を使う巻き添え側の tests は、`lock().unwrap()` ではなく poisoned lock を回復する helper を使い、
+   先行 panic の調査を `PoisonError` のノイズで隠さない。
