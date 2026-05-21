@@ -1,17 +1,17 @@
 ---
-description: Unified semantic search over SPECs, Issues, and project source files
+description: Unified semantic search over SPECs, Issues, project source files, and memory
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # Search Command
 
-Unified semantic search over SPEC Issues, GitHub Issues, and project source files using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
+Unified semantic search over SPEC Issues, GitHub Issues, project source files, and reusable project memory using ChromaDB vector embeddings. Use as mandatory preflight before creating new SPECs or Issues.
 
 ## Usage
 
 ```text
-/gwt:gwt-search [query] [--specs] [--issues] [--files]
+/gwt:gwt-search [query] [--specs] [--issues] [--files] [--memory]
 ```
 
 ## Steps
@@ -32,4 +32,8 @@ Unified semantic search over SPEC Issues, GitHub Issues, and project source file
 
 ```text
 /gwt:gwt-search --issues "crash on resize"
+```
+
+```text
+/gwt:gwt-search --memory "watcher debounce"
 ```

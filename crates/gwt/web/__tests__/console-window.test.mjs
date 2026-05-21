@@ -76,9 +76,10 @@ test("Console window push() removes the empty hint and appends the line", () => 
   const lines = ghPane.querySelectorAll(".console-window__line");
   assert.equal(lines.length, 1);
   assert.equal(lines[0].textContent, "PR #2810 created");
-  // The first spawn always emits an invocation header before the line.
+  // Plain messages are rendered as regular lines — the backend pushes a
+  // synthetic "$ <command>" banner separately when an actual spawn starts.
   const headers = ghPane.querySelectorAll(".console-window__invocation-header");
-  assert.equal(headers.length, 1);
+  assert.equal(headers.length, 0);
 });
 
 test("Console window stderr line uses the dedicated stderr class", () => {
@@ -101,7 +102,7 @@ test("Console window stderr line uses the dedicated stderr class", () => {
   assert.equal(stderrLine.textContent, "fatal: not a repo");
 });
 
-test("Console window inserts a new invocation header when spawn_id changes", () => {
+test("Console window renders backend-pushed $ command banners as invocation headers", () => {
   const document = freshDocument();
   const controller = createConsoleWindow({ document });
   const host = document.getElementById("host");
@@ -111,24 +112,87 @@ test("Console window inserts a new invocation header when spawn_id changes", () 
     kind: "docker",
     spawn_id: 10,
     stream: "stdout",
-    message: "Pulling layer A",
+    message: "$ docker pull alpine",
   });
   controller.push({
     kind: "docker",
     spawn_id: 10,
     stream: "stdout",
-    message: "Pulling layer B",
+    message: "Pulling layer A",
   });
   controller.push({
     kind: "docker",
     spawn_id: 11,
     stream: "stdout",
-    message: "Pulling layer A (second run)",
+    message: "$ docker pull busybox",
+  });
+  controller.push({
+    kind: "docker",
+    spawn_id: 11,
+    stream: "stdout",
+    message: "→ exit=0 (42ms)",
   });
 
   const pane = host.querySelector(".console-window__pane[data-kind='docker']");
   const headers = pane.querySelectorAll(".console-window__invocation-header");
-  assert.equal(headers.length, 2, "two distinct spawn_ids should yield two headers");
+  assert.equal(
+    headers.length,
+    3,
+    "two `$ ...` banners + one `→ ...` footer should render as headers",
+  );
+  const lines = pane.querySelectorAll(".console-window__line");
+  assert.equal(lines.length, 1, "only the non-banner middle line is a regular line");
+});
+
+test("Console window keeps tee-layer [target] lines as regular lines, not banners", () => {
+  // Regression for the user-reported issue (2026-05-21): ConsoleTeeLayer
+  // emits lines like `[gwt::index] project index status runner completed
+  // (...)`. These are operational log lines, not command banners, and
+  // should render with the regular line CSS so the runner tab stays
+  // dense and readable instead of getting block-level margins on every
+  // line.
+  const document = freshDocument();
+  const controller = createConsoleWindow({ document });
+  const host = document.getElementById("host");
+  controller.mount(host);
+
+  controller.push({
+    kind: "runner",
+    spawn_id: 0,
+    stream: "stdout",
+    message: "[gwt::index] project index status runner ensured (project_root=/tmp ms=12)",
+  });
+  controller.push({
+    kind: "runner",
+    spawn_id: 0,
+    stream: "stdout",
+    message: "[gwt_core::index::runtime] refreshed worktree (elapsed_ms=4)",
+  });
+  controller.push({
+    kind: "agent",
+    spawn_id: 7,
+    stream: "stdout",
+    message: "[wizard] launching codex",
+  });
+
+  const runnerPane = host.querySelector(".console-window__pane[data-kind='runner']");
+  assert.equal(
+    runnerPane.querySelectorAll(".console-window__invocation-header").length,
+    0,
+    "[gwt::...] tee lines must not be treated as headers",
+  );
+  assert.equal(
+    runnerPane.querySelectorAll(".console-window__line").length,
+    2,
+    "both tee lines render as regular lines",
+  );
+
+  const agentPane = host.querySelector(".console-window__pane[data-kind='agent']");
+  assert.equal(
+    agentPane.querySelectorAll(".console-window__invocation-header").length,
+    1,
+    "short single-word [stage] banners are still treated as headers",
+  );
 });
 
 test("Console window ingestSnapshot replays per-kind buffers", () => {

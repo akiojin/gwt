@@ -534,6 +534,10 @@ mod tests {
             "missing gwt-arch-review skill dir"
         );
         assert!(dirs.contains(&"gwt-search"), "missing gwt-search skill dir");
+        assert!(
+            dirs.contains(&"gwt-memory-search"),
+            "missing gwt-memory-search skill dir"
+        );
         assert!(dirs.contains(&"gwt-agent"), "missing gwt-agent skill dir");
         assert!(
             dirs.contains(&"gwt-manage-pr"),
@@ -593,6 +597,10 @@ mod tests {
         assert!(
             files.contains(&"gwt-search.md"),
             "missing gwt-search.md command"
+        );
+        assert!(
+            files.contains(&"gwt-memory-search.md"),
+            "missing gwt-memory-search.md command"
         );
         assert!(
             files.contains(&"gwt-agent.md"),
@@ -1236,6 +1244,7 @@ mod tests {
             "gwt-build-spec",
             "gwt-arch-review",
             "gwt-search",
+            "gwt-memory-search",
             "gwt-agent",
             "gwt-manage-pr",
         ] {
@@ -1336,7 +1345,8 @@ mod tests {
                 content.contains("Mandatory preflight")
                     && content.contains("--specs")
                     && content.contains("--issues")
-                    && content.contains("--files"),
+                    && content.contains("--files")
+                    && content.contains("--memory"),
                 "expected unified search contract in {relative}"
             );
         }
@@ -2074,6 +2084,92 @@ mod tests {
                 content.contains("User Verification Result"),
                 "{relative} must gate push / PR create / update on User Verification Result (SPEC-1935 FR-133)"
             );
+        }
+    }
+
+    #[test]
+    fn ready_pr_gate_is_documented_in_agents_and_pr_skills() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        for required in [
+            "Ready PR Gate",
+            "Draft PR",
+            "単独で配信可能",
+            "Ready PR 禁止",
+        ] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md must document Ready PR Gate phrase: {required}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "Ready PR Gate",
+                "Draft PR",
+                "releaseable slice",
+                "Ready for review",
+                "known blockers",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document Ready/Draft PR gate phrase: {required}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_spec_does_not_treat_draft_pr_as_completion() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "Draft PR",
+                "does not satisfy",
+                "Ready PR Gate",
+                "releaseable slice",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must make Draft PR handoffs distinct from completion: {required}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pr_body_template_surfaces_ready_and_draft_state() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [
+            ".claude/skills/gwt-manage-pr/references/pr-body-template.md",
+            ".codex/skills/gwt-manage-pr/references/pr-body-template.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "PR Readiness",
+                "Ready for review",
+                "Draft",
+                "Known blockers",
+                "Remaining acceptance",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must expose PR readiness fields: {required}"
+                );
+            }
         }
     }
 }

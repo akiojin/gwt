@@ -9,46 +9,31 @@ export function createWorkspaceKanbanSurface({
   send,
   windowMap,
   workspaceWindowById,
-  // SPEC-2359 US-42 — opens the Workspace Resume Picker modal. Optional
-  // so legacy callers (smoke tests, fixtures) that do not wire the
-  // picker still render Workspace cards.
   openWorkspaceResumePicker,
 }) {
-  const workspaceResumePickerOpen = openWorkspaceResumePicker;
-  const workspaceKanbanStateMap = new Map();
+  const workspaceStateMap = new Map();
 
-  function ensureWorkspaceKanbanState(windowId) {
-    if (!workspaceKanbanStateMap.has(windowId)) {
-      workspaceKanbanStateMap.set(windowId, {
-        selectedId: null,
-      });
+  function ensureState(windowId) {
+    if (!workspaceStateMap.has(windowId)) {
+      workspaceStateMap.set(windowId, { selectedId: null });
     }
-    return workspaceKanbanStateMap.get(windowId);
+    return workspaceStateMap.get(windowId);
   }
 
-  function workspaceColumnForCurrentStatus(statusCategory) {
-    const state = String(statusCategory || "").toLowerCase();
-    if (state === "active" || state === "blocked") {
-      return "active";
-    }
-    if (state === "done" || state === "completed" || state === "closed") {
-      return "completed";
-    }
-    return "inactive";
+  function compactText(value, fallback = "") {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text || fallback;
   }
 
-  function workspaceColumnForJournalStatus(statusCategory) {
-    const state = String(statusCategory || "").toLowerCase();
-    if (state === "done" || state === "completed" || state === "closed") {
-      return "completed";
-    }
-    return "inactive";
+  function statusLabel(value) {
+    const raw = String(value || "idle").toLowerCase();
+    if (raw === "blocked") return "Blocked";
+    if (raw === "active" || raw === "running") return "Active";
+    if (raw === "done" || raw === "completed" || raw === "closed") return "Done";
+    if (raw === "archived") return "Archived";
+    return "Idle";
   }
 
-  // SPEC-2359 Phase U-7 (FR-148): Human-readable label for the Phase U-6
-  // `WorkspaceLifecycleStage` enum. The Rust side serializes the enum in
-  // snake_case (planning / active / in_review / done / archived); the UI
-  // shows a capitalised form to match the existing status chip styling.
   function formatLifecycleStageLabel(stage) {
     const normalized = String(stage || "").toLowerCase();
     switch (normalized) {
@@ -74,283 +59,265 @@ export function createWorkspaceKanbanSurface({
     }
   }
 
-  // SPEC-2359 Phase U-7 (FR-146): structured chip row for Kanban Card
-  // preview. Renders `linked_issues`, `linked_prs`, and `tags` as chips
-  // when present. Returns null if there is nothing to show so callers
-  // can skip appending an empty row.
-  function renderWorkspaceCardChipRow(cardData) {
-    const row = createNode("div", "workspace-card-chips");
-    const linkedIssues = Array.isArray(cardData?.linked_issues)
-      ? cardData.linked_issues
-      : [];
-    const linkedPrs = Array.isArray(cardData?.linked_prs) ? cardData.linked_prs : [];
-    const tags = Array.isArray(cardData?.tags) ? cardData.tags : [];
-
-    for (const issue of linkedIssues) {
-      const number = Number.parseInt(issue?.number, 10);
-      if (!Number.isFinite(number)) continue;
-      row.appendChild(
-        createNode("span", "workspace-card-link-chip workspace-card-link-chip--issue", `#Issue-${number}`),
-      );
-    }
-    for (const pr of linkedPrs) {
-      const number = Number.parseInt(pr?.number, 10);
-      if (!Number.isFinite(number)) continue;
-      const state = pr?.state ? `:${pr.state}` : "";
-      row.appendChild(
-        createNode(
-          "span",
-          "workspace-card-link-chip workspace-card-link-chip--pr",
-          `#PR-${number}${state}`,
-        ),
-      );
-    }
-    for (const tag of tags) {
-      const text = typeof tag === "string" ? tag.trim() : "";
-      if (!text) continue;
-      row.appendChild(
-        createNode("span", "workspace-card-link-chip workspace-card-link-chip--tag", `#${text}`),
-      );
-    }
-
-    return row;
+  function compactPath(value) {
+    const text = compactText(value);
+    if (!text) return "";
+    const parts = text.split(/[\\/]+/).filter(Boolean);
+    if (parts.length <= 3) return text;
+    return `${parts[parts.length - 3]}/${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
   }
 
-  function ownerIssueNumber(owner) {
-    const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
-    if (!match) return null;
-    const number = Number.parseInt(match[1] || match[2], 10);
-    return Number.isFinite(number) ? number : null;
+  function workspaceTitle(entry) {
+    return compactText(
+      entry?.title || entry?.intent || entry?.summary || entry?.owner,
+      "Workspace",
+    );
   }
 
-  function compactWorkspaceTitle(value) {
-    const title = String(value || "").replace(/\s+/g, " ").trim();
-    if (!title) return "";
-    return title.length > 80 ? `${title.slice(0, 77)}...` : title;
+  function eventTitle(event) {
+    return compactText(
+      event?.title || event?.summary || event?.kind || event?.board_entry_id,
+      "Workspace event",
+    );
   }
 
-  function workspaceJournalCardTitle(entry) {
-    for (const value of [
-      entry.title,
-      entry.agent_title_summary,
-      entry.summary,
-      entry.agent_current_focus,
-      entry.status_text,
-      entry.next_action,
-    ]) {
-      const title = compactWorkspaceTitle(value);
-      if (title) return title;
+  function containersFor(entry) {
+    if (Array.isArray(entry?.execution_containers)) {
+      return entry.execution_containers;
     }
-    return "Workspace update";
+    if (entry?.branch || entry?.worktree_path || entry?.pr_number) {
+      return [entry];
+    }
+    return [];
   }
 
-  function workspaceCardsFromProjection(projection) {
+  function normalizeWorkspaceItem(item, fallback = {}) {
+    const containers = containersFor(item);
+    const primaryContainer = containers[0] || {};
+    const id =
+      item?.id ||
+      item?.workspace_id ||
+      fallback.id ||
+      `workspace-${workspaceTitle(item).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    return {
+      id,
+      title: workspaceTitle(item),
+      intent: compactText(item?.intent),
+      summary: compactText(item?.summary || item?.status_text || item?.intent),
+      owner: compactText(item?.owner || fallback.owner),
+      status_category: item?.status_category || fallback.status_category || "idle",
+      status_text: compactText(item?.status_text || item?.summary),
+      next_action: compactText(item?.next_action),
+      blocked_reason: compactText(item?.blocked_reason),
+      lifecycle_stage: item?.lifecycle_stage || fallback.lifecycle_stage || "",
+      branch: compactText(item?.branch || primaryContainer.branch || fallback.branch),
+      worktree_path: compactText(
+        item?.worktree_path || primaryContainer.worktree_path || fallback.worktree_path,
+      ),
+      pr_number: item?.pr_number || primaryContainer.pr_number || fallback.pr_number || null,
+      pr_url: item?.pr_url || primaryContainer.pr_url || fallback.pr_url || "",
+      pr_state: item?.pr_state || primaryContainer.pr_state || fallback.pr_state || "",
+      board_refs: Array.isArray(item?.board_refs)
+        ? item.board_refs
+        : Array.isArray(fallback.board_refs)
+          ? fallback.board_refs
+          : [],
+      agents: Array.isArray(item?.agents)
+        ? item.agents
+        : Array.isArray(fallback.agents)
+          ? fallback.agents
+          : [],
+      events: Array.isArray(item?.events) ? item.events : [],
+      cleanup_candidate: item?.cleanup_candidate || fallback.cleanup_candidate || null,
+      updated_at: compactText(item?.updated_at || fallback.updated_at),
+    };
+  }
+
+  function workspacesFromProjection(projection) {
     if (!projection) return [];
-    const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
-    const branch = projection.branch || "";
-    const worktreePath = projection.worktree_path || "";
-    const workspaces = Array.isArray(projection.workspaces)
+    const sourceItems = Array.isArray(projection.workspaces)
       ? projection.workspaces
       : Array.isArray(projection.work_items)
         ? projection.work_items
         : [];
-    if (workspaces.length > 0) {
-      return workspaces.map((item) => {
-        const workspaceId = item.id || `workspace-${item.title || "workspace"}`;
-        const workspaceTitle = item.title || item.intent || "Workspace";
-        const workspaceEvents = Array.isArray(item.events) ? item.events : [];
-        const normalizedEvents = workspaceEvents.map((event) => ({
-          ...event,
-          workspace_id: event.workspace_id || event.work_item_id || workspaceId,
-          related_workspace_id: event.related_workspace_id || event.related_work_item_id || "",
-        }));
-        const containers = Array.isArray(item.execution_containers)
-          ? item.execution_containers
-          : [];
-        const container = containers[0] || {};
-        return {
-          id: workspaceId,
-          kind: "workspace",
-          label: "Workspace",
-          title: workspaceTitle,
-          intent: item.intent || "",
-          status_category: item.status_category || "idle",
-          status_text: item.summary || item.intent || "",
-          summary: item.summary || item.intent || "",
-          owner: item.owner || "",
-          next_action: "",
-          branch: container.branch || "",
-          worktree_path: container.worktree_path || "",
-          pr_number: container.pr_number || null,
-          pr_url: container.pr_url || "",
-          pr_state: container.pr_state || "",
-          board_refs: Array.isArray(item.board_refs) ? item.board_refs : [],
-          agents: Array.isArray(item.agents) ? item.agents : [],
-          execution_containers: containers,
-          cleanup_candidate: null,
-          updated_at: item.updated_at || "",
-          resume_source: "current",
-          journal_id: null,
-          events: normalizedEvents,
-          column: workspaceColumnForCurrentStatus(item.status_category),
-        };
-      });
+    if (sourceItems.length > 0) {
+      return sourceItems.map((item) => normalizeWorkspaceItem(item, projection));
     }
-    const cards = [
-      {
-        id: projection.id || "__current_workspace__",
-        kind: "current",
-        label: "Current",
-        title,
-        status_category: projection.status_category || "idle",
-        status_text: projection.status_text || "No active work",
-        summary: projection.summary || projection.status_text || "",
-        owner: projection.owner || "",
-        next_action: projection.next_action || "",
-        branch,
-        worktree_path: worktreePath,
-        pr_number: projection.pr_number || null,
-        pr_url: projection.pr_url || "",
-        pr_state: projection.pr_state || "",
-        board_refs: Array.isArray(projection.board_refs) ? projection.board_refs : [],
-        agents: Array.isArray(projection.agents) ? projection.agents : [],
-        cleanup_candidate: projection.cleanup_candidate || null,
-        updated_at: projection.updated_at || "",
-        // SPEC-2359 Phase U-7 (FR-141, FR-147): surface the new Phase U-6
-        // schema fields on the current-Workspace card so the Detail pane
-        // can render them. Each field falls back to an empty string / null
-        // so the existing rendering code keeps working when the projection
-        // payload lacks the new keys (e.g. older daemon, pre-migration
-        // legacy data).
-        blocked_reason: projection.blocked_reason || "",
-        lifecycle_stage: projection.lifecycle_stage || "",
-        created_at: projection.created_at || "",
-        creator: projection.creator || "",
-        linked_issues: Array.isArray(projection.linked_issues)
-          ? projection.linked_issues
-          : [],
-        linked_prs: Array.isArray(projection.linked_prs) ? projection.linked_prs : [],
-        tags: Array.isArray(projection.tags) ? projection.tags : [],
-        progress_pct:
-          typeof projection.progress_pct === "number" ? projection.progress_pct : null,
-        resume_source: "current",
-        journal_id: null,
-        events: [],
-        column: workspaceColumnForCurrentStatus(projection.status_category),
-      },
-    ];
 
+    const current = normalizeWorkspaceItem(projection, {
+      id: projection.id || "__current_workspace__",
+      title: projection.title || activeWorkspace()?.title,
+    });
     const journalEntries = Array.isArray(projection.journal_entries)
       ? projection.journal_entries
       : [];
-    for (const entry of journalEntries) {
-      const statusCategory = entry.status_category || "idle";
-      cards.push({
-        id: `journal-${entry.id || cards.length}`,
-        kind: "journal",
-        title: workspaceJournalCardTitle(entry),
-        status_category: statusCategory,
-        status_text: entry.status_text || projection.status_text || "",
-        summary:
-          entry.summary ||
-          entry.agent_title_summary ||
-          entry.agent_current_focus ||
-          entry.status_text ||
-          entry.next_action ||
-          "Workspace update",
-        owner: entry.owner || projection.owner || "",
-        next_action: entry.next_action || "",
-        branch: "",
-        worktree_path: "",
-        pr_number: projection.pr_number || null,
-        pr_url: projection.pr_url || "",
-        pr_state: projection.pr_state || "",
-        board_refs: [],
-        agents: [],
-        cleanup_candidate: null,
-        updated_at: entry.updated_at || "",
-        resume_source: "journal",
-        journal_id: entry.id || "",
-        events: [],
-        column: workspaceColumnForJournalStatus(statusCategory),
-      });
-    }
-
-    return cards;
+    return [
+      current,
+      ...journalEntries.map((entry) =>
+        normalizeWorkspaceItem(entry, {
+          owner: projection.owner,
+          status_category: entry.status_category || "idle",
+        }),
+      ),
+    ];
   }
 
   function unassignedAgentsFromProjection(projection) {
-    const unassigned = Array.isArray(projection?.unassigned_agents)
+    return Array.isArray(projection?.unassigned_agents)
       ? projection.unassigned_agents
       : [];
-    return unassigned
-      .filter((agent) => String(agent?.affiliation_status || "unassigned") === "unassigned")
-      .map((agent) => ({
-        session_id: agent.session_id || "",
-        display_name: agent.display_name || agent.agent_id || "Agent",
-        agent_id: agent.agent_id || "",
-        branch: agent.branch || "",
-        worktree_path: agent.worktree_path || "",
-        current_focus: agent.current_focus || agent.title_summary || "",
-      }));
   }
 
-  function renderUnassignedAgents(container, projection) {
-    if (!container) return;
-    container.innerHTML = "";
-    const agents = unassignedAgentsFromProjection(projection);
+  function selectedWorkspace(state, workspaces) {
+    if (workspaces.length === 0) return null;
+    const selected = workspaces.find((item) => item.id === state.selectedId);
+    if (selected) return selected;
+    state.selectedId = workspaces[0].id;
+    return workspaces[0];
+  }
+
+  function appendMetaText(container, value) {
+    if (!value) return;
+    appendMeta(container, value);
+  }
+
+  function renderWorkspaceRow(windowId, state, item) {
+    const row = createNode("button", "workspace-overview-row");
+    row.type = "button";
+    row.dataset.workspaceId = item.id;
+    row.dataset.status = String(item.status_category || "idle").toLowerCase();
+    row.setAttribute("aria-selected", state.selectedId === item.id ? "true" : "false");
+
+    const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
+    const copy = createNode("span", "workspace-overview-row-copy");
+    copy.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    const meta = createNode("span", "workspace-overview-row-meta");
+    appendMetaText(meta, item.owner);
+    appendMetaText(meta, item.branch);
+    const prMeta = createWorkspacePrMeta?.(item);
+    if (prMeta) {
+      meta.appendChild(prMeta);
+    }
+    copy.appendChild(meta);
+
+    row.appendChild(status);
+    row.appendChild(copy);
+    row.addEventListener("click", () => {
+      state.selectedId = item.id;
+      renderWorkspaceOverviewWindow(windowId);
+    });
+    return row;
+  }
+
+  function renderUnassignedQueue(container, agents) {
+    const section = createNode("section", "workspace-agent-queue");
+    section.dataset.role = "unassigned-agents";
+    section.appendChild(
+      createNode("div", "workspace-overview-section-label", "Unassigned agents"),
+    );
     if (agents.length === 0) {
-      container.hidden = true;
+      section.appendChild(
+        createNode("div", "workspace-overview-empty", "No unassigned agents"),
+      );
+      container.appendChild(section);
       return;
     }
-    container.hidden = false;
-    const header = createNode("div", "workspace-unassigned-header");
-    header.appendChild(createNode("div", "workspace-unassigned-title", "Unassigned"));
-    header.appendChild(
-      createNode(
-        "div",
-        "workspace-unassigned-count",
-        agents.length === 1 ? "1 Agent" : `${agents.length} Agents`,
-      ),
-    );
-    container.appendChild(header);
-    const list = createNode("div", "workspace-unassigned-list");
+    const list = createNode("div", "workspace-overview-agent-list");
     for (const agent of agents) {
-      const row = createNode("article", "workspace-unassigned-agent");
-      row.dataset.sessionId = agent.session_id;
-      row.appendChild(createNode("div", "workspace-unassigned-agent-name", agent.display_name));
+      const row = createNode("article", "workspace-overview-agent-row");
+      row.dataset.status = String(agent.status_category || "idle").toLowerCase();
       row.appendChild(
-        createNode("div", "workspace-unassigned-agent-state", "No Workspace selected"),
+        createNode(
+          "div",
+          "workspace-overview-agent-name",
+          agent.display_name || agent.agent_id || "Agent",
+        ),
       );
-      const meta = createNode("div", "kanban-card-meta");
-      appendMeta(meta, agent.branch);
-      appendMeta(meta, agent.current_focus);
-      if (meta.childElementCount > 0) {
-        row.appendChild(meta);
-      }
-      const actions = createNode("div", "workspace-card-actions");
-      const findButton = createNode("button", "wizard-button", "Find Workspace");
-      findButton.type = "button";
-      findButton.disabled = true;
-      const createButton = createNode("button", "wizard-button", "Create Workspace");
-      createButton.type = "button";
-      createButton.disabled = true;
-      actions.appendChild(findButton);
-      actions.appendChild(createButton);
-      row.appendChild(actions);
+      const meta = createNode("div", "workspace-overview-agent-meta");
+      appendMetaText(meta, "No Workspace selected");
+      appendMetaText(meta, agentStatusLabel?.(agent.status_category));
+      appendMetaText(meta, agent.branch);
+      row.appendChild(meta);
+      list.appendChild(row);
+    }
+    section.appendChild(list);
+    container.appendChild(section);
+  }
+
+  function detailSection(title, bodyBuilder) {
+    const section = createNode("section", "workspace-detail-section");
+    section.appendChild(createNode("h3", "workspace-detail-section-title", title));
+    const body = createNode("div", "workspace-detail-section-body");
+    bodyBuilder(body);
+    section.appendChild(body);
+    return section;
+  }
+
+  function appendTextBlock(container, text, className = "workspace-detail-text") {
+    if (!text) return;
+    container.appendChild(createNode("p", className, text));
+  }
+
+  function appendDefinitionList(container, rows) {
+    const list = createNode("dl", "workspace-detail-meta-grid");
+    for (const [label, value] of rows) {
+      if (!value) continue;
+      list.appendChild(createNode("dt", "", label));
+      list.appendChild(createNode("dd", "", value));
+    }
+    if (list.childNodes.length > 0) {
+      container.appendChild(list);
+    }
+  }
+
+  function appendAgents(container, agents) {
+    if (!agents || agents.length === 0) {
+      container.appendChild(createNode("div", "workspace-overview-empty", "No assigned agents"));
+      return;
+    }
+    const list = createNode("div", "workspace-detail-agent-list");
+    for (const agent of agents) {
+      const row = createNode("article", "workspace-detail-agent");
+      row.dataset.status = String(agent.status_category || "idle").toLowerCase();
+      row.appendChild(
+        createNode("div", "workspace-detail-agent-name", agent.display_name || agent.agent_id || "Agent"),
+      );
+      const meta = createNode("div", "workspace-detail-agent-meta");
+      appendMetaText(meta, agentStatusLabel?.(agent.status_category));
+      appendMetaText(meta, agent.title_summary || agent.current_focus);
+      row.appendChild(meta);
       list.appendChild(row);
     }
     container.appendChild(list);
   }
 
-  function resumeWorkspaceCard(card) {
-    // SPEC-2359 US-42: Resume button now opens the Workspace Resume
-    // Picker. The backend enumerates assigned agents and the user picks
-    // which previously-running agent to restart in-place; the Launch
-    // Wizard never opens for this path.
-    const workspaceId = card?.id ?? null;
-    if (typeof workspaceResumePickerOpen === "function") {
-      workspaceResumePickerOpen(workspaceId);
+  function appendEvents(container, events) {
+    if (!events || events.length === 0) {
+      container.appendChild(createNode("div", "workspace-overview-empty", "No lifecycle events"));
+      return;
+    }
+    const list = createNode("ol", "workspace-detail-event-list");
+    for (const event of events) {
+      const item = createNode("li", "workspace-detail-event");
+      const title = createNode("div", "workspace-detail-event-title", eventTitle(event));
+      const meta = createNode("div", "workspace-detail-event-meta");
+      appendMetaText(meta, event.kind);
+      appendMetaText(meta, event.updated_at);
+      appendMetaText(meta, event.board_entry_id);
+      item.appendChild(title);
+      if (event.summary && event.summary !== event.title) {
+        appendTextBlock(item, event.summary, "workspace-detail-event-summary");
+      }
+      item.appendChild(meta);
+      list.appendChild(item);
+    }
+    container.appendChild(list);
+  }
+
+  function resumeWorkspace(workspace) {
+    const workspaceId = workspace?.id ?? null;
+    if (typeof openWorkspaceResumePicker === "function") {
+      openWorkspaceResumePicker(workspaceId);
     }
     send({
       kind: "list_resumable_agents",
@@ -358,383 +325,178 @@ export function createWorkspaceKanbanSurface({
     });
   }
 
-  function renderWorkspaceKanbanCard(windowId, state, cardData) {
-    const card = createNode("article", "kanban-card workspace-kanban-card");
-    card.dataset.workspaceCardId = cardData.id;
-    if (state.selectedId === cardData.id) {
-      card.classList.add("is-selected");
-    }
-
-    const select = () => {
-      state.selectedId = cardData.id;
-      renderWorkspaceKanban(windowId);
-    };
-    const selectButton = createNode("button", "workspace-card-main");
-    selectButton.type = "button";
-    selectButton.addEventListener("click", select);
-    if (state.selectedId === cardData.id) {
-      selectButton.setAttribute("aria-current", "true");
-    }
-
-    const head = createNode("div", "kanban-card-head");
-    head.appendChild(
-      createNode(
-        "span",
-        "kanban-card-number",
-        cardData.label || (cardData.kind === "current" ? "Current" : "Update"),
-      ),
-    );
-    head.appendChild(
-      createNode(
-        "span",
-        `kanban-card-chip kanban-card-chip--state-${cardData.status_category}`,
-        agentStatusLabel(cardData.status_category),
-      ),
-    );
-    // SPEC-2359 Phase U-7 (FR-146, FR-148): render the Phase U-6
-    // `lifecycle_stage` as its own chip next to the runtime status chip
-    // so user can distinguish "where is this work in its lifecycle"
-    // (Planning / Active / InReview / Done / Archived) from "what are
-    // the agents doing right now" (active / idle / blocked / done).
-    if (cardData.lifecycle_stage) {
-      head.appendChild(
-        createNode(
-          "span",
-          `kanban-card-chip lifecycle-chip lifecycle-chip--${cardData.lifecycle_stage}`,
-          formatLifecycleStageLabel(cardData.lifecycle_stage),
-        ),
-      );
-    }
-    selectButton.appendChild(head);
-    selectButton.appendChild(createNode("div", "kanban-card-title", cardData.title));
-    if (cardData.summary) {
-      selectButton.appendChild(createNode("div", "workspace-card-summary", cardData.summary));
-    }
-
-    // SPEC-2359 Phase U-7 (FR-146): structured Issue / PR / tag chips. The
-    // Phase U-6 schema stores them as structured arrays so we can render
-    // each as a chip (#Issue-N, #PR-N, #tag) instead of free-text. The
-    // existing owner / branch / PR meta line below remains for legacy
-    // CSS / a11y.
-    const chips = renderWorkspaceCardChipRow(cardData);
-    if (chips && chips.childElementCount > 0) {
-      selectButton.appendChild(chips);
-    }
-
-    const meta = createNode("div", "kanban-card-meta");
-    appendMeta(meta, cardData.owner);
-    appendMeta(meta, cardData.branch);
-    const cardPr = createWorkspacePrMeta?.(cardData);
-    if (cardPr) {
-      meta.appendChild(cardPr);
-    }
-    appendMeta(meta, cardData.updated_at);
-    if (meta.childElementCount > 0) {
-      selectButton.appendChild(meta);
-    }
-    card.appendChild(selectButton);
-
-    const actions = createNode("div", "workspace-card-actions");
-    const resumeButton = createNode("button", "wizard-button primary", "Resume");
-    resumeButton.type = "button";
-    resumeButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.selectedId = cardData.id;
-      renderWorkspaceKanban(windowId);
-      resumeWorkspaceCard(cardData);
-    });
-    actions.appendChild(resumeButton);
-    card.appendChild(actions);
-    return card;
-  }
-
-  function renderWorkspaceKanbanDetail(detailPane, cardData) {
-    detailPane.innerHTML = "";
-    if (!cardData) {
-      detailPane.appendChild(createNode("div", "knowledge-detail-empty", "Select a Workspace"));
+  function renderWorkspaceDetail(container, workspace) {
+    container.innerHTML = "";
+    if (!workspace) {
+      const empty = createNode("div", "workspace-overview-empty", "No Workspaces");
+      container.appendChild(empty);
       return;
     }
 
-    const header = createNode("div", "knowledge-detail-header");
-    const head = createNode("div", "");
-    const headRow = createNode("div", "knowledge-detail-head");
-    headRow.appendChild(createNode("h3", "knowledge-detail-title", cardData.title));
-    headRow.appendChild(
-      createNode(
-        "span",
-        `knowledge-state-chip ${cardData.status_category}`,
-        agentStatusLabel(cardData.status_category),
-      ),
-    );
-    head.appendChild(headRow);
-    const subtitle = createNode("div", "knowledge-detail-subtitle");
-    appendMeta(subtitle, cardData.owner);
-    appendMeta(subtitle, cardData.branch);
-    const detailPr = createWorkspacePrMeta?.(cardData);
-    if (detailPr) {
-      subtitle.appendChild(detailPr);
-    }
-    if (subtitle.childElementCount > 0) {
-      head.appendChild(subtitle);
-    }
-    header.appendChild(head);
+    const header = createNode("header", "workspace-detail-header");
+    const titleWrap = createNode("div", "workspace-detail-heading");
+    titleWrap.appendChild(createNode("h2", "workspace-detail-title", workspace.title));
+    const subtitle = createNode("div", "workspace-detail-subtitle");
+    appendMetaText(subtitle, statusLabel(workspace.status_category));
+    appendMetaText(subtitle, workspace.owner);
+    appendMetaText(subtitle, formatLifecycleStageLabel(workspace.lifecycle_stage));
+    titleWrap.appendChild(subtitle);
+    header.appendChild(titleWrap);
 
-    const actions = createNode("div", "knowledge-detail-actions");
-    const resumeButton = createNode("button", "wizard-button primary", "Resume");
+    const actions = createNode("div", "workspace-detail-actions");
+    const resumeButton = createNode("button", "wizard-button", "Resume");
     resumeButton.type = "button";
-    resumeButton.addEventListener("click", () => resumeWorkspaceCard(cardData));
+    resumeButton.dataset.action = "resume-workspace";
+    resumeButton.addEventListener("click", () => resumeWorkspace(workspace));
     actions.appendChild(resumeButton);
-    if (cardData.cleanup_candidate?.branch) {
-      const cleanupButton = createNode("button", "wizard-button", "Review Cleanup");
+    if (workspace.cleanup_candidate) {
+      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";
-      cleanupButton.addEventListener("click", openWorkspaceCleanup);
+      cleanupButton.addEventListener("click", () => openWorkspaceCleanup?.());
       actions.appendChild(cleanupButton);
     }
     header.appendChild(actions);
-    detailPane.appendChild(header);
+    container.appendChild(header);
 
-    const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
-    const summary = createNode("section", "knowledge-section");
-    summary.appendChild(createNode("div", "knowledge-section-title", "Summary"));
-    summary.appendChild(
-      createNode(
-        "pre",
-        "knowledge-section-body",
-        cardData.summary ||
-          cardData.status_text ||
-          "Summary not set — add one with `gwtd workspace update --summary X`",
-      ),
+    container.appendChild(
+      detailSection("Summary", (body) => {
+        appendTextBlock(body, workspace.summary || workspace.status_text || workspace.intent);
+        if (workspace.intent && workspace.intent !== workspace.summary) {
+          appendTextBlock(body, workspace.intent);
+        }
+        appendTextBlock(body, workspace.next_action);
+        appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
+      }),
     );
-    scroll.appendChild(summary);
-
-    // SPEC-2359 Phase U-7 (FR-141, FR-147): a dedicated Blocked Reason
-    // section makes the cause of the Blocked status discoverable without
-    // mining the journal. Detail pane renders it between Summary and
-    // Next Action so the user sees "what's blocking" before "what to do
-    // next".
-    if (cardData.blocked_reason) {
-      const blocked = createNode("section", "knowledge-section");
-      blocked.appendChild(createNode("div", "knowledge-section-title", "Blocked Reason"));
-      blocked.appendChild(
-        createNode("pre", "knowledge-section-body", cardData.blocked_reason),
-      );
-      scroll.appendChild(blocked);
-    }
-
-    if (cardData.next_action) {
-      const next = createNode("section", "knowledge-section");
-      next.appendChild(createNode("div", "knowledge-section-title", "Next Action"));
-      next.appendChild(createNode("pre", "knowledge-section-body", cardData.next_action));
-      scroll.appendChild(next);
-    }
-
-    if (cardData.worktree_path) {
-      const context = createNode("section", "knowledge-section");
-      context.appendChild(createNode("div", "knowledge-section-title", "Workspace Context"));
-      context.appendChild(createNode("pre", "knowledge-section-body", cardData.worktree_path));
-      scroll.appendChild(context);
-    }
-
-    // SPEC-2359 Phase U-7 (FR-147): the Lifecycle section is now always
-    // rendered. When the Workspace has no recorded events the section
-    // surfaces an informative placeholder so users know where the
-    // timeline will appear once activity arrives — instead of the whole
-    // section vanishing and leaving the Detail pane feeling empty.
-    const lifecycle = createNode("section", "knowledge-section");
-    lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
-    if (cardData.events.length > 0) {
-      lifecycle.appendChild(
-        createNode(
-          "pre",
-          "knowledge-section-body",
-          cardData.events
-            .map((event) =>
-              [
-                event.updated_at || "",
-                event.kind || "update",
-                event.title || event.intent || "",
-                event.summary || "",
-                event.board_entry_id ? `board:${event.board_entry_id}` : "",
-                event.agent_session_id ? `session:${event.agent_session_id}` : "",
-              ]
-                .filter(Boolean)
-                .join(" · "),
-            )
-            .join("\n"),
-        ),
-      );
-    } else {
-      lifecycle.appendChild(
-        createNode(
-          "pre",
-          "knowledge-section-body workspace-lifecycle-empty",
-          "Workspace created — no lifecycle events yet. Activity will appear after the next Board post.",
-        ),
-      );
-    }
-    scroll.appendChild(lifecycle);
-
-    if (cardData.agents.length > 0) {
-      const agents = createNode("section", "knowledge-section");
-      agents.appendChild(createNode("div", "knowledge-section-title", "Agents"));
-      agents.appendChild(
-        createNode(
-          "pre",
-          "knowledge-section-body",
-          cardData.agents
-            .map((agent) =>
-              [
-                agent.display_name || agent.agent_id || "Agent",
-                agentStatusLabel(agent.status_category),
-                agent.current_focus || agent.title_summary || "",
-              ].filter(Boolean).join(" · "),
-            )
-            .join("\n"),
-        ),
-      );
-      scroll.appendChild(agents);
-    }
-
-    detailPane.appendChild(scroll);
+    container.appendChild(
+      detailSection("Agents", (body) => {
+        appendAgents(body, workspace.agents);
+      }),
+    );
+    container.appendChild(
+      detailSection("Lifecycle", (body) => {
+        appendDefinitionList(body, [
+          ["Stage", formatLifecycleStageLabel(workspace.lifecycle_stage)],
+          ["Status", statusLabel(workspace.status_category)],
+          ["Updated", workspace.updated_at],
+        ]);
+        appendEvents(body, workspace.events);
+      }),
+    );
+    container.appendChild(
+      detailSection("Workspace Context", (body) => {
+        appendDefinitionList(body, [
+          ["Owner", workspace.owner],
+          ["Branch", workspace.branch],
+          ["Worktree", compactPath(workspace.worktree_path) || workspace.worktree_path],
+          ["PR", workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
+          ["PR state", workspace.pr_state],
+        ]);
+      }),
+    );
+    container.appendChild(
+      detailSection("Coordination", (body) => {
+        if (workspace.board_refs.length === 0 && workspace.events.length === 0) {
+          body.appendChild(createNode("div", "workspace-overview-empty", "No Board references"));
+          return;
+        }
+        if (workspace.board_refs.length > 0) {
+          const refs = createNode("div", "workspace-board-ref-list");
+          for (const ref of workspace.board_refs) {
+            refs.appendChild(createNode("span", "workspace-board-ref", ref));
+          }
+          body.appendChild(refs);
+        }
+        appendEvents(body, workspace.events.filter((event) => event.board_entry_id));
+      }),
+    );
   }
 
-  function renderWorkspaceKanban(windowId) {
+  function renderWorkspaceOverviewWindow(windowId) {
     const element = windowMap.get(windowId);
     if (!element) return;
-    const state = ensureWorkspaceKanbanState(windowId);
-    const board = element.querySelector(".workspace-kanban-board");
-    const unassigned = element.querySelector("[data-role='unassigned-agents']");
-    const detailPane = element.querySelector(".workspace-kanban-detail-pane");
-    const status = element.querySelector(".workspace-kanban-status");
-    if (!board || !detailPane || !status) return;
+    const root = element.querySelector(".workspace-overview-root");
+    if (!root) return;
 
     const projection = getActiveWorkProjection();
-    const cards = workspaceCardsFromProjection(projection);
-    renderUnassignedAgents(unassigned, projection);
-    if (!state.selectedId || !cards.some((card) => card.id === state.selectedId)) {
-      state.selectedId = cards[0]?.id || null;
+    const workspaces = workspacesFromProjection(projection);
+    const unassignedAgents = unassignedAgentsFromProjection(projection);
+    const state = ensureState(windowId);
+    const selected = selectedWorkspace(state, workspaces);
+
+    const status = root.querySelector(".workspace-overview-status-line");
+    if (status) {
+      status.textContent = projection
+        ? `${workspaces.length} Workspaces · ${unassignedAgents.length} unassigned agents`
+        : "No Workspace projection";
     }
 
-    const columnsByStatus = new Map();
-    for (const column of board.querySelectorAll(".kanban-column[data-workspace-column]")) {
-      const body = column.querySelector("[data-role='body']");
-      if (body) body.innerHTML = "";
-      columnsByStatus.set(column.dataset.workspaceColumn, column);
-    }
-
-    const counts = new Map();
-    for (const cardData of cards) {
-      const column = columnsByStatus.get(cardData.column) || columnsByStatus.get("inactive");
-      const body = column?.querySelector("[data-role='body']");
-      if (!body) continue;
-      body.appendChild(renderWorkspaceKanbanCard(windowId, state, cardData));
-      counts.set(cardData.column, (counts.get(cardData.column) || 0) + 1);
-    }
-
-    for (const [columnKey, column] of columnsByStatus) {
-      const countLabel = column.querySelector("[data-role='count']");
-      if (countLabel) {
-        countLabel.textContent = String(counts.get(columnKey) || 0);
-      }
-      const body = column.querySelector("[data-role='body']");
-      if (body && body.childElementCount === 0) {
-        body.appendChild(createNode("div", "kanban-column-empty", "No Workspaces"));
+    const list = root.querySelector(".workspace-overview-list");
+    list.innerHTML = "";
+    if (workspaces.length === 0) {
+      list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
+    } else {
+      for (const workspace of workspaces) {
+        list.appendChild(renderWorkspaceRow(windowId, state, workspace));
       }
     }
 
-    status.className = "knowledge-status workspace-kanban-status";
-    status.textContent = cards.length === 0 ? "No Workspace history yet" : "";
-    if (cards.length === 0) {
-      status.classList.add("visible", "info");
-    }
+    const queue = root.querySelector("[data-role='workspace-agent-queue-slot']");
+    queue.innerHTML = "";
+    renderUnassignedQueue(queue, unassignedAgents);
 
-    const selected = cards.find((card) => card.id === state.selectedId) || null;
-    renderWorkspaceKanbanDetail(detailPane, selected);
+    renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected);
   }
 
-  function mountWorkspaceKanban(body, windowData, { focusWindowLocally, sendFocus }) {
-    body.innerHTML = `
-      <div class="workspace-kanban-root kanban-root">
-        <div class="workspace-toolbar kanban-toolbar is-stacked">
+  function mount(parent, windowData, { focusWindowLocally, sendFocus } = {}) {
+    parent.innerHTML = `
+      <div class="workspace-overview-root">
+        <div class="workspace-toolbar is-stacked workspace-overview-toolbar">
           <div class="workspace-toolbar-main">
             <div class="knowledge-heading">Workspace Overview</div>
+            <div class="knowledge-status workspace-overview-status-line"></div>
           </div>
           <div class="workspace-toolbar-actions">
-            <button class="wizard-button" type="button" data-action="start-workspace">Start Work</button>
+            <button class="icon-button" data-action="refresh-workspace-overview" aria-label="Refresh Workspace Overview">↻</button>
           </div>
         </div>
-        <div class="knowledge-status workspace-kanban-status"></div>
-        <div class="knowledge-split workspace-split kanban-shell">
-          <div class="knowledge-list-pane kanban-list-pane">
-            <section class="workspace-unassigned" data-role="unassigned-agents" hidden></section>
-            <div class="kanban-board workspace-kanban-board" role="list" aria-label="Workspace Kanban Board">
-              <div class="kanban-column workspace-kanban-column" data-workspace-column="active" aria-label="Active Workspace column">
-                <div class="kanban-column-header">
-                  <span class="workspace-column-name">Active</span>
-                  <span class="kanban-column-count" data-role="count">0</span>
-                </div>
-                <div class="kanban-column-body" data-role="body"></div>
-              </div>
-              <div class="kanban-column workspace-kanban-column" data-workspace-column="inactive" aria-label="Inactive Workspace column">
-                <div class="kanban-column-header">
-                  <span class="workspace-column-name">Inactive</span>
-                  <span class="kanban-column-count" data-role="count">0</span>
-                </div>
-                <div class="kanban-column-body" data-role="body"></div>
-              </div>
-              <div class="kanban-column workspace-kanban-column" data-workspace-column="completed" aria-label="Completed Workspace column">
-                <div class="kanban-column-header">
-                  <span class="workspace-column-name">Completed</span>
-                  <span class="kanban-column-count" data-role="count">0</span>
-                </div>
-                <div class="kanban-column-body" data-role="body"></div>
-              </div>
-            </div>
-          </div>
-          <div class="knowledge-detail-pane workspace-kanban-detail-pane"></div>
+        <div class="workspace-overview-shell">
+          <aside class="workspace-overview-list-pane" aria-label="Workspace list">
+            <div class="workspace-overview-section-label">Workspaces</div>
+            <div class="workspace-overview-list" role="listbox"></div>
+            <div data-role="workspace-agent-queue-slot"></div>
+          </aside>
+          <main class="workspace-overview-detail-pane" aria-label="Workspace detail"></main>
         </div>
       </div>
     `;
-    // Issue #2757: body-level `mousedown` previously fired `focus_window`
-    // unconditionally. Backend responded with a `workspace_state` broadcast
-    // (z_index bump from `bring_to_front`), and that broadcast re-rendered
-    // the Kanban DOM between `mousedown` and `mouseup`. When the original
-    // Resume / Start Work button was replaced under the user's cursor, the
-    // browser silently dropped the trailing `click` event and the action
-    // (`resume_workspace` / `open_start_work`) never reached the backend.
-    // Skip the focus dispatch when `mousedown` targets an interactive
-    // control so the click can complete; non-control whitespace clicks
-    // still focus the window.
-    body.addEventListener("mousedown", (event) => {
-      if (event.target?.closest("button, a, input, select, textarea, [role='button']")) {
-        return;
-      }
-      focusWindowLocally(windowData.id);
-      sendFocus(windowData.id);
+    parent.addEventListener("mousedown", () => {
+      focusWindowLocally?.(windowData.id);
+      sendFocus?.(windowData.id);
     });
-    body
-      .querySelector("[data-action='start-workspace']")
-      .addEventListener("click", (event) => {
-        event.stopPropagation();
-        send({ kind: "open_start_work" });
-      });
-    renderWorkspaceKanban(windowData.id);
+    const refresh = parent.querySelector("[data-action='refresh-workspace-overview']");
+    refresh?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      renderWorkspaceOverviewWindow(windowData.id);
+    });
+    renderWorkspaceOverviewWindow(windowData.id);
   }
 
-  function renderWorkspaceKanbanWindows() {
-    for (const [windowId] of windowMap.entries()) {
-      if (workspaceWindowById(windowId)?.preset === "workspace") {
-        renderWorkspaceKanban(windowId);
-      }
+  function renderWindows() {
+    for (const windowData of activeWorkspace()?.windows || []) {
+      if (workspaceWindowById(windowData.id)?.preset !== "workspace") continue;
+      renderWorkspaceOverviewWindow(windowData.id);
     }
   }
 
-  return Object.freeze({
-    deleteState(windowId) {
-      workspaceKanbanStateMap.delete(windowId);
-    },
-    mount: mountWorkspaceKanban,
-    renderWindow: renderWorkspaceKanban,
-    renderWindows: renderWorkspaceKanbanWindows,
-  });
+  function deleteState(windowId) {
+    workspaceStateMap.delete(windowId);
+  }
+
+  return {
+    mount,
+    renderWindows,
+    deleteState,
+    _workspacesFromProjection: workspacesFromProjection,
+  };
 }

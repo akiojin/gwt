@@ -1,7 +1,7 @@
 use super::*;
 
 /// SPEC-1942 family split (FR-088〜092 / SC-025〜027): the parent
-/// [`CliCommand`] is a 10-variant nested enum and each top-level verb
+/// [`CliCommand`] is a nested enum and each top-level verb
 /// parses into the matching family-typed inner enum. This RED test
 /// pins the contract before the refactor lands and stays green
 /// afterwards as the round-trip guard for the family split.
@@ -9,7 +9,7 @@ use super::*;
 fn cli_command_family_split_round_trip_parses() {
     use crate::cli::{
         ActionsCommand, BoardCommand, CliCommand, DiscussCommand, HookCommand, IndexCommand,
-        IssueCommand, PaneCommand, PrCommand, UpdateCommand, WorkspaceCommand,
+        IssueCommand, MemoryCommand, PaneCommand, PrCommand, UpdateCommand, WorkspaceCommand,
     };
 
     fn s(value: &str) -> String {
@@ -84,6 +84,23 @@ fn cli_command_family_split_round_trip_parses() {
             scope: IndexScope::All
         })
     ));
+
+    // gwtd memory add ...
+    let cmd = parse_memory_args(&[
+        s("add"),
+        s("--date"),
+        s("2026-05-20"),
+        s("--title"),
+        s("writer"),
+        s("--context"),
+        s("context"),
+        s("--learning"),
+        s("learning"),
+        s("--future-action"),
+        s("action"),
+    ])
+    .expect("parse memory add");
+    assert!(matches!(cmd, CliCommand::Memory(MemoryCommand::Add(_))));
 
     // gwtd hook runtime-state PreToolUse
     let cmd = parse_hook_args(&[s("runtime-state"), s("PreToolUse")]).expect("parse hook command");

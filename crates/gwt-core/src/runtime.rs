@@ -5,15 +5,20 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{GwtError, Result};
 use sha2::{Digest, Sha256};
 
 const RUNNER_SOURCE: &str = include_str!("../runtime/chroma_index_runner.py");
+const INDEX_PATH_POLICY_SOURCE: &str = include_str!("../runtime/index_path_policy.json");
 const REQUIREMENTS_SOURCE: &str = include_str!("../runtime/project_index_requirements.txt");
+const INDEX_PATH_POLICY_FILE: &str = "index_path_policy.json";
 const REQUIREMENTS_FILE: &str = "project_index_requirements.txt";
 const RUNTIME_MANIFEST_FILE: &str = "project_index_runtime_manifest.json";
+const VERSIONED_RUNNER_DIR: &str = "runners";
+const VERSIONED_VENV_DIR: &str = "venvs";
 const PYTHON_VERSION_SNIPPET: &str =
     "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')";
 const PROJECT_INDEX_RUNTIME_ERROR_PREFIX: &str = "[gwt-project-index-runtime]";
@@ -40,6 +45,7 @@ pub enum ProjectIndexRuntimeErrorKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndexRuntimeReport {
     pub runner_updated: bool,
+    pub policy_updated: bool,
     pub requirements_updated: bool,
     pub manifest_updated: bool,
     pub venv_created: bool,
@@ -47,12 +53,28 @@ pub struct ProjectIndexRuntimeReport {
     pub dependencies_installed: bool,
     pub runner_smoke_tested: bool,
     pub runner_hash: String,
+    pub policy_hash: String,
     pub requirements_hash: String,
 }
 
 pub fn ensure_project_index_runtime() -> Result<ProjectIndexRuntimeReport> {
     ensure_project_index_runtime_with(&crate::paths::gwt_home(), &RealProvisioner)
         .map_err(wrap_project_index_runtime_error)
+}
+
+/// Return the content-addressed runner path for this binary's bundled runtime.
+///
+/// Older gwt processes may still rewrite the legacy shared runner path under
+/// `~/.gwt/runtime/chroma_index_runner.py`. Newer code executes this versioned
+/// copy after `ensure_project_index_runtime`, so concurrent older processes
+/// cannot downgrade the runner underneath an in-flight search.
+pub fn project_index_runner_path() -> PathBuf {
+    project_index_runner_path_from(&crate::paths::gwt_home())
+}
+
+/// Return the Python executable for this binary's content-addressed index venv.
+pub fn project_index_python_path() -> PathBuf {
+    project_index_python_path_from(&crate::paths::gwt_home())
 }
 
 trait RuntimeProvisioner {
@@ -119,14 +141,24 @@ fn ensure_project_index_runtime_with(
 ) -> Result<ProjectIndexRuntimeReport> {
     let mut report = ProjectIndexRuntimeReport::default();
     let runtime_dir = crate::paths::gwt_runtime_dir_from(gwt_home);
-    let runner_path = crate::paths::gwt_runtime_runner_path_from(gwt_home);
+    let legacy_runner_path = crate::paths::gwt_runtime_runner_path_from(gwt_home);
+    let runner_path = project_index_runner_path_from(gwt_home);
+    let legacy_policy_path = runtime_dir.join(INDEX_PATH_POLICY_FILE);
+    let versioned_policy_path = runner_path.with_file_name(INDEX_PATH_POLICY_FILE);
     let requirements_path = runtime_dir.join(REQUIREMENTS_FILE);
-    let venv_dir = crate::paths::gwt_project_index_venv_dir_from(gwt_home);
+    let venv_dir = project_index_venv_dir_from(gwt_home);
 
     crate::paths::ensure_dir(&runtime_dir)?;
-    report.runner_updated = write_if_changed(&runner_path, RUNNER_SOURCE)?;
+    let legacy_runner_updated = write_if_changed(&legacy_runner_path, RUNNER_SOURCE)?;
+    let versioned_runner_updated = write_if_changed(&runner_path, RUNNER_SOURCE)?;
+    report.runner_updated = legacy_runner_updated || versioned_runner_updated;
+    let legacy_policy_updated = write_if_changed(&legacy_policy_path, INDEX_PATH_POLICY_SOURCE)?;
+    let versioned_policy_updated =
+        write_if_changed(&versioned_policy_path, INDEX_PATH_POLICY_SOURCE)?;
+    report.policy_updated = legacy_policy_updated || versioned_policy_updated;
     report.requirements_updated = write_if_changed(&requirements_path, REQUIREMENTS_SOURCE)?;
     report.runner_hash = content_hash(RUNNER_SOURCE);
+    report.policy_hash = content_hash(INDEX_PATH_POLICY_SOURCE);
     report.requirements_hash = content_hash(REQUIREMENTS_SOURCE);
     report.manifest_updated = write_if_changed(
         &runtime_dir.join(RUNTIME_MANIFEST_FILE),
@@ -151,7 +183,7 @@ fn ensure_project_index_runtime_with(
 
     if let Err(first_probe_error) = provisioner.probe_chromadb(&venv_python) {
         if venv_dir.exists() {
-            fs::remove_dir_all(&venv_dir)?;
+            remove_runtime_dir_for_rebuild(&venv_dir)?;
         }
         let python = provisioner.find_python()?;
         provisioner.create_venv(&python, &venv_dir)?;
@@ -166,7 +198,7 @@ fn ensure_project_index_runtime_with(
 
     if let Err(first_probe_error) = provisioner.probe_runner(&venv_python, &runner_path) {
         if venv_dir.exists() {
-            fs::remove_dir_all(&venv_dir)?;
+            remove_runtime_dir_for_rebuild(&venv_dir)?;
         }
         let python = provisioner.find_python()?;
         provisioner.create_venv(&python, &venv_dir)?;
@@ -199,15 +231,72 @@ fn runtime_manifest_contents(report: &ProjectIndexRuntimeReport) -> String {
     serde_json::json!({
         "schema_version": 1,
         "runner": {
-            "path": "chroma_index_runner.py",
+            "path": format!("{VERSIONED_RUNNER_DIR}/chroma_index_runner-{}.py", report.runner_hash),
             "sha256_16": report.runner_hash,
         },
         "requirements": {
             "path": REQUIREMENTS_FILE,
             "sha256_16": report.requirements_hash,
         },
+        "index_path_policy": {
+            "path": INDEX_PATH_POLICY_FILE,
+            "versioned_path": format!("{VERSIONED_RUNNER_DIR}/{INDEX_PATH_POLICY_FILE}"),
+            "sha256_16": report.policy_hash,
+        },
+        "venv": {
+            "path": format!("{VERSIONED_VENV_DIR}/chroma-venv-{}", report.requirements_hash),
+        },
     })
     .to_string()
+}
+
+fn project_index_runner_path_from(gwt_home: &Path) -> PathBuf {
+    let hash = content_hash(RUNNER_SOURCE);
+    crate::paths::gwt_runtime_dir_from(gwt_home)
+        .join(VERSIONED_RUNNER_DIR)
+        .join(format!("chroma_index_runner-{hash}.py"))
+}
+
+fn project_index_venv_dir_from(gwt_home: &Path) -> PathBuf {
+    let hash = content_hash(REQUIREMENTS_SOURCE);
+    crate::paths::gwt_runtime_dir_from(gwt_home)
+        .join(VERSIONED_VENV_DIR)
+        .join(format!("chroma-venv-{hash}"))
+}
+
+fn project_index_python_path_from(gwt_home: &Path) -> PathBuf {
+    venv_python_path(&project_index_venv_dir_from(gwt_home))
+}
+
+fn remove_runtime_dir_for_rebuild(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(first_error) => {
+            let quarantine = runtime_rebuild_quarantine_path(path);
+            fs::rename(path, &quarantine).map_err(|rename_error| {
+                GwtError::Other(format!(
+                    "remove {} failed with {first_error}; rename to {} failed with {rename_error}",
+                    path.display(),
+                    quarantine.display()
+                ))
+            })?;
+            let _ = fs::remove_dir_all(&quarantine);
+        }
+    }
+    Ok(())
+}
+
+fn runtime_rebuild_quarantine_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("runtime-dir");
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    path.with_file_name(format!("{name}.rebuild-{}-{millis}", std::process::id()))
 }
 
 fn venv_python_path(venv_dir: &Path) -> PathBuf {
@@ -571,7 +660,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::paths::{gwt_project_index_venv_dir_from, gwt_runtime_runner_path_from};
+    use crate::paths::gwt_runtime_runner_path_from;
 
     #[derive(Default)]
     struct FakeProvisioner {
@@ -651,19 +740,29 @@ mod tests {
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
 
         assert!(report.runner_updated);
+        assert!(report.policy_updated);
         assert!(report.requirements_updated);
         assert!(report.manifest_updated);
         assert!(report.venv_created);
         assert!(report.dependencies_installed);
         assert!(report.runner_smoke_tested);
         assert_eq!(report.runner_hash.len(), 16);
+        assert_eq!(report.policy_hash.len(), 16);
         assert_eq!(report.requirements_hash.len(), 16);
         assert!(gwt_runtime_runner_path_from(&gwt_home).exists());
+        assert!(project_index_runner_path_from(&gwt_home).exists());
+        assert!(gwt_home
+            .join("runtime")
+            .join(INDEX_PATH_POLICY_FILE)
+            .exists());
+        assert!(project_index_runner_path_from(&gwt_home)
+            .with_file_name(INDEX_PATH_POLICY_FILE)
+            .exists());
         assert!(gwt_home
             .join("runtime")
             .join(RUNTIME_MANIFEST_FILE)
             .exists());
-        assert!(venv_python_path(&gwt_project_index_venv_dir_from(&gwt_home)).exists());
+        assert!(project_index_python_path_from(&gwt_home).exists());
         assert_eq!(
             provisioner.calls(),
             vec![
@@ -689,6 +788,7 @@ mod tests {
 
         let second = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(!second.runner_updated);
+        assert!(!second.policy_updated);
         assert!(!second.requirements_updated);
         assert!(!second.manifest_updated);
         assert!(!second.venv_created);
@@ -696,6 +796,54 @@ mod tests {
         assert!(!second.dependencies_installed);
         assert!(second.runner_smoke_tested);
         assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
+    }
+
+    #[test]
+    fn project_index_runner_path_is_content_addressed() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+
+        let runner = project_index_runner_path_from(&gwt_home);
+
+        assert!(runner.ends_with(format!(
+            "runtime/runners/chroma_index_runner-{}.py",
+            content_hash(RUNNER_SOURCE)
+        )));
+    }
+
+    #[test]
+    fn project_index_python_path_is_content_addressed() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+
+        let python = project_index_python_path_from(&gwt_home);
+
+        let suffix = if cfg!(windows) {
+            PathBuf::from("runtime")
+                .join("venvs")
+                .join(format!("chroma-venv-{}", content_hash(REQUIREMENTS_SOURCE)))
+                .join("Scripts")
+                .join("python.exe")
+        } else {
+            PathBuf::from("runtime")
+                .join("venvs")
+                .join(format!("chroma-venv-{}", content_hash(REQUIREMENTS_SOURCE)))
+                .join("bin")
+                .join("python3")
+        };
+        assert!(python.ends_with(suffix));
+    }
+
+    #[test]
+    fn remove_runtime_dir_for_rebuild_removes_non_empty_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime_dir = root.path().join("runtime-dir");
+        fs::create_dir_all(runtime_dir.join("nested")).unwrap();
+        fs::write(runtime_dir.join("nested/file.txt"), "stale").unwrap();
+
+        remove_runtime_dir_for_rebuild(&runtime_dir).unwrap();
+
+        assert!(!runtime_dir.exists());
     }
 
     #[test]

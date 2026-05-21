@@ -1,6 +1,6 @@
 // SPEC-1939 Phase 13 — project-bar Index badge withdrawn (concept separation).
 // `formatIndexStatusLabel` removed. The remaining helpers drive the per-tab
-// `.project-tab-dot` and the Settings.Index navigation event consumed by
+// `.project-tab-dot` and the Index window navigation event consumed by
 // callers other than the deleted badge.
 
 export const INDEX_STATUS_OPEN_SETTINGS_EVENT = "settings:open";
@@ -15,7 +15,8 @@ export const INDEX_STATUS_OPEN_SETTINGS_TARGET = "index";
 //   else every contributing scope ready -> "ready" (green)
 //   otherwise (empty / skipped)        -> ""
 //
-// `issues` and `specs` are repo-shared and intentionally do not contribute.
+// Repo-shared scopes are intentionally excluded; only per-worktree file
+// scopes contribute to the project-tab dot.
 export function aggregateProjectTabDotState(status) {
   if (!status) return "";
   const filesByWorktree = (status.scopes && status.scopes.files) || {};
@@ -43,8 +44,8 @@ export function aggregateProjectTabDotState(status) {
   return "";
 }
 
-// Dispatch the canonical settings:open event consumed by the Settings.Index
-// tab handler (PR3). Callers (Settings button, command palette, future
+// Dispatch the canonical settings:open event consumed by the dedicated Index
+// window handler. Callers (Settings button, command palette, future
 // affordances) reuse this helper so the navigation event shape stays canonical.
 export function dispatchOpenIndexSettings(target) {
   const dispatchTarget = target || (typeof document !== "undefined" ? document : null);

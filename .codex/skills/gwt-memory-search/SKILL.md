@@ -1,18 +1,19 @@
 ---
-name: gwt-lessons-search
-description: "Semantic search over the project's lessons log at `tasks/lessons.md` using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search lessons', 'find related lesson', 'check past failures', 'has this been hit before', '過去 lesson を引いて', '同じ失敗があるか確認して'."
+name: gwt-memory-search
+description: "Semantic search over the project's memory log at `tasks/memory.md` using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search memory', 'find related memory', 'check past failures', 'has this been hit before', '過去 memory を引いて', '同じ失敗があるか確認して'."
 ---
 
-# Lessons Search
+# Memory Search
 
-gwt maintains a vector search index over post-mortem lesson entries kept in
-`tasks/lessons.md` using ChromaDB embeddings (model:
+gwt maintains a vector search index over post-mortem memory entries kept in
+`tasks/memory.md` using ChromaDB embeddings (model:
 `intfloat/multilingual-e5-base`). Each H2 section (`## YYYY-MM-DD — title` plus
 the canonical `### 事象 / 原因 / 再発防止策` subsections) is chunked and
 embedded. The index is repo-scoped and stored at
-`~/.gwt/index/<repo-hash>/lessons/`, shared across worktrees. Lessons are the
-only canonical record of post-mortem learning for this project — write to
-`tasks/lessons.md` directly; this skill never edits content.
+`~/.gwt/index/<repo-hash>/memory/`, shared across worktrees. Memory is the
+only canonical record of post-mortem learning for this project. Use
+`gwtd memory add` for new entries; direct edits to `tasks/memory.md` are only
+for unusual bulk cleanup.
 
 ## gwtd resolution
 
@@ -22,21 +23,21 @@ then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
 command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 `gwtd not found` error.
 
-## Lessons search first when work resembles past failures
+## Memory search first when work resembles past failures
 
-When the user asks any of the following, use lessons search **before** writing
+When the user asks any of the following, use memory search **before** writing
 new code or spec text:
 
-- "過去 lesson を引いて"
+- "過去 memory を引いて"
 - "同じ失敗があるか確認して"
 - "before fixing X, check whether we have learned this before"
 - "Has this regression been recorded?"
 
 Minimum workflow:
 
-1. Run `search-lessons` with 2-3 semantic queries derived from the request.
-2. Pick the most relevant past lesson if one exists.
-3. Read the matching section in `tasks/lessons.md` before deciding the
+1. Run `search-memory` with 2-3 semantic queries derived from the request.
+2. Pick the most relevant past memory if one exists.
+3. Read the matching section in `tasks/memory.md` before deciding the
    approach. Reuse the existing prevention strategy when applicable.
 
 ## Environment
@@ -52,19 +53,19 @@ automatically:
 If you invoke the runner outside the gwt app, recompute them as shown in
 `gwt-search` (the runner accepts the same flags for all scopes).
 
-## Lessons search command
+## Memory search command
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action search-lessons \
+  --action search-memory \
   --repo-hash "$GWT_REPO_HASH" \
   --project-root "$GWT_PROJECT_ROOT" \
   --query "your search query" \
   --n-results 10
 ```
 
-If the lessons index does not yet exist, the runner builds it inline (full
-mode) from `<project_root>/tasks/lessons.md` and emits NDJSON progress on
+If the memory index does not yet exist, the runner builds it inline (full
+mode) from `<project_root>/tasks/memory.md` and emits NDJSON progress on
 stderr before returning the search result.
 
 To force a full re-index (normally handled by the project watcher or the
@@ -72,51 +73,61 @@ search auto-build fallback):
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action index-lessons \
+  --action index-memory \
   --repo-hash "$GWT_REPO_HASH" \
   --project-root "$GWT_PROJECT_ROOT" \
   --mode full
 ```
 
 `--worktree-hash` is accepted for symmetry with the other scopes but is
-ignored — lessons is repo-scoped and serves every worktree from a single
+ignored — memory is repo-scoped and serves every worktree from a single
 index.
 
-## Lessons search output format
+## Memory search output format
 
 ```json
-{"ok": true, "lessonResults": [
+{"ok": true, "memoryResults": [
   {"date": "2026-05-20", "title": "gwtd issue spec create -f は section マーカーを付けない", "heading": "## 2026-05-20 — gwtd issue spec create -f は section マーカーを付けない", "chunk_idx": 0, "distance": 0.12}
 ]}
 ```
 
-When a lesson spans multiple chunks (long body or paragraph-split), only the
+When a memory spans multiple chunks (long body or paragraph-split), only the
 best-scoring chunk per `(date, title)` pair is surfaced. Use the `heading`
-field to locate the exact section in `tasks/lessons.md`.
+field to locate the exact section in `tasks/memory.md`.
 
 ## When to use
 
 - Pre-work duplication check: before fixing a bug or adding a feature, confirm
-  whether a related lesson already captures the prevention strategy.
+  whether a related memory already captures the prevention strategy.
 - Architecture discussions: surface relevant past learnings during
   `gwt-discussion` or `gwt-arch-review`.
-- Code review: cite the original lesson that motivates a defensive change.
+- Code review: cite the original memory that motivates a defensive change.
 - Onboarding: discover recurring failure modes documented in the project.
 
-## Write path is unchanged
+## Write path
 
-This skill does **not** write to `tasks/lessons.md`. New lessons must be added
-by editing the file directly with the canonical structure (`## YYYY-MM-DD —
-title` + `### 事象 / ### 原因 / ### 再発防止策`). The watcher and the
-auto-build fallback pick up the change automatically.
+Use `gwtd memory add` for new reusable learning. `gwtd lessons add` remains a
+legacy CLI alias and writes the same canonical `tasks/memory.md` file:
+
+```bash
+"$GWT_BIN" memory add \
+  --type lesson \
+  --title "short title" \
+  --context "What happened or where the learning applies." \
+  --learning "The reusable insight." \
+  --future-action "What future agents should do differently."
+```
+
+Direct file edits remain acceptable for unusual bulk edits or manual cleanup.
+The watcher and the auto-build fallback pick up either path automatically.
 
 ## Notes
 
-- The runner auto-builds the lessons index when missing (use
+- The runner auto-builds the memory index when missing (use
   `--no-auto-build` to suppress).
 - Uses semantic similarity (not just keyword matching). Lower distance values
   indicate higher relevance.
 - For SPEC search, use `gwt-spec-search`. For GitHub Issue search, use
   `gwt-issue-search`. For implementation file search, use
   `gwt-project-search`. For a unified result across all four, use
-  `gwt-search` and add `--lessons` (or omit filters to merge every scope).
+  `gwt-search` and add `--memory` (or omit filters to merge every scope).

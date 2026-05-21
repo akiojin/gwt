@@ -64,6 +64,8 @@ fn print_help() {
     println!("  board       Read/write the coordination Board (SPEC-1974)");
     println!("  hook        Dispatch Claude Code / Codex hook events");
     println!("  index       Manage the local search index");
+    println!("  memory      Append reusable project memory");
+    println!("  lessons     Legacy alias for memory add");
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
@@ -84,6 +86,7 @@ fn family_help(family: &str) -> Option<String> {
         "board" => Some(format_board_help()),
         "hook" => Some(format_hook_help()),
         "index" => Some(format_index_help()),
+        "memory" | "lessons" => Some(format_memory_help()),
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
@@ -265,8 +268,28 @@ fn format_index_help() -> String {
         "",
         "Subcommands:",
         "  status                                  Show index runtime + asset status",
-        "  rebuild [--scope all|issues|specs|files|files-docs]",
+        "  rebuild [--scope all|issues|specs|memory|board|files|files-docs]",
         "                                          Rebuild a specific scope",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_memory_help() -> String {
+    [
+        "gwtd memory — Append reusable project memory to tasks/memory.md.",
+        "",
+        "Usage: gwtd memory add [fields]",
+        "       gwtd lessons add [fields]   Legacy alias; writes tasks/memory.md",
+        "",
+        "Fields:",
+        "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",
+        "  --type <lesson|decision|workflow|failure-pattern>",
+        "                                          Memory entry type (defaults to lesson)",
+        "  --title <text>                          Entry heading",
+        "  --context <text>                        What happened or what was observed",
+        "  --learning <text>                       Reusable learning",
+        "  --future-action <text>                  What future agents should do",
         "",
     ]
     .join("\n")

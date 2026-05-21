@@ -14,12 +14,17 @@ use std::{
     time::Duration,
 };
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tokio::sync::mpsc;
 
-use crate::error::{GwtError, Result};
+use crate::{
+    error::{GwtError, Result},
+    index::path_policy::{
+        build_project_ignore_matcher, default_index_path_policy, IndexPathPolicy,
+        ProjectIgnoreMatcher,
+    },
+};
 
 /// Tunable parameters for `start_watcher`.
 #[derive(Debug, Clone)]
@@ -87,7 +92,8 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
         dunce::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
     let worktree_path = worktree_path_owned.as_path();
 
-    let gitignore = build_gitignore(worktree_path);
+    let policy = default_index_path_policy();
+    let ignore_matcher = build_gitignore(worktree_path);
 
     // Bridge sync notify callback → tokio mpsc.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
@@ -129,10 +135,10 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
                 continue;
             }
 
-            // Filter through gitignore.
+            // Filter through the shared project index path policy.
             let filtered: Vec<PathBuf> = accumulated
                 .into_iter()
-                .filter(|p| !is_ignored(&gitignore, &worktree_owned, p))
+                .filter(|p| !is_ignored(&policy, &ignore_matcher, &worktree_owned, p))
                 .collect();
             if filtered.is_empty() {
                 continue;
@@ -158,72 +164,22 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
     })
 }
 
-/// Prefixes under the Worktree root that should never feed into the index
-/// even when they are not listed in `.gitignore`. These mirror the
-/// runner's `classify_file_bucket` skip list plus common heavy build
-/// artifact directories so the watcher does not trigger rebuilds from
-/// agent hook writes or cargo target churn.
-const WATCHER_BUILTIN_SKIP_PREFIXES: &[&str] = &[
-    ".git",
-    ".claude",
-    ".codex",
-    ".gemini",
-    ".gwt",
-    "tasks",
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-];
-
-fn build_gitignore(worktree: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(worktree);
-    let gitignore_path = worktree.join(".gitignore");
-    if gitignore_path.is_file() {
-        let _ = builder.add(&gitignore_path);
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
+fn build_gitignore(worktree: &Path) -> ProjectIgnoreMatcher {
+    build_project_ignore_matcher(worktree)
 }
 
+#[cfg(test)]
 fn is_builtin_skip(worktree: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(worktree).unwrap_or(path);
-    let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
-    match first {
-        Some(name) => WATCHER_BUILTIN_SKIP_PREFIXES.contains(&name),
-        None => false,
-    }
+    default_index_path_policy().is_builtin_denied_path(worktree, path)
 }
 
-/// Worktree-relative paths that override the builtin skip list. These files
-/// participate in the watcher even when their parent directory would normally
-/// be skipped. Keep the list intentionally small — every entry weakens the
-/// builtin skip guarantee.
-const WATCHER_BUILTIN_ALLOWLIST: &[&str] = &["tasks/lessons.md"];
-
-fn is_allowlisted(worktree: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(worktree).unwrap_or(path);
-    WATCHER_BUILTIN_ALLOWLIST
-        .iter()
-        .any(|allowed| rel == Path::new(allowed))
-}
-
-fn is_ignored(gi: &Gitignore, worktree: &Path, path: &Path) -> bool {
-    if is_allowlisted(worktree, path) {
-        return false;
-    }
-    if is_builtin_skip(worktree, path) {
-        return true;
-    }
-    let rel = path.strip_prefix(worktree).unwrap_or(path);
-    let is_dir = path.is_dir();
-    // Use matched_path_or_any_parents so a `ignored/` rule excludes
-    // every file underneath `ignored/`, not just the directory entry itself.
-    matches!(
-        gi.matched_path_or_any_parents(rel, is_dir),
-        ignore::Match::Ignore(_)
-    )
+fn is_ignored(
+    policy: &IndexPathPolicy,
+    matcher: &ProjectIgnoreMatcher,
+    worktree: &Path,
+    path: &Path,
+) -> bool {
+    !policy.is_indexable_path(matcher, worktree, path)
 }
 
 #[cfg(test)]
@@ -252,12 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn tasks_lessons_md_is_watched_despite_tasks_skip() {
+    fn tasks_memory_md_is_watched_despite_tasks_skip() {
         let root = Path::new("/repo");
-        let path = root.join("tasks/lessons.md");
+        let path = root.join("tasks/memory.md");
 
+        let policy = default_index_path_policy();
         let gi = build_gitignore(root);
-        assert!(!is_ignored(&gi, root, &path));
+        assert!(!is_ignored(&policy, &gi, root, &path));
     }
 
     #[test]
@@ -265,8 +222,9 @@ mod tests {
         let root = Path::new("/repo");
         let path = root.join("tasks/todo.md");
 
+        let policy = default_index_path_policy();
         let gi = build_gitignore(root);
-        assert!(is_ignored(&gi, root, &path));
+        assert!(is_ignored(&policy, &gi, root, &path));
     }
 
     #[test]
@@ -274,7 +232,8 @@ mod tests {
         let root = Path::new("/repo");
         let path = root.join("tasks/spec-1939/notes.md");
 
+        let policy = default_index_path_policy();
         let gi = build_gitignore(root);
-        assert!(is_ignored(&gi, root, &path));
+        assert!(is_ignored(&policy, &gi, root, &path));
     }
 }

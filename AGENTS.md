@@ -11,7 +11,7 @@
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
-- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/lessons.md` に記録し、同種の作業を始める前に確認する。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd memory add` で `tasks/memory.md` に記録し、同種の作業を始める前に確認する。`tasks/lessons.md` は legacy alias / 移行 stub として扱う。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -71,6 +71,15 @@
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
 
+### Ready PR Gate（Draft / Ready 運用）
+
+- `feat` / `fix` / `refactor` の途中成果は **Draft PR** のみ許可する。未完了・未検証・受け入れ未達・既知 blocker ありの変更は **Ready PR 禁止**。
+- Ready PR は、その PR スコープが**単独で配信可能**であり、残件が配信 blocker ではない後続タスクとして明確な場合だけ許可する。
+- 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。
+- Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
+- Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
+- Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
+
 ## 開発ワークフロー
 
 ### 実装前ワークフロー（必須）
@@ -99,7 +108,7 @@
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/lessons.md 参照）
+- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/memory.md 参照）
 - GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（gwt-register-spec の validation が強制する 7 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
@@ -143,8 +152,8 @@
 
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
-- 再発防止に値する失敗やレビュー指摘は `tasks/lessons.md` に「事象 / 原因 / 再発防止策」の形式で記録する。
-- 同種の作業を始める前に `tasks/lessons.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --lessons "<query>"` または `/gwt:gwt-lessons-search "<query>"` を使い、関連 lesson が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` で `tasks/memory.md` に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。`gwtd lessons add` は legacy alias として同じ `tasks/memory.md` に追記する。
+- 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 
@@ -163,6 +172,17 @@
 - **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除・切り替えを行ってはならない。`git checkout -b`、`git switch -c`、`git branch -D`、`git worktree add/remove` は禁止。Worktree は起動ブランチで作業を完結する設計であり、必要な Git 環境作成は gwt の Start Work / Launch materialization が行う。**
 - 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
 - **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（GitHub Issue-backed SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / AGENTS.md / CLAUDE.md / README.md 更新のみ
+
+### PR 作成ルール（必須）
+
+> 🚨 **エージェントは、ユーザーの視覚検証結果が `confirmed` になる前に PR を `create` / `update` してはならない。**
+
+- `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま `gwtd pr create` / `gwtd pr edit` を呼ばない。
+- ユーザーが視覚検証できない状態（例: Open Project picker のクリックがブロックされている、splash から進めない、サーバーが起動しない 等）に遭遇した場合、エージェントの独断で `skipped(<reason>)` に倒さない。**まずブロッカーの根本原因を特定して解消し、ユーザーが実際に視覚確認できる状態を再現してから verification を依頼する**。
+- `skipped(<reason>)` を許容するのは、ユーザーが `AskUserQuestion` 等で明示的に "Skip — proceed to PR" を選択した場合のみ。エージェントが「自動テスト全 PASS だから skip 妥当」と判断して skip するのは禁止。
+- 「進めて」「OK」等の承認指示は、**既に verification 結果を持つ作業**を完了まで進める指示であり、verification 自体の skip 承認ではない。verification 動線がブロックされている時に「進めて」と言われた場合は、ブロッカー解消の作業を進める指示として解釈する。
+- 万が一誤って PR を作成してしまった場合、即座に PR タイトルへ `[DO NOT MERGE — user verification pending]` を付与し、ブロック comment を投稿してマージを物理的に阻止する。verification が `confirmed` になってからタイトルを戻す。
+- 過去事例: PR #2857（SPEC-2809）で `User Verification Result: skipped(reason: develop 側 picker regression)` をエージェントが独断で倒して PR を作成したのは skill 違反だった。原因は picker click-blocking という visualization blocker をエージェントが解消せずに skip に倒したこと。今後は同じ skip 判断を繰り返さない。
 
 ### コミットメッセージポリシー
 

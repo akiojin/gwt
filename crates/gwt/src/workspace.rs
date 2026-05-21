@@ -275,16 +275,41 @@ impl WorkspaceState {
         }
         let step = step as f64;
 
-        let window = PersistedWindowState {
-            id: self.next_window_id(preset),
-            title: title.into(),
+        self.push_window_with_geometry(
             preset,
-            geometry: WindowGeometry {
+            title,
+            persist,
+            WindowGeometry {
                 x: center_x + step * STACK_OFFSET_X,
                 y: center_y + step * STACK_OFFSET_Y,
                 width,
                 height,
             },
+        )
+    }
+
+    pub fn add_window_at_geometry_with_title(
+        &mut self,
+        preset: WindowPreset,
+        title: impl Into<String>,
+        persist: bool,
+        geometry: WindowGeometry,
+    ) -> PersistedWindowState {
+        self.push_window_with_geometry(preset, title, persist, geometry)
+    }
+
+    fn push_window_with_geometry(
+        &mut self,
+        preset: WindowPreset,
+        title: impl Into<String>,
+        persist: bool,
+        geometry: WindowGeometry,
+    ) -> PersistedWindowState {
+        let window = PersistedWindowState {
+            id: self.next_window_id(preset),
+            title: title.into(),
+            preset,
+            geometry,
             geometry_revision: 0,
             z_index: self.persisted.next_z_index,
             status: WindowProcessStatus::Running,

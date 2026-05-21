@@ -242,21 +242,18 @@ where
 }
 
 pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
-    if current_git_branch(repo_path)
-        .as_ref()
-        .is_ok_and(|current| current == branch_name)
-    {
-        return Some(repo_path.to_path_buf());
-    }
-
     let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    manager
-        .list()
-        .ok()?
-        .into_iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-        .map(|worktree| worktree.path)
+    let mut worktrees = manager.list().ok()?;
+    if let Some(path) = usable_worktree_path_for_branch(&worktrees, branch_name) {
+        return Some(path);
+    }
+    if worktrees_have_stale_branch_entry(&worktrees, branch_name) {
+        manager.prune().ok()?;
+        worktrees = manager.list().ok()?;
+        return usable_worktree_path_for_branch(&worktrees, branch_name);
+    }
+    None
 }
 
 pub fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Result<(), String> {
@@ -283,37 +280,43 @@ pub fn resolve_launch_worktree_request(
         return Ok(());
     }
 
-    let current_branch = current_git_branch(repo_path);
-    if current_branch.is_err() && base_branch.is_none() {
-        return Ok(());
-    }
-    if current_branch
-        .as_ref()
-        .is_ok_and(|current| current == &branch_name)
-    {
-        *working_dir = Some(repo_path.to_path_buf());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            repo_path.display().to_string(),
-        );
-        return Ok(());
-    }
-
-    let main_repo_path =
-        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    let main_repo_path = match gwt_git::worktree::main_worktree_root(repo_path) {
+        Ok(path) => path,
+        Err(error) => {
+            if base_branch.is_none()
+                && matches!(
+                    gwt_git::detect_repo_type(repo_path),
+                    gwt_git::RepoType::NonRepo
+                )
+            {
+                return Ok(());
+            }
+            return Err(error.to_string());
+        }
+    };
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let worktrees = manager.list().map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = worktrees
-        .iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
-        .map(|worktree| worktree.path.clone())
-    {
+    let mut worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
         *working_dir = Some(existing_worktree.clone());
         env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
             existing_worktree.display().to_string(),
         );
         return Ok(());
+    }
+    if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
+        manager
+            .prune()
+            .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
+        worktrees = manager.list().map_err(|err| err.to_string())?;
+        if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
+            *working_dir = Some(existing_worktree.clone());
+            env_vars.insert(
+                "GWT_PROJECT_ROOT".to_string(),
+                existing_worktree.display().to_string(),
+            );
+            return Ok(());
+        }
     }
 
     let mut base_branch = base_branch
@@ -1458,6 +1461,31 @@ fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -
         .any(|worktree| same_path(&worktree.path, path))
 }
 
+fn usable_worktree_path_for_branch(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> Option<PathBuf> {
+    worktrees
+        .iter()
+        .find(|worktree| {
+            worktree.branch.as_deref() == Some(branch_name) && usable_worktree_entry(worktree)
+        })
+        .map(|worktree| worktree.path.clone())
+}
+
+fn worktrees_have_stale_branch_entry(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> bool {
+    worktrees.iter().any(|worktree| {
+        worktree.branch.as_deref() == Some(branch_name) && !usable_worktree_entry(worktree)
+    })
+}
+
+fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
+    !worktree.prunable && worktree.path.exists()
+}
+
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -1496,25 +1524,6 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
     branch_name
         .strip_prefix("work/")
         .is_some_and(|name| !name.is_empty())
-}
-
-fn current_git_branch(repo_path: &Path) -> Result<String, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|err| format!("git branch --show-current: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git branch --show-current: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        return Err("git branch --show-current: detached HEAD".to_string());
-    }
-    Ok(branch)
 }
 
 fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
@@ -1625,6 +1634,41 @@ mod tests {
         config.runtime_target = LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
         config
+    }
+
+    fn init_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("create repo dir");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q", "-b", "develop"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+        let config_name = gwt_core::process::hidden_command("git")
+            .args(["config", "user.name", "Codex"])
+            .current_dir(path)
+            .status()
+            .expect("git config user.name");
+        assert!(config_name.success(), "git config user.name failed");
+        let config_email = gwt_core::process::hidden_command("git")
+            .args(["config", "user.email", "codex@example.com"])
+            .current_dir(path)
+            .status()
+            .expect("git config user.email");
+        assert!(config_email.success(), "git config user.email failed");
+        fs::write(path.join("README.md"), "repo\n").expect("write readme");
+        let add = gwt_core::process::hidden_command("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add failed");
+        let commit = gwt_core::process::hidden_command("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+        assert!(commit.success(), "git commit failed");
     }
 
     #[test]
@@ -2007,48 +2051,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_launch_worktree_request_noops_when_repo_is_detached_and_base_is_missing() {
+    fn resolve_launch_worktree_request_noops_when_repo_is_nonrepo_and_base_is_missing() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
-
-        let init = gwt_core::process::hidden_command("git")
-            .args(["init", "-q", "-b", "develop"])
-            .current_dir(&repo)
-            .status()
-            .expect("git init");
-        assert!(init.success(), "git init failed");
-        let config_name = gwt_core::process::hidden_command("git")
-            .args(["config", "user.name", "Codex"])
-            .current_dir(&repo)
-            .status()
-            .expect("git config user.name");
-        assert!(config_name.success(), "git config user.name failed");
-        let config_email = gwt_core::process::hidden_command("git")
-            .args(["config", "user.email", "codex@example.com"])
-            .current_dir(&repo)
-            .status()
-            .expect("git config user.email");
-        assert!(config_email.success(), "git config user.email failed");
-        fs::write(repo.join("README.md"), "repo\n").expect("write readme");
-        let add = gwt_core::process::hidden_command("git")
-            .args(["add", "README.md"])
-            .current_dir(&repo)
-            .status()
-            .expect("git add");
-        assert!(add.success(), "git add failed");
-        let commit = gwt_core::process::hidden_command("git")
-            .args(["commit", "-qm", "init"])
-            .current_dir(&repo)
-            .status()
-            .expect("git commit");
-        assert!(commit.success(), "git commit failed");
-        let detach = gwt_core::process::hidden_command("git")
-            .args(["checkout", "--detach"])
-            .current_dir(&repo)
-            .status()
-            .expect("git checkout --detach");
-        assert!(detach.success(), "git checkout --detach failed");
 
         let mut working_dir = None;
         let mut env_vars = HashMap::new();
@@ -2059,10 +2065,62 @@ mod tests {
             &mut working_dir,
             &mut env_vars,
         )
-        .expect("detached repo without base branch should no-op");
+        .expect("non-repo without base branch should no-op");
 
         assert!(working_dir.is_none());
         assert!(env_vars.is_empty());
+    }
+
+    #[test]
+    fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        let branch = "feature/existing";
+        let create_branch = gwt_core::process::hidden_command("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .status()
+            .expect("create branch");
+        assert!(create_branch.success(), "create branch failed");
+        let existing_worktree = temp.path().join("feature-existing");
+        let add_worktree = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q"])
+            .arg(&existing_worktree)
+            .arg(branch)
+            .current_dir(&repo)
+            .status()
+            .expect("git worktree add");
+        assert!(add_worktree.success(), "git worktree add failed");
+        let detach = gwt_core::process::hidden_command("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout --detach");
+        assert!(detach.success(), "git checkout --detach failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let result = resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            None,
+            &mut working_dir,
+            &mut env_vars,
+        );
+        assert!(
+            result.is_ok(),
+            "selected branch should resolve through git worktree list before current-branch probe: {result:?}"
+        );
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|value| same_path(value, &existing_worktree)));
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| same_path(Path::new(value), &existing_worktree)));
+        assert!(branch_worktree_path(&repo, branch)
+            .as_deref()
+            .is_some_and(|value| same_path(value, &existing_worktree)));
     }
 
     #[test]

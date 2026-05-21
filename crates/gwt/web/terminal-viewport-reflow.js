@@ -1,6 +1,6 @@
 // SPEC-2008 Phase 24 — operation-shape primitives for host resize and tab
 // visibility transitions. Pure module so __tests__ can drive the
-// behavior with linkedom + stubs (`tasks/lessons.md` 2026-05-07 lesson —
+// behavior with linkedom + stubs (`tasks/memory.md` 2026-05-07 memory —
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 

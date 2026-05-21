@@ -1,7 +1,7 @@
 // SPEC-2008 Phase 24 / T-184..T-186 — terminal viewport reflow on host
 // resize and tab visibility transitions. Behaviour tests drive the
 // extracted controller (terminal-viewport-reflow.js) so the operation
-// shape is exercised end-to-end (`tasks/lessons.md` 2026-05-07 lesson —
+// shape is exercised end-to-end (`tasks/memory.md` 2026-05-07 memory —
 // window interaction features need behavior tests, not only source-string
 // contract). app.js still imports the same primitives, and a thin
 // source-string assertion at the bottom makes sure the wiring stays in
@@ -405,7 +405,7 @@ test("elementHasLayoutBox blocks 0-size containers (Issue #2832 / SPEC-2008 Phas
 });
 
 test("app.js wires the reflow controller for resize, transition, and predicate", () => {
-  // Source-string contract retained per the lesson — limited to wiring
+  // Source-string contract retained per the memory — limited to wiring
   // detection so a future refactor that drops the import / call surfaces
   // immediately, without claiming behaviour coverage.
   assert.match(

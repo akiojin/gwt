@@ -28,8 +28,9 @@ use gwt_git::PrStatus;
 use gwt_github::{client::IssueClient, IssueNumber, SpecListFilter};
 
 use super::{
-    parse_actions_args, parse_board_args, parse_hook_args, parse_issue_args, parse_pane_args,
-    parse_pr_args, run, CliParseError, LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread,
+    parse_actions_args, parse_board_args, parse_hook_args, parse_issue_args, parse_memory_args,
+    parse_pane_args, parse_pr_args, run, CliParseError, LinkedPrSummary, PrChecksSummary, PrReview,
+    PrReviewThread,
 };
 
 /// High-level runtime environment for the CLI. Kept as a trait so tests can
@@ -181,6 +182,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "index" => super::parse_index_args(&rest),
+        "memory" | "lessons" => parse_memory_args(&rest),
         "hook" => parse_hook_args(&rest),
         "discuss" => super::parse_discuss_args(&rest),
         "plan" => super::parse_plan_args(&rest),

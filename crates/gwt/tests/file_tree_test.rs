@@ -28,6 +28,26 @@ fn list_directory_entries_filters_gitignored_and_builtin_skipped_paths() {
 }
 
 #[test]
+fn list_directory_entries_filters_nested_gitignore_rules() {
+    let dir = tempdir().expect("tempdir");
+    let app = dir.path().join("packages").join("app");
+    std::fs::create_dir_all(&app).expect("create app");
+    std::fs::write(app.join(".gitignore"), "*.generated\n").expect("write nested gitignore");
+    std::fs::write(app.join("view.generated"), "ignored").expect("write ignored");
+    std::fs::write(app.join("view.rs"), "fn view() {}").expect("write kept");
+
+    let entries = list_directory_entries(dir.path(), Some(Path::new("packages/app")))
+        .expect("nested entries");
+
+    let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+    assert!(paths.contains(&"packages/app/view.rs"));
+    assert!(
+        !paths.contains(&"packages/app/view.generated"),
+        "nested .gitignore rule must be honored by file tree filtering"
+    );
+}
+
+#[test]
 fn list_directory_entries_sorts_directories_before_files() {
     let dir = tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src").join("zeta")).expect("create zeta");

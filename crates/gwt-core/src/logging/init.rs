@@ -138,6 +138,22 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     }));
     let ui = UiForwarderLayer::new(ui_tx.clone());
 
+    // Install the hub before the subscriber so any caller invoking
+    // `spawn_logged` / `run_git_logged` during early startup pushes to
+    // the real hub instance.
+    let process_console_hub = ProcessConsoleHub::new();
+    let _ = crate::process_console::set_global(process_console_hub.clone());
+
+    // SPEC-2809 revised — the Console window mirrors actual subprocess
+    // stdout/stderr (via `spawn_logged` / `run_git_logged` → hub push)
+    // and synthetic `$ <command>` banners + `→ exit=...` footers. We
+    // intentionally do NOT tee gwt-domain tracing events
+    // (`gwt::index`, `gwt::git`, etc.) into the Console hub: those are
+    // structured tracing for the Logs window, and surfacing them in
+    // Console with `[target] message (field=value)` prefixes broke the
+    // "terminal-like output" mental model. The canonical JSONL log
+    // file still receives every tracing event via the `fmt` layer
+    // above, and the Logs window reads from that file.
     Registry::default()
         .with(reloadable_filter)
         .with(fmt)
@@ -154,12 +170,6 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
             "invalid initial filter directive — fell back to default level"
         );
     }
-
-    let process_console_hub = ProcessConsoleHub::new();
-    // SPEC-1924 FR-039: install the process-wide hub so synchronous
-    // gh / git / docker / runner wrappers can find it without
-    // threading it through every call site.
-    let _ = crate::process_console::set_global(process_console_hub.clone());
 
     Ok(LoggingHandles {
         guard,

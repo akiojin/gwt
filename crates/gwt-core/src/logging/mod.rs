@@ -20,6 +20,7 @@
 //! for the architectural background.
 
 pub mod config;
+pub mod console_tee;
 pub mod event;
 pub mod fmt_layer;
 pub mod housekeep;
