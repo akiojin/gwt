@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-05-21 — startup CPU / power は「起動プロセス数」と「hot payload サイズ」を同時に見る
+
+### 事象
+
+gwt 起動中に CPU 使用率と消費電力が高く、macOS ではファンが異様に回るという報告があった。
+`sample` / `ps` / gwt logs を見ると、単一の busy loop ではなく、startup auto-resume、
+project index full status refresh、頻繁な `workspace_state` broadcast が同時に負荷を作っていた。
+
+### 原因
+
+- 起動時の auto-resume が recoverable session を無制限に再開し、同一 native
+  agent session 由来の重複も launch 対象になり得た。
+- Settings.Index の full refresh が、startup current-worktree bootstrap と衝突した後の
+  retry だけでなく、同時 full refresh 同士でも二重 probe を起こせる in-flight key になっていた。
+- hot path の `workspace_state` が workspace work item 履歴を毎回含み、履歴が増えるほど
+  serialize / WebSocket / frontend state update のコストが膨らんだ。
+
+### 再発防止策
+
+1. startup の自動再開は、件数上限・native session id dedupe・staleness gate を同時に置く。
+   「前回状態を復元する」機能でも、unbounded launch fan-out は performance bug として扱う。
+2. startup current-only probe と Settings.Index full refresh は別 key にしつつ、full refresh 同士は
+   single-flight で潰す。retry を許すのは startup bootstrap と衝突した場合だけに限定する。
+3. 高頻度 broadcast には履歴 payload を載せない。workspace history は
+   `active_work_projection` のような用途特化 payload に寄せ、shell state は構造情報だけに保つ。
+4. CPU / power 調査では CPU% だけで結論を出さず、`sample`、子プロセス数、runner 起動ログ、
+   WebSocket payload の大きさを同じタイムラインで見る。
+
 ## 2026-05-20 — Phase 26 の visibility 述語だけでは silent no-op を防げない: layout box が立つまで `isReady` を flip しない (Issue #2832 / SPEC-2008 Phase 26.A regression)
 
 ### 事象

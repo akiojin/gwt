@@ -228,6 +228,9 @@ fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_age
     config
 }
 
+const STARTUP_AUTO_RESUME_LIMIT: usize = 3;
+const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
+
 fn auto_resume_window_bounds(index: usize) -> gwt::WindowGeometry {
     let offset = ((index % 6) as f64) * 28.0;
     gwt::WindowGeometry {
@@ -236,6 +239,14 @@ fn auto_resume_window_bounds(index: usize) -> gwt::WindowGeometry {
         width: 960.0,
         height: 620.0,
     }
+}
+
+fn startup_auto_resume_is_fresh(
+    session: &gwt_agent::Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now.signed_duration_since(session.last_activity_at)
+        <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
 }
 
 fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
@@ -2677,14 +2688,34 @@ impl AppRuntime {
     fn auto_resume_recoverable_agent_sessions(&mut self) {
         let mut sessions = self.load_recovery_sessions();
         sessions.sort_by(|left, right| {
-            left.last_activity_at
-                .cmp(&right.last_activity_at)
+            right
+                .last_activity_at
+                .cmp(&left.last_activity_at)
                 .then_with(|| left.id.cmp(&right.id))
         });
 
+        let now = chrono::Utc::now();
         let mut launched = 0usize;
+        let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
+            if launched >= STARTUP_AUTO_RESUME_LIMIT {
+                break;
+            }
             if !session.exact_auto_resume_candidate() {
+                continue;
+            }
+            if !startup_auto_resume_is_fresh(&session, now) {
+                continue;
+            }
+            let Some(native_session_id) = session
+                .agent_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !resumed_native_sessions.insert(native_session_id.to_string()) {
                 continue;
             }
             if self
@@ -11039,6 +11070,80 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_bootstrap_auto_resume_caps_dedupes_and_skips_stale_sessions() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("auto-resume-guard");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/auto-resume-guard",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let now = chrono::Utc::now();
+        let cases = [
+            ("session-fresh-1", "native-one", 1_i64),
+            ("session-duplicate-native-one", "native-one", 2_i64),
+            ("session-fresh-2", "native-two", 3_i64),
+            ("session-fresh-3", "native-three", 4_i64),
+            ("session-fresh-4-over-cap", "native-four", 5_i64),
+            ("session-stale", "native-stale", 60 * 60 * 48_i64),
+        ];
+        for (session_id, native_session_id, age_secs) in cases {
+            let mut session = gwt_agent::Session::new(
+                &worktree,
+                "work/auto-resume-guard",
+                gwt_agent::AgentId::Codex,
+            );
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session.last_activity_at = now - chrono::Duration::seconds(age_secs);
+            session.updated_at = session.last_activity_at;
+            session
+                .save(&runtime.sessions_dir)
+                .expect("save resumable session");
+        }
+
+        runtime.bootstrap();
+
+        assert_eq!(
+            runtime.pending_auto_resume_sources.len(),
+            3,
+            "startup auto-resume must cap launches and avoid spawning every persisted session"
+        );
+        let resumed_sources = runtime
+            .pending_auto_resume_sources
+            .values()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            !resumed_sources.contains("session-duplicate-native-one"),
+            "duplicate native agent session ids must not launch twice"
+        );
+        assert!(
+            !resumed_sources.contains("session-stale"),
+            "stale persisted sessions must stay available for manual resume instead of auto-launching"
+        );
+        assert!(
+            !resumed_sources.contains("session-fresh-4-over-cap"),
+            "only the newest capped set should auto-launch"
+        );
+    }
+
+    #[test]
     fn app_runtime_resume_workspace_journal_populates_quick_start_entries_from_prior_sessions() {
         // SPEC-2359 US-44 (Issue #2757) follow-on: when the user clicks
         // `Resume` on a Workspace journal card whose branch already has a
@@ -16310,10 +16415,11 @@ exit 1
     }
 
     #[test]
-    fn workspace_view_for_tab_includes_done_work_items_from_disk() {
-        // SPEC-2359 US-37: workspace_state broadcast must carry work_items so
-        // the Workspace Overview Completed column renders without depending on
-        // the limited-trigger active_work_projection broadcast.
+    fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
+        // SPEC-2359 CPU/power follow-up: workspace_state is broadcast frequently
+        // and must stay structural. Workspace history/work items are carried by
+        // active_work_projection so every window/status update does not serialize
+        // the full work item event log.
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -16364,14 +16470,8 @@ exit 1
 
         let view = crate::runtime_support::workspace_view_for_tab(&tab);
         assert!(
-            view.work_items
-                .iter()
-                .any(|item| item.id == "work-item-done" && item.status_category == "done"),
-            "WorkspaceView.work_items must include the Done work item persisted on disk so workspace_state broadcast renders the Completed column on startup; got {:?}",
-            view.work_items
-                .iter()
-                .map(|i| (i.id.clone(), i.status_category.clone()))
-                .collect::<Vec<_>>()
+            view.work_items.is_empty(),
+            "WorkspaceView.work_items must stay empty because workspace_state is a hot broadcast path; active_work_projection owns Workspace history"
         );
     }
 
