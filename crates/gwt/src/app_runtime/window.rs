@@ -346,6 +346,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        self.clear_agent_window_startup_restore(id);
         self.stop_window_runtime(id);
         self.remove_window_state_tracking(id);
         self.profile_selections.remove(id);
