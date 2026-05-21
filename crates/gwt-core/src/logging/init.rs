@@ -14,7 +14,6 @@ use tracing_subscriber::{
 
 use super::{
     config::{LogLevel, LoggingConfig},
-    console_tee::ConsoleTeeLayer,
     fmt_layer, housekeep,
     ui_forwarder::UiForwarderLayer,
     writer, LogEvent,
@@ -139,22 +138,26 @@ pub fn init(config: LoggingConfig) -> Result<LoggingHandles, String> {
     }));
     let ui = UiForwarderLayer::new(ui_tx.clone());
 
-    // Install the hub BEFORE the subscriber so the ConsoleTeeLayer's
-    // first event finds the real hub instead of an orphan instance.
+    // Install the hub before the subscriber so any caller invoking
+    // `spawn_logged` / `run_git_logged` during early startup pushes to
+    // the real hub instance.
     let process_console_hub = ProcessConsoleHub::new();
     let _ = crate::process_console::set_global(process_console_hub.clone());
 
-    // SPEC-2809: ConsoleTeeLayer mirrors gwt-domain tracing events
-    // (target prefix → ProcessKind) into the ProcessConsoleHub so the
-    // Console window tabs see both actual command spawns and gwt-side
-    // operational notes (VS Code Output Panel parity).
-    let tee = ConsoleTeeLayer::new();
-
+    // SPEC-2809 revised — the Console window mirrors actual subprocess
+    // stdout/stderr (via `spawn_logged` / `run_git_logged` → hub push)
+    // and synthetic `$ <command>` banners + `→ exit=...` footers. We
+    // intentionally do NOT tee gwt-domain tracing events
+    // (`gwt::index`, `gwt::git`, etc.) into the Console hub: those are
+    // structured tracing for the Logs window, and surfacing them in
+    // Console with `[target] message (field=value)` prefixes broke the
+    // "terminal-like output" mental model. The canonical JSONL log
+    // file still receives every tracing event via the `fmt` layer
+    // above, and the Logs window reads from that file.
     Registry::default()
         .with(reloadable_filter)
         .with(fmt)
         .with(ui)
-        .with(tee)
         .try_init()
         .map_err(|e| format!("subscriber init failed: {e}"))?;
 

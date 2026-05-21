@@ -32,10 +32,11 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
     );
     tracing::warn!(target: "gwt_core::logging::test", "warning sample");
 
-    // SPEC-2809 — ConsoleTeeLayer should map `gwt::index` events into
-    // the IndexRunner ring buffer so the Console window's Runner tab
-    // shows operational notes even when the chroma runner is not
-    // currently spawning a subprocess.
+    // SPEC-2809 revised — the Console window only shows actual
+    // subprocess stdout/stderr (terminal-like view); gwt-domain
+    // tracing events like `gwt::index` must NOT be teed into the
+    // ProcessConsoleHub. They are surfaced by the Logs window via the
+    // canonical JSONL log file. This assertion guards the contract.
     tracing::info!(
         target: "gwt::index",
         worktree = "test-wt",
@@ -46,10 +47,8 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
         .process_console_hub
         .snapshot_kind(ProcessKind::IndexRunner);
     assert!(
-        hub_snapshot_runner
-            .iter()
-            .any(|line| line.message.contains("index status runner kicked")),
-        "expected ConsoleTeeLayer to push gwt::index event into IndexRunner buffer; got: {:?}",
+        hub_snapshot_runner.is_empty(),
+        "expected IndexRunner hub buffer to remain empty (no tee from `gwt::index` tracing), got: {:?}",
         hub_snapshot_runner
             .iter()
             .map(|l| l.message.as_str())
