@@ -68,7 +68,7 @@ test("aggregateProjectTabDotState ignores repo-shared scopes", () => {
       scopes: {
         issues: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
         specs: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
-        lessons: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
+        memory: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
         board: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
       },
     }),

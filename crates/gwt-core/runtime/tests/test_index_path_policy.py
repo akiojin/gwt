@@ -74,10 +74,9 @@ class IndexPathPolicyTests(unittest.TestCase):
 
             self.assertEqual(rels, {"src.rs"})
 
-    def test_shared_policy_exposes_lessons_and_memory_allowlist(self):
+    def test_shared_policy_exposes_memory_allowlist(self):
         policy = runner.load_index_path_policy()
 
-        self.assertIn("tasks/lessons.md", policy["allow_paths"])
         self.assertIn("tasks/memory.md", policy["allow_paths"])
         self.assertIn("tasks", policy["deny_root_prefixes"])
 

@@ -61,23 +61,23 @@ fn frontend_event_rebuild_index_cell_deserializes_with_all_scopes() {
         other => panic!("unexpected event: {other:?}"),
     }
 
-    let lessons = serde_json::from_value::<FrontendEvent>(json!({
+    let memory = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "rebuild_index_cell",
         "project_root": "/abs/repo",
-        "scope": "lessons"
+        "scope": "memory"
     }))
-    .expect("rebuild_index_cell scope=lessons should deserialize (SPEC-2805)");
-    match lessons {
+    .expect("rebuild_index_cell scope=memory should deserialize (SPEC-2805)");
+    match memory {
         FrontendEvent::RebuildIndexCell {
             project_root,
             scope,
             worktree_hash,
         } => {
             assert_eq!(project_root, "/abs/repo");
-            assert_eq!(scope, IndexRebuildScope::Lessons);
+            assert_eq!(scope, IndexRebuildScope::Memory);
             assert_eq!(
                 worktree_hash, None,
-                "lessons is repo-scoped, worktree_hash must not be required"
+                "memory is repo-scoped, worktree_hash must not be required"
             );
         }
         other => panic!("unexpected event: {other:?}"),
@@ -85,11 +85,11 @@ fn frontend_event_rebuild_index_cell_deserializes_with_all_scopes() {
 }
 
 #[test]
-fn index_rebuild_scope_lessons_metadata_matches_repo_scoped_contract() {
-    let scope = IndexRebuildScope::Lessons;
-    assert_eq!(scope.label(), "lessons");
+fn index_rebuild_scope_memory_metadata_matches_repo_scoped_contract() {
+    let scope = IndexRebuildScope::Memory;
+    assert_eq!(scope.label(), "memory");
     assert!(
         !scope.requires_worktree_hash(),
-        "lessons is repo-scoped — rebuild cell must not require worktree_hash"
+        "memory is repo-scoped — rebuild cell must not require worktree_hash"
     );
 }

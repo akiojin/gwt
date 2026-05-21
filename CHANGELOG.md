@@ -73,14 +73,14 @@ All notable changes to this project will be documented in this file.
 - **gui:** ブランチクリーンアップの進捗表示と強制削除を追加 (SPEC-2009)
 - Migrate docker/agent/runner callers to spawn_logged surface (SPEC-1924 Phase D)
 - **skills:** gwt-verify を project-agnostic 化しユーザー確認フェーズを追加
-- **index:** Add Lessons semantic search scope (SPEC #2805)
+- **index:** Add Memory semantic search scope (SPEC #2805)
 - **gui:** Add independent Console window for external process live tail (SPEC-2809)
 
 ### Bug Fixes
 
 - **workspace:** Unassigned session でも初回 UserPromptSubmit で identity auto-derive する (SPEC-2359 Phase U-10 / US-46)
 - Scope board reminder to hook cwd (Issue #2811)
-- **gui:** Populate lessons scope in aggregated project_index_status
+- **gui:** Populate memory scope in aggregated project_index_status
 - Issue Launch を work branch で起動する
 - Knowledge Launch を専用 Worktree で起動する
 - **docs:** Drop broken rustdoc intra-doc link in strip_ansi module (SPEC-2809)
@@ -90,14 +90,14 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record binary mismatch / deployment lag finding from Phase U-9 self-bench
-- **lessons:** Record salience asymmetry + activity-descriptor lessons from SPEC-2359 Phase U-9
-- **lessons:** Record process console wrapper raw-buffer-vs-redaction split
+- **memory:** Record binary mismatch / deployment lag finding from Phase U-9 self-bench
+- **memory:** Record salience asymmetry + activity-descriptor memory from SPEC-2359 Phase U-9
+- **memory:** Record process console wrapper raw-buffer-vs-redaction split
 
 ### Testing
 
 - **gui:** ブランチクリーンアップ E2E を追加 (SPEC-2009)
-- **index:** Add E2E coverage for lessons scope (Closes #2815)
+- **index:** Add E2E coverage for memory scope (Closes #2815)
 - **gui:** Console window DOM unit + live Playwright E2E (SPEC-2809)
 
 ### Miscellaneous Tasks
@@ -132,7 +132,7 @@ All notable changes to this project will be documented in this file.
 
 ### Testing
 
-- **playwright:** Add live E2E spec for Release Notes window + lessons
+- **playwright:** Add live E2E spec for Release Notes window + memory
 
 ## [9.39.0] - 2026-05-20
 
@@ -142,7 +142,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record SPEC creation pitfall with `gwtd issue spec create`
+- **memory:** Record SPEC creation pitfall with `gwtd issue spec create`
 
 ### Features
 
@@ -410,7 +410,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record xterm fitAddon silent no-op (SPEC-2008 Phase 26)
+- **memory:** Record xterm fitAddon silent no-op (SPEC-2008 Phase 26)
 
 ### Miscellaneous Tasks
 
@@ -571,7 +571,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** SPEC-2041 Phase 14 silent-failure 5回連続見逃しの教訓を追加
+- **memory:** SPEC-2041 Phase 14 silent-failure 5回連続見逃しの教訓を追加
 - **spec-2041:** SPEC-2041 Phase 19 Gate 3 manual smoke runbook
 
 ### Features
@@ -651,20 +651,20 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record preset filter for agent counting
-- **lessons:** Record source-string vs behavior test lesson for terminal viewport reflow
-- **lessons:** Record gwt-build-spec preflight gap from duplicate PR
+- **memory:** Record preset filter for agent counting
+- **memory:** Record source-string vs behavior test memory for terminal viewport reflow
+- **memory:** Record gwt-build-spec preflight gap from duplicate PR
 - **skills:** Add Board claim preflight
 - **playwright:** Document SPEC-1939 Phase 12 e2e seams + local reproduction
 - **playwright:** Add CI failure triage steps for Index Status e2e workflow
 - **playwright:** Rewrite test layout to match the actual spec set
 - Add SPEC-1939 Phase 12 manual smoke checklist for T-IDX-111/112
 - Correct manual smoke prerequisites and Board flags
-- **lessons:** Record CLI snippet verification rule for user-facing docs
+- **memory:** Record CLI snippet verification rule for user-facing docs
 - Restore --mention flag in board post documentation
 - **cli:** Align BoardCommand::Post docstring with full flag surface
-- **lessons:** Record auto-merge race window with CodeRabbit feedback
-- **lessons:** Record spec section edit safeguards
+- **memory:** Record auto-merge race window with CodeRabbit feedback
+- **memory:** Record spec section edit safeguards
 - **playwright:** Align README test names with actual spec test() titles
 - **smoke:** Add concrete recipe for seeding repair_required state
 - Record safe GitHub comment workflow
@@ -879,7 +879,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **tasks:** Record frontend module check lesson
+- **tasks:** Record frontend module check memory
 
 ### Features
 
@@ -1018,11 +1018,11 @@ All notable changes to this project will be documented in this file.
 
 - **ui:** SPEC-2356 — document Cmd+backslash sidebar toggle in Hotkey Overlay
 - SPEC-2356 — README に Cmd+backslash sidebar toggle を追記
-- **lessons:** SPEC-2356 — chrome-structure assertions alone don't catch contrast regressions
+- **memory:** SPEC-2356 — chrome-structure assertions alone don't catch contrast regressions
 - **ui:** SPEC-2356 — clarify why canvas is excluded from state-color contrast coverage
 - SPEC-2356 — README accessibility section reflects modal a11y completion
-- **lessons:** SPEC-2356 — regex undercapture masks bugs in nested CSS blocks
-- **lessons:** SPEC-2356 — audit-driven a11y coverage finds gaps that checklists miss
+- **memory:** SPEC-2356 — regex undercapture masks bugs in nested CSS blocks
+- **memory:** SPEC-2356 — audit-driven a11y coverage finds gaps that checklists miss
 
 ### Features
 
@@ -1106,7 +1106,7 @@ All notable changes to this project will be documented in this file.
 - **ui:** SPEC-2356 — pin forced-colors fallback completeness for every --color-* token
 - **ui:** SPEC-2356 — pin Shift+Tab from outside the trap wraps to last
 - **rust:** SPEC-2356 — pin Operator module embed + content-type contract
-- **ui:** SPEC-2356 — apply Lesson 2 to forced-colors fallback assertion
+- **ui:** SPEC-2356 — apply Memory 2 to forced-colors fallback assertion
 - **ui:** SPEC-2356 — assert every role="dialog" has a programmatic accessible name
 
 ### Ci
@@ -1231,12 +1231,12 @@ All notable changes to this project will be documented in this file.
 
 - **skills:** Sync .codex/skills with .claude/ to remove outdated SPEC paths (#1679)
 - **daemon:** Publish_event 最大 stall を 400ms→600ms に修正 (SPEC-2077)
-- **lessons:** SPEC-2077 Phase H1 review-driven hardening lessons
-- **lessons:** Variant-aware error matching for async primitives
+- **memory:** SPEC-2077 Phase H1 review-driven hardening memory
+- **memory:** Variant-aware error matching for async primitives
 - **readme:** Describe per-project runtime daemon and gwtd daemon status
 - **readme:** Scope runtime daemon description to macOS/Linux (codex P2)
 - **readme:** Correct Windows daemon status availability claim (codex P2)
-- **lessons:** Verify claims against actual code path before review
+- **memory:** Verify claims against actual code path before review
 - **daemon:** Refresh module docstrings to reflect Phase H1 ship
 - **daemon-contract:** Refresh DaemonFrame::Event comment to reflect Phase H1 ship
 - **daemon-publisher:** Correct default timeout from "2 s" to "200 ms" in module docstring
@@ -1245,7 +1245,7 @@ All notable changes to this project will be documented in this file.
 - **architecture:** Refresh post-Tauri-migration + add SPEC-2077 daemon overview
 - ***:** Correct daemon auto-bootstrap claim and endpoint filename (codex P2 ×2)
 - ***:** Drop incorrect "GUI launch records endpoint metadata" claim (codex P2 ×3)
-- **lessons:** Add multi-round-correction-loop pattern from PRs #2335-#2337
+- **memory:** Add multi-round-correction-loop pattern from PRs #2335-#2337
 
 ### Features
 
@@ -1486,7 +1486,7 @@ All notable changes to this project will be documented in this file.
 
 ### Miscellaneous Tasks
 
-- **docs:** Avoid space-only code spans in lessons entry
+- **docs:** Avoid space-only code spans in memory entry
 
 ### Testing
 
@@ -1709,7 +1709,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record WiX multi-file component auto GUID failure by @akiojin
+- **memory:** Record WiX multi-file component auto GUID failure by @akiojin
 - Remove tui-design from agent guide by @akiojin
 
 ### Features
@@ -1819,10 +1819,10 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record Windows release packaging failure by @akiojin
+- **memory:** Record Windows release packaging failure by @akiojin
 - Update skill guidance in agents
 - AGENTS.mdにカバレッジ基準を追記
-- **lessons:** Preset経由agent launchの既定arg抜け落ちを記録
+- **memory:** Preset経由agent launchの既定arg抜け落ちを記録
 
 ### Features
 
@@ -1894,7 +1894,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- **lessons:** Record branch-head check before issue completion
+- **memory:** Record branch-head check before issue completion
 
 ### Features
 
@@ -1993,7 +1993,7 @@ All notable changes to this project will be documented in this file.
 ### Documentation
 
 - **AGENTS.md:** Remove release workflow section
-- **lessons:** V9.2.0 リリース時の Step 9.2 スキップ (AI 実行エラー) に関する教訓を記録
+- **memory:** V9.2.0 リリース時の Step 9.2 スキップ (AI 実行エラー) に関する教訓を記録
 
 ### Features
 
@@ -2046,7 +2046,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Record terminal gui clarification lesson
+- Record terminal gui clarification memory
 - SPEC 参照ドキュメントを GitHub Issue ベースに統一
 - SPEC フォーマット制御を CLI に移行する方針を反映
 - 全スキルファイルの旧システム参照を gwt CLI に統一
@@ -2616,7 +2616,7 @@ All notable changes to this project will be documented in this file.
 - **spec:** Reconcile completion-gate artifacts
 - **spec:** Refresh SPEC-4 and SPEC-8 status
 - **spec:** Update SPEC-9 US-3 for embedded skills redesign
-- Record docker verification serialization lesson
+- Record docker verification serialization memory
 - **spec:** Mark Phase 2c tasks complete in SPEC-9
 - **skills:** Gwtスキル手順を更新する
 - 仕様策定ワークフローで既存SPEC検索を最優先にする
@@ -2629,7 +2629,7 @@ All notable changes to this project will be documented in this file.
 - **spec:** Add FR-029 user language principle to SPEC-12
 - **spec-9:** 統合 Node ベースマネージドランタイムフック仕様を追加
 - **spec-3:** Claude Code effort レベルと Codex 推論レベル UI を仕様化
-- Record legacy spec parser lesson
+- Record legacy spec parser memory
 - Add coordination shared board domain
 
 ### Features
@@ -2968,7 +2968,7 @@ All notable changes to this project will be documented in this file.
 - Mark SPEC-3 and SPEC-6 as Done
 - Accept updated E2E snapshots after SPEC completions
 - Accept updated E2E snapshots after operation flow overhaul
-- Apply cargo fmt and update lessons
+- Apply cargo fmt and update memory
 - Apply rustfmt formatting to lib.rs test assertions
 - SPEC-11 metadata をクローズ状態に更新
 - **tui:** Cargo fmtによるフォーマット修正
@@ -2983,7 +2983,7 @@ All notable changes to this project will be documented in this file.
 - **merge:** Sync origin/develop into bugfix/not-work-paste
 - Update obsolete skill references in gwt-search and gwt-spec-build
 - Merge latest develop
-- Lessons markdownlintを修正
+- Memory markdownlintを修正
 - **debug:** Add agent scrollback capture logs
 - Codex hooksのruntime-stateコマンドを反映
 - **skills:** Remove non-embedding gwt skills

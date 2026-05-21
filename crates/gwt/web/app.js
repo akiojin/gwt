@@ -559,13 +559,13 @@
         { id: "board", label: "Board" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
-        { id: "lessons", label: "Lessons" },
+        { id: "memory", label: "Memory" },
       ]);
       const INDEX_SEARCH_DEFAULT_SCOPES = Object.freeze([
         "issues",
         "specs",
         "board",
-        "lessons",
+        "memory",
       ]);
 
       function ensureIndexSearchState(windowId) {
@@ -908,7 +908,7 @@
           case "file":
             focusOrSpawnPreset("file_tree");
             return;
-          case "lesson":
+          case "memory":
             focusOrSpawnPreset("index");
             return;
           default:

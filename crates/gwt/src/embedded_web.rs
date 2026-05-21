@@ -202,7 +202,7 @@ pub fn release_notes_window_js() -> &'static str {
 // SPEC-2809 — Console window for external process stdout/stderr live tail.
 // 5 fixed kind tabs (gh / git / docker / agent / runner). app.js imports
 // `createConsoleWindow` at module top level so this asset MUST be registered
-// here; otherwise the ES module load fails and splash hangs (PR #2797 lesson).
+// here; otherwise the ES module load fails and splash hangs (PR #2797 memory).
 pub fn console_window_js() -> &'static str {
     include_str!("../web/console-window.js")
 }
@@ -917,7 +917,7 @@ mod tests {
         // default 80×24 grid; flushing deferredWrites then renders the
         // post-launch Claude Code output corrupted, with the
         // resize-recovers-on-move signature documented in
-        // tasks/lessons.md 2026-05-13.
+        // tasks/memory.md 2026-05-13.
         let layout_box_gate = regex::Regex::new(
             r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )

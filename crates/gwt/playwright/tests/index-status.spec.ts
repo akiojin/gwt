@@ -290,14 +290,14 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
-  test("Index window Health renders the lessons scope row and dispatches rebuild_index_cell (SPEC-2805)", async ({
+  test("Index window Health renders the memory scope row and dispatches rebuild_index_cell (SPEC-2805)", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
       state: "repair_required",
       scopes: {
-        lessons: {
+        memory: {
           healthy: false,
           repair_required: true,
           document_count: 0,
@@ -308,13 +308,13 @@ test.describe("Project Index status surface", () => {
 
     await page.goto(APP_URL);
     const { table } = await openIndexHealthPanel(page);
-    const lessonsRow = table.locator("tr[data-scope='lessons']").first();
-    await expect(lessonsRow).toBeVisible({ timeout: 10_000 });
-    await expect(lessonsRow.locator(".settings-index-cell.unhealthy")).toContainText(
+    const memoryRow = table.locator("tr[data-scope='memory']").first();
+    await expect(memoryRow).toBeVisible({ timeout: 10_000 });
+    await expect(memoryRow.locator(".settings-index-cell.unhealthy")).toContainText(
       "manifest_missing",
     );
 
-    const rebuildAll = lessonsRow.locator(".settings-index-rebuild-all[data-scope='lessons']");
+    const rebuildAll = memoryRow.locator(".settings-index-rebuild-all[data-scope='memory']");
     await rebuildAll.click();
 
     const lastRebuild = await page.evaluate(() => {
@@ -334,9 +334,9 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).toMatchObject({
       kind: "rebuild_index_cell",
       project_root: "/fixture",
-      scope: "lessons",
+      scope: "memory",
     });
-    // Lessons is repo-scoped just like issues/specs, so worktree_hash must
+    // Memory is repo-scoped just like issues/specs, so worktree_hash must
     // not be included in the dispatched IPC payload.
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });

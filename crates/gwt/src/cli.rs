@@ -395,7 +395,7 @@ pub enum IndexScope {
     All,
     Issues,
     Specs,
-    Lessons,
+    Memory,
     Board,
     Files,
     FilesDocs,

@@ -11,7 +11,7 @@
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
-- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/lessons.md` に記録し、同種の作業を始める前に確認する。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/memory.md` に記録し、同種の作業を始める前に確認する。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -99,7 +99,7 @@
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/lessons.md 参照）
+- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/memory.md 参照）
 - GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（gwt-register-spec の validation が強制する 7 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
@@ -143,8 +143,8 @@
 
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
-- 再発防止に値する失敗やレビュー指摘は `tasks/lessons.md` に「事象 / 原因 / 再発防止策」の形式で記録する。
-- 同種の作業を始める前に `tasks/lessons.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --lessons "<query>"` または `/gwt:gwt-lessons-search "<query>"` を使い、関連 lesson が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 再発防止に値する失敗やレビュー指摘は `tasks/memory.md` に「事象 / 原因 / 再発防止策」の形式で記録する。
+- 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 

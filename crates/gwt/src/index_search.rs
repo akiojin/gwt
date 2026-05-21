@@ -174,7 +174,7 @@ fn default_index_search_scopes() -> Vec<IndexSearchScope> {
     vec![
         IndexSearchScope::Issues,
         IndexSearchScope::Specs,
-        IndexSearchScope::Lessons,
+        IndexSearchScope::Memory,
         IndexSearchScope::Board,
         IndexSearchScope::Files,
         IndexSearchScope::FilesDocs,
@@ -338,7 +338,7 @@ fn search_action(scope: IndexSearchScope) -> &'static str {
     match scope {
         IndexSearchScope::Issues => "search-issues",
         IndexSearchScope::Specs => "search-specs",
-        IndexSearchScope::Lessons => "search-lessons",
+        IndexSearchScope::Memory => "search-memory",
         IndexSearchScope::Board => "search-board",
         IndexSearchScope::Files => "search-files",
         IndexSearchScope::FilesDocs => "search-files-docs",
@@ -354,7 +354,7 @@ fn append_scope_results(
     let key = match scope {
         IndexSearchScope::Issues => "issueResults",
         IndexSearchScope::Specs => "specResults",
-        IndexSearchScope::Lessons => "lessonResults",
+        IndexSearchScope::Memory => "memoryResults",
         IndexSearchScope::Board => "boardResults",
         IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
     };
@@ -365,7 +365,7 @@ fn append_scope_results(
         let result = match scope {
             IndexSearchScope::Issues => issue_result(item),
             IndexSearchScope::Specs => spec_result(item),
-            IndexSearchScope::Lessons => lesson_result(item),
+            IndexSearchScope::Memory => memory_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
@@ -403,21 +403,21 @@ fn spec_result(item: &Value) -> Option<IndexSearchResult> {
     })
 }
 
-fn lesson_result(item: &Value) -> Option<IndexSearchResult> {
+fn memory_result(item: &Value) -> Option<IndexSearchResult> {
     let heading = value_str(item.get("heading"))?;
     let title = value_str(item.get("title")).unwrap_or_else(|| heading.clone());
     let date = value_str(item.get("date")).unwrap_or_default();
     Some(IndexSearchResult {
-        scope: IndexSearchScope::Lessons,
+        scope: IndexSearchScope::Memory,
         title,
         subtitle: if date.is_empty() {
-            "lesson".to_string()
+            "memory".to_string()
         } else {
-            format!("lesson · {date}")
+            format!("memory · {date}")
         },
         preview: heading.clone(),
         distance: item.get("distance").and_then(Value::as_f64),
-        target: IndexSearchTarget::Lesson { heading, date },
+        target: IndexSearchTarget::Memory { heading, date },
     })
 }
 
@@ -584,7 +584,7 @@ mod tests {
             vec![
                 IndexSearchScope::Issues,
                 IndexSearchScope::Specs,
-                IndexSearchScope::Lessons,
+                IndexSearchScope::Memory,
                 IndexSearchScope::Board,
                 IndexSearchScope::Files,
                 IndexSearchScope::FilesDocs,
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn append_scope_results_formats_issue_spec_lesson_and_file_targets() {
+    fn append_scope_results_formats_issue_spec_memory_and_file_targets() {
         let mut results = Vec::new();
         let board_scope = BoardAudienceScope::All;
 
@@ -627,9 +627,9 @@ mod tests {
         );
         append_scope_results(
             &mut results,
-            IndexSearchScope::Lessons,
+            IndexSearchScope::Memory,
             &json!({
-                "lessonResults": [{
+                "memoryResults": [{
                     "heading": "Always verify index routes",
                     "title": "Index verification",
                     "date": "2026-05-20",
@@ -665,10 +665,10 @@ mod tests {
             results[1].target,
             IndexSearchTarget::Spec { spec_id: 1939 }
         ));
-        assert_eq!(results[2].subtitle, "lesson · 2026-05-20");
+        assert_eq!(results[2].subtitle, "memory · 2026-05-20");
         assert!(matches!(
             results[2].target,
-            IndexSearchTarget::Lesson { .. }
+            IndexSearchTarget::Memory { .. }
         ));
         assert_eq!(results[3].title, "README.md");
         assert_eq!(results[3].subtitle, "Markdown");
@@ -804,7 +804,7 @@ mod tests {
                 IndexSearchScope::Issues,
                 IndexSearchScope::Specs,
                 IndexSearchScope::Board,
-                IndexSearchScope::Lessons,
+                IndexSearchScope::Memory,
             ],
             "Git",
             12,
@@ -813,7 +813,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "search-multi"));
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "--scopes" && pair[1] == "issues,specs,board,lessons"),
+                .any(|pair| pair[0] == "--scopes" && pair[1] == "issues,specs,board,memory"),
             "repo-scoped searches should share one runner process"
         );
         assert!(args.iter().any(|arg| arg == "--no-auto-build"));
@@ -851,7 +851,7 @@ mod tests {
             ScopeSearchJob {
                 search_root: PathBuf::from("/repo"),
                 worktree_hash: None,
-                scope: IndexSearchScope::Lessons,
+                scope: IndexSearchScope::Memory,
             },
         ];
 
@@ -864,7 +864,7 @@ mod tests {
                 IndexSearchScope::Issues => "issueResults",
                 IndexSearchScope::Specs => "specResults",
                 IndexSearchScope::Board => "boardResults",
-                IndexSearchScope::Lessons => "lessonResults",
+                IndexSearchScope::Memory => "memoryResults",
                 IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
             };
             let mut payload = serde_json::Map::new();

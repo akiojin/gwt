@@ -44,7 +44,7 @@ pub enum FileContentErrorKind {
 pub enum IndexSearchScope {
     Issues,
     Specs,
-    Lessons,
+    Memory,
     Board,
     Files,
     #[serde(rename = "files-docs")]
@@ -56,7 +56,7 @@ impl IndexSearchScope {
         match self {
             Self::Issues => "issues",
             Self::Specs => "specs",
-            Self::Lessons => "lessons",
+            Self::Memory => "memory",
             Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
@@ -69,7 +69,7 @@ impl IndexSearchScope {
 pub enum IndexSearchTarget {
     Issue { number: u64 },
     Spec { spec_id: u64 },
-    Lesson { heading: String, date: String },
+    Memory { heading: String, date: String },
     Board { entry_id: String },
     File { path: String },
 }
@@ -2373,7 +2373,7 @@ mod tests {
             "id": "tab-1:index-1",
             "query": "Board semantic search",
             "request_id": 42,
-            "scopes": ["issues", "specs", "board", "files", "files-docs", "lessons"],
+            "scopes": ["issues", "specs", "board", "files", "files-docs", "memory"],
             "worktree_hash": "wt-a"
         }))
         .expect("deserialize search_project_index");

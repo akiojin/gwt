@@ -208,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn tasks_lessons_md_is_watched_despite_tasks_skip() {
+    fn tasks_memory_md_is_watched_despite_tasks_skip() {
         let root = Path::new("/repo");
-        let path = root.join("tasks/lessons.md");
+        let path = root.join("tasks/memory.md");
 
         let policy = default_index_path_policy();
         let gi = build_gitignore(root);

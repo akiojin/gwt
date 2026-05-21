@@ -213,12 +213,12 @@ class AutoBuildFallbackTests(unittest.TestCase):
             db = db_root / "abc1234567890def" / "specs"
             self.assertTrue(db.exists(), f"index dir was not created: {db}")
 
-    def test_search_lessons_auto_builds_when_index_missing(self):
+    def test_search_memory_auto_builds_when_index_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             (root / "tasks").mkdir(parents=True)
-            (root / "tasks" / "lessons.md").write_text(
-                "# Lessons Learned\n\n"
+            (root / "tasks" / "memory.md").write_text(
+                "# Memory Learned\n\n"
                 "## 2026-05-20 — watcher debounce regression\n\n"
                 "### 事象\n watcher fired too often.\n\n"
                 "### 原因\n debounce too low.\n\n"
@@ -228,7 +228,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
 
             db_root = Path(tmp) / "index_root"
             result = runner.action_search_v2(
-                action="search-lessons",
+                action="search-memory",
                 repo_hash="abc1234567890def",
                 worktree_hash=None,
                 project_root=str(root),
@@ -239,23 +239,23 @@ class AutoBuildFallbackTests(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"], result)
-            self.assertIn("lessonResults", result)
-            self.assertGreaterEqual(len(result["lessonResults"]), 1, result["lessonResults"])
-            top = result["lessonResults"][0]
+            self.assertIn("memoryResults", result)
+            self.assertGreaterEqual(len(result["memoryResults"]), 1, result["memoryResults"])
+            top = result["memoryResults"][0]
             self.assertEqual(top["date"], "2026-05-20")
             self.assertIn("watcher debounce", top["title"])
-            db = db_root / "abc1234567890def" / "lessons"
-            self.assertTrue(db.exists(), f"lessons index dir was not created: {db}")
+            db = db_root / "abc1234567890def" / "memory"
+            self.assertTrue(db.exists(), f"memory index dir was not created: {db}")
 
-    def test_search_lessons_returns_index_missing_when_no_auto_build(self):
+    def test_search_memory_returns_index_missing_when_no_auto_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             (root / "tasks").mkdir(parents=True)
-            (root / "tasks" / "lessons.md").write_text("# empty\n", encoding="utf-8")
+            (root / "tasks" / "memory.md").write_text("# empty\n", encoding="utf-8")
             db_root = Path(tmp) / "index_root"
 
             result = runner.action_search_v2(
-                action="search-lessons",
+                action="search-memory",
                 repo_hash="abc1234567890def",
                 worktree_hash=None,
                 project_root=str(root),

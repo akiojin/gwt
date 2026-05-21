@@ -69,25 +69,25 @@ class ResolveDbPathTests(unittest.TestCase):
         )
         self.assertEqual(path.parts[-len(expected) :], expected)
 
-    def test_lessons_scope_is_repo_scoped(self):
+    def test_memory_scope_is_repo_scoped(self):
         path = runner.resolve_db_path(
             repo_hash="abc1234567890def",
             worktree_hash=None,
-            scope="lessons",
+            scope="memory",
         )
-        expected = (".gwt", "index", "abc1234567890def", "lessons")
+        expected = (".gwt", "index", "abc1234567890def", "memory")
         self.assertEqual(path.parts[-len(expected) :], expected)
 
-    def test_lessons_scope_ignores_worktree_hash(self):
+    def test_memory_scope_ignores_worktree_hash(self):
         with_wt = runner.resolve_db_path(
             repo_hash="abc1234567890def",
             worktree_hash="111122223333ffff",
-            scope="lessons",
+            scope="memory",
         )
         without_wt = runner.resolve_db_path(
             repo_hash="abc1234567890def",
             worktree_hash=None,
-            scope="lessons",
+            scope="memory",
         )
         self.assertEqual(with_wt, without_wt)
         self.assertNotIn("worktrees", with_wt.parts)
@@ -186,13 +186,13 @@ class CliArgumentTests(unittest.TestCase):
                 "--query",
                 "Git",
                 "--scopes",
-                "issues,specs,board,lessons",
+                "issues,specs,board,memory",
                 "--no-auto-build",
             ],
         ):
             args = runner.parse_args()
             self.assertEqual(args.action, "search-multi")
-            self.assertEqual(args.scopes, "issues,specs,board,lessons")
+            self.assertEqual(args.scopes, "issues,specs,board,memory")
             self.assertTrue(args.no_auto_build)
 
     def test_parse_args_accepts_respect_ttl(self):
