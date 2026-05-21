@@ -1,6 +1,55 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.43.0] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Show real command label as Console invocation header (SPEC-2809)
+- **gui:** Tighten Console invocation header detection (SPEC-2809)
+- **gui:** Render Console banner/footer as plain terminal text (SPEC-2809)
+- **gui:** Harden quiet work UI surfaces
+- Improve index search window usability
+- Stabilize index search window
+- List memory index rebuild scope
+- **launch:** Worktree解決でbranch probeを避ける
+- **gui:** Restore only open agent windows on startup
+- **gui:** Restore legacy open agent windows
+- **gui:** Show index search loading feedback
+- **skills:** Preserve tracked gwt skill directories
+- Map completed agent hooks to idle status
+- エージェント起動前の状態表示を分離
+- Codex起動後の状態をIdleにする
+- **gui:** Honor index result targets
+
+### Documentation
+
+- **agents:** Require user verification confirmed before PR create/update
+
+### Features
+
+- Add memory-backed learning workflow
+- Add memory writer command
+- **logging:** Tee gwt-domain tracing events into Console hub (SPEC-2809)
+- **gui:** Surface chroma indexer + git callers in Console (SPEC-2809)
+- Add dedicated index search window
+- Unify project index path policy
+- Rename lessons search to memory
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into work/20260520-1053
+- Origin/developを作業branchへmerge
+- **skills:** Add ready pr gate guidance
+- Merge origin/develop into work branch
+- Merge origin/develop into work/20260520-1053
+
+### Testing
+
+- **e2e:** Allow Console RUNNER tab populated at startup (SPEC-2809)
+- **e2e:** Cover quiet work UI surfaces with embedded routes
+- Codex hookテストの環境依存を解消
+
 ## [9.42.2] - 2026-05-21
 
 ### Bug Fixes
