@@ -392,7 +392,7 @@ test("Launch Wizard live sessions render window runtime status", () => {
   assert.match(
     appSource,
     /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
-    "expected live-session rows to label Running/Waiting/Error from runtime_status",
+    "expected live-session rows to label Running/Idle/Error from runtime_status",
   );
   assert.match(
     appSource,
@@ -2045,9 +2045,9 @@ test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-dr
   assert.ok(opDrawerCovered, ".op-drawer scaffold must drop its transition under reduced-motion");
 });
 
-test("mapAgentTelemetryState emits only the four Living Telemetry states CSS handles", () => {
+test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", () => {
   // app.js has a closure-scoped runtime→Living Telemetry mapper. CSS only
-  // styles `[data-agent-state]` for active/idle/blocked/done — any drift
+  // styles `[data-agent-state]` for declared telemetry states — any drift
   // (e.g. emitting "warn" or "exited") would silently render no rim. Pin
   // the contract so refactors can't introduce undeclared states.
   const mapperBlock = appSource.match(
@@ -2058,7 +2058,7 @@ test("mapAgentTelemetryState emits only the four Living Telemetry states CSS han
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);
   }
-  const allowed = new Set(["active", "idle", "blocked", "done"]);
+  const allowed = new Set(["active", "not_started", "idle", "blocked", "done"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }

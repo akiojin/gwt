@@ -102,6 +102,33 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result.get("error_code"), "INDEX_MISSING")
 
+    def test_search_multi_disables_auto_build_for_each_scope(self):
+        with mock.patch.object(
+            runner,
+            "action_search_v2",
+            side_effect=[
+                {"ok": True, "issueResults": [{"number": 1}]},
+                {"ok": True, "specResults": [{"spec_id": "1939"}]},
+                {"ok": True, "boardResults": [{"entry_id": "board-1"}]},
+            ],
+        ) as search:
+            result = runner.action_search_multi_v2(
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                project_root="/repo",
+                query="Git",
+                n_results=5,
+                scopes=["issues", "specs", "board"],
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["issueResults"][0]["number"], 1)
+        self.assertEqual(result["specResults"][0]["spec_id"], "1939")
+        self.assertEqual(result["boardResults"][0]["entry_id"], "board-1")
+        self.assertEqual(search.call_count, 3)
+        for call in search.call_args_list:
+            self.assertTrue(call.kwargs["no_auto_build"])
+
     def test_progress_emitted_on_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -191,12 +218,11 @@ class AutoBuildFallbackTests(unittest.TestCase):
             root = Path(tmp) / "repo"
             (root / "tasks").mkdir(parents=True)
             (root / "tasks" / "memory.md").write_text(
-                "# Memory\n\n"
+                "# Memory Learned\n\n"
                 "## 2026-05-20 — watcher debounce regression\n\n"
-                "Type: lesson\n"
-                "Context: watcher fired too often.\n"
-                "Learning: debounce was too low.\n"
-                "Future Action: raise debounce.\n",
+                "### 事象\n watcher fired too often.\n\n"
+                "### 原因\n debounce too low.\n\n"
+                "### 再発防止策\n raise debounce.\n",
                 encoding="utf-8",
             )
 
@@ -221,15 +247,15 @@ class AutoBuildFallbackTests(unittest.TestCase):
             db = db_root / "abc1234567890def" / "memory"
             self.assertTrue(db.exists(), f"memory index dir was not created: {db}")
 
-    def test_search_lessons_returns_index_missing_when_no_auto_build(self):
+    def test_search_memory_returns_index_missing_when_no_auto_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             (root / "tasks").mkdir(parents=True)
-            (root / "tasks" / "lessons.md").write_text("# empty\n", encoding="utf-8")
+            (root / "tasks" / "memory.md").write_text("# empty\n", encoding="utf-8")
             db_root = Path(tmp) / "index_root"
 
             result = runner.action_search_v2(
-                action="search-lessons",
+                action="search-memory",
                 repo_hash="abc1234567890def",
                 worktree_hash=None,
                 project_root=str(root),

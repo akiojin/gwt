@@ -14,7 +14,6 @@ use gwt_core::{
             RefreshIssuesOptions, RunnerSpawner,
         },
     },
-    paths::{gwt_project_index_venv_dir, gwt_runtime_runner_path},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -45,7 +44,7 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
     );
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
-        runner_script: gwt_runtime_runner_path(),
+        runner_script: gwt_core::runtime::project_index_runner_path(),
     };
     bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
 }
@@ -57,8 +56,8 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
 pub enum IndexRebuildScope {
     Issues,
     Specs,
-    #[serde(alias = "lessons")]
     Memory,
+    Board,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -70,6 +69,7 @@ impl IndexRebuildScope {
             Self::Issues => "issues",
             Self::Specs => "specs",
             Self::Memory => "memory",
+            Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -161,8 +161,10 @@ pub struct ProjectIndexScopes {
     pub issues: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specs: Option<ScopeHealthView>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "lessons")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -178,6 +180,7 @@ impl ProjectIndexScopes {
         self.issues.is_none()
             && self.specs.is_none()
             && self.memory.is_none()
+            && self.board.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -341,12 +344,13 @@ pub fn build_aggregated_status_view(
             }
         }
         if scopes.memory.is_none() {
-            if let Some(view) = status_obj
-                .get("memory")
-                .or_else(|| status_obj.get("lessons"))
-                .and_then(parse_scope_health)
-            {
+            if let Some(view) = status_obj.get("memory").and_then(parse_scope_health) {
                 scopes.memory = Some(view);
+            }
+        }
+        if scopes.board.is_none() {
+            if let Some(view) = status_obj.get("board").and_then(parse_scope_health) {
+                scopes.board = Some(view);
             }
         }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
@@ -398,6 +402,9 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
         count += 1;
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        count += 1;
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
         count += 1;
     }
     count += scopes.files.values().filter(|view| !view.healthy).count();
@@ -670,7 +677,7 @@ fn probe_worktree_status(
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -814,6 +821,12 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
+        IndexRebuildScope::Board => RebuildAction {
+            label: "board",
+            action: "index-board",
+            scope: None,
+            needs_worktree_hash: false,
+        },
         IndexRebuildScope::Files => RebuildAction {
             label: "files",
             action: "index-files",
@@ -846,6 +859,9 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     for (wt_hash, view) in &scopes.files {
         if !view.healthy {
@@ -890,6 +906,9 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
@@ -1049,7 +1068,7 @@ fn project_index_status_for_path_inner(
     );
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -1226,12 +1245,7 @@ fn canonicalize_path(path: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn project_index_python_path() -> PathBuf {
-    let venv = gwt_project_index_venv_dir();
-    if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 #[cfg(test)]

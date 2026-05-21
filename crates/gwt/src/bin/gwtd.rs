@@ -99,21 +99,6 @@ fn family_help(family: &str) -> Option<String> {
     }
 }
 
-fn format_memory_help() -> String {
-    [
-        "gwtd memory — Append reusable project memory.",
-        "",
-        "Usage: gwtd memory add --title <text> --context <text> --learning <text> --future-action <text> [--type lesson|decision|workflow|failure-pattern] [--date YYYY-MM-DD]",
-        "       gwtd lessons add ...",
-        "",
-        "Notes:",
-        "  - Writes canonical tasks/memory.md.",
-        "  - The lessons command is a legacy alias and does not append tasks/lessons.md.",
-        "",
-    ]
-    .join("\n")
-}
-
 fn format_workspace_help() -> String {
     [
         "gwtd workspace — Update Workspace current projection and summary journal.",
@@ -283,8 +268,28 @@ fn format_index_help() -> String {
         "",
         "Subcommands:",
         "  status                                  Show index runtime + asset status",
-        "  rebuild [--scope all|issues|specs|files|files-docs|memory|lessons]",
+        "  rebuild [--scope all|issues|specs|memory|board|files|files-docs]",
         "                                          Rebuild a specific scope",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_memory_help() -> String {
+    [
+        "gwtd memory — Append reusable project memory to tasks/memory.md.",
+        "",
+        "Usage: gwtd memory add [fields]",
+        "       gwtd lessons add [fields]   Legacy alias; writes tasks/memory.md",
+        "",
+        "Fields:",
+        "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",
+        "  --type <lesson|decision|workflow|failure-pattern>",
+        "                                          Memory entry type (defaults to lesson)",
+        "  --title <text>                          Entry heading",
+        "  --context <text>                        What happened or what was observed",
+        "  --learning <text>                       Reusable learning",
+        "  --future-action <text>                  What future agents should do",
         "",
     ]
     .join("\n")

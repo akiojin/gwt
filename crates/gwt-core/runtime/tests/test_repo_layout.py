@@ -69,15 +69,6 @@ class ResolveDbPathTests(unittest.TestCase):
         )
         self.assertEqual(path.parts[-len(expected) :], expected)
 
-    def test_lessons_scope_is_repo_scoped(self):
-        path = runner.resolve_db_path(
-            repo_hash="abc1234567890def",
-            worktree_hash=None,
-            scope="lessons",
-        )
-        expected = (".gwt", "index", "abc1234567890def", "memory")
-        self.assertEqual(path.parts[-len(expected) :], expected)
-
     def test_memory_scope_is_repo_scoped(self):
         path = runner.resolve_db_path(
             repo_hash="abc1234567890def",
@@ -87,29 +78,16 @@ class ResolveDbPathTests(unittest.TestCase):
         expected = (".gwt", "index", "abc1234567890def", "memory")
         self.assertEqual(path.parts[-len(expected) :], expected)
 
-    def test_lessons_scope_aliases_memory_scope(self):
-        memory = runner.resolve_db_path(
-            repo_hash="abc1234567890def",
-            worktree_hash=None,
-            scope="memory",
-        )
-        lessons = runner.resolve_db_path(
-            repo_hash="abc1234567890def",
-            worktree_hash=None,
-            scope="lessons",
-        )
-        self.assertEqual(lessons, memory)
-
-    def test_lessons_scope_ignores_worktree_hash(self):
+    def test_memory_scope_ignores_worktree_hash(self):
         with_wt = runner.resolve_db_path(
             repo_hash="abc1234567890def",
             worktree_hash="111122223333ffff",
-            scope="lessons",
+            scope="memory",
         )
         without_wt = runner.resolve_db_path(
             repo_hash="abc1234567890def",
             worktree_hash=None,
-            scope="lessons",
+            scope="memory",
         )
         self.assertEqual(with_wt, without_wt)
         self.assertNotIn("worktrees", with_wt.parts)
@@ -175,25 +153,6 @@ class CliArgumentTests(unittest.TestCase):
             args = runner.parse_args()
             self.assertEqual(args.scope, "files-docs")
 
-    def test_parse_args_accepts_memory_scope(self):
-        with mock.patch.object(
-            runner.sys,
-            "argv",
-            [
-                "chroma_index_runner.py",
-                "--action",
-                "search-memory",
-                "--repo-hash",
-                "abc1234567890def",
-                "--query",
-                "reusable learning",
-                "--scope",
-                "memory",
-            ],
-        ):
-            args = runner.parse_args()
-            self.assertEqual(args.scope, "memory")
-
     def test_parse_args_accepts_no_auto_build(self):
         with mock.patch.object(
             runner.sys,
@@ -212,6 +171,28 @@ class CliArgumentTests(unittest.TestCase):
             ],
         ):
             args = runner.parse_args()
+            self.assertTrue(args.no_auto_build)
+
+    def test_parse_args_accepts_search_multi_scopes(self):
+        with mock.patch.object(
+            runner.sys,
+            "argv",
+            [
+                "chroma_index_runner.py",
+                "--action",
+                "search-multi",
+                "--repo-hash",
+                "abc1234567890def",
+                "--query",
+                "Git",
+                "--scopes",
+                "issues,specs,board,memory",
+                "--no-auto-build",
+            ],
+        ):
+            args = runner.parse_args()
+            self.assertEqual(args.action, "search-multi")
+            self.assertEqual(args.scopes, "issues,specs,board,memory")
             self.assertTrue(args.no_auto_build)
 
     def test_parse_args_accepts_respect_ttl(self):

@@ -71,6 +71,15 @@
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
 
+### Ready PR Gate（Draft / Ready 運用）
+
+- `feat` / `fix` / `refactor` の途中成果は **Draft PR** のみ許可する。未完了・未検証・受け入れ未達・既知 blocker ありの変更は **Ready PR 禁止**。
+- Ready PR は、その PR スコープが**単独で配信可能**であり、残件が配信 blocker ではない後続タスクとして明確な場合だけ許可する。
+- 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。
+- Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
+- Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
+- Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
+
 ## 開発ワークフロー
 
 ### 実装前ワークフロー（必須）
@@ -144,7 +153,7 @@
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
 - 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` で `tasks/memory.md` に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。`gwtd lessons add` は legacy alias として同じ `tasks/memory.md` に追記する。
-- 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。`--lessons` と `/gwt:gwt-lessons-search` は legacy alias としてのみ使用する。
+- 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 
@@ -308,7 +317,6 @@ Commands can be invoked as `/gwt:<command-name>`.
 | Skill | Command | Description |
 |-------|---------|-------------|
 | gwt-search | `/gwt:gwt-search` | Unified semantic search over SPECs, GitHub Issues, project source files, and docs using ChromaDB. Supports `--specs`, `--issues`, `--files` filters and resolves `gwtd` through the managed skill contract. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
-| gwt-memory-search | `/gwt:gwt-memory-search` | Semantic search over reusable project memory in `tasks/memory.md`. `gwt-lessons-search` remains a legacy alias. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management through `gwtd pane`. Auto-detects mode: no args → list panes; pane ID → read output; stop/close + pane ID → stop pane. Use Board for agent-to-agent communication. |
 
 ### Recommended Workflow

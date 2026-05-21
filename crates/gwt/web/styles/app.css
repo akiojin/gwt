@@ -736,8 +736,16 @@ body {
   background: var(--color-state-active);
 }
 
+.status-chip.not_started .status-dot {
+  background: var(--color-state-idle);
+}
+
+.status-chip.idle .status-dot {
+  background: var(--color-state-idle);
+}
+
 .status-chip.waiting .status-dot {
-  background: var(--color-state-active);
+  background: var(--color-state-idle);
 }
 
 .status-chip.error .status-dot {
@@ -924,6 +932,7 @@ body {
 .surface-board .window-body,
 .surface-logs .window-body,
 .surface-knowledge .window-body,
+.surface-index .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
@@ -1032,12 +1041,316 @@ body {
 .board-root,
 .logs-root,
 .knowledge-root,
+.index-search-root,
+.workspace-kanban-root,
 .workspace-overview-root,
 .mock-root {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
+}
+
+.index-search-root {
+  overflow: hidden;
+}
+
+.index-search-panel,
+.index-health-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.index-search-panel[hidden],
+.index-health-panel[hidden] {
+  display: none !important;
+}
+
+.index-window-header,
+.index-search-toolbar,
+.index-health-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+}
+
+.index-window-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.index-window-subtitle,
+.index-health-subtitle {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-window-tabs {
+  flex: 0 0 auto;
+}
+
+.index-search-toolbar {
+  align-items: stretch;
+  flex-wrap: wrap;
+  background: var(--color-surface);
+}
+
+.index-search-box {
+  flex: 1 1 360px;
+  min-width: min(100%, 260px);
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.index-filter-bar {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.index-worktree-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-worktree-field[hidden] {
+  display: none !important;
+}
+
+.index-worktree-field span {
+  white-space: nowrap;
+}
+
+.index-health-toolbar {
+  align-items: flex-start;
+}
+
+.index-health-table > .settings-section-heading {
+  display: none;
+}
+
+.index-health-title {
+  color: var(--color-text-strong);
+  font-weight: 700;
+  font-size: var(--type-md);
+}
+
+.index-scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.index-scope-button {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  cursor: pointer;
+}
+
+.index-scope-button[aria-pressed="true"] {
+  border-color: var(--color-state-active);
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
+}
+
+.index-run-button {
+  min-width: 88px;
+  border: 1px solid var(--color-state-active);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface));
+  color: var(--color-text-strong);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.index-run-button:disabled {
+  border-color: var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.index-worktree-select,
+.index-search-input {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.index-search-input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+}
+
+.index-worktree-select {
+  width: min(220px, 28vw);
+  min-width: 140px;
+  padding: 6px 8px;
+}
+
+.index-search-status {
+  min-height: 24px;
+  padding: 5px 12px;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-search-status[data-kind="error"] {
+  color: var(--color-state-blocked);
+}
+
+.index-search-layout {
+  grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+  border-top: 1px solid var(--color-border);
+}
+
+.index-search-layout.is-empty {
+  grid-template-columns: 1fr;
+}
+
+.index-search-layout.is-empty .index-result-detail {
+  display: none;
+}
+
+.index-search-layout.is-empty .index-result-list {
+  border-right: 0;
+}
+
+.index-result-list {
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.index-search-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+}
+
+.index-search-loading-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.index-search-loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-state-active);
+  animation: index-search-loading 900ms ease-in-out infinite;
+}
+
+.index-search-loading-dot:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.index-search-loading-dot:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes index-search-loading {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .index-search-loading-dot {
+    animation: none;
+  }
+}
+
+.index-result-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.index-result-row[aria-selected="true"],
+.index-result-row:hover {
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
+}
+
+.index-result-scope {
+  grid-row: span 2;
+  align-self: start;
+  min-width: 64px;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  text-transform: uppercase;
+}
+
+.index-result-subtitle,
+.index-detail-subtitle,
+.index-detail-meta {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-result-detail {
+  padding: 16px;
+  background: var(--color-canvas);
+}
+
+.index-result-list > :is(.workspace-empty-state),
+.index-result-detail > :is(.workspace-empty-state) {
+  margin: 0;
+  padding: 18px 14px;
+  text-align: left;
+}
+
+.index-detail-title {
+  margin: 0 0 6px;
+  font-size: var(--type-lg);
+}
+
+.index-detail-preview {
+  white-space: pre-wrap;
+  line-height: 1.5;
 }
 
 /* SPEC-2008 FR-034: shared layout primitives. Surface-specific classes

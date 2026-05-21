@@ -77,6 +77,7 @@ pub fn current_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+#[cfg(test)]
 pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     gwt::WorkspaceView {
         viewport: tab.workspace.persisted().viewport.clone(),
@@ -95,6 +96,7 @@ pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     }
 }
 
+#[cfg(test)]
 pub fn app_state_view_from_parts(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<&str>,

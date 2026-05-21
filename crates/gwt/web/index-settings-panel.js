@@ -1,4 +1,4 @@
-// SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
+// SPEC-1939 Phase 15 — Index window health panel renderer.
 //
 // Pure rendering: receives the aggregated payload + a `send` transport
 // (so unit tests can stub WebSocket dispatch) and rebuilds the panel DOM
@@ -6,7 +6,7 @@
 // and a per-cell Rebuild button that emits `rebuild_index_cell` with
 // `(project_root, scope, worktree_hash?)`.
 
-const REPO_SHARED_SCOPES = ["issues", "specs", "memory"];
+const REPO_SHARED_SCOPES = ["issues", "specs", "memory", "board"];
 const PER_WORKTREE_SCOPES = ["files", "files-docs"];
 const ALL_SCOPES = [...REPO_SHARED_SCOPES, ...PER_WORKTREE_SCOPES];
 
@@ -78,11 +78,6 @@ function buildHealthCell(doc, scope, worktreeHash, view, send, projectRoot) {
   return td;
 }
 
-function repoScopeView(scopes, scope) {
-  if (scope === "memory") return scopes.memory || scopes.lessons || null;
-  return scopes[scope] || null;
-}
-
 function appendRebuildAllScopeButton(doc, headerCell, scope, send, projectRoot) {
   const button = doc.createElement("button");
   button.type = "button";
@@ -116,7 +111,7 @@ export function renderIndexSettingsPanel(options) {
     && !scopes.issues
     && !scopes.specs
     && !scopes.memory
-    && !scopes.lessons
+    && !scopes.board
     && (!scopes.files || Object.keys(scopes.files).length === 0)
     && (!scopes["files-docs"] || Object.keys(scopes["files-docs"]).length === 0)
   ) {
@@ -172,7 +167,7 @@ export function renderIndexSettingsPanel(options) {
     tr.appendChild(scopeCell);
 
     if (REPO_SHARED_SCOPES.includes(scope)) {
-      const view = repoScopeView(scopes, scope);
+      const view = scopes[scope] || null;
       const cell = buildHealthCell(ownerDoc, scope, null, view, send, projectRoot);
       cell.colSpan = Math.max(worktreeHashes.length || 1, 1);
       tr.appendChild(cell);

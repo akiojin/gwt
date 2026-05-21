@@ -391,9 +391,11 @@ fn should_skip_tracked_path(
         .strip_prefix(worktree)
         .ok()
         .map(|relative| {
-            tracked_paths
-                .iter()
-                .any(|tracked| relative == tracked || relative.starts_with(tracked))
+            tracked_paths.iter().any(|tracked| {
+                relative == tracked
+                    || relative.starts_with(tracked)
+                    || tracked.starts_with(relative)
+            })
         })
         .unwrap_or(false)
 }
@@ -749,6 +751,36 @@ mod tests {
             !tracked_hook.exists(),
             "retired codex gwt hook must be removed even when tracked: {}",
             tracked_hook.display()
+        );
+    }
+
+    #[test]
+    fn distribute_preserves_tracked_stale_gwt_skill_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        let tracked_claude_skill = dir.path().join(".claude/skills/gwt-future-search/SKILL.md");
+        let tracked_codex_skill = dir.path().join(".codex/skills/gwt-future-search/SKILL.md");
+
+        fs::create_dir_all(tracked_claude_skill.parent().unwrap()).unwrap();
+        fs::create_dir_all(tracked_codex_skill.parent().unwrap()).unwrap();
+        fs::write(&tracked_claude_skill, "tracked future claude skill").unwrap();
+        fs::write(&tracked_codex_skill, "tracked future codex skill").unwrap();
+
+        track_path(dir.path(), ".claude/skills/gwt-future-search/SKILL.md");
+        track_path(dir.path(), ".codex/skills/gwt-future-search/SKILL.md");
+
+        distribute_to_worktree(dir.path()).unwrap();
+
+        assert!(
+            tracked_claude_skill.exists(),
+            "tracked gwt skill dir must not be pruned before the running binary bundles it: {}",
+            tracked_claude_skill.display()
+        );
+        assert!(
+            tracked_codex_skill.exists(),
+            "tracked codex gwt skill dir must not be pruned before the running binary bundles it: {}",
+            tracked_codex_skill.display()
         );
     }
 

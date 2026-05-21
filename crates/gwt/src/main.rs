@@ -87,19 +87,20 @@ pub(crate) use launch_runtime::{
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
     resolve_launch_worktree_request,
 };
+#[cfg(test)]
 pub(crate) use runtime_support::{
-    app_state_view_from_parts, attach_parent_console_for_cli, close_window_from_workspace,
-    combined_window_id, current_git_branch, dedupe_recent_projects, fallback_project_target,
+    app_state_view_from_parts, parse_github_remote_url, spawn_env, suffixed_worktree_path,
+    worktree_path_is_occupied,
+};
+pub(crate) use runtime_support::{
+    attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
+    current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
     resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
     should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
-    workspace_view_for_tab, worktrees_have_stale_branch_entry,
-};
-#[cfg(test)]
-pub(crate) use runtime_support::{
-    parse_github_remote_url, spawn_env, suffixed_worktree_path, worktree_path_is_occupied,
+    worktrees_have_stale_branch_entry,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -1947,6 +1948,7 @@ mod tests {
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -5062,15 +5064,19 @@ mod tests {
         let mut base_branch = None;
         let mut detached_dir = None;
         let mut detached_env = HashMap::new();
-        let err = super::resolve_launch_worktree_request(
+        super::resolve_launch_worktree_request(
             &repo,
             Some("feature/detached"),
             &mut base_branch,
             &mut detached_dir,
             &mut detached_env,
         )
-        .expect_err("repo branch resolution failure should not silently skip");
-        assert!(err.contains("git branch --show-current"));
+        .expect("detached repo still resolves branch worktree through worktree metadata");
+        let detached_dir = detached_dir.expect("detached branch worktree dir");
+        assert!(detached_dir.exists());
+        assert!(detached_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &detached_dir)));
 
         let attach = gwt_core::process::hidden_command("git")
             .args(["checkout", "develop"])
@@ -5090,7 +5096,9 @@ mod tests {
             &mut current_env,
         )
         .expect("current branch worktree");
-        assert_eq!(current_dir.as_deref(), Some(repo.as_path()));
+        assert!(current_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &repo)));
         assert!(current_env
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &repo)));
@@ -5289,6 +5297,56 @@ mod tests {
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "feature/existing";
+        let create_branch = gwt_core::process::hidden_command("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .status()
+            .expect("create branch");
+        assert!(create_branch.success(), "create branch failed");
+        let existing_worktree = temp.path().join("feature-existing");
+        let add_worktree = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q"])
+            .arg(&existing_worktree)
+            .arg(branch)
+            .current_dir(&repo)
+            .status()
+            .expect("add worktree");
+        assert!(add_worktree.success(), "git worktree add failed");
+        let detach = gwt_core::process::hidden_command("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .expect("detach head");
+        assert!(detach.success(), "git checkout --detach failed");
+
+        let mut base_branch = None;
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let result = super::resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        );
+        assert!(
+            result.is_ok(),
+            "selected branch should resolve through git worktree list before current-branch probe: {result:?}"
+        );
+        assert!(working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
     }
 
     #[test]

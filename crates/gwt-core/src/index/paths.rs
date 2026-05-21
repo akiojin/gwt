@@ -42,10 +42,8 @@ pub enum Scope {
     Issues,
     /// Repo-scoped: cached SPEC Issue search index.
     Specs,
-    /// Repo-scoped: reusable agent memory sourced from `tasks/memory.md`.
+    /// Repo-scoped: post-mortem fix knowledge sourced from `tasks/memory.md`.
     Memory,
-    /// Legacy alias for [`Scope::Memory`].
-    Lessons,
     /// Worktree-scoped: project source code files.
     FilesCode,
     /// Worktree-scoped: project documentation files.
@@ -62,7 +60,7 @@ impl Scope {
         match self {
             Scope::Issues => "issues",
             Scope::Specs => "specs",
-            Scope::Memory | Scope::Lessons => "memory",
+            Scope::Memory => "memory",
             Scope::FilesCode => "files",
             Scope::FilesDocs => "files-docs",
         }
@@ -96,10 +94,7 @@ pub fn gwt_index_db_path(
     worktree: Option<&WorktreeHash>,
     scope: Scope,
 ) -> Result<PathBuf> {
-    if matches!(
-        scope,
-        Scope::Issues | Scope::Specs | Scope::Memory | Scope::Lessons
-    ) {
+    if matches!(scope, Scope::Issues | Scope::Specs | Scope::Memory) {
         return Ok(gwt_index_repo_dir(repo).join(scope.subdir()));
     }
     let wt = worktree.ok_or_else(|| {
@@ -155,21 +150,8 @@ mod tests {
     }
 
     #[test]
-    fn lessons_scope_aliases_memory_resolution() {
-        let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-        let memory_path = gwt_index_db_path(&repo, None, Scope::Memory).unwrap();
-        let path = gwt_index_db_path(&repo, None, Scope::Lessons).unwrap();
-        assert_eq!(path, memory_path);
-    }
-
-    #[test]
     fn memory_requires_worktree_false() {
         assert!(!Scope::Memory.requires_worktree());
-    }
-
-    #[test]
-    fn lessons_alias_requires_worktree_false() {
-        assert!(!Scope::Lessons.requires_worktree());
     }
 
     #[test]
@@ -178,17 +160,12 @@ mod tests {
     }
 
     #[test]
-    fn lessons_alias_subdir_is_memory() {
-        assert_eq!(Scope::Lessons.subdir(), "memory");
-    }
-
-    #[test]
-    fn lessons_scope_ignores_worktree_hash() {
+    fn memory_scope_ignores_worktree_hash() {
         let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
         let tmp = tempfile::tempdir().unwrap();
         let wt = compute_worktree_hash(tmp.path()).unwrap();
-        let with_wt = gwt_index_db_path(&repo, Some(&wt), Scope::Lessons).unwrap();
-        let without_wt = gwt_index_db_path(&repo, None, Scope::Lessons).unwrap();
+        let with_wt = gwt_index_db_path(&repo, Some(&wt), Scope::Memory).unwrap();
+        let without_wt = gwt_index_db_path(&repo, None, Scope::Memory).unwrap();
         assert_eq!(with_wt, without_wt);
         assert!(!with_wt
             .components()

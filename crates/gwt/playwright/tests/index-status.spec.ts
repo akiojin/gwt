@@ -1,6 +1,6 @@
-/* SPEC-1939 Phase 13 — project-bar Index badge withdrawn. The remaining
- * coverage exercises the per-tab dot aggregator and the Settings.Index
- * panel (per-cell rebuild IPC) using the SPEC-2017 Kanban fixture pattern:
+/* SPEC-1939 Phase 13+15 — project-bar Index badge withdrawn. The remaining
+ * coverage exercises the per-tab dot aggregator and the dedicated Index
+ * window health panel (per-cell rebuild IPC) using the SPEC-2017 Kanban fixture pattern:
  * the embedded frontend is served via `installEmbeddedRoutes`
  * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
  * deterministic backend that emits canned `workspace_state` +
@@ -198,7 +198,7 @@ test.describe("Project Index status surface", () => {
     await expect(dot).toHaveAttribute("data-state", "ready", { timeout: 5_000 });
   });
 
-  test("Settings.Index renders the scope health table from project_index_status (T-IDX-106)", async ({
+  test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -226,24 +226,7 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
-
-    // SPEC-1939 Phase 13: badge entry point is gone; tests drive the
-    // Settings.Index tab directly via the canonical `settings:open` event.
-    await page.evaluate(() => {
-      document.dispatchEvent(
-        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
-      );
-    });
-
-    // The Settings window mounts asynchronously after the create_window
-    // round-trip. The Index panel is one of three tabs and should be
-    // active by the time we look for the table.
-    const indexPanel = page.locator("[data-settings-panel='index']").first();
-    await expect(indexPanel).toBeVisible({ timeout: 10_000 });
-    await expect(indexPanel).not.toHaveClass(/hidden/);
-
-    const table = indexPanel.locator("[data-role='index-settings-table']");
+    const { table } = await openIndexHealthPanel(page);
     await expect(table).toBeVisible();
 
     const specsRow = table.locator("tr[data-scope='specs']");
@@ -259,7 +242,7 @@ test.describe("Project Index status surface", () => {
       .toContainText("develop");
   });
 
-  test("Settings.Index scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
+  test("Index window Health scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
       state: "repair_required",
@@ -274,16 +257,8 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
-    await page.evaluate(() => {
-      document.dispatchEvent(
-        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
-      );
-    });
-
-    const issuesRow = page
-      .locator("[data-settings-panel='index'] tr[data-scope='issues']")
-      .first();
+    const { table } = await openIndexHealthPanel(page);
+    const issuesRow = table.locator("tr[data-scope='issues']").first();
     await expect(issuesRow).toBeVisible({ timeout: 10_000 });
 
     // The scope-row Rebuild button lives in the row header (`th`),
@@ -315,7 +290,7 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
-  test("Settings.Index renders the memory scope row and dispatches rebuild_index_cell (SPEC-2805)", async ({
+  test("Index window Health renders the memory scope row and dispatches rebuild_index_cell (SPEC-2805)", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -332,16 +307,8 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
-    await page.evaluate(() => {
-      document.dispatchEvent(
-        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
-      );
-    });
-
-    const memoryRow = page
-      .locator("[data-settings-panel='index'] tr[data-scope='memory']")
-      .first();
+    const { table } = await openIndexHealthPanel(page);
+    const memoryRow = table.locator("tr[data-scope='memory']").first();
     await expect(memoryRow).toBeVisible({ timeout: 10_000 });
     await expect(memoryRow.locator(".settings-index-cell.unhealthy")).toContainText(
       "manifest_missing",
@@ -374,7 +341,38 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
-  test("Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
+  test("Index window Search shows animated loading feedback in the results pane", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        issues: { healthy: true, repair_required: false, document_count: 214 },
+        specs: { healthy: true, repair_required: false, document_count: 774 },
+        memory: { healthy: true, repair_required: false, document_count: 260 },
+        board: { healthy: true, repair_required: false, document_count: 1471 },
+      },
+      worktrees: {},
+    });
+
+    await page.goto(APP_URL);
+    const { root } = await openIndexSearchPanel(page);
+    await root.locator(".index-search-input").fill("memory search loading");
+    await root.locator(".index-run-button").click();
+
+    const loading = root.locator(".index-search-loading");
+    await expect(loading).toBeVisible({ timeout: 5_000 });
+    await expect(loading).toHaveAttribute("role", "status");
+    await expect(loading).toContainText("Searching semantic index");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "true");
+
+    const animatedDot = loading.locator(".index-search-loading-dot").first();
+    await expect(animatedDot).toBeVisible();
+    await expect(animatedDot).toHaveCSS("animation-name", /index-search-loading/);
+  });
+
+  test("Index window Health per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -396,17 +394,12 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
-    await page.evaluate(() => {
-      document.dispatchEvent(
-        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
-      );
-    });
+    const { table } = await openIndexHealthPanel(page);
 
-    // Wait for Settings.Index to render the row, then click the per-cell
+    // Wait for Index Health to render the row, then click the per-cell
     // Rebuild button.
-    const filesCell = page
-      .locator("[data-settings-panel='index'] tr[data-scope='files'] .settings-index-cell[data-worktree-hash='wtAhash']")
+    const filesCell = table
+      .locator("tr[data-scope='files'] .settings-index-cell[data-worktree-hash='wtAhash']")
       .first();
     await expect(filesCell).toBeVisible({ timeout: 10_000 });
 
@@ -438,6 +431,45 @@ test.describe("Project Index status surface", () => {
   });
 
 });
+
+async function openIndexHealthPanel(page) {
+  await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+
+  // SPEC-1939 Phase 15: settings target=index is now the compatibility
+  // entrypoint for the dedicated Index window, not a Settings tab.
+  await page.evaluate(() => {
+    document.dispatchEvent(
+      new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+    );
+  });
+
+  const root = page.locator(".index-search-root").first();
+  await expect(root).toBeVisible({ timeout: 10_000 });
+  await root.locator("[data-index-tab='health']").click();
+
+  const panel = root.locator("[data-index-panel='health']");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  const table = panel.locator("[data-role='index-settings-table']");
+  return { root, panel, table };
+}
+
+async function openIndexSearchPanel(page) {
+  await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+
+  await page.evaluate(() => {
+    document.dispatchEvent(
+      new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+    );
+  });
+
+  const root = page.locator(".index-search-root").first();
+  await expect(root).toBeVisible({ timeout: 10_000 });
+  await root.locator("[data-index-tab='search']").click();
+
+  const panel = root.locator("[data-index-panel='search']");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  return { root, panel };
+}
 
 async function installIndexStatusBackend(page, indexStatus) {
   await page.addInitScript((indexStatusPayload) => {
@@ -509,18 +541,18 @@ async function installIndexStatusBackend(page, indexStatus) {
           this.emit(projectIndexStatus);
           return;
         }
-        // SPEC-1939 T-IDX-106: simulate the backend create_window behaviour
-        // for `preset === "settings"` so click → settings:open →
-        // focusOrSpawnPreset("settings") can drive a real Settings window
-        // mount end-to-end. The fixture appends a Settings window to the
+        // SPEC-1939 T-IDX-106/Phase 15: simulate the backend create_window
+        // behaviour for `preset === "index"` so settings:open target=index →
+        // focusOrSpawnPreset("index") can drive a real Index window mount
+        // end-to-end. The fixture appends an Index window to the
         // current tab's workspace and re-emits workspace_state.
-        if (message.kind === "create_window" && message.preset === "settings") {
+        if (message.kind === "create_window" && message.preset === "index") {
           const tab = workspaceState.workspace.tabs[0];
           tab.workspace.windows = (tab.workspace.windows || []).concat([
             {
-              id: `settings-${Date.now()}`,
-              title: "Settings",
-              preset: "settings",
+              id: `index-${Date.now()}`,
+              title: "Index",
+              preset: "index",
               geometry: { x: 96, y: 76, width: 720, height: 540 },
               z_index: tab.workspace.windows.length + 1,
               status: "running",

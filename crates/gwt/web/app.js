@@ -177,9 +177,12 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const indexSearchStateMap = new Map();
+      const pendingIndexOpenTargetsByPreset = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
+      let startupAutoResumeReadySent = false;
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
       // backing state today. New helpers should mutate state through the owning
@@ -471,6 +474,7 @@
           worktrees: status?.worktrees || {},
         });
         renderIndexPanelInAllSettingsWindows();
+        renderProjectIndexWindows();
         refreshProjectTabDots();
       }
 
@@ -532,6 +536,9 @@
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
         }
+        if (preset === "index") {
+          return "index";
+        }
         if (preset === "workspace") {
           return "workspace";
         }
@@ -546,6 +553,438 @@
           return preset;
         }
         return null;
+      }
+
+      const INDEX_SEARCH_SCOPES = Object.freeze([
+        { id: "issues", label: "Issues" },
+        { id: "specs", label: "SPECs" },
+        { id: "board", label: "Board" },
+        { id: "files", label: "Files" },
+        { id: "files-docs", label: "Docs" },
+        { id: "memory", label: "Memory" },
+      ]);
+      const INDEX_SEARCH_DEFAULT_SCOPES = Object.freeze([
+        "issues",
+        "specs",
+        "board",
+        "memory",
+      ]);
+
+      function ensureIndexSearchState(windowId) {
+        if (!indexSearchStateMap.has(windowId)) {
+          indexSearchStateMap.set(windowId, {
+            activeTab: "search",
+            query: "",
+            selectedScopes: new Set(INDEX_SEARCH_DEFAULT_SCOPES),
+            selectedWorktreeHash: "",
+            searchTimer: 0,
+            requestId: 0,
+            inFlightRequestId: 0,
+            inFlightSignature: "",
+            searching: false,
+            results: [],
+            selectedResultIndex: -1,
+            error: "",
+          });
+        }
+        return indexSearchStateMap.get(windowId);
+      }
+
+      function invalidateProjectIndexSearchRequest(state) {
+        state.requestId += 1;
+        state.inFlightRequestId = 0;
+        state.inFlightSignature = "";
+      }
+
+      function clearProjectIndexSearchState(state) {
+        if (state.searchTimer) {
+          clearTimeout(state.searchTimer);
+          state.searchTimer = 0;
+        }
+        invalidateProjectIndexSearchRequest(state);
+        state.results = [];
+        state.selectedResultIndex = -1;
+        state.searching = false;
+        state.error = "";
+      }
+
+      function markProjectIndexSearchPending(state) {
+        invalidateProjectIndexSearchRequest(state);
+        state.error = "";
+      }
+
+      function activeIndexStatus() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        return (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+      }
+
+      function indexWorktreeEntries(status) {
+        const worktrees = status?.worktrees || {};
+        return Object.entries(worktrees)
+          .map(([hash, meta]) => ({
+            hash,
+            branch: meta?.branch || "",
+            path: meta?.path || "",
+            label: meta?.branch || meta?.path || hash,
+          }))
+          .sort((left, right) => left.label.localeCompare(right.label));
+      }
+
+      function activeWorktreeHashForIndex(status) {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const entries = indexWorktreeEntries(status);
+        return (
+          entries.find((entry) => entry.path === activeProjectRoot)?.hash
+          || entries[0]?.hash
+          || ""
+        );
+      }
+
+      function selectedIndexWorktreeHash(state, status) {
+        const entries = indexWorktreeEntries(status);
+        if (state.selectedWorktreeHash && entries.some((entry) => entry.hash === state.selectedWorktreeHash)) {
+          return state.selectedWorktreeHash;
+        }
+        return activeWorktreeHashForIndex(status);
+      }
+
+      function indexFileScopesSelected(state) {
+        return state.selectedScopes.has("files") || state.selectedScopes.has("files-docs");
+      }
+
+      function selectedIndexScopeLabels(state) {
+        return INDEX_SEARCH_SCOPES
+          .filter((scope) => state.selectedScopes.has(scope.id))
+          .map((scope) => scope.label);
+      }
+
+      function formatIndexSearchMatch(distance) {
+        if (!Number.isFinite(distance)) return "";
+        const score = Math.max(0, Math.min(1, 1 - distance));
+        return `${Math.round(score * 100)}% match`;
+      }
+
+      function scheduleProjectIndexSearch(windowId) {
+        const state = ensureIndexSearchState(windowId);
+        if (state.searchTimer) {
+          clearTimeout(state.searchTimer);
+        }
+        state.searchTimer = setTimeout(() => {
+          state.searchTimer = 0;
+          sendProjectIndexSearch(windowId);
+        }, 250);
+      }
+
+      function sendProjectIndexSearch(windowId) {
+        const state = ensureIndexSearchState(windowId);
+        const query = state.query.trim();
+        if (!query) {
+          clearProjectIndexSearchState(state);
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        const scopes = Array.from(state.selectedScopes);
+        if (scopes.length === 0) {
+          invalidateProjectIndexSearchRequest(state);
+          state.error = "Select at least one scope.";
+          state.searching = false;
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        const requestId = state.requestId + 1;
+        const status = activeIndexStatus();
+        const worktreeHash = indexFileScopesSelected(state)
+          ? selectedIndexWorktreeHash(state, status)
+          : "";
+        const searchSignature = JSON.stringify({ query, scopes, worktreeHash });
+        if (state.searching && state.inFlightSignature === searchSignature) {
+          renderProjectIndexSearch(windowId);
+          return;
+        }
+        state.requestId = requestId;
+        state.inFlightRequestId = requestId;
+        state.inFlightSignature = searchSignature;
+        state.searching = true;
+        state.error = "";
+        send({
+          kind: "search_project_index",
+          id: windowId,
+          query,
+          request_id: requestId,
+          scopes,
+          worktree_hash: worktreeHash || null,
+        });
+        renderProjectIndexSearch(windowId);
+      }
+
+      function renderProjectIndexSearch(windowId) {
+        const state = ensureIndexSearchState(windowId);
+        const root = document.querySelector(
+          `[data-id='${CSS.escape(windowId)}'] .index-search-root`,
+        );
+        if (!root) return;
+        const status = activeIndexStatus();
+        const searchPanel = root.querySelector("[data-index-panel='search']");
+        const healthPanel = root.querySelector("[data-index-panel='health']");
+        const healthTable = root.querySelector(".index-health-table");
+        const tabs = root.querySelectorAll("[data-index-tab]");
+        tabs.forEach((tab) => {
+          const active = tab.dataset.indexTab === state.activeTab;
+          tab.classList.toggle("active", active);
+          tab.setAttribute("aria-selected", String(active));
+        });
+        if (searchPanel) {
+          searchPanel.hidden = state.activeTab !== "search";
+        }
+        if (healthPanel) {
+          healthPanel.hidden = state.activeTab !== "health";
+        }
+        renderProjectIndexSearchControls(root, state, status);
+        renderProjectIndexSearchResults(root, state);
+        if (healthTable) {
+          renderIndexSettingsPanel({
+            panel: healthTable,
+            status,
+            projectRoot: activeProjectTab()?.project_root || "",
+            send,
+          });
+        }
+      }
+
+      function renderProjectIndexSearchControls(root, state, status) {
+        const scopes = root.querySelector(".index-scope-list");
+        if (scopes) {
+          clearChildren(scopes);
+          for (const scope of INDEX_SEARCH_SCOPES) {
+            const button = makeEl("button", {
+              className: "index-scope-button",
+              attrs: {
+                type: "button",
+                "aria-pressed": String(state.selectedScopes.has(scope.id)),
+              },
+              dataset: { scope: scope.id },
+              text: scope.label,
+            });
+            scopes.appendChild(button);
+          }
+        }
+        const runButton = root.querySelector(".index-run-button");
+        if (runButton) {
+          runButton.disabled = !state.query.trim() || state.searching;
+          runButton.textContent = state.searching ? "Searching" : "Search";
+        }
+        const fileWorktreeField = root.querySelector(".index-worktree-field");
+        if (fileWorktreeField) {
+          fileWorktreeField.hidden = !indexFileScopesSelected(state);
+        }
+        const select = root.querySelector(".index-worktree-select");
+        if (select) {
+          clearChildren(select);
+          select.disabled = !indexFileScopesSelected(state);
+          const entries = indexWorktreeEntries(status);
+          const selectedHash = selectedIndexWorktreeHash(state, status);
+          if (entries.length === 0) {
+            select.appendChild(makeEl("option", { attrs: { value: "" }, text: "Current workspace" }));
+          } else {
+            for (const entry of entries) {
+              select.appendChild(
+                makeEl("option", {
+                  attrs: { value: entry.hash },
+                  text: entry.label,
+                }),
+              );
+            }
+          }
+          select.value = selectedHash;
+        }
+        const statusNode = root.querySelector(".index-search-status");
+        if (statusNode) {
+          const scopeSummary = selectedIndexScopeLabels(state).join(", ");
+          if (state.searching) {
+            statusNode.textContent = state.results.length > 0
+              ? `Updating results · ${scopeSummary}`
+              : `Searching semantic index · ${scopeSummary}`;
+          } else if (state.error) {
+            statusNode.textContent = state.error;
+          } else if (state.query.trim() && state.results.length > 0) {
+            statusNode.textContent = `${state.results.length} results · ${scopeSummary}`;
+          } else if (state.query.trim()) {
+            statusNode.textContent = "No indexed results";
+          } else {
+            statusNode.textContent = `Ready · ${scopeSummary}`;
+          }
+          statusNode.dataset.kind = state.error ? "error" : "";
+        }
+      }
+
+      function renderProjectIndexSearchResults(root, state) {
+        const layout = root.querySelector(".index-search-layout");
+        const list = root.querySelector(".index-result-list");
+        const detail = root.querySelector(".index-result-detail");
+        if (!list || !detail) return;
+        clearChildren(list);
+        clearChildren(detail);
+        layout?.classList.toggle("is-empty", state.results.length === 0);
+        if (layout) {
+          layout.setAttribute("aria-busy", String(Boolean(state.searching)));
+        }
+        if (!state.query.trim()) {
+          list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "Search indexed content." }));
+        } else if (state.searching && state.results.length === 0) {
+          list.appendChild(makeIndexSearchLoadingState());
+        } else if (state.error) {
+          list.appendChild(makeEl("div", { className: "workspace-empty-state", text: state.error }));
+        } else if (state.results.length === 0) {
+          list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "No indexed results" }));
+        } else {
+          if (state.searching) {
+            list.appendChild(makeIndexSearchLoadingState("Updating results"));
+          }
+          state.results.forEach((result, index) => {
+            const row = makeEl("button", {
+              className: "index-result-row",
+              attrs: {
+                type: "button",
+                "aria-selected": String(index === state.selectedResultIndex),
+              },
+              dataset: { resultIndex: String(index) },
+            });
+            row.appendChild(makeEl("span", { className: "index-result-scope", text: result.scope || "" }));
+            row.appendChild(makeEl("strong", { text: result.title || "Untitled" }));
+            row.appendChild(makeEl("span", {
+              className: "index-result-subtitle",
+              text: [result.subtitle || "", formatIndexSearchMatch(result.distance)].filter(Boolean).join(" · "),
+            }));
+            list.appendChild(row);
+          });
+        }
+
+        const selected = state.results[state.selectedResultIndex] || state.results[0] || null;
+        if (!selected) {
+          detail.appendChild(makeEl("div", { className: "workspace-empty-state", text: "Select a result" }));
+          return;
+        }
+        state.selectedResultIndex = Math.max(0, state.results.indexOf(selected));
+        detail.appendChild(makeEl("h3", { className: "index-detail-title", text: selected.title || "Untitled" }));
+        detail.appendChild(makeEl("div", { className: "index-detail-subtitle", text: selected.subtitle || selected.scope || "" }));
+        const match = formatIndexSearchMatch(selected.distance);
+        if (match) {
+          detail.appendChild(makeEl("div", { className: "index-detail-meta", text: match }));
+        }
+        detail.appendChild(makeEl("p", { className: "index-detail-preview", text: selected.preview || "No preview available" }));
+        detail.appendChild(makeEl("button", {
+          className: "wizard-button primary",
+          attrs: { type: "button" },
+          dataset: { action: "open-index-result" },
+          text: "Open",
+        }));
+      }
+
+      function makeIndexSearchLoadingState(label = "Searching semantic index") {
+        const node = makeEl("div", {
+          className: "index-search-loading",
+          attrs: { role: "status", "aria-live": "polite" },
+        });
+        const dots = makeEl("span", {
+          className: "index-search-loading-dots",
+          attrs: { "aria-hidden": "true" },
+        });
+        for (let i = 0; i < 3; i += 1) {
+          dots.appendChild(makeEl("span", { className: "index-search-loading-dot" }));
+        }
+        node.appendChild(dots);
+        node.appendChild(makeEl("span", { className: "index-search-loading-label", text: label }));
+        return node;
+      }
+
+      function handleProjectIndexSearchResults(event) {
+        const state = indexSearchStateMap.get(event.id);
+        if (!state || event.request_id !== state.inFlightRequestId) {
+          return;
+        }
+        state.searching = false;
+        state.inFlightRequestId = 0;
+        state.inFlightSignature = "";
+        state.error = "";
+        state.results = Array.isArray(event.results) ? event.results : [];
+        state.selectedResultIndex = state.results.length > 0 ? 0 : -1;
+        renderProjectIndexSearch(event.id);
+      }
+
+      function handleProjectIndexSearchError(event) {
+        const state = indexSearchStateMap.get(event.id);
+        if (!state || event.request_id !== state.inFlightRequestId) {
+          return;
+        }
+        state.searching = false;
+        state.inFlightRequestId = 0;
+        state.inFlightSignature = "";
+        state.error = event.message || "Project index search failed.";
+        renderProjectIndexSearch(event.id);
+      }
+
+      function renderProjectIndexWindows() {
+        for (const windowId of indexSearchStateMap.keys()) {
+          renderProjectIndexSearch(windowId);
+        }
+      }
+
+      function moveIndexResultSelection(windowId, delta) {
+        const state = ensureIndexSearchState(windowId);
+        if (state.results.length === 0) return;
+        const current = Math.max(0, state.selectedResultIndex);
+        state.selectedResultIndex = Math.max(0, Math.min(state.results.length - 1, current + delta));
+        renderProjectIndexSearch(windowId);
+        document
+          .querySelector(`[data-id='${CSS.escape(windowId)}'] [data-result-index='${state.selectedResultIndex}']`)
+          ?.focus();
+      }
+
+      function openIndexResultTarget(result) {
+        const target = result?.target || {};
+        switch (target.kind) {
+          case "issue":
+            openKnowledgeIndexResultTarget("issue", target);
+            return;
+          case "spec":
+            openKnowledgeIndexResultTarget("spec", target);
+            return;
+          case "board":
+            focusOrSpawnPreset("board");
+            return;
+          case "file":
+            focusOrSpawnPreset("file_tree");
+            return;
+          case "memory":
+            focusOrSpawnPreset("index");
+            return;
+          default:
+            return;
+        }
+      }
+
+      function indexResultTargetNumber(target) {
+        const rawNumber = target?.number ?? target?.spec_id ?? target?.id;
+        const number = Number(rawNumber);
+        if (!Number.isInteger(number) || number <= 0) {
+          return null;
+        }
+        return number;
+      }
+
+      function openKnowledgeIndexResultTarget(preset, target) {
+        const knowledgeKind = knowledgeKindForPreset(preset);
+        const number = indexResultTargetNumber(target);
+        const windowId = focusOrSpawnPreset(preset);
+        if (!knowledgeKind || number === null) {
+          return;
+        }
+        if (windowId) {
+          requestKnowledgeDetail(windowId, knowledgeKind, number);
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number });
       }
 
       function send(message) {
@@ -1154,6 +1593,8 @@
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
+        not_started: "Not Started",
+        idle: "Idle",
         waiting: "Waiting",
         stopped: "Stopped",
         error: "Error",
@@ -1161,7 +1602,9 @@
 
       const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
         starting: "running",
-        ready: "waiting",
+        notstarted: "not_started",
+        "not-started": "not_started",
+        ready: "idle",
         exited: "stopped",
       });
 
@@ -2011,6 +2454,19 @@
         };
       }
 
+      function sendStartupAutoResumeReady() {
+        if (startupAutoResumeReadySent) {
+          return;
+        }
+        startupAutoResumeReadySent = true;
+        requestAnimationFrame(() => {
+          send({
+            kind: "startup_auto_resume_ready",
+            bounds: visibleBounds(),
+          });
+        });
+      }
+
       function topmostWindowId(workspace) {
         const visibleWindows = (workspace.windows || []).filter(visibleWindowData);
         if (visibleWindows.length === 0) {
@@ -2805,9 +3261,12 @@
         switch (runtimeState) {
           case "starting":
           case "running":
-          case "waiting":
             return "active";
+          case "not_started":
+            return "not_started";
           case "ready":
+          case "idle":
+          case "waiting":
             return "idle";
           case "stopped":
           case "exited":
@@ -2829,7 +3288,12 @@
             windowRuntimeStateMap.set(windowId, runtimeState);
             if (detail) {
               detailMap.set(windowId, detail);
-            } else if (runtimeState === "running" || runtimeState === "waiting") {
+            } else if (
+              runtimeState === "running" ||
+              runtimeState === "not_started" ||
+              runtimeState === "idle" ||
+              runtimeState === "waiting"
+            ) {
               detailMap.delete(windowId);
             }
             const element = windowMap.get(windowId);
@@ -2845,7 +3309,9 @@
             chip.classList.remove(
               "starting",
               "running",
+              "not_started",
               "ready",
+              "idle",
               "waiting",
               "stopped",
               "exited",
@@ -8527,6 +8993,7 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-index",
           "surface-workspace",
           "surface-mock",
         );
@@ -9059,6 +9526,150 @@
           return;
         }
 
+        if (surface === "index") {
+          body.innerHTML = `
+            <div class="index-search-root">
+              <div class="index-window-header">
+                <div class="index-window-title">
+                  <div class="knowledge-heading">Index</div>
+                  <div class="index-window-subtitle">Search indexed project content</div>
+                </div>
+                <div class="workspace-toolbar-actions index-window-tabs">
+                  <button class="settings-tab active" type="button" role="tab" aria-selected="true" data-index-tab="search">Search</button>
+                  <button class="settings-tab" type="button" role="tab" aria-selected="false" data-index-tab="health">Health</button>
+                </div>
+              </div>
+              <section class="index-search-panel" data-index-panel="search">
+                <div class="index-search-toolbar">
+                  <form class="index-search-box" role="search">
+                    <input class="index-search-input" type="search" placeholder="Search indexed content" aria-label="Search indexed content" />
+                    <button class="index-run-button" type="submit">Search</button>
+                  </form>
+                  <div class="index-filter-bar">
+                    <div class="index-scope-list" role="group" aria-label="Search scopes"></div>
+                    <label class="index-worktree-field">
+                      <span>File worktree</span>
+                      <select class="index-worktree-select" aria-label="Files and Docs worktree"></select>
+                    </label>
+                  </div>
+                </div>
+                <div class="index-search-status"></div>
+                <div class="index-search-layout workspace-split">
+                  <div class="index-result-list workspace-scroll"></div>
+                  <div class="index-result-detail workspace-scroll"></div>
+                </div>
+              </section>
+              <section class="index-health-panel" data-index-panel="health" hidden>
+                <div class="index-health-toolbar">
+                  <div>
+                    <div class="index-health-title">Project index health</div>
+                    <div class="index-health-subtitle">Repair indexed sources without leaving this window.</div>
+                  </div>
+                  <button class="icon-button" data-action="refresh-index-status" aria-label="Refresh index status">↻</button>
+                </div>
+                <div class="index-health-table workspace-scroll"></div>
+              </section>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
+          const state = ensureIndexSearchState(windowData.id);
+          const input = body.querySelector(".index-search-input");
+          input.value = state.query;
+          input.addEventListener("input", () => {
+            state.query = input.value;
+            if (!state.query.trim()) {
+              clearProjectIndexSearchState(state);
+              renderProjectIndexSearch(windowData.id);
+              return;
+            }
+            markProjectIndexSearchPending(state);
+            renderProjectIndexSearch(windowData.id);
+            scheduleProjectIndexSearch(windowData.id);
+          });
+          body.querySelector(".index-search-box").addEventListener("submit", (event) => {
+            event.preventDefault();
+            if (state.searchTimer) {
+              clearTimeout(state.searchTimer);
+              state.searchTimer = 0;
+            }
+            sendProjectIndexSearch(windowData.id);
+          });
+          body.querySelector(".index-scope-list").addEventListener("click", (event) => {
+            const button = event.target.closest("[data-scope]");
+            if (!button) return;
+            const scope = button.dataset.scope;
+            if (state.selectedScopes.has(scope)) {
+              state.selectedScopes.delete(scope);
+            } else {
+              state.selectedScopes.add(scope);
+            }
+            if (state.query.trim()) {
+              markProjectIndexSearchPending(state);
+            }
+            renderProjectIndexSearch(windowData.id);
+            scheduleProjectIndexSearch(windowData.id);
+          });
+          body.querySelector(".index-worktree-select").addEventListener("change", (event) => {
+            state.selectedWorktreeHash = event.target.value || "";
+            if (state.query.trim()) {
+              markProjectIndexSearchPending(state);
+              renderProjectIndexSearch(windowData.id);
+            }
+            scheduleProjectIndexSearch(windowData.id);
+          });
+          for (const tab of body.querySelectorAll("[data-index-tab]")) {
+            tab.addEventListener("click", () => {
+              state.activeTab = tab.dataset.indexTab || "search";
+              if (state.activeTab === "health") {
+                requestFullIndexStatusRefresh();
+              }
+              renderProjectIndexSearch(windowData.id);
+            });
+          }
+          body
+            .querySelector("[data-action='refresh-index-status']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              requestFullIndexStatusRefresh();
+            });
+          body.querySelector(".index-result-list").addEventListener("click", (event) => {
+            const row = event.target.closest("[data-result-index]");
+            if (!row) return;
+            state.selectedResultIndex = Number(row.dataset.resultIndex || 0);
+            renderProjectIndexSearch(windowData.id);
+          });
+          body.querySelector(".index-result-list").addEventListener("dblclick", (event) => {
+            const row = event.target.closest("[data-result-index]");
+            if (!row) return;
+            state.selectedResultIndex = Number(row.dataset.resultIndex || 0);
+            const result = state.results[state.selectedResultIndex] || state.results[0];
+            openIndexResultTarget(result);
+          });
+          body.querySelector(".index-result-list").addEventListener("keydown", (event) => {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              moveIndexResultSelection(windowData.id, 1);
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              moveIndexResultSelection(windowData.id, -1);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              const result = state.results[state.selectedResultIndex] || state.results[0];
+              openIndexResultTarget(result);
+            }
+          });
+          body.querySelector(".index-result-detail").addEventListener("click", (event) => {
+            if (!event.target.closest("[data-action='open-index-result']")) return;
+            const result = state.results[state.selectedResultIndex] || state.results[0];
+            openIndexResultTarget(result);
+          });
+          renderProjectIndexSearch(windowData.id);
+          return;
+        }
+
         if (surface === "knowledge") {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
@@ -9149,6 +9760,14 @@
             windowData.id,
             knowledgeKind,
           );
+          const pendingIndexTarget = pendingIndexOpenTargetsByPreset.get(windowData.preset);
+          if (
+            pendingIndexTarget
+            && pendingIndexTarget.knowledgeKind === knowledgeKind
+          ) {
+            state.selectedNumber = pendingIndexTarget.number;
+            pendingIndexOpenTargetsByPreset.delete(windowData.preset);
+          }
           const search = body.querySelector(".knowledge-search");
           search.value = state.query;
           search.addEventListener("input", () => {
@@ -9313,7 +9932,6 @@
         // Kept distinct from `custom-agents` so External CLI rows and
         // built-in LLM redirection have separate physical UI.
         tabs.appendChild(buildSettingsTab("agent-backends", "Agent Backends", false));
-        tabs.appendChild(buildSettingsTab("index", "Index", false));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -9339,16 +9957,9 @@
         panelBackends.dataset.settingsPanel = "agent-backends";
         panelBackends.dataset.role = "settings-scroll";
 
-        const panelIndex = document.createElement("section");
-        panelIndex.className = "settings-panel hidden";
-        panelIndex.setAttribute("role", "tabpanel");
-        panelIndex.dataset.settingsPanel = "index";
-        panelIndex.dataset.role = "settings-scroll";
-
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
-        bodyEl.appendChild(panelIndex);
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -9393,9 +10004,6 @@
         for (const agent of ["claudeCode", "codex"]) {
           send({ kind: "list_agent_backends", agent });
         }
-
-        // SPEC-1939 T-IDX-106: render the Project Index health table.
-        renderIndexPanel(panelIndex);
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
@@ -9515,6 +10123,10 @@
 
       document.addEventListener("settings:open", (event) => {
         const target = event?.detail?.target || "system";
+        if (target === "index") {
+          focusOrSpawnPreset("index");
+          return;
+        }
         const existingBody = Array.from(settingsWindowBodies).find(
           (settingsBody) => settingsBody.isConnected,
         );
@@ -9551,9 +10163,6 @@
             panel.dataset.settingsPanel !== target,
           );
         });
-        if (target === "index") {
-          requestFullIndexStatusRefresh();
-        }
       }
 
       function renderSystemPanel(panel) {
@@ -10148,6 +10757,7 @@
               profileStateMap.delete(windowId);
               boardStateMap.delete(windowId);
               logStateMap.delete(windowId);
+              indexSearchStateMap.delete(windowId);
               clearKnowledgeBridgeState(windowId);
               workspaceOverviewSurface.deleteState(windowId);
               if (branchCleanupWindowId === windowId) {
@@ -10337,6 +10947,7 @@
           case "workspace_state": {
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            sendStartupAutoResumeReady();
             break;
           }
           case "workspace_projection_prune_result": {
@@ -10411,6 +11022,12 @@
           }
           case "project_index_status":
             setIndexStatus(event.project_root, event.status);
+            break;
+          case "project_index_search_results":
+            handleProjectIndexSearchResults(event);
+            break;
+          case "project_index_search_error":
+            handleProjectIndexSearchError(event);
             break;
           case "file_tree_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
@@ -12179,6 +12796,7 @@
           preset === "logs" ||
           preset === "issue" ||
           preset === "spec" ||
+          preset === "index" ||
           preset === "workspace" ||
           preset === "board" ||
           preset === "pr"
@@ -12199,7 +12817,7 @@
             message.bounds = visibleBounds();
           }
           frontendUnits.socketTransport.send(message);
-          return;
+          return existing.id;
         }
         const message = {
           kind: "create_window",
@@ -12207,6 +12825,7 @@
           bounds: visibleBounds(),
         };
         frontendUnits.socketTransport.send(message);
+        return null;
       }
 
       document.addEventListener("op:command", (event) => {
@@ -12227,6 +12846,9 @@
             return;
           case "open-files":
             focusOrSpawnPreset("file_tree");
+            return;
+          case "open-index":
+            focusOrSpawnPreset("index");
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");

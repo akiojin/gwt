@@ -199,6 +199,9 @@ fn main() -> ExitCode {
 }
 
 pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -28,62 +28,105 @@ def emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
-DEFAULT_IGNORE_PATTERNS = [
-    ".git",
-    ".gwt/index",
-    "node_modules",
-    "__pycache__",
-    ".DS_Store",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    "*.pyc",
-    "*.pyo",
-    "*.so",
-    "*.dylib",
-    "*.dll",
-    "*.exe",
-    "*.o",
-    "*.a",
-    "*.class",
-    "*.jar",
-    "*.war",
-    "*.wasm",
-    "*.min.js",
-    "*.min.css",
-    "*.map",
-    "*.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "Cargo.lock",
-]
-
-BINARY_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
-    ".dmg", ".msi", ".deb", ".rpm", ".AppImage",
-    ".safetensors", ".bin", ".onnx", ".pt", ".pth",
+INDEX_PATH_POLICY_FILE = "index_path_policy.json"
+FALLBACK_INDEX_PATH_POLICY = {
+    "schema_version": 1,
+    "max_file_size": 1_048_576,
+    "allow_paths": ["tasks/memory.md"],
+    "deny_root_prefixes": [
+        ".git",
+        ".claude",
+        ".codex",
+        ".gemini",
+        ".gwt",
+        "tasks",
+        "specs",
+    ],
+    "deny_directory_names": [
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        "vendor",
+        ".venv",
+        "venv",
+        ".tox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".gradle",
+        ".terraform",
+        "coverage",
+        "htmlcov",
+        ".turbo",
+        ".parcel-cache",
+        "__pycache__",
+    ],
+    "deny_file_extensions": [".snap"],
+    "binary_extensions": [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".svg",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        ".pdf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".dmg",
+        ".msi",
+        ".deb",
+        ".rpm",
+        ".AppImage",
+        ".safetensors",
+        ".bin",
+        ".onnx",
+        ".pt",
+        ".pth",
+    ],
 }
 
-MAX_FILE_SIZE = 1_048_576  # 1 MiB
+
+def load_index_path_policy() -> Dict[str, Any]:
+    """Load the shared project-index path policy bundled with the runner."""
+    policy_path = Path(__file__).with_name(INDEX_PATH_POLICY_FILE)
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        policy = dict(FALLBACK_INDEX_PATH_POLICY)
+
+    merged = dict(FALLBACK_INDEX_PATH_POLICY)
+    merged.update(policy)
+    return merged
+
+
+INDEX_PATH_POLICY = load_index_path_policy()
+BINARY_EXTENSIONS = {ext.lower() for ext in INDEX_PATH_POLICY["binary_extensions"]}
+MAX_FILE_SIZE = int(INDEX_PATH_POLICY["max_file_size"])
 CODE_COLLECTION = "files_code"
 DOC_COLLECTION = "files_docs"
 LEGACY_FILE_COLLECTION = "files"
 
-SKIP_FILE_EXTENSIONS = {
-    ".snap",
-}
-
-SKIP_ROOT_DIRECTORIES = {
-    ".claude",
-    ".codex",
-    "specs",
-    "tasks",
-}
+SKIP_FILE_EXTENSIONS = {ext.lower() for ext in INDEX_PATH_POLICY["deny_file_extensions"]}
+SKIP_ROOT_DIRECTORIES = set(INDEX_PATH_POLICY["deny_root_prefixes"])
 
 DOC_FILE_EXTENSIONS = {
     ".md",
@@ -103,19 +146,92 @@ def normalize_rel_path(path: Path) -> str:
     return path.as_posix()
 
 
-def load_gitignore_patterns(project_root: Path) -> List[str]:
-    """Load patterns from .gitignore."""
-    gitignore = project_root / ".gitignore"
-    patterns: List[str] = list(DEFAULT_IGNORE_PATTERNS)
-    if gitignore.is_file():
+def _policy_allowlisted(rel_path: str, policy: Optional[Dict[str, Any]] = None) -> bool:
+    policy = policy or INDEX_PATH_POLICY
+    return rel_path.strip("/") in set(policy["allow_paths"])
+
+
+def _policy_denies_path(rel_path: str, policy: Optional[Dict[str, Any]] = None) -> bool:
+    policy = policy or INDEX_PATH_POLICY
+    rel_path = rel_path.strip("/")
+    if not rel_path or _policy_allowlisted(rel_path, policy):
+        return False
+
+    parts = [part for part in rel_path.split("/") if part]
+    if not parts:
+        return False
+
+    if parts[0] in set(policy["deny_root_prefixes"]):
+        return True
+
+    if any(part in set(policy["deny_directory_names"]) for part in parts):
+        return True
+
+    suffix = Path(rel_path).suffix.lower()
+    return suffix in {ext.lower() for ext in policy["deny_file_extensions"]}
+
+
+def load_gitignore_patterns(project_root: Path) -> List[tuple[str, str]]:
+    """Load root/nested .gitignore and project-local info/exclude patterns."""
+    return load_project_ignore_patterns(project_root)
+
+
+def load_project_ignore_patterns(project_root: Path) -> List[tuple[str, str]]:
+    """Load project-local ignore patterns without consulting global git ignores."""
+    policy = load_index_path_policy()
+    patterns: List[tuple[str, str]] = []
+
+    for root, dirs, files in os.walk(project_root):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(project_root)
+        base_rel = "" if str(rel_root) == "." else rel_root.as_posix()
+
+        dirs[:] = [
+            d for d in dirs
+            if not _policy_denies_path(
+                f"{base_rel}/{d}" if base_rel else d,
+                policy,
+            )
+        ]
+
+        if ".gitignore" not in files:
+            continue
+        gitignore = root_path / ".gitignore"
         for line in gitignore.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                patterns.append(line)
+                patterns.append((base_rel, line))
+
+    info_exclude = _git_info_exclude_path(project_root)
+    if info_exclude and info_exclude.is_file():
+        for line in info_exclude.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(("", line))
+
     return patterns
 
 
-def _pattern_to_regex(pattern: str) -> Optional[re.Pattern]:
+def _git_info_exclude_path(project_root: Path) -> Optional[Path]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--git-path", "info/exclude"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    path_text = completed.stdout.strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    return path if path.is_absolute() else project_root / path
+
+
+def _pattern_to_regex(pattern: str, base_rel: str = "") -> Optional[re.Pattern]:
     """Convert a simplified gitignore-style pattern to a regex."""
     negated = pattern.startswith("!")
     if negated:
@@ -126,13 +242,18 @@ def _pattern_to_regex(pattern: str) -> Optional[re.Pattern]:
     if not pattern:
         return None
 
+    base_rel = base_rel.strip("/")
     regex = pattern.replace(".", r"\.")
     regex = regex.replace("**", "{{GLOBSTAR}}")
     regex = regex.replace("*", "[^/]*")
     regex = regex.replace("{{GLOBSTAR}}", ".*")
     regex = regex.replace("?", "[^/]")
 
-    if "/" not in pattern:
+    if base_rel and "/" not in pattern:
+        regex = f"^{re.escape(base_rel)}/(.*/)?{regex}(/.*|$)"
+    elif base_rel:
+        regex = f"^{re.escape(base_rel)}/{regex}(/.*|$)"
+    elif "/" not in pattern:
         regex = f"(^|.*/){regex}(/.*|$)"
     else:
         regex = f"^{regex}(/.*|$)"
@@ -181,9 +302,12 @@ def classify_file_bucket(rel_path: str) -> str:
 
 
 def collect_files(project_root: Path) -> List[Path]:
-    """Recursively collect project files, respecting .gitignore."""
-    patterns = load_gitignore_patterns(project_root)
-    compiled = [p for p in (_pattern_to_regex(pat) for pat in patterns) if p is not None]
+    """Recursively collect project files, respecting the shared path policy."""
+    policy = load_index_path_policy()
+    patterns = load_project_ignore_patterns(project_root)
+    compiled = [
+        p for p in (_pattern_to_regex(pat, base) for base, pat in patterns) if p is not None
+    ]
     result = []
     for root, dirs, files in os.walk(project_root):
         root_path = Path(root)
@@ -192,14 +316,17 @@ def collect_files(project_root: Path) -> List[Path]:
 
         dirs[:] = [
             d for d in dirs
-            if not should_ignore(
+            if not _policy_denies_path(
                 f"{rel_root_str}/{d}" if rel_root_str else d,
-                compiled,
+                policy,
             )
+            and not should_ignore(f"{rel_root_str}/{d}" if rel_root_str else d, compiled)
         ]
 
         for fname in files:
             rel = f"{rel_root_str}/{fname}" if rel_root_str else fname
+            if _policy_denies_path(rel, policy):
+                continue
             if should_ignore(rel, compiled):
                 continue
             fpath = root_path / fname
@@ -971,22 +1098,15 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "memory", "lessons", "files", "files-docs")
-V2_CANONICAL_SCOPES = ("issues", "specs", "memory", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "board", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
-REPO_SCOPED = {"issues", "specs", "memory"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "specs"
 V2_ISSUES_COLLECTION = "issues"
 V2_MEMORY_COLLECTION = "memory"
-V2_LESSONS_COLLECTION = V2_MEMORY_COLLECTION
-
-
-def _canonical_scope(scope: str) -> str:
-    """Return the storage scope name, preserving lessons as a public alias."""
-    return "memory" if scope == "lessons" else scope
+V2_BOARD_COLLECTION = "board"
 
 
 def gwt_index_root() -> Path:
@@ -1002,19 +1122,18 @@ def resolve_db_path(
     db_root: Optional[Path] = None,
 ) -> Path:
     """Compute the on-disk DB directory for the given (repo, worktree, scope)."""
-    canonical_scope = _canonical_scope(scope)
-    if canonical_scope not in V2_CANONICAL_SCOPES:
+    if scope not in V2_SCOPES:
         raise ValueError(f"unknown scope: {scope}")
-    if canonical_scope in WORKTREE_SCOPED and not worktree_hash:
-        raise ValueError(f"scope {canonical_scope} requires worktree_hash")
+    if scope in WORKTREE_SCOPED and not worktree_hash:
+        raise ValueError(f"scope {scope} requires worktree_hash")
 
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if canonical_scope in REPO_SCOPED:
-        return repo_dir / canonical_scope
+    if scope in {"issues", "specs", "memory", "board"}:
+        return repo_dir / scope
 
-    return repo_dir / "worktrees" / worktree_hash / canonical_scope
+    return repo_dir / "worktrees" / worktree_hash / scope
 
 
 # ---------------------------------------------------------------------
@@ -1263,10 +1382,9 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
-    canonical_scope = _canonical_scope(scope)
-    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "memory", "lessons"):
-        return worktree_dir.parent / f"manifest-{canonical_scope}.json"
-    return worktree_dir / f"manifest-{canonical_scope}.json"
+    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "memory", "board"):
+        return worktree_dir.parent / f"manifest-{scope}.json"
+    return worktree_dir / f"manifest-{scope}.json"
 
 
 def read_manifest(worktree_dir: Path, scope: str) -> List[Dict[str, Any]]:
@@ -1890,14 +2008,14 @@ def _load_cached_spec_documents(
     return specs, manifest_entries
 
 
-_LESSON_DATE_HEADING_RE = re.compile(
+_MEMORY_DATE_HEADING_RE = re.compile(
     r"^##\s+(?P<date>\d{4}-\d{2}-\d{2})\s+(?:—|--|-)\s+(?P<title>.+?)\s*$"
 )
-_LESSON_BARE_HEADING_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$")
-_LESSON_HEADING_CHUNK_SUFFIX_RE = re.compile(r"\s+\[\d+\]\s*$")
+_MEMORY_BARE_HEADING_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$")
+_MEMORY_HEADING_CHUNK_SUFFIX_RE = re.compile(r"\s+\[\d+\]\s*$")
 
 
-def _parse_lesson_heading(heading: str) -> tuple[str, str]:
+def _parse_memory_heading(heading: str) -> tuple[str, str]:
     """Extract (date, title) from an H2 heading.
 
     Handles three shapes:
@@ -1905,41 +2023,29 @@ def _parse_lesson_heading(heading: str) -> tuple[str, str]:
     - ``## title without date`` → ("", "title without date")
     - ``## 2026-05-20 — title [2]`` (paragraph-split suffix) → strip suffix
     """
-    cleaned = _LESSON_HEADING_CHUNK_SUFFIX_RE.sub("", heading)
-    dated = _LESSON_DATE_HEADING_RE.match(cleaned)
+    cleaned = _MEMORY_HEADING_CHUNK_SUFFIX_RE.sub("", heading)
+    dated = _MEMORY_DATE_HEADING_RE.match(cleaned)
     if dated:
         return dated.group("date"), dated.group("title").strip()
-    bare = _LESSON_BARE_HEADING_RE.match(cleaned)
+    bare = _MEMORY_BARE_HEADING_RE.match(cleaned)
     if bare:
         return "", bare.group("title").strip()
     return "", heading.strip()
 
 
-def _select_memory_source_path(root: Path) -> tuple[Optional[Path], str]:
-    """Select the canonical memory file, falling back to legacy lessons.md."""
-    memory_path = root / "tasks" / "memory.md"
-    if memory_path.is_file():
-        return memory_path, "tasks/memory.md"
-    lessons_path = root / "tasks" / "lessons.md"
-    if lessons_path.is_file():
-        return lessons_path, "tasks/lessons.md"
-    return None, ""
-
-
 def _load_memory_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``tasks/memory.md`` and chunk it into reusable memory units.
+    """Load ``<project_root>/tasks/memory.md`` and chunk it into memory units.
 
-    Legacy ``tasks/lessons.md`` is accepted as a compatibility fallback.
-    Returns ``(memories, manifest_entries)`` where ``manifest_entries`` contains
-    at most one entry describing the selected source file's mtime/size.
-    Missing file -> both empty. Empty file -> empty memories but a manifest
-    entry so the runner can still detect future content additions.
+    Returns a tuple ``(memory, manifest_entries)`` where ``manifest_entries``
+    contains at most one entry describing the source file's mtime/size.
+    Missing file → both empty. Empty file → empty memory but a manifest
+    entry so that the runner can still detect future content additions.
     """
     root = Path(project_root)
-    source_path, rel_path = _select_memory_source_path(root)
-    if source_path is None:
+    source_path = root / "tasks" / "memory.md"
+    if not source_path.is_file():
         return [], []
 
     try:
@@ -1953,7 +2059,7 @@ def _load_memory_documents(
         return [], []
     manifest_entries = [
         {
-            "path": rel_path,
+            "path": "tasks/memory.md",
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -1969,11 +2075,11 @@ def _load_memory_documents(
         heading = chunk["heading"]
         body = chunk["body"]
         # `_chunk_spec_content` emits a synthetic "(intro)" chunk for any
-        # leading content before the first H2 (e.g. the `# Lessons Learned`
-        # title line). That preamble is not a real lesson — skip it.
+        # leading content before the first H2 (e.g. the `# Project Memory`
+        # title line). That preamble is not a real memory — skip it.
         if not heading.startswith("## "):
             continue
-        date, title = _parse_lesson_heading(heading)
+        date, title = _parse_memory_heading(heading)
         key = (date, title)
         chunk_idx = grouped.get(key, 0)
         grouped[key] = chunk_idx + 1
@@ -1982,8 +2088,6 @@ def _load_memory_documents(
         memories.append(
             {
                 "memory_id": memory_id,
-                # Keep lesson_id for legacy callers and search output.
-                "lesson_id": memory_id,
                 "date": date,
                 "title": title,
                 "heading": heading,
@@ -1994,18 +2098,11 @@ def _load_memory_documents(
             }
         )
 
-    for memory in memories:
-        key = (memory["date"], memory["title"])
-        memory["total_chunks"] = grouped[key]
+    for entry in memories:
+        key = (entry["date"], entry["title"])
+        entry["total_chunks"] = grouped[key]
 
     return memories, manifest_entries
-
-
-def _load_lessons_documents(
-    project_root: str,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Compatibility wrapper for the legacy lessons API."""
-    return _load_memory_documents(project_root)
 
 
 def _build_memory_records(
@@ -2013,51 +2110,22 @@ def _build_memory_records(
 ) -> List[Dict[str, Any]]:
     """Materialize Chroma upsert records for the memory scope."""
     records: List[Dict[str, Any]] = []
-    for memory in memories:
-        memory_id = memory.get("memory_id") or memory.get("lesson_id", "")
-        title = memory.get("title", "")
-        heading = memory.get("heading", "")
-        body = memory.get("body", "")
+    for entry in memories:
+        title = entry.get("title", "")
+        heading = entry.get("heading", "")
+        body = entry.get("body", "")
         document = f"{title}\n{heading}\n{body}".strip()
         records.append(
             {
-                "id": f"memory-{memory_id}",
+                "id": f"memory-{entry.get('memory_id', '')}",
                 "document": document,
                 "metadata": {
-                    "memory_id": memory_id,
-                    "lesson_id": memory.get("lesson_id", memory_id),
-                    "date": memory.get("date", ""),
+                    "memory_id": entry.get("memory_id", ""),
+                    "date": entry.get("date", ""),
                     "title": title,
                     "heading": heading,
-                    "chunk_idx": int(memory.get("chunk_idx", 0)),
-                    "total_chunks": int(memory.get("total_chunks", 1)),
-                },
-            }
-        )
-    return records
-
-
-def _build_lesson_records(
-    lessons: Sequence[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Materialize Chroma upsert records for the lessons scope."""
-    records: List[Dict[str, Any]] = []
-    for lesson in lessons:
-        title = lesson.get("title", "")
-        heading = lesson.get("heading", "")
-        body = lesson.get("body", "")
-        document = f"{title}\n{heading}\n{body}".strip()
-        records.append(
-            {
-                "id": f"lesson-{lesson.get('lesson_id', '')}",
-                "document": document,
-                "metadata": {
-                    "lesson_id": lesson.get("lesson_id", ""),
-                    "date": lesson.get("date", ""),
-                    "title": title,
-                    "heading": heading,
-                    "chunk_idx": int(lesson.get("chunk_idx", 0)),
-                    "total_chunks": int(lesson.get("total_chunks", 1)),
+                    "chunk_idx": int(entry.get("chunk_idx", 0)),
+                    "total_chunks": int(entry.get("total_chunks", 1)),
                 },
             }
         )
@@ -2074,8 +2142,9 @@ def action_index_memory_v2(
     """Index ``tasks/memory.md`` into the repo-scoped memory Chroma store.
 
     `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored because memory is repo-scoped. Legacy ``tasks/lessons.md`` is used
-    only when ``tasks/memory.md`` is absent.
+    ignored — memory is repo-scoped. Manifest diff degenerates to a single
+    entry; when the file changes (mtime or size), all chunks are re-upserted
+    after deleting prior records for the file.
     """
     del worktree_hash  # repo-scoped scope does not consume the worktree hash
     db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
@@ -2166,49 +2235,221 @@ def action_index_memory_v2(
     return {"ok": True, "scope": "memory", "indexed": indexed}
 
 
-def action_index_lessons_v2(
-    project_root: str,
+def _gwt_home() -> Path:
+    return Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home()) / ".gwt"
+
+
+def _board_coordination_roots(repo_hash: str, project_root: Optional[str]) -> List[Path]:
+    roots = [_gwt_home() / "projects" / repo_hash / "coordination"]
+    if project_root:
+        legacy = Path(project_root) / ".gwt" / "coordination"
+        if legacy not in roots:
+            roots.append(legacy)
+    return roots
+
+
+def _load_board_segment_events(segment_path: Path) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    try:
+        lines = segment_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        entry = payload.get("entry")
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _load_board_documents(
     repo_hash: str,
-    worktree_hash: Optional[str],
+    project_root: Optional[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load Board entries from repo-scoped segmented coordination history."""
+    for coordination_root in _board_coordination_roots(repo_hash, project_root):
+        manifest_path = coordination_root / "events.manifest.json"
+        segments_root = coordination_root / "events"
+        if not manifest_path.is_file() or not segments_root.is_dir():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        docs: List[Dict[str, Any]] = []
+        manifest_entries: List[Dict[str, Any]] = []
+        for segment in manifest.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            file_name = str(segment.get("file", "")).strip()
+            if not file_name:
+                continue
+            segment_path = segments_root / file_name
+            if not segment_path.is_file():
+                continue
+            try:
+                stat = segment_path.stat()
+            except OSError:
+                continue
+            manifest_entries.append(
+                {
+                    "path": f"coordination/events/{file_name}",
+                    "mtime": int(stat.st_mtime),
+                    "size": int(stat.st_size),
+                }
+            )
+            for entry in _load_board_segment_events(segment_path):
+                if "entry_id" not in entry and entry.get("id"):
+                    entry["entry_id"] = entry.get("id")
+                docs.append(entry)
+        docs.sort(key=lambda entry: entry.get("created_at", ""))
+        return docs, manifest_entries
+
+    return [], []
+
+
+def _board_entry_document(entry: Dict[str, Any]) -> str:
+    parts = [
+        str(entry.get("title_summary") or ""),
+        str(entry.get("kind") or ""),
+        str(entry.get("body") or ""),
+        " ".join(str(value) for value in entry.get("related_topics") or []),
+        " ".join(str(value) for value in entry.get("related_owners") or []),
+        str(entry.get("author") or ""),
+        str(entry.get("origin_branch") or ""),
+    ]
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _build_board_records(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for entry in entries:
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            continue
+        body = str(entry.get("body") or "")
+        records.append(
+            {
+                "id": entry_id,
+                "document": _board_entry_document(entry),
+                "metadata": {
+                    "entry_id": entry_id,
+                    "kind": str(entry.get("kind") or ""),
+                    "author": str(entry.get("author") or ""),
+                    "title_summary": str(entry.get("title_summary") or ""),
+                    "body_preview": body[:500],
+                    "created_at": str(entry.get("created_at") or ""),
+                    "updated_at": str(entry.get("updated_at") or ""),
+                    "origin_branch": str(entry.get("origin_branch") or ""),
+                    "origin_session_id": str(entry.get("origin_session_id") or ""),
+                    "audience": ",".join(str(value) for value in entry.get("audience") or []),
+                    "related_topics": ",".join(str(value) for value in entry.get("related_topics") or []),
+                    "related_owners": ",".join(str(value) for value in entry.get("related_owners") or []),
+                },
+            }
+        )
+    return records
+
+
+def action_index_board_v2(
+    repo_hash: str,
+    project_root: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Compatibility wrapper for the legacy lessons index action."""
-    return action_index_memory_v2(
-        project_root=project_root,
-        repo_hash=repo_hash,
-        worktree_hash=worktree_hash,
-        mode=mode,
-        db_root=db_root,
+    """Index Board coordination history into the repo-scoped board store."""
+    db_path = resolve_db_path(repo_hash, None, "board", db_root=db_root)
+    entries, new_entries = _load_board_documents(repo_hash, project_root)
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "board",
+            "mode": mode,
+            "done": 0,
+            "total": len(entries),
+        }
     )
 
-
-def _format_lessons_results(
-    items: List[Dict[str, Any]], n_results: int = 10
-) -> List[Dict[str, Any]]:
-    """Collapse chunked lesson results so each (date, title) appears once."""
-    formatted: List[Dict[str, Any]] = []
-    seen: set = set()
-    for it in items:
-        meta = it.get("metadata") or {}
-        date = meta.get("date", "")
-        title = meta.get("title", "")
-        key = (date, title)
-        if key in seen:
-            continue
-        seen.add(key)
-        formatted.append(
-            {
-                "date": date,
-                "title": title,
-                "heading": meta.get("heading", ""),
-                "chunk_idx": int(meta.get("chunk_idx", 0)),
-                "distance": it.get("distance"),
-            }
+    indexed = 0
+    with acquire_lock(db_path, exclusive=True):
+        if mode != "incremental":
+            _reset_chroma_store(db_path)
+        make_collection = (
+            _make_chroma_collection
+            if mode == "incremental"
+            else _make_chroma_collection_repairing
         )
-        if len(formatted) >= n_results:
-            break
-    return formatted
+        client, collection = make_collection(db_path, V2_BOARD_COLLECTION)
+        try:
+            old_entries = read_manifest(db_path, scope="board")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            history_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+
+            if mode != "incremental" or history_changed:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                records = _build_board_records(entries)
+            else:
+                records = []
+
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "board",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+
+            if records:
+                ids = [r["id"] for r in records]
+                documents = [r["document"] for r in records]
+                metadatas = [r["metadata"] for r in records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+                indexed = len(records)
+
+            write_manifest(db_path, scope="board", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                scope="board",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": indexed,
+                },
+            )
+        finally:
+            _close_chroma_client(client)
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "board",
+            "mode": mode,
+            "indexed": indexed,
+            "total": indexed,
+        }
+    )
+    return {"ok": True, "scope": "board", "indexed": indexed}
 
 
 def _format_memory_results(
@@ -2225,11 +2466,8 @@ def _format_memory_results(
         if key in seen:
             continue
         seen.add(key)
-        memory_id = meta.get("memory_id") or meta.get("lesson_id", "")
         formatted.append(
             {
-                "memory_id": memory_id,
-                "lesson_id": meta.get("lesson_id", memory_id),
                 "date": date,
                 "title": title,
                 "heading": meta.get("heading", ""),
@@ -2309,11 +2547,12 @@ def _scope_meta_path(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Path:
-    scope = _canonical_scope(scope)
     if scope == "specs":
         return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
     if scope == "memory":
         return resolve_db_path(repo_hash, None, "memory", db_root=db_root) / META_FILENAME
+    if scope == "board":
+        return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -2348,7 +2587,6 @@ def _read_scope_meta(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    scope = _canonical_scope(scope)
     payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
     scopes = payload.get("scopes") or {}
     scope_payload = scopes.get(scope, {})
@@ -2362,7 +2600,6 @@ def _write_scope_meta(
     db_root: Optional[Path] = None,
     updates: Optional[Dict[str, Any]] = None,
 ) -> None:
-    scope = _canonical_scope(scope)
     meta_path = _scope_meta_path(repo_hash, worktree_hash, scope, db_root=db_root)
     payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
     payload["schema_version"] = INDEX_SCHEMA_VERSION
@@ -2380,13 +2617,13 @@ def _write_scope_meta(
 
 
 def _scope_collection_name(scope: str) -> str:
-    scope = _canonical_scope(scope)
     return {
         "files": V2_FILES_CODE_COLLECTION,
         "files-docs": V2_FILES_DOCS_COLLECTION,
         "specs": V2_SPECS_COLLECTION,
         "issues": V2_ISSUES_COLLECTION,
         "memory": V2_MEMORY_COLLECTION,
+        "board": V2_BOARD_COLLECTION,
     }[scope]
 
 
@@ -2429,7 +2666,6 @@ def _scope_status_v2(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    scope = _canonical_scope(scope)
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
@@ -2459,11 +2695,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory") and document_count < manifest_count:
+    elif scope in ("specs", "memory", "board") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "memory") and document_count != manifest_count:
+    elif scope not in ("specs", "memory", "board") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -2720,6 +2956,36 @@ def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+def _split_csv_meta(value: Any) -> List[str]:
+    if not value:
+        return []
+    return [part for part in str(value).split(",") if part]
+
+
+def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    formatted = []
+    for it in items:
+        meta = it["metadata"] or {}
+        formatted.append(
+            {
+                "entry_id": meta.get("entry_id", it["id"]),
+                "kind": meta.get("kind", ""),
+                "author": meta.get("author", ""),
+                "title_summary": meta.get("title_summary", ""),
+                "body_preview": meta.get("body_preview", ""),
+                "created_at": meta.get("created_at", ""),
+                "updated_at": meta.get("updated_at", ""),
+                "origin_branch": meta.get("origin_branch", ""),
+                "origin_session_id": meta.get("origin_session_id", ""),
+                "audience": _split_csv_meta(meta.get("audience", "")),
+                "related_topics": _split_csv_meta(meta.get("related_topics", "")),
+                "related_owners": _split_csv_meta(meta.get("related_owners", "")),
+                "distance": it["distance"],
+            }
+        )
+    return formatted
+
+
 def action_search_v2(
     action: str,
     repo_hash: str,
@@ -2737,11 +3003,11 @@ def action_search_v2(
         "search-specs": "specs",
         "search-issues": "issues",
         "search-memory": "memory",
-        "search-lessons": "lessons",
+        "search-board": "board",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
-    scope = _canonical_scope(scope_for_action[action])
+    scope = scope_for_action[action]
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     if scope == "issues":
@@ -2795,6 +3061,13 @@ def action_search_v2(
                 mode="full",
                 db_root=db_root,
             )
+        elif scope == "board":
+            build = action_index_board_v2(
+                repo_hash=repo_hash,
+                project_root=project_root,
+                mode="full",
+                db_root=db_root,
+            )
         else:
             build = action_index_files_v2(
                 project_root=project_root,
@@ -2823,15 +3096,61 @@ def action_search_v2(
     if scope == "specs":
         return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
     if scope == "memory":
-        memory_results = _format_memory_results(items, n_results)
-        if action == "search-lessons":
-            return {
-                "ok": True,
-                "memoryResults": memory_results,
-                "lessonResults": _format_lessons_results(items, n_results),
-            }
-        return {"ok": True, "memoryResults": memory_results}
+        return {"ok": True, "memoryResults": _format_memory_results(items, n_results)}
+    if scope == "board":
+        return {"ok": True, "boardResults": _format_board_results(items)[:n_results]}
     return {"ok": True, "issueResults": _format_issue_results(items)}
+
+
+def action_search_multi_v2(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    project_root: Optional[str],
+    query: str,
+    n_results: int,
+    scopes: Sequence[str],
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Search multiple v2 scopes inside one Python process.
+
+    Interactive UI search must not trigger auto-builds; Health/Rebuild owns
+    index repair. Keeping multiple scopes in one process also avoids loading
+    the embedding model once per scope.
+    """
+    action_for_scope = {
+        "issues": "search-issues",
+        "specs": "search-specs",
+        "memory": "search-memory",
+        "board": "search-board",
+        "files": "search-files",
+        "files-docs": "search-files-docs",
+    }
+    payload: Dict[str, Any] = {"ok": True}
+    for scope in scopes:
+        action = action_for_scope.get(scope)
+        if action is None:
+            return {
+                "ok": False,
+                "error_code": "BAD_ARGS",
+                "error": f"unsupported search scope {scope}",
+            }
+        result = action_search_v2(
+            action=action,
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash if scope in ("files", "files-docs") else None,
+            project_root=project_root,
+            query=query,
+            n_results=n_results,
+            no_auto_build=True,
+            db_root=db_root,
+        )
+        if not result.get("ok"):
+            result["scope"] = scope
+            return result
+        for key, value in result.items():
+            if key != "ok":
+                payload[key] = value
+    return payload
 
 
 # ---------------------------------------------------------------------
@@ -2862,6 +3181,7 @@ def action_status_v2(
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
         "memory": _scope_status_v2(repo_hash, None, "memory", db_root=db_root),
+        "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
     }
     if worktree_hash:
         for scope in ("files", "files-docs"):
@@ -2883,6 +3203,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "probe",
             "index-files",
+            "index-files-docs",
             "search-files",
             "search-files-docs",
             "index",
@@ -2894,8 +3215,9 @@ def parse_args() -> argparse.Namespace:
             "search-specs",
             "index-memory",
             "search-memory",
-            "index-lessons",
-            "search-lessons",
+            "index-board",
+            "search-board",
+            "search-multi",
         ],
     )
     parser.add_argument("--project-root", default="")
@@ -2908,8 +3230,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "memory", "files", "files-docs", "lessons"],
+        choices=["", "issues", "specs", "files", "files-docs", "memory", "board"],
     )
+    parser.add_argument("--scopes", default="")
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
     parser.add_argument("--respect-ttl", dest="respect_ttl", action="store_true")
@@ -2969,7 +3292,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
-        if action in ("index-memory", "index-lessons"):
+        if action == "index-memory":
             if not args.project_root:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
                 return 2
@@ -2983,13 +3306,40 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
+        if action == "index-board":
+            emit(
+                action_index_board_v2(
+                    repo_hash=repo_hash,
+                    project_root=args.project_root or None,
+                    mode=args.mode,
+                )
+            )
+            return 0
+
+        if action == "search-multi":
+            if not args.query:
+                emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                return 2
+            scopes = [scope.strip() for scope in args.scopes.split(",") if scope.strip()]
+            emit(
+                action_search_multi_v2(
+                    repo_hash=repo_hash,
+                    worktree_hash=worktree_hash,
+                    project_root=args.project_root or None,
+                    query=args.query,
+                    n_results=args.n_results,
+                    scopes=scopes,
+                )
+            )
+            return 0
+
         if action in (
             "search-files",
             "search-files-docs",
             "search-specs",
             "search-issues",
             "search-memory",
-            "search-lessons",
+            "search-board",
         ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})

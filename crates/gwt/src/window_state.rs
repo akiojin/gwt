@@ -10,11 +10,24 @@ pub fn compose_window_state(
     preset: WindowPreset,
     hook_state: Option<WindowState>,
 ) -> WindowState {
+    compose_window_state_with_active_session(pty_state, preset, hook_state, false)
+}
+
+pub fn compose_window_state_with_active_session(
+    pty_state: WindowState,
+    preset: WindowPreset,
+    hook_state: Option<WindowState>,
+    has_active_agent_session: bool,
+) -> WindowState {
     if matches!(pty_state, WindowState::Stopped | WindowState::Error) {
         return pty_state;
     }
     if uses_agent_hook_state(preset) {
-        return hook_state.unwrap_or(WindowState::Running);
+        return hook_state.unwrap_or(if has_active_agent_session {
+            WindowState::Idle
+        } else {
+            WindowState::NotStarted
+        });
     }
     pty_state
 }
@@ -23,16 +36,15 @@ pub fn runtime_hook_window_state(event: &RuntimeHookEvent) -> Option<WindowState
     if event.kind != RuntimeHookEventKind::RuntimeState {
         return None;
     }
-    event
-        .status
-        .as_deref()
-        .and_then(parse_runtime_status)
-        .or_else(|| {
-            event
-                .source_event
-                .as_deref()
-                .and_then(window_state_for_hook_event)
-        })
+    let source_event = event.source_event.as_deref();
+    if source_event == Some("SessionStart") {
+        return Some(WindowState::Idle);
+    }
+    let status_state = event.status.as_deref().and_then(parse_runtime_status);
+    if source_event == Some("Stop") && status_state == Some(WindowState::Waiting) {
+        return Some(WindowState::Idle);
+    }
+    status_state.or_else(|| source_event.and_then(window_state_for_hook_event))
 }
 
 pub fn window_state_from_pane_status(status: &PaneStatus) -> WindowState {
@@ -52,10 +64,8 @@ pub fn uses_agent_hook_state(preset: WindowPreset) -> bool {
 
 pub fn window_state_for_hook_event(event: &str) -> Option<WindowState> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
-            Some(WindowState::Running)
-        }
-        "Stop" => Some(WindowState::Waiting),
+        "SessionStart" | "Stop" => Some(WindowState::Idle),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(WindowState::Running),
         _ => None,
     }
 }
@@ -63,6 +73,10 @@ pub fn window_state_for_hook_event(event: &str) -> Option<WindowState> {
 fn parse_runtime_status(status: &str) -> Option<WindowState> {
     match status.trim().to_ascii_lowercase().as_str() {
         "running" | "starting" | "ready" => Some(WindowState::Running),
+        "notstarted" | "not_started" | "not-started" | "not started" => {
+            Some(WindowState::NotStarted)
+        }
+        "idle" => Some(WindowState::Idle),
         "waiting" | "waitinginput" | "waiting_input" => Some(WindowState::Waiting),
         "stopped" | "exited" => Some(WindowState::Stopped),
         "error" => Some(WindowState::Error),
@@ -72,7 +86,10 @@ fn parse_runtime_status(status: &str) -> Option<WindowState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_window_state, runtime_hook_window_state, window_state_from_pane_status};
+    use super::{
+        compose_window_state, compose_window_state_with_active_session, runtime_hook_window_state,
+        window_state_from_pane_status,
+    };
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
         persistence::WindowState,
@@ -127,7 +144,7 @@ mod tests {
         );
         assert_eq!(
             compose_window_state(WindowState::Running, WindowPreset::Agent, None),
-            WindowState::Running
+            WindowState::NotStarted
         );
         assert_eq!(
             compose_window_state(
@@ -140,23 +157,53 @@ mod tests {
     }
 
     #[test]
-    fn runtime_hook_window_state_maps_runtime_events_to_running_and_waiting() {
+    fn runtime_hook_window_state_maps_runtime_events_to_running_and_idle() {
         assert_eq!(
             runtime_hook_window_state(&runtime_event(Some("Running"), Some("PreToolUse"))),
             Some(WindowState::Running)
         );
         assert_eq!(
-            runtime_hook_window_state(&runtime_event(Some("Waiting"), Some("Stop"))),
-            Some(WindowState::Waiting)
+            serde_json::to_string(
+                &runtime_hook_window_state(&runtime_event(Some("Idle"), Some("Stop"))).unwrap()
+            )
+            .unwrap(),
+            "\"idle\""
         );
         assert_eq!(
-            runtime_hook_window_state(&runtime_event(None, Some("SessionStart"))),
-            Some(WindowState::Running)
+            serde_json::to_string(
+                &runtime_hook_window_state(&runtime_event(None, Some("SessionStart"))).unwrap()
+            )
+            .unwrap(),
+            "\"idle\""
         );
         assert_eq!(
-            runtime_hook_window_state(&runtime_event(None, Some("Stop"))),
-            Some(WindowState::Waiting)
+            serde_json::to_string(
+                &runtime_hook_window_state(&runtime_event(None, Some("Stop"))).unwrap()
+            )
+            .unwrap(),
+            "\"idle\""
         );
+    }
+
+    #[test]
+    fn compose_window_state_defaults_live_agent_without_hook_state_to_not_started() {
+        let composed = compose_window_state(WindowState::Running, WindowPreset::Agent, None);
+
+        assert_eq!(composed, WindowState::NotStarted);
+        assert_eq!(serde_json::to_string(&composed).unwrap(), "\"not_started\"");
+    }
+
+    #[test]
+    fn compose_window_state_defaults_active_agent_without_hook_state_to_idle() {
+        let composed = compose_window_state_with_active_session(
+            WindowState::Running,
+            WindowPreset::Agent,
+            None,
+            true,
+        );
+
+        assert_eq!(composed, WindowState::Idle);
+        assert_eq!(serde_json::to_string(&composed).unwrap(), "\"idle\"");
     }
 
     #[test]

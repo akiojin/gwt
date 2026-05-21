@@ -1,11 +1,11 @@
 ---
 name: gwt-search
-description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. Use proactively before creating any SPEC or Issue owner or before reusing an existing one. Searches SPEC Issues, GitHub Issues, project files, and reusable project memory via ChromaDB. Triggers: 'search', 'find related', 'check duplicates', '過去 memory を引いて', '過去 lesson を引いて'."
+description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. Use proactively before creating any SPEC or Issue owner or before reusing an existing one. Searches SPEC Issues, GitHub Issues, project files, and post-mortem memory via ChromaDB. Triggers: 'search', 'find related', 'check duplicates', '過去 memory を引いて'."
 ---
 
 # Unified Search
 
-gwt maintains ChromaDB vector search indexes for five scopes (Phase 8 layout
+gwt maintains ChromaDB vector search indexes for four scopes (Phase 8 layout
 plus SPEC-2805 Memory):
 
 | Scope | Content | Lifecycle |
@@ -13,7 +13,7 @@ plus SPEC-2805 Memory):
 | SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwtd issue spec pull` or gwt GUI startup sync |
 | Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + runner auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + runner auto-build on first search |
-| Memory | Reusable project memory in `tasks/memory.md` | Pinpoint allowlist watcher on `tasks/memory.md` + runner auto-build on first search |
+| Memory | Post-mortem entries in `tasks/memory.md` | Pinpoint allowlist watcher on `tasks/memory.md` + runner auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, and Memory are repo-scoped and shared across worktrees; Files (code
@@ -36,24 +36,22 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 ## Quick reference
 
 ```text
-gwt-search "query"              # search all five scopes (default merge)
+gwt-search "query"              # search all four scopes (default merge)
 gwt-search --specs "query"      # SPECs only
 gwt-search --issues "query"     # GitHub Issues only
 gwt-search --files "query"      # implementation files only
-gwt-search --memory "query"     # reusable project memory only
-gwt-search --lessons "query"    # legacy alias for --memory
+gwt-search --memory "query"    # post-mortem memory only
 ```
 
 ## Filter options
 
 | Flag | Scope | Action flag |
 |------|-------|------------|
-| (none) | All five | Run all five searches |
+| (none) | All four | Run all four searches |
 | `--specs` | SPECs only | `search-specs` |
 | `--issues` | Issues only | `search-issues` |
 | `--files` | Files only | `search-files` |
 | `--memory` | Memory only | `search-memory` |
-| `--lessons` | Legacy alias for Memory | `search-lessons` |
 
 ## Environment
 
@@ -145,9 +143,8 @@ $PYTHON $RUNNER \
 ```
 
 `search-memory` reads from the repo-scoped memory index built from
-`<project_root>/tasks/memory.md`. Legacy `tasks/lessons.md` is used only as a
-fallback when `memory.md` is absent. `search-lessons` remains accepted as a
-legacy alias and returns `lessonResults` for older callers.
+`<project_root>/tasks/memory.md`. `--worktree-hash` is accepted but ignored
+for this scope.
 
 ### Search all scopes (default)
 
@@ -220,8 +217,7 @@ $PYTHON $RUNNER \
   --mode full
 ```
 
-Memory is repo-scoped; `--worktree-hash` is accepted but ignored. The legacy
-`index-lessons` action remains accepted and writes to the same memory store.
+Memory is repo-scoped; `--worktree-hash` is accepted but ignored.
 
 ## Output formats
 
@@ -253,7 +249,7 @@ Memory is repo-scoped; `--worktree-hash` is accepted but ignored. The legacy
 
 ```json
 {"ok": true, "memoryResults": [
-  {"memory_id": "abc123def456", "lesson_id": "abc123def456", "date": "2026-05-20", "title": "gwtd issue spec create -f requires section markers", "heading": "## 2026-05-20 - gwtd issue spec create -f requires section markers", "chunk_idx": 0, "distance": 0.12}
+  {"date": "2026-05-20", "title": "gwtd issue spec create -f は section マーカーを付けない", "heading": "## 2026-05-20 — gwtd issue spec create -f は section マーカーを付けない", "chunk_idx": 0, "distance": 0.12}
 ]}
 ```
 
@@ -284,7 +280,7 @@ Run at least 2-3 semantic queries derived from the request before creating any n
 - **Memory lookup**: before fixing a bug, check whether a prior `tasks/memory.md` entry already records the prevention strategy
 - **Task start**: search for specs, issues, files, and memory related to the assigned feature
 - **Bug investigation**: find issues, files, and memory that might relate to the bug
-- **Duplicate check**: verify no existing spec, issue, or memory entry covers the same scope
+- **Duplicate check**: verify no existing spec, issue, or memory covers the same scope
 - **Architecture understanding**: discover how features are specified, implemented, and previously failed
 - **Feature addition**: locate existing similar implementations and recurring failure modes across all scopes
 
@@ -301,7 +297,6 @@ Run at least 2-3 semantic queries derived from the request before creating any n
 - "重複する SPEC はないか確認して"
 - "この機能の仕様は？"
 - "過去 memory を引いて"
-- "過去 lesson を引いて"
 - "同じ失敗があるか確認して"
 
 ## Suggested query patterns
@@ -319,5 +314,5 @@ Use 2-3 queries with different angles for thorough coverage:
 
 1. Run searches with 2-3 semantic queries derived from the request
 2. The runner auto-builds any missing index on the first call
-3. Pick the canonical existing spec, issue, or lesson if found
+3. Pick the canonical existing spec, issue, or memory if found
 4. Only fall back to creating a new spec or issue when no suitable canonical match exists

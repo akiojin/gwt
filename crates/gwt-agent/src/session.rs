@@ -70,6 +70,10 @@ pub struct Session {
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
+    /// GUI window lifecycle flag used by startup restore. Conversation
+    /// history alone must not reopen a window after the user closed it.
+    #[serde(default)]
+    pub restore_window_on_startup: bool,
     /// Active backend override id, if any (SPEC-1921 FR-102).
     /// `None` means the agent launched against its default upstream
     /// (no env override). Set only for built-in agents that support
@@ -154,6 +158,7 @@ impl Session {
             workflow_bypass: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
+            restore_window_on_startup: false,
             backend_id: None,
             windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
@@ -201,7 +206,10 @@ impl Session {
         self.status = status;
         let now = Utc::now();
         self.updated_at = now;
-        if status == AgentStatus::Running || status == AgentStatus::WaitingInput {
+        if matches!(
+            status,
+            AgentStatus::Running | AgentStatus::Idle | AgentStatus::WaitingInput
+        ) {
             self.last_activity_at = now;
         }
     }
@@ -226,7 +234,7 @@ impl Session {
             self.last_hook_event = Some("Stop".to_string());
             self.last_hook_event_at = Some(now);
         }
-        self.update_status(AgentStatus::WaitingInput);
+        self.update_status(AgentStatus::Idle);
     }
 
     /// Whether the latest hook lifecycle indicates the session did not reach a
@@ -252,7 +260,10 @@ impl Session {
     pub fn exact_auto_resume_candidate(&self) -> bool {
         matches!(
             self.status,
-            AgentStatus::Running | AgentStatus::WaitingInput | AgentStatus::Interrupted
+            AgentStatus::Running
+                | AgentStatus::Idle
+                | AgentStatus::WaitingInput
+                | AgentStatus::Interrupted
         ) && self.has_lifecycle_recovery_evidence()
             && self.worktree_path.exists()
             && self.has_exact_resume_session_id()
@@ -531,12 +542,28 @@ pub fn persist_agent_session_id(
     session.save(sessions_dir)
 }
 
+/// Persist whether the GUI should recreate this session's agent window during
+/// startup. This is intentionally separate from agent status/conversation
+/// persistence so manual close can opt out without deleting history.
+pub fn persist_session_restore_window_on_startup(
+    sessions_dir: &Path,
+    session_id: &str,
+    restore: bool,
+) -> std::io::Result<()> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = Session::load_and_migrate(&session_path)?;
+    if session.restore_window_on_startup == restore {
+        return Ok(());
+    }
+    session.restore_window_on_startup = restore;
+    session.updated_at = Utc::now();
+    session.save(sessions_dir)
+}
+
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
-            Some(AgentStatus::Running)
-        }
-        "Stop" => Some(AgentStatus::WaitingInput),
+        "SessionStart" | "Stop" => Some(AgentStatus::Idle),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStatus::Running),
         _ => None,
     }
 }
@@ -573,8 +600,41 @@ mod tests {
             DockerLifecycleIntent::Connect
         );
         assert!(session.workflow_bypass.is_none());
+        assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+    }
+
+    #[test]
+    fn legacy_session_toml_without_restore_window_flag_defaults_to_false() {
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-777777777777"
+worktree_path = "/tmp/wt"
+branch = "main"
+agent_id = { type = "Codex" }
+agent_session_id = "abc"
+status = "WaitingInput"
+launch_command = "codex"
+launch_args = []
+created_at = "2026-05-18T00:00:00Z"
+updated_at = "2026-05-18T00:00:00Z"
+last_activity_at = "2026-05-18T00:00:00Z"
+display_name = "Codex"
+"#;
+        let session: Session = toml::from_str(legacy).expect("deserialize legacy");
+
+        assert!(!session.restore_window_on_startup);
+    }
+
+    #[test]
+    fn restore_window_on_startup_round_trips() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        session.restore_window_on_startup = true;
+
+        let serialized = toml::to_string(&session).expect("serialize");
+        assert!(serialized.contains("restore_window_on_startup = true"));
+        let parsed: Session = toml::from_str(&serialized).expect("deserialize");
+        assert!(parsed.restore_window_on_startup);
     }
 
     #[test]
@@ -778,6 +838,24 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
+    }
+
+    #[test]
+    fn persist_session_restore_window_on_startup_updates_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(dir.path()).unwrap();
+
+        persist_session_restore_window_on_startup(dir.path(), &session_id, true).unwrap();
+
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        assert!(loaded.restore_window_on_startup);
+
+        persist_session_restore_window_on_startup(dir.path(), &session_id, false).unwrap();
+
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        assert!(!loaded.restore_window_on_startup);
     }
 
     // SPEC-1921 Phase 53 / FR-066: Session::load must not silently rewrite
@@ -1103,7 +1181,7 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn hook_runtime_state_maps_running_and_waiting_events() {
+    fn hook_runtime_state_maps_idle_and_running_events() {
         for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"] {
             let runtime = SessionRuntimeState::from_hook_event(event).expect("running event");
             assert_eq!(runtime.status, AgentStatus::Running, "{event}");
@@ -1112,12 +1190,15 @@ display_name = "Claude Code"
 
         let session_start =
             SessionRuntimeState::from_hook_event("SessionStart").expect("session start event");
-        assert_eq!(session_start.status, AgentStatus::Running);
+        assert_eq!(
+            serde_json::to_string(&session_start.status).unwrap(),
+            "\"Idle\""
+        );
         assert_eq!(session_start.source_event.as_deref(), Some("SessionStart"));
 
-        let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
-        assert_eq!(waiting.status, AgentStatus::WaitingInput);
-        assert_eq!(waiting.source_event.as_deref(), Some("Stop"));
+        let idle = SessionRuntimeState::from_hook_event("Stop").expect("idle event");
+        assert_eq!(serde_json::to_string(&idle.status).unwrap(), "\"Idle\"");
+        assert_eq!(idle.source_event.as_deref(), Some("Stop"));
 
         assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
     }
@@ -1129,11 +1210,11 @@ display_name = "Claude Code"
         let first = SessionRuntimeState::new(AgentStatus::Running);
         first.save(&path).unwrap();
 
-        let second = SessionRuntimeState::new(AgentStatus::WaitingInput);
+        let second = SessionRuntimeState::new(AgentStatus::Idle);
         second.save(&path).unwrap();
 
         let loaded = SessionRuntimeState::load(&path).unwrap();
-        assert_eq!(loaded.status, AgentStatus::WaitingInput);
+        assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
     }
 
     #[test]

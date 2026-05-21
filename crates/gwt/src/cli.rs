@@ -380,14 +380,13 @@ pub enum PaneCommand {
     /// `gwtd pane close <id>` / `gwtd pane stop <id>`.
     Close { id: String },
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexScope {
     All,
     Issues,
     Specs,
     Memory,
-    Lessons,
+    Board,
     Files,
     FilesDocs,
 }
@@ -428,7 +427,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd <issue|pr|actions|board|workspace|pane|index|memory|lessons|hook|discuss|plan|build|register|daemon> ..."
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|board|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -529,6 +528,12 @@ fn trim_title_status_punctuation(value: &str) -> &str {
     })
 }
 
+/// Determine whether the given argv (starting at the program name) should be
+/// handled as a CLI invocation. Returns `true` when argv[1..] begins with
+/// a supported top-level CLI verb such as `issue`, `pr`, `actions`, `board`,
+/// `hook`, `discuss`, `plan`, `build`, `pane`, `update`, or `__internal`. The GUI
+/// launcher keeps its legacy behaviour (positional repo path) for any other
+/// shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
         .map(|s| {
@@ -583,6 +588,7 @@ pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     index::parse(args).map(CliCommand::Index)
 }
 
+/// Parse an argv slice into a `gwtd memory ...` / `gwtd lessons ...` [`CliCommand`].
 pub fn parse_memory_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     memory::parse(args).map(CliCommand::Memory)
 }
