@@ -58,6 +58,7 @@ body {
 .project-bar {
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
+  min-width: 0;
 }
 
 .project-tabs {
@@ -65,13 +66,15 @@ body {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .project-tab {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
   max-width: 280px;
   height: 32px;
@@ -120,6 +123,7 @@ body {
 .project-actions {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
 }
 
