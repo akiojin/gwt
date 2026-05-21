@@ -654,21 +654,33 @@ impl AppRuntime {
             .filter(|agent| !live_session_ids.contains(agent.session_id.as_str()))
             .filter_map(|agent| {
                 let session_path = sessions_dir.join(format!("{}.toml", agent.session_id));
-                let resume_kind = match gwt_agent::Session::load_and_migrate(&session_path) {
-                    Ok(session) => {
-                        if session
-                            .agent_session_id
-                            .as_deref()
-                            .map(str::trim)
-                            .is_some_and(|value| !value.is_empty())
-                        {
-                            gwt::ResumableAgentResumeKind::Session
-                        } else {
-                            gwt::ResumableAgentResumeKind::MetadataOnly
+                let (resume_kind, lifecycle_status) =
+                    match gwt_agent::Session::load_and_migrate(&session_path) {
+                        Ok(session) => {
+                            let resume_kind = if session
+                                .agent_session_id
+                                .as_deref()
+                                .map(str::trim)
+                                .is_some_and(|value| !value.is_empty())
+                            {
+                                gwt::ResumableAgentResumeKind::Session
+                            } else {
+                                gwt::ResumableAgentResumeKind::MetadataOnly
+                            };
+                            let lifecycle_status = if session
+                                .should_mark_interrupted_from_lifecycle()
+                                || session.status == gwt_agent::AgentStatus::Interrupted
+                            {
+                                Some(gwt::ResumableAgentLifecycleStatus::Interrupted)
+                            } else if session.exact_auto_resume_candidate() {
+                                Some(gwt::ResumableAgentLifecycleStatus::Active)
+                            } else {
+                                None
+                            };
+                            (resume_kind, lifecycle_status)
                         }
-                    }
-                    Err(_) => return None,
-                };
+                        Err(_) => return None,
+                    };
                 Some(gwt::ResumableAgentView {
                     session_id: agent.session_id.clone(),
                     agent_id: agent.agent_id.clone(),
@@ -680,6 +692,7 @@ impl AppRuntime {
                         .map(|path| path.display().to_string()),
                     last_activity_at: Some(agent.updated_at.to_rfc3339()),
                     resume_kind,
+                    lifecycle_status,
                 })
             })
             .collect();

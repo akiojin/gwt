@@ -171,6 +171,82 @@ fn dispatch_agent_launch_success<F>(
     spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
+fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_agent::LaunchConfig {
+    let agent_id = session.agent_id.clone();
+    let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+    builder = builder.working_dir(session.worktree_path.clone());
+    if !session.branch.is_empty() {
+        builder = builder.branch(session.branch.clone());
+    }
+    if let Some(model) = session.model.clone() {
+        builder = builder.model(model);
+    }
+    if let Some(version) = session.tool_version.clone() {
+        builder = builder.version(version);
+    }
+    if let Some(level) = session.reasoning_level.clone() {
+        builder = builder.reasoning_level(level);
+    }
+    if session.skip_permissions {
+        builder = builder.skip_permissions(true);
+    }
+    if session.codex_fast_mode {
+        builder = builder.fast_mode(true);
+    }
+    builder = builder.runtime_target(session.runtime_target);
+    if let Some(service) = session.docker_service.clone() {
+        builder = builder.docker_service(service);
+    }
+    builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
+    if let Some(shell) = session.windows_shell {
+        builder = builder.windows_shell(shell);
+    }
+    if let Some(linked) = session.linked_issue_number {
+        builder = builder.linked_issue_number(linked);
+    }
+
+    if let Some(resume_id) = session
+        .agent_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder
+            .session_mode(gwt_agent::SessionMode::Resume)
+            .resume_session_id(resume_id.to_string());
+    } else {
+        builder = builder.session_mode(gwt_agent::SessionMode::Normal);
+    }
+
+    let mut config = builder.build();
+    if let Some(version) = session.tool_version.clone() {
+        config.tool_version = Some(version);
+    }
+    if !session.display_name.is_empty() {
+        config.display_name = session.display_name.clone();
+    }
+    config
+}
+
+fn auto_resume_window_bounds(index: usize) -> gwt::WindowGeometry {
+    let offset = ((index % 6) as f64) * 28.0;
+    gwt::WindowGeometry {
+        x: 48.0 + offset,
+        y: 48.0 + offset,
+        width: 960.0,
+        height: 620.0,
+    }
+}
+
+fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let Ok(mut session) = gwt_agent::Session::load_and_migrate(&path) else {
+        return;
+    };
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    let _ = session.save(sessions_dir);
+}
+
 #[derive(Default)]
 struct FrontendUserActionLog {
     action: &'static str,
@@ -2427,6 +2503,7 @@ pub struct AppRuntime {
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
+    pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
@@ -2522,6 +2599,7 @@ impl AppRuntime {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -2572,6 +2650,8 @@ impl AppRuntime {
             );
         }
 
+        self.auto_resume_recoverable_agent_sessions();
+
         let windows = self
             .tabs
             .iter()
@@ -2592,6 +2672,105 @@ impl AppRuntime {
             let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
         let _ = self.persist();
+    }
+
+    fn auto_resume_recoverable_agent_sessions(&mut self) {
+        let mut sessions = self.load_recovery_sessions();
+        sessions.sort_by(|left, right| {
+            left.last_activity_at
+                .cmp(&right.last_activity_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let mut launched = 0usize;
+        for session in sessions {
+            if !session.exact_auto_resume_candidate() {
+                continue;
+            }
+            if self
+                .active_agent_sessions
+                .values()
+                .any(|active| active.session_id == session.id)
+            {
+                continue;
+            }
+            if self
+                .open_project_path(session.worktree_path.clone())
+                .is_err()
+            {
+                continue;
+            }
+            let Some(tab_id) = self
+                .tabs
+                .iter()
+                .find(|tab| same_worktree_path(&tab.project_root, &session.worktree_path))
+                .map(|tab| tab.id.clone())
+            else {
+                continue;
+            };
+            let Some(tab) = self.tab(&tab_id) else {
+                continue;
+            };
+            if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
+                continue;
+            }
+            let config = launch_config_from_persisted_session(&session);
+            if config.session_mode != gwt_agent::SessionMode::Resume {
+                continue;
+            }
+            let existing_windows = self
+                .window_lookup
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            let workspace_resume_context =
+                gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
+                    .ok()
+                    .flatten()
+                    .map(|projection| workspace_resume_context_from_projection(&projection));
+            if self
+                .spawn_agent_window(
+                    &tab_id,
+                    config,
+                    auto_resume_window_bounds(launched),
+                    workspace_resume_context,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            if let Some(window_id) = self
+                .window_lookup
+                .keys()
+                .find(|window_id| !existing_windows.contains(*window_id))
+                .cloned()
+            {
+                self.pending_auto_resume_sources
+                    .insert(window_id, session.id.clone());
+            }
+            launched += 1;
+        }
+    }
+
+    fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+            .filter_map(|path| {
+                let mut session = gwt_agent::Session::load_and_migrate(&path).ok()?;
+                if session.worktree_path.exists()
+                    && session.should_mark_interrupted_from_lifecycle()
+                {
+                    session.update_status(gwt_agent::AgentStatus::Interrupted);
+                }
+                let _ = session.save(&self.sessions_dir);
+                Some(session)
+            })
+            .collect()
     }
 
     pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
@@ -5625,6 +5804,7 @@ impl AppRuntime {
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
+        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         match result {
             Ok((
                 process_launch,
@@ -5666,6 +5846,9 @@ impl AppRuntime {
                         tab_id: tab_id.clone(),
                     },
                 );
+                if let Some(source_session_id) = auto_resume_source_session_id {
+                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
+                }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
                 // SPEC-2809 — Launch Wizard always spawns an AI agent
@@ -6186,6 +6369,9 @@ impl AppRuntime {
             session.launch_command = config.command.clone();
             session.launch_args = config.args.clone();
             session.windows_shell = config.windows_shell;
+            if session.session_mode == gwt_agent::SessionMode::Resume {
+                session.agent_session_id = config.resume_session_id.clone();
+            }
             session.update_status(gwt_agent::AgentStatus::Running);
 
             let session_id = session.id.clone();
@@ -8176,6 +8362,7 @@ exit 1
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -10791,6 +10978,64 @@ exit 1
             BackendEvent::WorkspaceResumeAgentError { session_id, message }
                 if session_id == "missing-session" && !message.is_empty()
         ));
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("auto-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/auto-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        for (session_id, native_session_id) in [
+            ("session-auto-one", "native-session-one"),
+            ("session-auto-two", "native-session-two"),
+        ] {
+            let mut session =
+                gwt_agent::Session::new(&worktree, "work/auto-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.record_hook_event("Stop");
+            session.record_completed_stop();
+            session
+                .save(&runtime.sessions_dir)
+                .expect("save resumable session");
+        }
+
+        runtime.bootstrap();
+
+        assert_eq!(
+            runtime.tabs.len(),
+            1,
+            "bootstrap should reopen the worktree tab"
+        );
+        assert!(same_worktree_path(&runtime.tabs[0].project_root, &worktree));
+        let agent_windows = runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 2,
+            "all exact-resumable sessions for a worktree should restart"
+        );
     }
 
     #[test]

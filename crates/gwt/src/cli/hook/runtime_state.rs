@@ -197,6 +197,9 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     if let Some(agent_session_id) = agent_session_id.as_ref() {
         sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)?;
     }
+    if session.is_some() {
+        gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)?;
+    }
 
     let pending_discussion = session.as_ref().and_then(|session| {
         pending_discussion_for_session(&sessions_dir, &session.id)
@@ -204,6 +207,18 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
             .flatten()
     });
     write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+}
+
+pub fn record_completed_stop_from_env() -> Result<(), HookError> {
+    let Some(gwt_session_id) = GwtSessionId::from_env() else {
+        return Ok(());
+    };
+    let sessions_dir = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(PathBuf::from)
+        .map(|path| sessions_dir_for_runtime_path(&path))
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
+    gwt_agent::persist_session_completed_stop(&sessions_dir, gwt_session_id.as_str())?;
+    Ok(())
 }
 
 fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
@@ -556,5 +571,67 @@ mod tests {
         handle_with_input("PreToolUse", r#"{"tool_name":"Bash"}"#).unwrap();
 
         assert!(runtime_path.exists());
+    }
+
+    #[test]
+    fn runtime_state_persists_hook_lifecycle_to_session_toml() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "feature/demo", AgentId::ClaudeCode);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input("PreToolUse", r#"{"tool_name":"Bash"}"#).unwrap();
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+
+        assert_eq!(loaded.last_hook_event.as_deref(), Some("PreToolUse"));
+        assert!(loaded.last_hook_event_at.is_some());
+        assert!(loaded.last_completed_stop_at.is_none());
+        assert_eq!(loaded.status, gwt_agent::AgentStatus::Running);
+        assert!(loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn runtime_state_records_completed_stop_as_clean_boundary() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "feature/demo", AgentId::ClaudeCode);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input("Stop", r#"{}"#).unwrap();
+        let stopped_before_completion =
+            Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert!(stopped_before_completion.should_mark_interrupted_from_lifecycle());
+
+        record_completed_stop_from_env().unwrap();
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+
+        assert_eq!(loaded.last_hook_event.as_deref(), Some("Stop"));
+        assert!(loaded.last_completed_stop_at.is_some());
+        assert_eq!(loaded.status, gwt_agent::AgentStatus::WaitingInput);
+        assert!(!loaded.should_mark_interrupted_from_lifecycle());
     }
 }
