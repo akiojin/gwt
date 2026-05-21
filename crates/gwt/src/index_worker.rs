@@ -14,7 +14,6 @@ use gwt_core::{
             RefreshIssuesOptions, RunnerSpawner,
         },
     },
-    paths::{gwt_project_index_venv_dir, gwt_runtime_runner_path},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -45,7 +44,7 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
     );
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
-        runner_script: gwt_runtime_runner_path(),
+        runner_script: gwt_core::runtime::project_index_runner_path(),
     };
     bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
 }
@@ -678,7 +677,7 @@ fn probe_worktree_status(
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -1069,7 +1068,7 @@ fn project_index_status_for_path_inner(
     );
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -1246,12 +1245,7 @@ fn canonicalize_path(path: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn project_index_python_path() -> PathBuf {
-    let venv = gwt_project_index_venv_dir();
-    if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 #[cfg(test)]

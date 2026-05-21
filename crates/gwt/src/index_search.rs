@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    thread,
+};
 
 use serde_json::Value;
 
@@ -28,34 +32,142 @@ pub fn search_project_index(
     } else {
         scopes.to_vec()
     };
-    let file_worktree = resolve_file_search_worktree(project_root, selected_worktree_hash)?;
     let board_scope = crate::board_audience::gui_default_board_scope(project_root)
         .unwrap_or(gwt_core::coordination::BoardAudienceScope::All);
+    let file_worktree = if effective_scopes
+        .iter()
+        .any(|scope| matches!(scope, IndexSearchScope::Files | IndexSearchScope::FilesDocs))
+    {
+        Some(resolve_file_search_worktree(
+            project_root,
+            selected_worktree_hash,
+        )?)
+    } else {
+        None
+    };
 
     let mut results = Vec::new();
-    let per_scope_limit = INDEX_SEARCH_LIMIT;
+    let per_scope_limit = per_scope_limit(effective_scopes.len());
+    let mut file_jobs = Vec::new();
+    let mut repo_scopes = Vec::new();
     for scope in effective_scopes {
-        let (search_root, worktree_hash) = match scope {
-            IndexSearchScope::Files | IndexSearchScope::FilesDocs => (
-                file_worktree.path.as_path(),
-                Some(file_worktree.hash.as_str()),
-            ),
-            _ => (project_root, None),
-        };
-        let payload = run_scope_search(
-            search_root,
+        if is_file_scope(scope) {
+            let file_worktree = file_worktree
+                .as_ref()
+                .ok_or_else(|| "file search worktree was not resolved".to_string())?;
+            file_jobs.push(ScopeSearchJob {
+                search_root: file_worktree.path.clone(),
+                worktree_hash: Some(file_worktree.hash.clone()),
+                scope,
+            });
+        } else {
+            repo_scopes.push(scope);
+        }
+    }
+    if !repo_scopes.is_empty() {
+        let payload = run_repo_scope_search(
+            project_root,
             repo_hash.as_str(),
-            worktree_hash,
-            scope,
+            &repo_scopes,
             query,
             per_scope_limit,
         )?;
-        append_scope_results(&mut results, scope, &payload, &board_scope);
+        for scope in repo_scopes {
+            append_scope_results(&mut results, scope, &payload, &board_scope);
+        }
+    }
+    for outcome in run_scope_search_jobs(
+        file_jobs,
+        repo_hash.as_str(),
+        query,
+        per_scope_limit,
+        run_scope_search,
+    )? {
+        append_scope_results(&mut results, outcome.scope, &outcome.payload, &board_scope);
     }
 
     results.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
     results.truncate(INDEX_SEARCH_LIMIT);
     Ok(results)
+}
+
+fn is_file_scope(scope: IndexSearchScope) -> bool {
+    matches!(scope, IndexSearchScope::Files | IndexSearchScope::FilesDocs)
+}
+
+fn per_scope_limit(scope_count: usize) -> usize {
+    if scope_count <= 1 {
+        INDEX_SEARCH_LIMIT
+    } else {
+        INDEX_SEARCH_LIMIT.div_ceil(scope_count).max(12)
+    }
+}
+
+struct ScopeSearchJob {
+    search_root: PathBuf,
+    worktree_hash: Option<String>,
+    scope: IndexSearchScope,
+}
+
+struct ScopeSearchOutcome {
+    scope: IndexSearchScope,
+    payload: Value,
+}
+
+fn run_scope_search_jobs<F>(
+    jobs: Vec<ScopeSearchJob>,
+    repo_hash: &str,
+    query: &str,
+    limit: usize,
+    runner: F,
+) -> Result<Vec<ScopeSearchOutcome>, String>
+where
+    F: Fn(&Path, &str, Option<&str>, IndexSearchScope, &str, usize) -> Result<Value, String> + Sync,
+{
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let runner = &runner;
+            handles.push(scope.spawn(move || {
+                runner(
+                    job.search_root.as_path(),
+                    repo_hash,
+                    job.worktree_hash.as_deref(),
+                    job.scope,
+                    query,
+                    limit,
+                )
+                .map(|payload| ScopeSearchOutcome {
+                    scope: job.scope,
+                    payload,
+                })
+                .map_err(|error| format!("{} search failed: {error}", job.scope.as_str()))
+            }));
+        }
+
+        let mut outcomes = Vec::with_capacity(handles.len());
+        let mut first_error = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(outcome)) => outcomes.push(outcome),
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error = Some("project index search worker panicked".to_string());
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(outcomes)
+        }
+    })
 }
 
 fn default_index_search_scopes() -> Vec<IndexSearchScope> {
@@ -112,22 +224,14 @@ fn run_scope_search(
 ) -> Result<Value, String> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
-            .arg(gwt_core::paths::gwt_runtime_runner_path())
-            .arg("--action")
-            .arg(search_action(scope))
-            .arg("--repo-hash")
-            .arg(repo_hash)
-            .arg("--project-root")
-            .arg(project_root)
-            .arg("--query")
-            .arg(query)
-            .arg("--n-results")
-            .arg(limit.to_string())
-            .args(
-                worktree_hash
-                    .map(|hash| vec!["--worktree-hash".to_string(), hash.to_string()])
-                    .unwrap_or_default(),
-            )
+            .args(scope_search_command_args(
+                project_root,
+                repo_hash,
+                worktree_hash,
+                scope,
+                query,
+                limit,
+            ))
             .current_dir(project_root)
             .output()
             .map_err(|error| format!("run project index search: {error}"))?;
@@ -139,6 +243,95 @@ fn run_scope_search(
         return Err(payload_error(&payload));
     }
     Ok(payload)
+}
+
+fn run_repo_scope_search(
+    project_root: &Path,
+    repo_hash: &str,
+    scopes: &[IndexSearchScope],
+    query: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let output =
+        gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
+            .args(repo_scope_search_command_args(
+                project_root,
+                repo_hash,
+                scopes,
+                query,
+                limit,
+            ))
+            .current_dir(project_root)
+            .output()
+            .map_err(|error| format!("run project index search: {error}"))?;
+    if !output.status.success() {
+        return Err(format_runner_failure(&output));
+    }
+    let payload = parse_runner_payload(&output.stdout)?;
+    if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(payload_error(&payload));
+    }
+    Ok(payload)
+}
+
+fn scope_search_command_args(
+    project_root: &Path,
+    repo_hash: &str,
+    worktree_hash: Option<&str>,
+    scope: IndexSearchScope,
+    query: &str,
+    limit: usize,
+) -> Vec<OsString> {
+    let mut args = vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from(search_action(scope)),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+        OsString::from("--project-root"),
+        project_root.as_os_str().to_os_string(),
+        OsString::from("--query"),
+        OsString::from(query),
+        OsString::from("--n-results"),
+        OsString::from(limit.to_string()),
+        OsString::from("--no-auto-build"),
+    ];
+    if let Some(hash) = worktree_hash {
+        args.push(OsString::from("--worktree-hash"));
+        args.push(OsString::from(hash));
+    }
+    args
+}
+
+fn repo_scope_search_command_args(
+    project_root: &Path,
+    repo_hash: &str,
+    scopes: &[IndexSearchScope],
+    query: &str,
+    limit: usize,
+) -> Vec<OsString> {
+    vec![
+        gwt_core::runtime::project_index_runner_path().into_os_string(),
+        OsString::from("--action"),
+        OsString::from("search-multi"),
+        OsString::from("--repo-hash"),
+        OsString::from(repo_hash),
+        OsString::from("--project-root"),
+        project_root.as_os_str().to_os_string(),
+        OsString::from("--query"),
+        OsString::from(query),
+        OsString::from("--n-results"),
+        OsString::from(limit.to_string()),
+        OsString::from("--scopes"),
+        OsString::from(
+            scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        OsString::from("--no-auto-build"),
+    ]
 }
 
 fn search_action(scope: IndexSearchScope) -> &'static str {
@@ -582,6 +775,109 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn scope_search_command_args_disable_auto_build_for_interactive_search() {
+        let args = scope_search_command_args(
+            Path::new("/repo"),
+            "repo-hash",
+            None,
+            IndexSearchScope::Issues,
+            "Git",
+            50,
+        );
+
+        assert!(
+            args.iter().any(|arg| arg == "--no-auto-build"),
+            "interactive Index search must not block on auto-index rebuilds"
+        );
+    }
+
+    #[test]
+    fn repo_scope_search_command_args_use_single_multi_scope_runner() {
+        let args = repo_scope_search_command_args(
+            Path::new("/repo"),
+            "repo-hash",
+            &[
+                IndexSearchScope::Issues,
+                IndexSearchScope::Specs,
+                IndexSearchScope::Board,
+                IndexSearchScope::Lessons,
+            ],
+            "Git",
+            12,
+        );
+
+        assert!(args.iter().any(|arg| arg == "search-multi"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--scopes" && pair[1] == "issues,specs,board,lessons"),
+            "repo-scoped searches should share one runner process"
+        );
+        assert!(args.iter().any(|arg| arg == "--no-auto-build"));
+    }
+
+    #[test]
+    fn run_scope_search_jobs_executes_selected_scopes_in_parallel() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            thread,
+            time::Duration,
+        };
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let jobs = vec![
+            ScopeSearchJob {
+                search_root: PathBuf::from("/repo"),
+                worktree_hash: None,
+                scope: IndexSearchScope::Issues,
+            },
+            ScopeSearchJob {
+                search_root: PathBuf::from("/repo"),
+                worktree_hash: None,
+                scope: IndexSearchScope::Specs,
+            },
+            ScopeSearchJob {
+                search_root: PathBuf::from("/repo"),
+                worktree_hash: None,
+                scope: IndexSearchScope::Board,
+            },
+            ScopeSearchJob {
+                search_root: PathBuf::from("/repo"),
+                worktree_hash: None,
+                scope: IndexSearchScope::Lessons,
+            },
+        ];
+
+        let results = run_scope_search_jobs(jobs, "repo", "Git", 3, |_, _, _, scope, _, _| {
+            let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(active_now, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(120));
+            active.fetch_sub(1, Ordering::SeqCst);
+            let key = match scope {
+                IndexSearchScope::Issues => "issueResults",
+                IndexSearchScope::Specs => "specResults",
+                IndexSearchScope::Board => "boardResults",
+                IndexSearchScope::Lessons => "lessonResults",
+                IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
+            };
+            let mut payload = serde_json::Map::new();
+            payload.insert("ok".to_string(), Value::Bool(true));
+            payload.insert(key.to_string(), Value::Array(Vec::new()));
+            Ok(Value::Object(payload))
+        })
+        .expect("parallel scope search should succeed");
+
+        assert_eq!(results.len(), 4);
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "expected selected scope searches to overlap"
         );
     }
 }

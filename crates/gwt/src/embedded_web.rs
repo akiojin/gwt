@@ -2131,6 +2131,12 @@ mod tests {
             "Index Search and Health controls must be visually separated instead of sharing one toolbar"
         );
         assert!(
+            html.contains("index-run-button")
+                && html.contains("formatIndexSearchMatch")
+                && html.contains("File worktree"),
+            "Index Search must expose an explicit search action, friendly match scores, and file-only worktree context"
+        );
+        assert!(
             html.contains("classList.toggle(\"is-empty\"")
                 && html.contains(".index-search-layout.is-empty")
                 && html.contains(".index-search-layout.is-empty .index-result-detail"),

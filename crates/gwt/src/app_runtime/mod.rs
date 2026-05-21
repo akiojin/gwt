@@ -6935,17 +6935,13 @@ mod tests {
 
     #[cfg(unix)]
     fn write_fake_project_index_runtime(home: &Path) {
-        let python = home
+        let legacy_python = home
             .join(".gwt")
             .join("runtime")
             .join("chroma-venv")
             .join("bin")
             .join("python3");
-        fs::create_dir_all(python.parent().expect("fake python parent"))
-            .expect("create fake python dir");
-        fs::write(
-            &python,
-            r#"#!/bin/sh
+        let script = r#"#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "-c" ]; then
     exit 0
@@ -6969,11 +6965,14 @@ case "$*" in
 esac
 printf '%s\n' '{"ok":false,"error":"unexpected fake python invocation"}'
 exit 1
-"#,
-        )
-        .expect("write fake python");
-        #[cfg(unix)]
-        {
+"#;
+        for python in [
+            legacy_python,
+            gwt_core::runtime::project_index_python_path(),
+        ] {
+            fs::create_dir_all(python.parent().expect("fake python parent"))
+                .expect("create fake python dir");
+            fs::write(&python, script).expect("write fake python");
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&python, fs::Permissions::from_mode(0o755))
                 .expect("chmod fake python");

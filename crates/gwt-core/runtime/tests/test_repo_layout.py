@@ -173,6 +173,28 @@ class CliArgumentTests(unittest.TestCase):
             args = runner.parse_args()
             self.assertTrue(args.no_auto_build)
 
+    def test_parse_args_accepts_search_multi_scopes(self):
+        with mock.patch.object(
+            runner.sys,
+            "argv",
+            [
+                "chroma_index_runner.py",
+                "--action",
+                "search-multi",
+                "--repo-hash",
+                "abc1234567890def",
+                "--query",
+                "Git",
+                "--scopes",
+                "issues,specs,board,lessons",
+                "--no-auto-build",
+            ],
+        ):
+            args = runner.parse_args()
+            self.assertEqual(args.action, "search-multi")
+            self.assertEqual(args.scopes, "issues,specs,board,lessons")
+            self.assertTrue(args.no_auto_build)
+
     def test_parse_args_accepts_respect_ttl(self):
         with mock.patch.object(
             runner.sys,

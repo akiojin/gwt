@@ -177,7 +177,48 @@ test("Index window exposes semantic search and health refresh contract", () => {
   assert.ok(
     appSource.includes('kind: "search_project_index"') &&
       appSource.includes('case "project_index_search_results"') &&
-      appSource.includes('case "project_index_search_error"'),
+    appSource.includes('case "project_index_search_error"'),
     "Index window must wire search request, result, and error events",
+  );
+});
+
+test("Index search UI exposes explicit search controls and readable result scoring", () => {
+  assert.ok(
+    appSource.includes("index-run-button") &&
+      appSource.includes("formatIndexSearchMatch") &&
+      appSource.includes("% match"),
+    "Index search should have an explicit search action and user-facing match scores",
+  );
+  assert.ok(
+    appSource.includes("indexFileScopesSelected(state)") &&
+      appSource.includes("File worktree"),
+    "worktree selection should be scoped to Files / Docs search instead of looking globally required",
+  );
+  assert.ok(
+    appSource.includes("moveIndexResultSelection") &&
+      appSource.includes('event.key === "ArrowDown"') &&
+      appSource.includes('event.key === "ArrowUp"'),
+    "result lists should support keyboard movement",
+  );
+  assert.ok(
+    appSource.includes("inFlightSignature") &&
+      appSource.includes("state.searching && state.inFlightSignature === searchSignature"),
+    "explicit search clicks should not duplicate an identical debounced search already in flight",
+  );
+  assert.ok(
+    appSource.includes("state.query = input.value;") &&
+      appSource.includes("renderProjectIndexSearch(windowData.id);\n            scheduleProjectIndexSearch(windowData.id);"),
+    "typing in the search field should immediately enable the explicit Search button before debounce fires",
+  );
+});
+
+test("Index search tab does not trigger full health refresh on mount", () => {
+  const refreshCallCount = (
+    appSource.match(/requestFullIndexStatusRefresh\(\);/g) || []
+  ).length;
+  assert.equal(
+    refreshCallCount,
+    2,
+    "full index status refresh must stay limited to Health tab activation and manual refresh",
   );
 });

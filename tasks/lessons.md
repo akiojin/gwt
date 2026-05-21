@@ -5777,3 +5777,25 @@ Agent window 内の TTY 表示が白一色になった。
 2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
 3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
    frontend DOM の computed color、launch env の順に切り分ける。
+
+## Runtime path を versioned 化したら test fake も同じ公開 API を使う
+
+### 事象
+
+Project Index runtime を content-addressed runner / venv に変更した後、Knowledge Bridge の
+async semantic search テストが timeout した。旧 `~/.gwt/runtime/chroma-venv` にだけ fake python
+を置くテストヘルパーが残り、実コードは新しい versioned python path を見ていた。
+
+### 原因
+
+本番コードの runner / python path を `gwt_core::runtime::project_index_*_path()` に寄せた一方、
+テストの fake runtime が legacy path を直書きしていた。さらに fake `gh` テストは専用 lock だけを
+使い、`PATH` / `GWT_FAKE_GH_MODE` を触る他テストとの並列実行で mode が混線した。
+
+### 再発防止策
+
+1. Runtime path を変える場合、テスト fake は legacy path 直書きではなく同じ公開 path API に置く。
+2. `PATH` や env var を変更する共有 fake harness は、fake 専用 lock だけでなく global env test lock
+   も取る。
+3. `cargo test -p gwt-core -p gwt --all-features` は単独 targeted pass だけで代替せず、デフォルト並列で
+   最後に通して env 競合を拾う。

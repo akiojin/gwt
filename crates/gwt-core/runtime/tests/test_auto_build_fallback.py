@@ -102,6 +102,33 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result.get("error_code"), "INDEX_MISSING")
 
+    def test_search_multi_disables_auto_build_for_each_scope(self):
+        with mock.patch.object(
+            runner,
+            "action_search_v2",
+            side_effect=[
+                {"ok": True, "issueResults": [{"number": 1}]},
+                {"ok": True, "specResults": [{"spec_id": "1939"}]},
+                {"ok": True, "boardResults": [{"entry_id": "board-1"}]},
+            ],
+        ) as search:
+            result = runner.action_search_multi_v2(
+                repo_hash="abc1234567890def",
+                worktree_hash=None,
+                project_root="/repo",
+                query="Git",
+                n_results=5,
+                scopes=["issues", "specs", "board"],
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["issueResults"][0]["number"], 1)
+        self.assertEqual(result["specResults"][0]["spec_id"], "1939")
+        self.assertEqual(result["boardResults"][0]["entry_id"], "board-1")
+        self.assertEqual(search.call_count, 3)
+        for call in search.call_args_list:
+            self.assertTrue(call.kwargs["no_auto_build"])
+
     def test_progress_emitted_on_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"

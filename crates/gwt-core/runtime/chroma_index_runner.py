@@ -2976,6 +2976,57 @@ def action_search_v2(
     return {"ok": True, "issueResults": _format_issue_results(items)}
 
 
+def action_search_multi_v2(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    project_root: Optional[str],
+    query: str,
+    n_results: int,
+    scopes: Sequence[str],
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Search multiple v2 scopes inside one Python process.
+
+    Interactive UI search must not trigger auto-builds; Health/Rebuild owns
+    index repair. Keeping multiple scopes in one process also avoids loading
+    the embedding model once per scope.
+    """
+    action_for_scope = {
+        "issues": "search-issues",
+        "specs": "search-specs",
+        "lessons": "search-lessons",
+        "board": "search-board",
+        "files": "search-files",
+        "files-docs": "search-files-docs",
+    }
+    payload: Dict[str, Any] = {"ok": True}
+    for scope in scopes:
+        action = action_for_scope.get(scope)
+        if action is None:
+            return {
+                "ok": False,
+                "error_code": "BAD_ARGS",
+                "error": f"unsupported search scope {scope}",
+            }
+        result = action_search_v2(
+            action=action,
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash if scope in ("files", "files-docs") else None,
+            project_root=project_root,
+            query=query,
+            n_results=n_results,
+            no_auto_build=True,
+            db_root=db_root,
+        )
+        if not result.get("ok"):
+            result["scope"] = scope
+            return result
+        for key, value in result.items():
+            if key != "ok":
+                payload[key] = value
+    return payload
+
+
 # ---------------------------------------------------------------------
 # v2 status
 # ---------------------------------------------------------------------
@@ -3040,6 +3091,7 @@ def parse_args() -> argparse.Namespace:
             "search-lessons",
             "index-board",
             "search-board",
+            "search-multi",
         ],
     )
     parser.add_argument("--project-root", default="")
@@ -3054,6 +3106,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         choices=["", "issues", "specs", "files", "files-docs", "lessons", "board"],
     )
+    parser.add_argument("--scopes", default="")
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
     parser.add_argument("--respect-ttl", dest="respect_ttl", action="store_true")
@@ -3133,6 +3186,23 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     project_root=args.project_root or None,
                     mode=args.mode,
+                )
+            )
+            return 0
+
+        if action == "search-multi":
+            if not args.query:
+                emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                return 2
+            scopes = [scope.strip() for scope in args.scopes.split(",") if scope.strip()]
+            emit(
+                action_search_multi_v2(
+                    repo_hash=repo_hash,
+                    worktree_hash=worktree_hash,
+                    project_root=args.project_root or None,
+                    query=args.query,
+                    n_results=args.n_results,
+                    scopes=scopes,
                 )
             )
             return 0

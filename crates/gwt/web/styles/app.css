@@ -1091,6 +1091,8 @@ body {
   flex: 1 1 360px;
   min-width: min(100%, 260px);
   display: flex;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .index-filter-bar {
@@ -1099,6 +1101,22 @@ body {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.index-worktree-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-worktree-field[hidden] {
+  display: none !important;
+}
+
+.index-worktree-field span {
+  white-space: nowrap;
 }
 
 .index-health-toolbar {
@@ -1125,8 +1143,8 @@ body {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   padding: 5px 9px;
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
+  background: transparent;
+  color: var(--color-text-muted);
   font-size: var(--type-xs);
   cursor: pointer;
 }
@@ -1135,6 +1153,24 @@ body {
   border-color: var(--color-state-active);
   color: var(--color-text-strong);
   background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
+}
+
+.index-run-button {
+  min-width: 88px;
+  border: 1px solid var(--color-state-active);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface));
+  color: var(--color-text-strong);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.index-run-button:disabled {
+  border-color: var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: default;
 }
 
 .index-worktree-select,

@@ -40,17 +40,12 @@ pub(crate) fn resolve_index_context(repo_path: &Path) -> Result<IndexContext, Sp
         repo_hash,
         worktree_hash,
         python: project_index_python_path(),
-        runner: gwt_core::paths::gwt_runtime_runner_path(),
+        runner: gwt_core::runtime::project_index_runner_path(),
     })
 }
 
 fn project_index_python_path() -> PathBuf {
-    let venv = gwt_core::paths::gwt_project_index_venv_dir();
-    if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 pub(crate) fn run_runner_status(

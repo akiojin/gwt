@@ -573,6 +573,7 @@
             searchTimer: 0,
             requestId: 0,
             inFlightRequestId: 0,
+            inFlightSignature: "",
             searching: false,
             results: [],
             selectedResultIndex: -1,
@@ -617,6 +618,22 @@
         return activeWorktreeHashForIndex(status);
       }
 
+      function indexFileScopesSelected(state) {
+        return state.selectedScopes.has("files") || state.selectedScopes.has("files-docs");
+      }
+
+      function selectedIndexScopeLabels(state) {
+        return INDEX_SEARCH_SCOPES
+          .filter((scope) => state.selectedScopes.has(scope.id))
+          .map((scope) => scope.label);
+      }
+
+      function formatIndexSearchMatch(distance) {
+        if (!Number.isFinite(distance)) return "";
+        const score = Math.max(0, Math.min(1, 1 - distance));
+        return `${Math.round(score * 100)}% match`;
+      }
+
       function scheduleProjectIndexSearch(windowId) {
         const state = ensureIndexSearchState(windowId);
         if (state.searchTimer) {
@@ -635,6 +652,7 @@
           state.results = [];
           state.selectedResultIndex = -1;
           state.searching = false;
+          state.inFlightSignature = "";
           state.error = "";
           renderProjectIndexSearch(windowId);
           return;
@@ -647,12 +665,20 @@
           return;
         }
         const requestId = state.requestId + 1;
+        const status = activeIndexStatus();
+        const worktreeHash = indexFileScopesSelected(state)
+          ? selectedIndexWorktreeHash(state, status)
+          : "";
+        const searchSignature = JSON.stringify({ query, scopes, worktreeHash });
+        if (state.searching && state.inFlightSignature === searchSignature) {
+          renderProjectIndexSearch(windowId);
+          return;
+        }
         state.requestId = requestId;
         state.inFlightRequestId = requestId;
+        state.inFlightSignature = searchSignature;
         state.searching = true;
         state.error = "";
-        const status = activeIndexStatus();
-        const worktreeHash = selectedIndexWorktreeHash(state, status);
         send({
           kind: "search_project_index",
           id: windowId,
@@ -715,9 +741,19 @@
             scopes.appendChild(button);
           }
         }
+        const runButton = root.querySelector(".index-run-button");
+        if (runButton) {
+          runButton.disabled = !state.query.trim() || state.searching;
+          runButton.textContent = state.searching ? "Searching" : "Search";
+        }
+        const fileWorktreeField = root.querySelector(".index-worktree-field");
+        if (fileWorktreeField) {
+          fileWorktreeField.hidden = !indexFileScopesSelected(state);
+        }
         const select = root.querySelector(".index-worktree-select");
         if (select) {
           clearChildren(select);
+          select.disabled = !indexFileScopesSelected(state);
           const entries = indexWorktreeEntries(status);
           const selectedHash = selectedIndexWorktreeHash(state, status);
           if (entries.length === 0) {
@@ -736,9 +772,20 @@
         }
         const statusNode = root.querySelector(".index-search-status");
         if (statusNode) {
-          statusNode.textContent = state.searching
-            ? "Searching semantic index"
-            : state.error || "";
+          const scopeSummary = selectedIndexScopeLabels(state).join(", ");
+          if (state.searching) {
+            statusNode.textContent = state.results.length > 0
+              ? `Updating results · ${scopeSummary}`
+              : `Searching semantic index · ${scopeSummary}`;
+          } else if (state.error) {
+            statusNode.textContent = state.error;
+          } else if (state.query.trim() && state.results.length > 0) {
+            statusNode.textContent = `${state.results.length} results · ${scopeSummary}`;
+          } else if (state.query.trim()) {
+            statusNode.textContent = "No indexed results";
+          } else {
+            statusNode.textContent = `Ready · ${scopeSummary}`;
+          }
           statusNode.dataset.kind = state.error ? "error" : "";
         }
       }
@@ -771,7 +818,10 @@
             });
             row.appendChild(makeEl("span", { className: "index-result-scope", text: result.scope || "" }));
             row.appendChild(makeEl("strong", { text: result.title || "Untitled" }));
-            row.appendChild(makeEl("span", { className: "index-result-subtitle", text: result.subtitle || "" }));
+            row.appendChild(makeEl("span", {
+              className: "index-result-subtitle",
+              text: [result.subtitle || "", formatIndexSearchMatch(result.distance)].filter(Boolean).join(" · "),
+            }));
             list.appendChild(row);
           });
         }
@@ -784,8 +834,9 @@
         state.selectedResultIndex = Math.max(0, state.results.indexOf(selected));
         detail.appendChild(makeEl("h3", { className: "index-detail-title", text: selected.title || "Untitled" }));
         detail.appendChild(makeEl("div", { className: "index-detail-subtitle", text: selected.subtitle || selected.scope || "" }));
-        if (Number.isFinite(selected.distance)) {
-          detail.appendChild(makeEl("div", { className: "index-detail-meta", text: `distance ${selected.distance}` }));
+        const match = formatIndexSearchMatch(selected.distance);
+        if (match) {
+          detail.appendChild(makeEl("div", { className: "index-detail-meta", text: match }));
         }
         detail.appendChild(makeEl("p", { className: "index-detail-preview", text: selected.preview || "No preview available" }));
         detail.appendChild(makeEl("button", {
@@ -802,6 +853,7 @@
           return;
         }
         state.searching = false;
+        state.inFlightSignature = "";
         state.error = "";
         state.results = Array.isArray(event.results) ? event.results : [];
         state.selectedResultIndex = state.results.length > 0 ? 0 : -1;
@@ -814,6 +866,7 @@
           return;
         }
         state.searching = false;
+        state.inFlightSignature = "";
         state.error = event.message || "Project index search failed.";
         renderProjectIndexSearch(event.id);
       }
@@ -822,6 +875,17 @@
         for (const windowId of indexSearchStateMap.keys()) {
           renderProjectIndexSearch(windowId);
         }
+      }
+
+      function moveIndexResultSelection(windowId, delta) {
+        const state = ensureIndexSearchState(windowId);
+        if (state.results.length === 0) return;
+        const current = Math.max(0, state.selectedResultIndex);
+        state.selectedResultIndex = Math.max(0, Math.min(state.results.length - 1, current + delta));
+        renderProjectIndexSearch(windowId);
+        document
+          .querySelector(`[data-id='${CSS.escape(windowId)}'] [data-result-index='${state.selectedResultIndex}']`)
+          ?.focus();
       }
 
       function openIndexResultTarget(result) {
@@ -9172,12 +9236,16 @@
               </div>
               <section class="index-search-panel" data-index-panel="search">
                 <div class="index-search-toolbar">
-                  <label class="index-search-box">
+                  <form class="index-search-box" role="search">
                     <input class="index-search-input" type="search" placeholder="Search indexed content" aria-label="Search indexed content" />
-                  </label>
+                    <button class="index-run-button" type="submit">Search</button>
+                  </form>
                   <div class="index-filter-bar">
                     <div class="index-scope-list" role="group" aria-label="Search scopes"></div>
-                    <select class="index-worktree-select" aria-label="Files and Docs worktree"></select>
+                    <label class="index-worktree-field">
+                      <span>File worktree</span>
+                      <select class="index-worktree-select" aria-label="Files and Docs worktree"></select>
+                    </label>
                   </div>
                 </div>
                 <div class="index-search-status"></div>
@@ -9207,7 +9275,16 @@
           input.value = state.query;
           input.addEventListener("input", () => {
             state.query = input.value;
+            renderProjectIndexSearch(windowData.id);
             scheduleProjectIndexSearch(windowData.id);
+          });
+          body.querySelector(".index-search-box").addEventListener("submit", (event) => {
+            event.preventDefault();
+            if (state.searchTimer) {
+              clearTimeout(state.searchTimer);
+              state.searchTimer = 0;
+            }
+            sendProjectIndexSearch(windowData.id);
           });
           body.querySelector(".index-scope-list").addEventListener("click", (event) => {
             const button = event.target.closest("[data-scope]");
@@ -9246,12 +9323,31 @@
             state.selectedResultIndex = Number(row.dataset.resultIndex || 0);
             renderProjectIndexSearch(windowData.id);
           });
+          body.querySelector(".index-result-list").addEventListener("dblclick", (event) => {
+            const row = event.target.closest("[data-result-index]");
+            if (!row) return;
+            state.selectedResultIndex = Number(row.dataset.resultIndex || 0);
+            const result = state.results[state.selectedResultIndex] || state.results[0];
+            openIndexResultTarget(result);
+          });
+          body.querySelector(".index-result-list").addEventListener("keydown", (event) => {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              moveIndexResultSelection(windowData.id, 1);
+            } else if (event.key === "ArrowUp") {
+              event.preventDefault();
+              moveIndexResultSelection(windowData.id, -1);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              const result = state.results[state.selectedResultIndex] || state.results[0];
+              openIndexResultTarget(result);
+            }
+          });
           body.querySelector(".index-result-detail").addEventListener("click", (event) => {
             if (!event.target.closest("[data-action='open-index-result']")) return;
             const result = state.results[state.selectedResultIndex] || state.results[0];
             openIndexResultTarget(result);
           });
-          requestFullIndexStatusRefresh();
           renderProjectIndexSearch(windowData.id);
           return;
         }
