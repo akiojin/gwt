@@ -856,7 +856,7 @@ mod tests {
         // is false so we do not flip isReady while hidden, and (b) only
         // mark the runtime ready after activation succeeds.
         let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?const snapshot = pendingSnapshotMap\.get\(windowId\);[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?if \(runtime\.deferredWrites\.length\) \{[\s\S]*?for \(const chunk of flush\) \{[\s\S]*?writeOutput\(windowId, chunk\);[\s\S]*?\}[\s\S]*?\}"#,
         )
         .expect("valid regex");
         // Hidden → visible activation path also needs to drive the
@@ -919,7 +919,7 @@ mod tests {
         // resize-recovers-on-move signature documented in
         // tasks/lessons.md 2026-05-13.
         let layout_box_gate = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*runtime\.handshakeAttempts = \(runtime\.handshakeAttempts \|\| 0\) \+ 1;[\s\S]*?if \(runtime\.handshakeAttempts <= HANDSHAKE_RETRY_LIMIT\) \{\s*requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);\s*return;\s*\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
         assert!(
@@ -933,6 +933,11 @@ mod tests {
         assert!(
             html.contains("function terminalContainerHasLayoutBox(windowId)"),
             "expected app.js to expose terminalContainerHasLayoutBox so the handshake can gate on layout (Issue #2832)",
+        );
+        assert!(
+            html.contains("const terminalHost = runtime?.terminal?.element?.parentElement;")
+                && html.contains("return elementHasLayoutBox(terminalHost);"),
+            "expected terminalContainerHasLayoutBox to measure the actual xterm host before falling back to the outer workspace window (Issue #2839)",
         );
         assert!(
             html.contains("const HANDSHAKE_RETRY_LIMIT ="),

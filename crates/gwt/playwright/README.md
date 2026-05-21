@@ -10,13 +10,13 @@ below).
 ```bash
 # from repo root — runs every spec; specs without GWT_PLAYWRIGHT_BASE_URL
 # skip themselves so the suite is safe to invoke without a running gwt.
-npm run test:visual
+bash scripts/run-visual-tests.sh
 ```
 
 ## Update baseline (when intentional design change lands)
 
 ```bash
-npx playwright test --update-snapshots --config crates/gwt/playwright/playwright.config.ts
+bash scripts/run-visual-tests.sh --update-snapshots
 ```
 
 ## Test layout
@@ -55,7 +55,7 @@ required**, so the suite runs reliably under the existing
 To reproduce locally, simply run:
 
 ```bash
-npm run test:visual -- --project=chromium-dark crates/gwt/playwright/tests/index-status.spec.ts
+bash scripts/run-visual-tests.sh --project=chromium-dark crates/gwt/playwright/tests/index-status.spec.ts
 ```
 
 The spec covers (chromium-dark + chromium-light):

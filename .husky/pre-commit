@@ -3,7 +3,7 @@
 set -e
 
 echo "Validating SKILL.md frontmatter..."
-pnpm lint:skills
+bash scripts/validate-skill-frontmatter.sh
 
 echo "Running commit-time backend tests..."
 bash scripts/run-local-backend-tests-on-commit.sh

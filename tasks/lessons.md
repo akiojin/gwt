@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-05-21 — startup CPU / power は「起動プロセス数」と「hot payload サイズ」を同時に見る
+
+### 事象
+
+gwt 起動中に CPU 使用率と消費電力が高く、macOS ではファンが異様に回るという報告があった。
+`sample` / `ps` / gwt logs を見ると、単一の busy loop ではなく、startup auto-resume、
+project index full status refresh、頻繁な `workspace_state` broadcast が同時に負荷を作っていた。
+
+### 原因
+
+- 起動時の auto-resume が recoverable session を無条件に再開し、同一 native
+  agent session 由来の重複や古い session まで launch 対象になり得た。
+- Settings.Index の full refresh が、startup current-worktree bootstrap と衝突した後の
+  retry だけでなく、同時 full refresh 同士でも二重 probe を起こせる in-flight key になっていた。
+- hot path の `workspace_state` が workspace work item 履歴を毎回含み、履歴が増えるほど
+  serialize / WebSocket / frontend state update のコストが膨らんだ。
+
+### 再発防止策
+
+1. startup の自動再開は、件数上限で復元を落とさない。fresh かつ unique な exact-resumable
+   session は全件復元し、native session id dedupe と staleness gate で不要な二重起動だけを抑える。
+2. startup current-only probe と Settings.Index full refresh は別 key にしつつ、full refresh 同士は
+   single-flight で潰す。retry を許すのは startup bootstrap と衝突した場合だけに限定する。
+3. 高頻度 broadcast には履歴 payload を載せない。workspace history は
+   `active_work_projection` のような用途特化 payload に寄せ、shell state は構造情報だけに保つ。
+4. CPU / power 調査では CPU% だけで結論を出さず、`sample`、子プロセス数、runner 起動ログ、
+   WebSocket payload の大きさを同じタイムラインで見る。
+
 ## 2026-05-20 — Phase 26 の visibility 述語だけでは silent no-op を防げない: layout box が立つまで `isReady` を flip しない (Issue #2832 / SPEC-2008 Phase 26.A regression)
 
 ### 事象
@@ -5830,3 +5858,74 @@ Agent window 内の TTY 表示が白一色になった。
 2. `NO_COLOR` を profile env で明示した場合は尊重し、親 process 由来の値だけを剥がす。
 3. WebView の色回帰を調査するときは、xterm.css の読み込み、WebSocket payload の SGR、
    frontend DOM の computed color、launch env の順に切り分ける。
+
+## URL をユーザー操作ログに出すときは authority までに正規化する
+
+### 事象
+
+`gwt_ui_action` の backend connection test ログで `api_key` は出力していなかったが、`base_url` を
+そのまま `ui_target` に入れていたため、userinfo や signed query を含む URL がログに残る可能性があった。
+
+### 原因
+
+既存の `sanitize_ui_action_field()` は改行や制御文字をログ向けに整形するだけで、URL の
+credential / path / query / fragment を機密情報として扱っていなかった。レビューでは
+`https://user:pass@example.com/v1?token=...` のような入力がそのまま残る点を指摘された。
+
+### 再発防止策
+
+1. ユーザー操作ログに外部 URL を入れるときは、既定で `scheme://authority` までに正規化し、
+   userinfo / path / query / fragment を落とす。
+2. `api_key` の非出力だけで安全と判断せず、URL 自体に credential や token が含まれるケースを
+   regression test に入れる。
+3. ログ sanitization の helper 名は「format sanitization」と「secret redaction」を区別し、
+   期待する保護範囲をテスト名で明示する。
+
+## 起動時 auto resume は保存済みUI状態と履歴セッションを混同しない
+
+### 事象
+
+Agent session auto resume の実装後、実HOMEで `gwt serve` を起動すると、前回開いていた
+プロジェクトだけでなく過去の session TOML に残る多数の worktree が復元候補になった。
+結果としてブラウザURLが出る前に大量の agent/version process が起動し、UIには見覚えのない
+プロジェクトが並ぶ状態になった。
+
+### 原因
+
+起動時の即時復元が `session.json` の保存済み project tabs ではなく、`~/.gwt/sessions/*.toml`
+全体を source of truth として扱っていた。さらに migration で `Interrupted` にした旧セッションや、
+失敗した自動復元で生成された `Resume` セッションには、ユーザーが直前にUIで開いていた根拠がないのに
+exact auto resume 候補として扱える余地があった。
+
+### 再発防止策
+
+1. 起動時に新しい project tab を履歴 session TOML から作らない。即時 auto resume は
+   `session.json` など保存済みUI状態で既に復元された tab に一致する session だけに限定する。
+2. lifecycle hook の根拠がない legacy / migrated session は、manual resume 候補として残しても
+   exact auto resume 候補にはしない。
+3. 復元系の修正では、実HOMEに近い「多数の古い session TOML がある」ケースをテストまたは
+   headed browser smoke で確認し、URL 出力前に大量の agent/version process が起動しないことを見る。
+
+## Hook runtime state の env mutation test は crate-wide lock を共有する
+
+### 事象
+
+Release PR の `cargo test -p gwt-core -p gwt --all-features` で、
+`handle_user_prompt_submit_uses_hook_cwd_for_board_scope` が `HookOutput::Silent` になり、
+後続の workspace tests が `PoisonError` で連鎖失敗した。
+
+### 原因
+
+`runtime_state` tests が独自の `ENV_LOCK` を持っており、crate-wide の `env_test_lock()` で保護された
+`board_reminder` / workspace tests と同時に `GWT_SESSION_ID` などの process-wide env を変更できた。
+そのため並列 test 実行時に hook session env が消え、最初の panic が shared lock を poison した。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `GWT_SESSION_ID` / `GWT_SESSION_RUNTIME_PATH` などの process-wide env を触る
+   gwt tests は、ローカル mutex を作らず必ず `crate::env_test_lock()` を共有する。
+2. lock 共有の regression test では、保持中に取得できないことだけを短い timeout で確認し、
+   lock 解除後の取得完了は固定 timeout ではなく thread join で待つ。全体並列実行では他の env tests が
+   先に lock を取る可能性がある。
+3. env lock を使う巻き添え側の tests は、`lock().unwrap()` ではなく poisoned lock を回復する helper を使い、
+   先行 panic の調査を `PoisonError` のノイズで隠さない。

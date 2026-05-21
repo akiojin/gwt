@@ -607,6 +607,29 @@ test("Branches remains a branch browser, not a planning workspace", () => {
   );
 });
 
+test("Branches loading state becomes recoverable when the WebSocket disconnects", () => {
+  assert.match(
+    appSource,
+    /function\s+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)/,
+    "expected a dedicated Branches loading connection-loss helper",
+  );
+  assert.match(
+    appSource,
+    /failLoadingBranchesOnConnectionLoss[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
+    "expected connection loss to clear stale Branches loading flags",
+  );
+  assert.match(
+    appSource,
+    /Connection lost while loading branches/,
+    "expected initial branch inventory loss to surface a retryable error",
+  );
+  assert.match(
+    appSource,
+    /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
+    "expected socket disconnect to re-render Branches after clearing stale loading",
+  );
+});
+
 test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
@@ -956,7 +979,10 @@ test("xterm content stays on the dark Operator palette across app theme changes"
 
 test("xterm developer readability defaults use larger font metrics", () => {
   assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
-  assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
+  assert.ok(
+    terminalOptionNumber("lineHeight") >= 1.3,
+    "xterm lineHeight must be at least 1.30 to avoid cramped SS.mov output",
+  );
 });
 
 test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
@@ -1188,7 +1214,12 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
-test("Branches toolbar exposes explicit Launch Agent action for selected branch", () => {
+test("Branches toolbar exposes explicit Resume and Launch Agent actions for selected branch", () => {
+  assert.match(
+    appSource,
+    /data-action="open-branch-resume"/,
+    "expected Branches toolbar to include an explicit Resume action",
+  );
   assert.match(
     appSource,
     /data-action="open-branch-launch"/,
@@ -1196,8 +1227,18 @@ test("Branches toolbar exposes explicit Launch Agent action for selected branch"
   );
   assert.match(
     appSource,
+    /selectedBranchName[\s\S]{0,360}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,360}?selectedBranchName/,
+    "expected Branches toolbar Resume action to resume the selected branch",
+  );
+  assert.match(
+    appSource,
     /selectedBranchName[\s\S]{0,300}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,300}?selectedBranchName/,
     "expected Branches toolbar Launch Agent action to send selectedBranchName",
+  );
+  assert.match(
+    appSource,
+    /row\.addEventListener\("dblclick",\s*activate\)/,
+    "expected branch row double-click to keep Launch Agent activation",
   );
 });
 

@@ -1,6 +1,62 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.42.1] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Keep project actions visible with many tabs
+- **workspace:** Scope auto resume to restored tabs
+- **test:** Pin visual runner playwright resolution
+- **workspace:** Restore codex sessions by project scope
+- Gwt起動時のCPUと電力負荷を抑制する
+- Auto-resumeの件数上限を外す
+- Worktree ResumeをLaunch Agentから分離する
+
+## [9.42.0] - 2026-05-21
+
+### Bug Fixes
+
+- **start-work:** Resolve reservation refs from workspace home
+- **release:** Remove npm distribution path
+- **release:** Remove remaining npm tooling references
+- **release:** Align release instructions with GitHub assets
+
+### Features
+
+- **workspace:** 復元可能なエージェントセッションを自動再開する
+
+## [9.41.1] - 2026-05-21
+
+### Bug Fixes
+
+- Frontend user actionsを構造化ログに出力
+- **gui:** Latch canvas wheel gesture mode
+- **gui:** Claude Code 起動直後の terminal 表示崩れを修正 (Issue #2832, SPEC-2008 Phase 26.A regression)
+- **e2e:** Headed live Playwright を安定化
+- **gui:** Live headed E2E の update modal 4 failures を解消する
+- **gui:** Redact frontend action log urls
+- **gui:** Recover Branches loading after reconnect
+- **gui:** Stabilize terminal initial fit
+
+### Documentation
+
+- Remove continuous log watch from headless check
+
+### Miscellaneous Tasks
+
+- **skills:** Headless browser check skillを追加
+- **skills:** Prevent duplicate browser open
+- **skills:** Monitor structured gwt logs
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin/develop into work branch
+
+### Testing
+
+- Serialize docker runtime env tests
+
 ## [9.41.0] - 2026-05-20
 
 ### Features
