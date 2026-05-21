@@ -228,7 +228,6 @@ fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_age
     config
 }
 
-const STARTUP_AUTO_RESUME_LIMIT: usize = 3;
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 
 fn auto_resume_window_bounds(index: usize) -> gwt::WindowGeometry {
@@ -2698,9 +2697,6 @@ impl AppRuntime {
         let mut launched = 0usize;
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
-            if launched >= STARTUP_AUTO_RESUME_LIMIT {
-                break;
-            }
             if !session.exact_auto_resume_candidate() {
                 continue;
             }
@@ -11070,7 +11066,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_bootstrap_auto_resume_caps_dedupes_and_skips_stale_sessions() {
+    fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11097,7 +11093,7 @@ exit 1
             ("session-duplicate-native-one", "native-one", 2_i64),
             ("session-fresh-2", "native-two", 3_i64),
             ("session-fresh-3", "native-three", 4_i64),
-            ("session-fresh-4-over-cap", "native-four", 5_i64),
+            ("session-fresh-4", "native-four", 5_i64),
             ("session-stale", "native-stale", 60 * 60 * 48_i64),
         ];
         for (session_id, native_session_id, age_secs) in cases {
@@ -11121,8 +11117,8 @@ exit 1
 
         assert_eq!(
             runtime.pending_auto_resume_sources.len(),
-            3,
-            "startup auto-resume must cap launches and avoid spawning every persisted session"
+            4,
+            "startup auto-resume must restore every fresh unique exact-resumable session"
         );
         let resumed_sources = runtime
             .pending_auto_resume_sources
@@ -11138,8 +11134,8 @@ exit 1
             "stale persisted sessions must stay available for manual resume instead of auto-launching"
         );
         assert!(
-            !resumed_sources.contains("session-fresh-4-over-cap"),
-            "only the newest capped set should auto-launch"
+            resumed_sources.contains("session-fresh-4"),
+            "startup auto-resume must not drop fresh unique sessions due to an arbitrary count cap"
         );
     }
 

@@ -10,8 +10,8 @@ project index full status refresh、頻繁な `workspace_state` broadcast が同
 
 ### 原因
 
-- 起動時の auto-resume が recoverable session を無制限に再開し、同一 native
-  agent session 由来の重複も launch 対象になり得た。
+- 起動時の auto-resume が recoverable session を無条件に再開し、同一 native
+  agent session 由来の重複や古い session まで launch 対象になり得た。
 - Settings.Index の full refresh が、startup current-worktree bootstrap と衝突した後の
   retry だけでなく、同時 full refresh 同士でも二重 probe を起こせる in-flight key になっていた。
 - hot path の `workspace_state` が workspace work item 履歴を毎回含み、履歴が増えるほど
@@ -19,8 +19,8 @@ project index full status refresh、頻繁な `workspace_state` broadcast が同
 
 ### 再発防止策
 
-1. startup の自動再開は、件数上限・native session id dedupe・staleness gate を同時に置く。
-   「前回状態を復元する」機能でも、unbounded launch fan-out は performance bug として扱う。
+1. startup の自動再開は、件数上限で復元を落とさない。fresh かつ unique な exact-resumable
+   session は全件復元し、native session id dedupe と staleness gate で不要な二重起動だけを抑える。
 2. startup current-only probe と Settings.Index full refresh は別 key にしつつ、full refresh 同士は
    single-flight で潰す。retry を許すのは startup bootstrap と衝突した場合だけに限定する。
 3. 高頻度 broadcast には履歴 payload を載せない。workspace history は
