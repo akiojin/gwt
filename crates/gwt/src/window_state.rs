@@ -10,11 +10,24 @@ pub fn compose_window_state(
     preset: WindowPreset,
     hook_state: Option<WindowState>,
 ) -> WindowState {
+    compose_window_state_with_active_session(pty_state, preset, hook_state, false)
+}
+
+pub fn compose_window_state_with_active_session(
+    pty_state: WindowState,
+    preset: WindowPreset,
+    hook_state: Option<WindowState>,
+    has_active_agent_session: bool,
+) -> WindowState {
     if matches!(pty_state, WindowState::Stopped | WindowState::Error) {
         return pty_state;
     }
     if uses_agent_hook_state(preset) {
-        return hook_state.unwrap_or(WindowState::NotStarted);
+        return hook_state.unwrap_or(if has_active_agent_session {
+            WindowState::Idle
+        } else {
+            WindowState::NotStarted
+        });
     }
     pty_state
 }
@@ -73,7 +86,10 @@ fn parse_runtime_status(status: &str) -> Option<WindowState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_window_state, runtime_hook_window_state, window_state_from_pane_status};
+    use super::{
+        compose_window_state, compose_window_state_with_active_session, runtime_hook_window_state,
+        window_state_from_pane_status,
+    };
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
         persistence::WindowState,
@@ -175,6 +191,19 @@ mod tests {
 
         assert_eq!(composed, WindowState::NotStarted);
         assert_eq!(serde_json::to_string(&composed).unwrap(), "\"not_started\"");
+    }
+
+    #[test]
+    fn compose_window_state_defaults_active_agent_without_hook_state_to_idle() {
+        let composed = compose_window_state_with_active_session(
+            WindowState::Running,
+            WindowPreset::Agent,
+            None,
+            true,
+        );
+
+        assert_eq!(composed, WindowState::Idle);
+        assert_eq!(serde_json::to_string(&composed).unwrap(), "\"idle\"");
     }
 
     #[test]

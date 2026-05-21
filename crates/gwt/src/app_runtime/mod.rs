@@ -6946,8 +6946,11 @@ impl AppRuntime {
             })?;
         let hook_state = self.window_hook_states.get(window_id).copied();
         let preset = self.window_preset(window_id)?;
-        Some(gwt::window_state::compose_window_state(
-            pty_state, preset, hook_state,
+        Some(gwt::window_state::compose_window_state_with_active_session(
+            pty_state,
+            preset,
+            hook_state,
+            self.active_agent_sessions.contains_key(window_id),
         ))
     }
 
@@ -7094,7 +7097,12 @@ impl AppRuntime {
             .or_else(|| self.window_status(window_id))?;
         let hook_state = self.window_hook_states.get(window_id).copied();
         let preset = self.window_preset(window_id)?;
-        let composed = gwt::window_state::compose_window_state(pty_state, preset, hook_state);
+        let composed = gwt::window_state::compose_window_state_with_active_session(
+            pty_state,
+            preset,
+            hook_state,
+            self.active_agent_sessions.contains_key(window_id),
+        );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -9749,7 +9757,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_live_sessions_report_not_started_before_session_start() {
+    fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -9777,7 +9785,7 @@ exit 1
         let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::NotStarted);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
 
         runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
             "Idle",
@@ -9787,6 +9795,44 @@ exit 1
         let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
 
         assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
+    }
+
+    #[test]
+    fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_state() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: PathBuf::from("E:/gwt/test-repo"),
+                agent_project_root: "E:/gwt/test-repo".to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let view = runtime.app_state_view();
+        let tab = view.tabs.iter().find(|tab| tab.id == "tab-1").unwrap();
+        let window = tab
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "tab-1::agent-1")
+            .unwrap();
+
+        assert_eq!(window.status, WindowProcessStatus::Idle);
     }
 
     #[test]
