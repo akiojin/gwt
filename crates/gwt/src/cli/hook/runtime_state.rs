@@ -148,9 +148,7 @@ fn log_missing_codex_hook_session_id(
     hook_event: Option<&RawHookEvent>,
 ) {
     let persisted_agent_session_id = session
-        .and_then(|session| session.agent_session_id.as_deref())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+        .and_then(gwt_agent::Session::exact_resume_session_id)
         .unwrap_or("-");
     let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
     eprintln!(
@@ -495,6 +493,7 @@ mod tests {
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
             runtime_path.as_os_str().to_os_string(),
         );
+        env.unset("CODEX_THREAD_ID");
 
         let err = handle_with_input("PreToolUse", r#"{"tool_name":"Bash"}"#)
             .expect_err("managed Codex hooks must include session_id");
@@ -531,6 +530,7 @@ mod tests {
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
             runtime_path.as_os_str().to_os_string(),
         );
+        env.unset("CODEX_THREAD_ID");
 
         let err = handle_with_input("PreToolUse", r#"{"session_id":"   "}"#)
             .expect_err("blank Codex session_id must fail");

@@ -8,10 +8,8 @@
  * `tests/kanban.spec.ts` and `tests/index-status.spec.ts` for examples.
  */
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const WEB_ROOT = path.resolve(HERE, "../../../web");
+const WEB_ROOT = path.resolve(process.cwd(), "crates/gwt/web");
 
 export const APP_URL = "http://gwt-playwright.local/";
 
