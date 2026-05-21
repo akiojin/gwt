@@ -6260,11 +6260,10 @@ impl AppRuntime {
                                 }
                             }
                         }
-                        events.extend(Self::status_events(
-                            window_id,
-                            WindowProcessStatus::Running,
-                            None,
-                        ));
+                        let composed_status = self
+                            .window_status(&window_id)
+                            .unwrap_or(WindowProcessStatus::Running);
+                        events.extend(Self::status_events(window_id, composed_status, None));
                         events
                     }
                     Err(error) => self.launch_error_events(window_id, error),
@@ -6318,11 +6317,10 @@ impl AppRuntime {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let mut events = vec![self.workspace_state_broadcast()];
-                        events.extend(Self::status_events(
-                            window_id,
-                            WindowProcessStatus::Running,
-                            None,
-                        ));
+                        let composed_status = self
+                            .window_status(&window_id)
+                            .unwrap_or(WindowProcessStatus::Running);
+                        events.extend(Self::status_events(window_id, composed_status, None));
                         events
                     }
                     Err(error) => {
@@ -6432,7 +6430,10 @@ impl AppRuntime {
                 if let Some(id) = stage_id {
                     emit_agent_launch_stage(id, "ready", "PTY handoff complete");
                 }
-                Self::status_events(window_id, WindowProcessStatus::Running, None)
+                let composed_status = self
+                    .window_status(&window_id)
+                    .unwrap_or(WindowProcessStatus::Running);
+                Self::status_events(window_id, composed_status, None)
             }
             Err(error) => {
                 if let Some(id) = stage_id {
@@ -6585,9 +6586,12 @@ impl AppRuntime {
         self.window_hook_states.remove(&window_id);
 
         let mut events = vec![self.workspace_state_broadcast()];
+        let composed_status = self
+            .window_status(&window_id)
+            .unwrap_or(WindowProcessStatus::Running);
         events.extend(Self::status_events(
             window_id.clone(),
-            WindowProcessStatus::Running,
+            composed_status,
             Some("Launching...".to_string()),
         ));
 
@@ -7134,11 +7138,59 @@ impl AppRuntime {
     }
 
     pub(crate) fn app_state_view(&self) -> gwt::AppStateView {
-        app_state_view_from_parts(
-            &self.tabs,
-            self.active_tab_id.as_deref(),
-            &self.recent_projects,
-        )
+        gwt::AppStateView {
+            app_version: crate::runtime_support::current_app_version().to_string(),
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| {
+                    let workspace = self.workspace_view_for_tab(tab);
+                    let running_agents =
+                        crate::runtime_support::collect_running_agents(&workspace.windows);
+                    gwt::ProjectTabView {
+                        id: tab.id.clone(),
+                        title: tab.title.clone(),
+                        project_root: tab.project_root.display().to_string(),
+                        kind: tab.kind,
+                        workspace,
+                        running_agent_count: running_agents.len() as u32,
+                        running_agents,
+                    }
+                })
+                .collect(),
+            active_tab_id: self.active_tab_id.clone(),
+            recent_projects: self
+                .recent_projects
+                .iter()
+                .map(|project| gwt::RecentProjectView {
+                    path: project.path.display().to_string(),
+                    title: project.title.clone(),
+                    kind: project.kind,
+                })
+                .collect(),
+        }
+    }
+
+    fn workspace_view_for_tab(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+        gwt::WorkspaceView {
+            viewport: tab.workspace.persisted().viewport.clone(),
+            windows: tab
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .cloned()
+                .map(|mut window| {
+                    let raw_id = window.id.clone();
+                    window.id = combined_window_id(&tab.id, &raw_id);
+                    if let Some(status) = self.window_status(&window.id) {
+                        window.status = status;
+                    }
+                    window
+                })
+                .collect(),
+            work_items: Vec::new(),
+        }
     }
 
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
@@ -7170,8 +7222,11 @@ impl AppRuntime {
             })?;
         let hook_state = self.window_hook_states.get(window_id).copied();
         let preset = self.window_preset(window_id)?;
-        Some(gwt::window_state::compose_window_state(
-            pty_state, preset, hook_state,
+        Some(gwt::window_state::compose_window_state_with_active_session(
+            pty_state,
+            preset,
+            hook_state,
+            self.active_agent_sessions.contains_key(window_id),
         ))
     }
 
@@ -7318,7 +7373,12 @@ impl AppRuntime {
             .or_else(|| self.window_status(window_id))?;
         let hook_state = self.window_hook_states.get(window_id).copied();
         let preset = self.window_preset(window_id)?;
-        let composed = gwt::window_state::compose_window_state(pty_state, preset, hook_state);
+        let composed = gwt::window_state::compose_window_state_with_active_session(
+            pty_state,
+            preset,
+            hook_state,
+            self.active_agent_sessions.contains_key(window_id),
+        );
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -8659,9 +8719,17 @@ exit 1
     }
 
     fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
+        runtime_hook_state_for_event(status, "Stop", session_id)
+    }
+
+    fn runtime_hook_state_for_event(
+        status: &str,
+        source_event: &str,
+        session_id: &str,
+    ) -> gwt::RuntimeHookEvent {
         gwt::RuntimeHookEvent {
             kind: gwt::RuntimeHookEventKind::RuntimeState,
-            source_event: Some("Stop".to_string()),
+            source_event: Some(source_event.to_string()),
             gwt_session_id: Some(session_id.to_string()),
             agent_session_id: Some("agent-session-1".to_string()),
             project_root: Some("E:/gwt/test-repo".to_string()),
@@ -9932,7 +10000,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_live_sessions_report_composed_waiting_runtime_status() {
+    fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -9957,11 +10025,137 @@ exit 1
             },
         );
 
-        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        runtime.handle_runtime_hook_event(runtime_hook_state("Idle", "session-1"));
         let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Waiting);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
+    }
+
+    #[test]
+    fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: PathBuf::from("E:/gwt/test-repo"),
+                agent_project_root: "E:/gwt/test-repo".to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
+
+        runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+            "Idle",
+            "SessionStart",
+            "session-1",
+        ));
+        let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
+
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
+    }
+
+    #[test]
+    fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_state() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: PathBuf::from("E:/gwt/test-repo"),
+                agent_project_root: "E:/gwt/test-repo".to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let view = runtime.app_state_view();
+        let tab = view.tabs.iter().find(|tab| tab.id == "tab-1").unwrap();
+        let window = tab
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "tab-1::agent-1")
+            .unwrap();
+
+        assert_eq!(window.status, WindowProcessStatus::Idle);
+    }
+
+    #[test]
+    fn app_runtime_workspace_state_normalizes_pre_lifecycle_agent_windows() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime.app_state_view();
+        let tab = view.tabs.iter().find(|tab| tab.id == "tab-1").unwrap();
+        let window = tab
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "tab-1::agent-1")
+            .unwrap();
+
+        assert_eq!(window.status, WindowProcessStatus::NotStarted);
+        assert_eq!(tab.running_agent_count, 0);
+        assert!(tab.running_agents.is_empty());
+    }
+
+    #[test]
+    fn app_runtime_window_list_normalizes_pre_lifecycle_agent_windows() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let BackendEvent::WindowList { windows } = runtime.list_windows_event() else {
+            panic!("expected window list");
+        };
+        let window = windows
+            .iter()
+            .find(|window| window.id == "tab-1::agent-1")
+            .unwrap();
+
+        assert_eq!(window.status, WindowProcessStatus::NotStarted);
     }
 
     #[test]

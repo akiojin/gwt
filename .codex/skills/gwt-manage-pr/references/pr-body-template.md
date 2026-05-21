@@ -2,7 +2,7 @@
 PR Body Template — gwt-manage-pr skill
 
 Rules:
-- REQUIRED sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
+- REQUIRED sections: Summary, Changes, Testing, PR Readiness, Closing Issues, Related Issues, Checklist
 - CONDITIONAL sections: Context, Risk/Impact, Screenshots, Deployment
 - OPTIONAL sections: Notes
 - Remove CONDITIONAL sections entirely if not applicable
@@ -27,6 +27,15 @@ Rules:
 <!-- GUIDE: Provide reproducible steps. Include exact commands, expected output, or manual verification steps. "Tested" alone is NOT acceptable. -->
 
 - [ ] `{command}` — {expected result}
+
+## PR Readiness
+
+<!-- GUIDE: Choose exactly one State. Ready for review requires a releaseable slice, no known blockers, completed acceptance for this PR scope, and pre-PR verification evidence. Draft is allowed only for incomplete CI/shared review and must not claim release readiness. -->
+
+- State: Ready for review | Draft
+- Releaseable slice: {yes/no + reason}
+- Known blockers: {None or list}
+- Remaining acceptance: {None or list}
 
 ## Closing Issues
 

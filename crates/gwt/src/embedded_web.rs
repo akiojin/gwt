@@ -1462,12 +1462,12 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_window_status_chip_uses_running_waiting_stopped_error_variants() {
+    fn embedded_web_window_status_chip_uses_running_idle_stopped_error_variants() {
         let html = frontend_styles_bundle();
 
         assert!(
-            html.contains(".status-chip.waiting .status-dot"),
-            "expected embedded html to define a waiting variant for window status chips",
+            html.contains(".status-chip.idle .status-dot"),
+            "expected embedded html to define an idle variant for window status chips",
         );
         assert!(
             html.contains(".status-chip.stopped .status-dot"),
@@ -1630,6 +1630,39 @@ mod tests {
                 "if (!presetSupportsWaitingStatus(preset) && normalizedState === \"waiting\")"
             ) && js.contains("return \"running\";"),
             "expected embedded js to downgrade waiting to running for shell-like presets",
+        );
+    }
+
+    #[test]
+    fn embedded_web_agent_runtime_maps_idle_to_idle_telemetry() {
+        let js = app_js();
+
+        assert!(
+            js.contains("idle: \"Idle\""),
+            "expected embedded js to expose an Idle runtime label",
+        );
+        assert!(
+            js.contains("case \"idle\":") && js.contains("return \"idle\";"),
+            "expected embedded js to count idle runtime states as idle telemetry",
+        );
+    }
+
+    #[test]
+    fn embedded_web_agent_runtime_maps_not_started_separately() {
+        let js = app_js();
+        let html = frontend_styles_bundle();
+
+        assert!(
+            js.contains("not_started: \"Not Started\""),
+            "expected embedded js to expose a Not Started runtime label",
+        );
+        assert!(
+            js.contains("case \"not_started\":") && js.contains("return \"not_started\";"),
+            "expected embedded js to keep pre-lifecycle agent telemetry separate",
+        );
+        assert!(
+            html.contains(".status-chip.not_started .status-dot"),
+            "expected embedded html to define a not_started status chip variant",
         );
     }
 

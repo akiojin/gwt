@@ -127,6 +127,9 @@ fn handle_stop(
         }),
     ] {
         if matches!(output, HookOutput::StopBlock { .. }) {
+            run_step(event, "blocked-stop-runtime-state", || {
+                crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
+            })?;
             return Ok(output);
         }
     }

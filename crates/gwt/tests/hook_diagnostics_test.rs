@@ -23,6 +23,12 @@ impl ScopedEnvVar {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnvVar {
@@ -43,6 +49,9 @@ fn hook_event_writes_opt_in_handler_timing_without_stdout_noise() {
     let tmp = tempfile::tempdir().unwrap();
     let profile_path = tmp.path().join("hook-profile.jsonl");
     let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
+    let _gwt_session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({

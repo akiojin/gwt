@@ -14,8 +14,11 @@
 //! - Block hook returning `None`       → 0 (allow)
 //! - Block hook returning `Some(..)`   → 2 (block + stdout JSON)
 
-use gwt::cli::hook::{event_dispatcher, HookOutput};
+use chrono::Utc;
+use gwt::cli::hook::{event_dispatcher, runtime_state::RuntimeState, HookOutput};
 use gwt::cli::{dispatch, TestEnv};
+use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
+use gwt_core::skill_state::{self, SkillState};
 
 fn argv(strs: &[&str]) -> Vec<String> {
     strs.iter().map(std::string::ToString::to_string).collect()
@@ -253,4 +256,54 @@ fn event_dispatcher_non_blocking_events_are_silent_without_live_runtime() {
             event_dispatcher::handle_with_input(event, "", tmp.path(), Some("sess-1")).unwrap();
         assert_eq!(output, HookOutput::Silent);
     }
+}
+
+#[test]
+fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
+    session.agent_session_id = Some("agent-123".to_string());
+    let session_id = session.id.clone();
+    session.save(&sessions_dir).unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+    let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+    skill_state::save(
+        tmp.path(),
+        "build-spec",
+        &SkillState {
+            active: true,
+            owner_spec: Some(2077),
+            started_at: Utc::now(),
+            phase: Some("red".to_string()),
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap();
+
+    let output = event_dispatcher::handle_with_input(
+        "Stop",
+        r#"{"session_id":"agent-123"}"#,
+        tmp.path(),
+        Some(&session_id),
+    )
+    .expect("blocked Stop should still dispatch");
+
+    assert!(matches!(output, HookOutput::StopBlock { .. }));
+    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
+    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
+    assert_eq!(runtime_state.status, "Running");
+    assert_eq!(runtime_state.source_event, "Stop");
+
+    let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+    assert_eq!(
+        serde_json::to_string(&loaded.status).unwrap(),
+        "\"Running\""
+    );
 }
