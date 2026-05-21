@@ -804,15 +804,21 @@
         clearChildren(list);
         clearChildren(detail);
         layout?.classList.toggle("is-empty", state.results.length === 0);
+        if (layout) {
+          layout.setAttribute("aria-busy", String(Boolean(state.searching)));
+        }
         if (!state.query.trim()) {
           list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "Search indexed content." }));
         } else if (state.searching && state.results.length === 0) {
-          list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "Searching semantic index" }));
+          list.appendChild(makeIndexSearchLoadingState());
         } else if (state.error) {
           list.appendChild(makeEl("div", { className: "workspace-empty-state", text: state.error }));
         } else if (state.results.length === 0) {
           list.appendChild(makeEl("div", { className: "workspace-empty-state", text: "No indexed results" }));
         } else {
+          if (state.searching) {
+            list.appendChild(makeIndexSearchLoadingState("Updating results"));
+          }
           state.results.forEach((result, index) => {
             const row = makeEl("button", {
               className: "index-result-row",
@@ -851,6 +857,23 @@
           dataset: { action: "open-index-result" },
           text: "Open",
         }));
+      }
+
+      function makeIndexSearchLoadingState(label = "Searching semantic index") {
+        const node = makeEl("div", {
+          className: "index-search-loading",
+          attrs: { role: "status", "aria-live": "polite" },
+        });
+        const dots = makeEl("span", {
+          className: "index-search-loading-dots",
+          attrs: { "aria-hidden": "true" },
+        });
+        for (let i = 0; i < 3; i += 1) {
+          dots.appendChild(makeEl("span", { className: "index-search-loading-dot" }));
+        }
+        node.appendChild(dots);
+        node.appendChild(makeEl("span", { className: "index-search-loading-label", text: label }));
+        return node;
       }
 
       function handleProjectIndexSearchResults(event) {

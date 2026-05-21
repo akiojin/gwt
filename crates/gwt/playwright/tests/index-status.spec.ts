@@ -341,6 +341,37 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
+  test("Index window Search shows animated loading feedback in the results pane", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        issues: { healthy: true, repair_required: false, document_count: 214 },
+        specs: { healthy: true, repair_required: false, document_count: 774 },
+        memory: { healthy: true, repair_required: false, document_count: 260 },
+        board: { healthy: true, repair_required: false, document_count: 1471 },
+      },
+      worktrees: {},
+    });
+
+    await page.goto(APP_URL);
+    const { root } = await openIndexSearchPanel(page);
+    await root.locator(".index-search-input").fill("memory search loading");
+    await root.locator(".index-run-button").click();
+
+    const loading = root.locator(".index-search-loading");
+    await expect(loading).toBeVisible({ timeout: 5_000 });
+    await expect(loading).toHaveAttribute("role", "status");
+    await expect(loading).toContainText("Searching semantic index");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "true");
+
+    const animatedDot = loading.locator(".index-search-loading-dot").first();
+    await expect(animatedDot).toBeVisible();
+    await expect(animatedDot).toHaveCSS("animation-name", /index-search-loading/);
+  });
+
   test("Index window Health per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
     page,
   }) => {
@@ -420,6 +451,24 @@ async function openIndexHealthPanel(page) {
   await expect(panel).toBeVisible({ timeout: 10_000 });
   const table = panel.locator("[data-role='index-settings-table']");
   return { root, panel, table };
+}
+
+async function openIndexSearchPanel(page) {
+  await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+
+  await page.evaluate(() => {
+    document.dispatchEvent(
+      new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+    );
+  });
+
+  const root = page.locator(".index-search-root").first();
+  await expect(root).toBeVisible({ timeout: 10_000 });
+  await root.locator("[data-index-tab='search']").click();
+
+  const panel = root.locator("[data-index-panel='search']");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  return { root, panel };
 }
 
 async function installIndexStatusBackend(page, indexStatus) {
