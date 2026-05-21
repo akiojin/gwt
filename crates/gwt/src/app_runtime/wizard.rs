@@ -562,12 +562,7 @@ impl AppRuntime {
             builder = builder.linked_issue_number(linked);
         }
 
-        if let Some(resume_id) = session
-            .agent_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(resume_id) = session.exact_resume_session_id() {
             builder = builder
                 .session_mode(gwt_agent::SessionMode::Resume)
                 .resume_session_id(resume_id.to_string());
@@ -657,12 +652,7 @@ impl AppRuntime {
                 let (resume_kind, lifecycle_status) =
                     match gwt_agent::Session::load_and_migrate(&session_path) {
                         Ok(session) => {
-                            let resume_kind = if session
-                                .agent_session_id
-                                .as_deref()
-                                .map(str::trim)
-                                .is_some_and(|value| !value.is_empty())
-                            {
+                            let resume_kind = if session.exact_resume_session_id().is_some() {
                                 gwt::ResumableAgentResumeKind::Session
                             } else {
                                 gwt::ResumableAgentResumeKind::MetadataOnly

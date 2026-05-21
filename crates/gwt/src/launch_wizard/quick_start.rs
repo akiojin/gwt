@@ -111,12 +111,7 @@ fn session_is_newer(candidate: &gwt_agent::Session, current: &gwt_agent::Session
 }
 
 fn agent_session_resume_id(session: &gwt_agent::Session) -> Option<String> {
-    session
-        .agent_session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+    session.exact_resume_session_id().map(str::to_string)
 }
 
 struct WorktreePathScope<'a> {

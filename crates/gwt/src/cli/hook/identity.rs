@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 use super::{HookError, HookEvent};
 
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
+const CODEX_PLACEHOLDER_SESSION_ID: &str = "agent-session";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GwtSessionId(String);
 
@@ -42,6 +45,10 @@ impl HookSessionId {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(|id| Self(id.to_string()))
+    }
+
+    fn is_codex_placeholder(&self) -> bool {
+        self.0 == CODEX_PLACEHOLDER_SESSION_ID
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -107,15 +114,147 @@ pub(crate) fn resolve_hook_agent_session_id(
     session: Option<&Session>,
     hook_event: Option<&RawHookEvent>,
 ) -> HookAgentSessionId {
+    if session.map(is_codex_session).unwrap_or(false) {
+        if let Some(session_id) = codex_thread_id_from_env() {
+            return HookAgentSessionId::Provided(session_id);
+        }
+        if let Some(session_id) = hook_event
+            .and_then(RawHookEvent::session_id)
+            .filter(|session_id| !session_id.is_codex_placeholder())
+        {
+            return HookAgentSessionId::Provided(session_id);
+        }
+        return HookAgentSessionId::MissingRequiredForCodex;
+    }
     if let Some(session_id) = hook_event.and_then(RawHookEvent::session_id) {
         return HookAgentSessionId::Provided(session_id);
-    }
-    if session.map(is_codex_session).unwrap_or(false) {
-        return HookAgentSessionId::MissingRequiredForCodex;
     }
     HookAgentSessionId::MissingOptional
 }
 
 fn is_codex_session(session: &Session) -> bool {
     matches!(&session.agent_id, gwt_agent::AgentId::Codex)
+}
+
+fn codex_thread_id_from_env() -> Option<HookSessionId> {
+    let value = std::env::var_os(CODEX_THREAD_ID_ENV)?;
+    HookSessionId::parse(Some(value.to_string_lossy().as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use gwt_agent::{AgentId, Session};
+
+    use super::*;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self { saved: Vec::new() }
+        }
+
+        fn set(&mut self, key: &'static str, value: impl Into<OsString>) {
+            if !self.saved.iter().any(|(saved_key, _)| *saved_key == key) {
+                self.saved.push((key, std::env::var_os(key)));
+            }
+            std::env::set_var(key, value.into());
+        }
+
+        fn remove(&mut self, key: &'static str) {
+            if !self.saved.iter().any(|(saved_key, _)| *saved_key == key) {
+                self.saved.push((key, std::env::var_os(key)));
+            }
+            std::env::remove_var(key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.iter().rev() {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    fn codex_session() -> Session {
+        Session::new("/tmp/worktree", "work/recover", AgentId::Codex)
+    }
+
+    fn raw_event(session_id: &str) -> RawHookEvent {
+        RawHookEvent {
+            tool_name: None,
+            tool_input: None,
+            session_id: Some(session_id.to_string()),
+            transcript_path: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn codex_hook_identity_prefers_thread_id_env_over_placeholder_payload() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut env = EnvGuard::new();
+        env.set(CODEX_THREAD_ID_ENV, "019e4646-9d79-79f0-b74a-df9f74f9f0fd");
+        let session = codex_session();
+
+        let resolved = resolve_hook_agent_session_id(
+            Some(&session),
+            Some(&raw_event(CODEX_PLACEHOLDER_SESSION_ID)),
+        );
+
+        assert!(matches!(
+            resolved,
+            HookAgentSessionId::Provided(id)
+                if id.as_str() == "019e4646-9d79-79f0-b74a-df9f74f9f0fd"
+        ));
+    }
+
+    #[test]
+    fn codex_hook_identity_rejects_placeholder_without_thread_id_env() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut env = EnvGuard::new();
+        env.remove(CODEX_THREAD_ID_ENV);
+        let session = codex_session();
+
+        let resolved = resolve_hook_agent_session_id(
+            Some(&session),
+            Some(&raw_event(CODEX_PLACEHOLDER_SESSION_ID)),
+        );
+
+        assert_eq!(resolved, HookAgentSessionId::MissingRequiredForCodex);
+    }
+
+    #[test]
+    fn codex_hook_identity_uses_raw_payload_when_thread_id_env_is_missing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut env = EnvGuard::new();
+        env.remove(CODEX_THREAD_ID_ENV);
+        let session = codex_session();
+
+        let resolved = resolve_hook_agent_session_id(
+            Some(&session),
+            Some(&raw_event("019e4646-9d79-79f0-b74a-df9f74f9f0fd")),
+        );
+
+        assert!(matches!(
+            resolved,
+            HookAgentSessionId::Provided(id)
+                if id.as_str() == "019e4646-9d79-79f0-b74a-df9f74f9f0fd"
+        ));
+    }
 }
