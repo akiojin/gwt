@@ -1946,6 +1946,7 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
