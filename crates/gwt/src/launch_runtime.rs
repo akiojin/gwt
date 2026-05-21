@@ -14,34 +14,20 @@ pub fn resolve_launch_worktree_request(
         return Ok(());
     }
 
-    let current_branch = current_git_branch(repo_path);
-    if let Err(error) = &current_branch {
-        if base_branch.is_none()
-            && matches!(
-                gwt_git::detect_repo_type(repo_path),
-                gwt_git::RepoType::NonRepo
-            )
-        {
-            return Ok(());
+    let main_repo_path = match gwt_git::worktree::main_worktree_root(repo_path) {
+        Ok(path) => path,
+        Err(error) => {
+            if base_branch.is_none()
+                && matches!(
+                    gwt_git::detect_repo_type(repo_path),
+                    gwt_git::RepoType::NonRepo
+                )
+            {
+                return Ok(());
+            }
+            return Err(error.to_string());
         }
-        if base_branch.is_none() {
-            return Err(error.clone());
-        }
-    }
-    if current_branch
-        .as_ref()
-        .is_ok_and(|current| current == &branch_name)
-    {
-        *working_dir = Some(repo_path.to_path_buf());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            repo_path.display().to_string(),
-        );
-        return Ok(());
-    }
-
-    let main_repo_path =
-        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    };
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
     if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
