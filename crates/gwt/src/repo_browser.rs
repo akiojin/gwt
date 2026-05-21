@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use crate::{AppEventProxy, ClientId, OutboundEvent, UserEvent};
+use crate::{AppEventProxy, OutboundEvent, UserEvent};
 use gwt::{
     hydrate_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
     BranchEntriesPhase, BranchListEntry, BranchScope,
@@ -12,7 +12,6 @@ use gwt::{
 
 pub fn spawn_branch_load_async(
     proxy: AppEventProxy,
-    client_id: ClientId,
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
@@ -20,7 +19,6 @@ pub fn spawn_branch_load_async(
     thread::spawn(move || {
         dispatch_branch_load_progressive(
             &proxy,
-            &client_id,
             &window_id,
             &project_root,
             &active_session_branches,
@@ -48,7 +46,6 @@ pub fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Option<Stri
 
 fn dispatch_branch_load_progressive(
     proxy: &AppEventProxy,
-    client_id: &ClientId,
     window_id: &str,
     project_root: &Path,
     active_session_branches: &HashSet<String>,
@@ -57,14 +54,11 @@ fn dispatch_branch_load_progressive(
         Ok(entries) => {
             dispatch_async_events(
                 proxy,
-                vec![OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::BranchEntries {
-                        id: window_id.to_string(),
-                        phase: BranchEntriesPhase::Inventory,
-                        entries: entries.clone(),
-                    },
-                )],
+                vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
+                    id: window_id.to_string(),
+                    phase: BranchEntriesPhase::Inventory,
+                    entries: entries.clone(),
+                })],
             );
             match hydrate_branch_entries_with_active_sessions(
                 project_root,
@@ -73,36 +67,27 @@ fn dispatch_branch_load_progressive(
             ) {
                 Ok(entries) => dispatch_async_events(
                     proxy,
-                    vec![OutboundEvent::reply(
-                        client_id.clone(),
-                        BackendEvent::BranchEntries {
-                            id: window_id.to_string(),
-                            phase: BranchEntriesPhase::Hydrated,
-                            entries,
-                        },
-                    )],
+                    vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
+                        id: window_id.to_string(),
+                        phase: BranchEntriesPhase::Hydrated,
+                        entries,
+                    })],
                 ),
                 Err(error) => dispatch_async_events(
                     proxy,
-                    vec![OutboundEvent::reply(
-                        client_id.clone(),
-                        BackendEvent::BranchError {
-                            id: window_id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )],
+                    vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                        id: window_id.to_string(),
+                        message: error.to_string(),
+                    })],
                 ),
             }
         }
         Err(error) => dispatch_async_events(
             proxy,
-            vec![OutboundEvent::reply(
-                client_id.clone(),
-                BackendEvent::BranchError {
-                    id: window_id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
+            vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: window_id.to_string(),
+                message: error.to_string(),
+            })],
         ),
     }
 }
@@ -172,5 +157,41 @@ mod tests {
         ];
 
         assert_eq!(preferred_issue_launch_branch(&entries), None);
+    }
+
+    #[test]
+    fn async_branch_load_results_are_broadcast_not_bound_to_a_stale_websocket_client() {
+        let source = include_str!("repo_browser.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+
+        assert_async_branch_event_is_broadcast_only(production_source, "BranchEntries");
+        assert_async_branch_event_is_broadcast_only(production_source, "BranchError");
+    }
+
+    fn assert_async_branch_event_is_broadcast_only(production_source: &str, event: &str) {
+        let event_marker = format!("BackendEvent::{event}");
+        let positions = production_source
+            .match_indices(&event_marker)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        assert!(
+            !positions.is_empty(),
+            "async branch {event} must still be dispatched"
+        );
+
+        for position in positions {
+            let prefix = &production_source[..position];
+            let last_broadcast = prefix.rfind("OutboundEvent::broadcast(");
+            let last_reply = prefix.rfind("OutboundEvent::reply(");
+
+            assert!(
+                last_broadcast.is_some() && last_broadcast > last_reply,
+                "async branch {event} must be broadcast by window id, not targeted to a transient websocket client id",
+            );
+        }
     }
 }

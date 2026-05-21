@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.42.2] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Recover Branches refresh after reconnect
+
 ## [9.42.1] - 2026-05-21
 
 ### Bug Fixes
