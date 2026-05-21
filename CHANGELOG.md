@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.42.0] - 2026-05-21
+
+### Bug Fixes
+
+- **start-work:** Resolve reservation refs from workspace home
+- **release:** Remove npm distribution path
+- **release:** Remove remaining npm tooling references
+- **release:** Align release instructions with GitHub assets
+
+### Features
+
+- **workspace:** 復元可能なエージェントセッションを自動再開する
+
 ## [9.41.1] - 2026-05-21
 
 ### Bug Fixes

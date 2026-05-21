@@ -9,7 +9,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+printf '{"private":true,"type":"module"}\n' > "$TMPDIR/package.json"
 bun install --cwd "$TMPDIR" linkedom@0.18.12 >/dev/null
 
-cd "$ROOT"
-NODE_PATH="$TMPDIR/node_modules" node --test "$@"
+ln -s "$ROOT/crates" "$TMPDIR/crates"
+
+cd "$TMPDIR"
+node --preserve-symlinks --preserve-symlinks-main --test "$@"

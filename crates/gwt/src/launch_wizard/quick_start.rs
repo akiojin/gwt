@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -31,8 +32,9 @@ pub(super) fn collect_quick_start_entries_from_sessions(
     branch_name: &str,
     sessions: Vec<gwt_agent::Session>,
 ) -> Vec<QuickStartEntry> {
-    let mut latest_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
-    let mut latest_resumable_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
+    let mut resumable_sessions = Vec::new();
+    let mut agents_with_resumable: HashSet<String> = HashSet::new();
+    let mut latest_metadata_only_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
     let repo_scope = WorktreePathScope::new(repo_path);
 
     for session in sessions {
@@ -42,43 +44,27 @@ pub(super) fn collect_quick_start_entries_from_sessions(
 
         let agent_key = session.agent_id.command().to_string();
         if agent_session_resume_id(&session).is_some() {
-            let replace = latest_resumable_by_agent
+            agents_with_resumable.insert(agent_key);
+            resumable_sessions.push(session);
+        } else {
+            let replace = latest_metadata_only_by_agent
                 .get(&agent_key)
                 .map(|current| session_is_newer(&session, current))
                 .unwrap_or(true);
             if replace {
-                latest_resumable_by_agent.insert(agent_key.clone(), session.clone());
+                latest_metadata_only_by_agent.insert(agent_key, session);
             }
-        }
-
-        let replace = latest_by_agent
-            .get(&agent_key)
-            .map(|current| session_is_newer(&session, current))
-            .unwrap_or(true);
-        if replace {
-            latest_by_agent.insert(agent_key, session);
         }
     }
 
-    let mut sessions = latest_by_agent
-        .into_iter()
-        .map(|(agent_key, latest_session)| {
-            if agent_session_resume_id(&latest_session).is_some() {
-                latest_session
-            } else {
-                latest_resumable_by_agent
-                    .get(&agent_key)
-                    .cloned()
-                    .unwrap_or(latest_session)
-            }
-        })
-        .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.created_at.cmp(&left.created_at))
-    });
+    let mut sessions = resumable_sessions;
+    sessions.extend(
+        latest_metadata_only_by_agent
+            .into_iter()
+            .filter(|(agent_key, _)| !agents_with_resumable.contains(agent_key))
+            .map(|(_, session)| session),
+    );
+    sessions.sort_by(|left, right| compare_session_recency(right, left));
 
     sessions
         .into_iter()
@@ -106,8 +92,15 @@ pub(super) fn collect_quick_start_entries_from_sessions(
 }
 
 fn session_is_newer(candidate: &gwt_agent::Session, current: &gwt_agent::Session) -> bool {
-    candidate.updated_at > current.updated_at
-        || (candidate.updated_at == current.updated_at && candidate.created_at > current.created_at)
+    compare_session_recency(candidate, current) == Ordering::Greater
+}
+
+fn compare_session_recency(left: &gwt_agent::Session, right: &gwt_agent::Session) -> Ordering {
+    left.last_activity_at
+        .cmp(&right.last_activity_at)
+        .then_with(|| left.updated_at.cmp(&right.updated_at))
+        .then_with(|| left.created_at.cmp(&right.created_at))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn agent_session_resume_id(session: &gwt_agent::Session) -> Option<String> {
@@ -215,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn load_quick_start_entries_prefers_latest_session_per_agent() {
+    fn load_quick_start_entries_orders_resumable_sessions_latest_first() {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
         std::fs::create_dir_all(&worktree).expect("repo dir");
@@ -237,10 +230,48 @@ mod tests {
         );
 
         let entries = load_quick_start_entries(&worktree, dir.path(), "feature/gui");
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].agent_id, "codex");
         assert_eq!(entries[0].resume_session_id.as_deref(), Some("newer"));
         assert_eq!(entries[0].docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn load_quick_start_entries_keeps_multiple_resumable_sessions_latest_first() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            "older-resume",
+        );
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            "newer-resume",
+        );
+
+        let entries = load_quick_start_entries(&worktree, dir.path(), "feature/gui");
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "Launch Agent must expose each resumable session instead of collapsing by agent"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.resume_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("newer-resume"), Some("older-resume")]
+        );
     }
 
     #[test]
