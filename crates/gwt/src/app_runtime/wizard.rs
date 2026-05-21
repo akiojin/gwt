@@ -168,20 +168,16 @@ impl AppRuntime {
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let worktree_path = None;
         let quick_start_root = project_root.to_path_buf();
-        // SPEC-2359 US-44 (Issue #2757): when this wizard is opened by a
-        // Workspace Resume action, pre-populate Quick Start entries from
-        // prior sessions on this branch so the user can immediately re-launch
-        // the most recent Claude Code / Codex session via the Quick Start
-        // panel (which carries `resume_session_id` and triggers
-        // `--resume <uuid>` at launch time). Other entry points keep the
-        // deferred path (populated during runtime hydration) so Add Agent /
-        // Branches launch flows stay fast on open.
-        let quick_start_entries = if workspace_resume_context.is_some() {
-            self.launch_wizard_cache
-                .quick_start_entries(&quick_start_root, &normalized_branch_name)
-        } else {
-            Vec::new()
-        };
+        // SPEC-2014 US-27: Branches > Launch Agent must expose all
+        // resumable sessions in Quick Start so users can choose a specific
+        // prior conversation. The cache is already in memory, so this stays
+        // off the GUI hot path's filesystem scan.
+        let mut quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&quick_start_root, &normalized_branch_name);
+        if workspace_resume_context.is_none() {
+            quick_start_entries.retain(|entry| entry.resume_session_id.is_some());
+        }
         let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
@@ -604,6 +600,90 @@ impl AppRuntime {
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
             Ok(events) => events,
             Err(error) => reply_error(error),
+        }
+    }
+
+    pub(crate) fn resume_branch_latest_agent_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        branch_name: &str,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let branch_error = |message: String| {
+            vec![OutboundEvent::reply(
+                client_id.to_string(),
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message,
+                },
+            )]
+        };
+
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return branch_error("Window not found".to_string());
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return branch_error("Project tab not found".to_string());
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return branch_error("Window not found".to_string());
+        };
+        if window.preset != WindowPreset::Branches {
+            return branch_error("Window is not a branches list".to_string());
+        }
+        if tab.kind != gwt::ProjectKind::Git {
+            return branch_error("Resume requires a Git project".to_string());
+        }
+        if tab.migration_pending {
+            return branch_error(
+                "Complete the project migration before resuming an agent".to_string(),
+            );
+        }
+
+        let tab_id = address.tab_id.clone();
+        let project_root = tab.project_root.clone();
+        let normalized_branch_name = normalize_branch_name(branch_name);
+        let Some(session) =
+            self.latest_resumable_branch_session(&project_root, &normalized_branch_name)
+        else {
+            return branch_error(format!(
+                "No resumable session found for {normalized_branch_name}"
+            ));
+        };
+
+        if let Some(window_id) = self
+            .active_agent_sessions
+            .iter()
+            .find(|(_, active)| active.session_id == session.id)
+            .map(|(window_id, _)| window_id.clone())
+        {
+            if !self.window_lookup.contains_key(&window_id) {
+                return branch_error(format!("Agent window not found for session {}", session.id));
+            }
+            let mut events = self.restore_window_events(&window_id);
+            events.extend(self.focus_window_events(&window_id, Some(bounds)));
+            if events.is_empty() {
+                return vec![self.workspace_state_broadcast()];
+            }
+            return events;
+        }
+
+        let config = super::launch_config_from_persisted_session(&session);
+        if config.session_mode != gwt_agent::SessionMode::Resume {
+            return branch_error(format!(
+                "No resumable session found for {normalized_branch_name}"
+            ));
+        }
+        let workspace_resume_context =
+            gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
+                .ok()
+                .flatten()
+                .map(|projection| workspace_resume_context_from_projection(&projection));
+
+        match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
+            Ok(events) => events,
+            Err(error) => branch_error(error),
         }
     }
 

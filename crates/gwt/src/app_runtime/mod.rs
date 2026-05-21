@@ -626,6 +626,11 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::ResumeWorkspaceAgent { session_id, .. } => {
             FrontendUserActionLog::new("resume_workspace_agent", "workspace").target(session_id)
         }
+        FrontendEvent::ResumeBranchLatestAgent {
+            id, branch_name, ..
+        } => FrontendUserActionLog::new("resume_branch_latest_agent", "launch")
+            .window(id)
+            .target(branch_name),
         FrontendEvent::OpenLaunchWizard {
             id,
             branch_name,
@@ -1043,6 +1048,21 @@ impl LaunchWizardMemoryCache {
             branch_name,
             &self.sessions,
         )
+    }
+
+    fn latest_resumable_branch_session(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Option<gwt_agent::Session> {
+        let entry = self
+            .quick_start_entries(repo_path, branch_name)
+            .into_iter()
+            .find(|entry| entry.resume_session_id.is_some())?;
+        self.sessions
+            .iter()
+            .find(|session| session.id == entry.session_id)
+            .cloned()
     }
 
     fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
@@ -3125,6 +3145,11 @@ impl AppRuntime {
             FrontendEvent::ResumeWorkspaceAgent { session_id, bounds } => {
                 self.resume_workspace_agent_events(&client_id, session_id, bounds)
             }
+            FrontendEvent::ResumeBranchLatestAgent {
+                id,
+                branch_name,
+                bounds,
+            } => self.resume_branch_latest_agent_events(&client_id, &id, &branch_name, bounds),
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
@@ -5788,6 +5813,16 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
 }
 
 impl AppRuntime {
+    fn latest_resumable_branch_session(
+        &self,
+        project_root: &Path,
+        branch_name: &str,
+    ) -> Option<gwt_agent::Session> {
+        let normalized_branch_name = normalize_branch_name(branch_name);
+        self.launch_wizard_cache
+            .latest_resumable_branch_session(project_root, &normalized_branch_name)
+    }
+
     pub(crate) fn live_sessions_for_branch(
         &self,
         tab_id: &str,
@@ -7619,6 +7654,7 @@ mod tests {
     use tempfile::tempdir;
 
     use base64::Engine;
+    use chrono::{TimeZone, Utc};
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
@@ -11004,6 +11040,140 @@ exit 1
             &event.event,
             BackendEvent::WorkspaceResumeAgentError { session_id, message }
                 if session_id == "missing-session" && !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        let mut older =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        older.id = "session-older".to_string();
+        older.agent_session_id = Some("native-older".to_string());
+        older.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap();
+        older.updated_at = older.last_activity_at;
+        older.created_at = older.last_activity_at;
+        older.save(&sessions_dir).expect("save older session");
+
+        let mut newer =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        newer.id = "session-newer".to_string();
+        newer.agent_session_id = Some("native-newer".to_string());
+        newer.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap();
+        newer.updated_at = newer.last_activity_at;
+        newer.created_at = newer.last_activity_at;
+        newer.save(&sessions_dir).expect("save newer session");
+
+        let mut metadata_only =
+            gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+        metadata_only.id = "session-metadata-only".to_string();
+        metadata_only.agent_session_id = None;
+        metadata_only.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap();
+        metadata_only.updated_at = metadata_only.last_activity_at;
+        metadata_only.created_at = metadata_only.last_activity_at;
+        metadata_only
+            .save(&sessions_dir)
+            .expect("save metadata-only session");
+
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        let selected = runtime
+            .latest_resumable_branch_session(&repo, "work/manual-resume")
+            .expect("latest resumable session");
+
+        assert_eq!(selected.id, "session-newer");
+        assert_eq!(selected.agent_session_id.as_deref(), Some("native-newer"));
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_shows_multiple_resume_candidates_latest_first() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        for (session_id, native_session_id, hour) in [
+            ("session-older", "native-older", 9),
+            ("session-newer", "native-newer", 10),
+        ] {
+            let mut session =
+                gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = Some(native_session_id.to_string());
+            session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+            session.updated_at = session.last_activity_at;
+            session.created_at = session.last_activity_at;
+            session.save(&sessions_dir).expect("save session");
+        }
+
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "branches-1",
+            repo,
+            WindowPreset::Branches,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "branches-1");
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: window_id,
+                branch_name: "work/manual-resume".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard")
+            .wizard
+            .view();
+        assert_eq!(
+            view.quick_start_entries
+                .iter()
+                .map(|entry| entry.resume_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("native-newer"), Some("native-older")]
+        );
+    }
+
+    #[test]
+    fn app_runtime_resume_branch_latest_returns_branch_error_when_no_resumable_session_exists() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "branches-1",
+            repo,
+            WindowPreset::Branches,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "branches-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeBranchLatestAgent {
+                id: window_id.clone(),
+                branch_name: "work/manual-resume".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::BranchError { id, message })
+                if id == &window_id && message.contains("No resumable session")
         ));
     }
 

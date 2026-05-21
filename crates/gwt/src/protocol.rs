@@ -376,6 +376,11 @@ pub enum FrontendEvent {
         session_id: String,
         bounds: WindowGeometry,
     },
+    ResumeBranchLatestAgent {
+        id: String,
+        branch_name: String,
+        bounds: WindowGeometry,
+    },
     OpenLaunchWizard {
         id: String,
         branch_name: String,
