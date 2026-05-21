@@ -343,6 +343,11 @@ control in the Project Bar lets you choose `auto`, `dark`, or `light`. The
 choice is persisted in browser storage and survives restarts. xterm terminal
 content stays on the Dark Operator palette with larger developer-readable font
 metrics, while the terminal window chrome follows the overall theme.
+Quiet Work UI surfaces such as Workspace Overview and Release Notes avoid
+status-board layouts, bespoke fixed overlays, and display-font body copy:
+Workspace Overview uses a List + Detail work surface, and Release Notes uses the
+shared app-global window chrome. These guardrails are covered by SPEC-2356 and
+the frontend UI contract tests.
 `prefers-reduced-motion: reduce`
 disables the Living Telemetry pulse rim, status strip ticking, and Mission
 Briefing intro reveal so the UI stays usable in motion-sensitive environments.

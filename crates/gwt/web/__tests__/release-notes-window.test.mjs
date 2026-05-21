@@ -7,7 +7,7 @@ import { createReleaseNotesWindow } from "../release-notes-window.js";
 
 function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
   const { document } = parseHTML(
-    "<!doctype html><html><body></body></html>",
+    '<!doctype html><html><body><button id="trigger">Version</button></body></html>',
   );
   const sent = [];
   const send = (msg) => sent.push(msg);
@@ -85,6 +85,20 @@ test("handlePayload mounts the window and renders sidebar entries", () => {
   assert.equal(sidebarItems.length, entries.length);
   assert.equal(sidebarItems[0].dataset.version, "9.38.0");
   assert.equal(sidebarItems[1].dataset.version, "9.37.0");
+});
+
+test("handlePayload mounts an app-global floating window chrome", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({ id: "rn-test-1", entries, focus_version: null });
+
+  const root = document.getElementById("release-notes-window");
+  assert.ok(root.classList.contains("op-global-window"));
+  assert.ok(root.classList.contains("release-notes-window"));
+  assert.equal(root.getAttribute("data-surface"), "release-notes");
+  assert.ok(root.querySelector(".op-global-window__titlebar"));
+  assert.ok(root.querySelector(".op-global-window__title"));
+  assert.ok(root.querySelector(".op-global-window__actions"));
+  assert.ok(root.querySelector(".op-global-window__body"));
 });
 
 test("handlePayload defaults selection to the first entry when no focus", () => {
@@ -168,6 +182,42 @@ test("close() removes the window from the DOM and isOpen reflects that", () => {
   controller.close();
   assert.equal(controller.isOpen(), false);
   assert.equal(document.getElementById("release-notes-window"), null);
+});
+
+test("Escape closes Release Notes and restores focus to the trigger", () => {
+  const { document, controller, entries } = makeFixture();
+  const trigger = document.getElementById("trigger");
+  let activeElement = trigger;
+  Object.defineProperty(document, "activeElement", {
+    configurable: true,
+    get: () => activeElement,
+  });
+  trigger.focus = () => {
+    activeElement = trigger;
+  };
+  trigger.focus();
+  controller.open("9.38.0");
+  controller.handlePayload({ id: "rn-test-1", entries, focus_version: null });
+  assert.equal(controller.isOpen(), true);
+
+  const event = new document.defaultView.Event("keydown", { bubbles: true });
+  Object.defineProperty(event, "key", { value: "Escape" });
+  document.dispatchEvent(event);
+
+  assert.equal(controller.isOpen(), false);
+  assert.equal(document.activeElement, trigger);
+});
+
+test("Release Notes open request is app-global and does not require project state", () => {
+  const { controller, sent } = makeFixture();
+  controller.open(null);
+
+  assert.deepEqual(Object.keys(sent[0]).sort(), [
+    "focus_version",
+    "id",
+    "kind",
+  ]);
+  assert.equal(sent[0].kind, "open_release_notes");
 });
 
 test("handleError shows the empty state with the CHANGELOG URL", () => {

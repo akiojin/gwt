@@ -3,160 +3,229 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
 
-test("Workspace journal cards derive titles from each entry instead of the current Workspace title", () => {
+test("Workspace Overview renders a quiet List + Detail shell instead of status Kanban columns", () => {
   const fixture = createFixture();
-  const projection = {
-    id: "current-workspace",
-    title: "Workspace Kanban Surface Extraction",
-    status_category: "active",
-    status_text: "Current work is active",
-    summary: "Current work summary",
-    owner: "SPEC-2359",
-    journal_entries: [
-      {
-        id: "journal-one",
-        status_category: "done",
-        summary: "Scroll fix details remain in the summary body",
-        agent_title_summary: "Kanban scroll PR",
-        updated_at: "2026-05-08T15:14:43Z",
-      },
-      {
-        id: "journal-two",
-        status_category: "active",
-        summary: "Update CTA dismiss PR",
-        updated_at: "2026-05-08T14:07:07Z",
-      },
-      {
-        id: "journal-focus-only",
-        status_category: "idle",
-        status_text: "Workspace update",
-        next_action: "Continue",
-        agent_current_focus: "Review thread title fallback",
-        updated_at: "2026-05-08T13:00:00Z",
-      },
-    ],
-    agents: [],
-  };
+  const surface = createSurface(fixture, sampleProjection());
 
-  const surface = createSurface(fixture, projection);
   surface.mount(fixture.body, fixture.windowData, {
     focusWindowLocally() {},
     sendFocus() {},
   });
 
-  const titles = Array.from(
-    fixture.document.querySelectorAll(".workspace-kanban-card .kanban-card-title"),
+  assert.ok(fixture.body.querySelector(".workspace-overview-root"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-list-pane"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
+  assert.equal(fixture.body.querySelector(".workspace-kanban-board"), null);
+  assert.equal(fixture.body.querySelector("[data-workspace-column]"), null);
+
+  const rows = Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  );
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].dataset.workspaceId, "workspace-current");
+  assert.equal(rows[0].getAttribute("aria-selected"), "true");
+  assert.match(rows[0].textContent, /Release Notes cleanup/);
+  assert.match(rows[0].textContent, /SPEC-2356/);
+  assert.match(rows[0].textContent, /PR #2847/);
+});
+
+test("Workspace Overview keeps unassigned agents in an explicit queue outside Workspace rows", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const queue = fixture.body.querySelector(".workspace-agent-queue");
+  assert.ok(queue, "unassigned agents should have a dedicated queue");
+  assert.match(queue.textContent, /Unassigned agents/);
+  assert.match(queue.textContent, /No Workspace selected/);
+  assert.match(queue.textContent, /Codex/);
+  assert.equal(
+    queue.querySelectorAll(".workspace-overview-agent-row").length,
+    1,
+  );
+});
+
+test("Workspace detail renders structured body sections without preformatted dumps", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  assert.ok(detail);
+  assert.equal(detail.querySelector("pre"), null);
+
+  const sectionTitles = Array.from(
+    detail.querySelectorAll(".workspace-detail-section-title"),
     (node) => node.textContent,
   );
+  assert.deepEqual(sectionTitles, [
+    "Summary",
+    "Agents",
+    "Lifecycle",
+    "Workspace Context",
+    "Coordination",
+  ]);
 
-  assert.equal(
-    titles.filter((title) => title === "Workspace Kanban Surface Extraction").length,
-    1,
-    "only the current card should use the current Workspace title",
-  );
-  assert.ok(
-    titles.includes("Kanban scroll PR"),
-    "journal cards should prefer agent_title_summary as their visible title",
-  );
-  assert.ok(
-    titles.includes("Update CTA dismiss PR"),
-    "journal cards without title_summary should derive a visible title from their own summary",
-  );
-  assert.ok(
-    titles.includes("Review thread title fallback"),
-    "focus-only journal cards should prefer agent_current_focus before generic status text",
-  );
+  const text = detail.textContent.replace(/\s+/g, " ").trim();
+  assert.match(text, /Quiet Work UI redesign/);
+  assert.match(text, /Mona Sans body copy/);
+  assert.match(text, /work\/20260521-0234/);
+  assert.match(text, /repo\/work\/20260521-0234/);
+  assert.match(text, /board-claim-1/);
 });
 
-test("Workspace Kanban keeps journal history out of the Active column", () => {
+test("Workspace list selection updates the detail pane", () => {
   const fixture = createFixture();
-  const projection = {
-    id: "current-work",
-    title: "Current work",
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const second = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="workspace-done"]',
+  );
+  second.click();
+
+  const selected = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="workspace-done"]',
+  );
+  assert.equal(selected.getAttribute("aria-selected"), "true");
+  const detailText = fixture.body
+    .querySelector(".workspace-overview-detail-pane")
+    .textContent.replace(/\s+/g, " ");
+  assert.match(detailText, /Completed Workspace/);
+  assert.match(detailText, /Already merged/);
+});
+
+test("Workspace resume action asks backend for resumable agents", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, sampleProjection(), {
+    send: (message) => sent.push(message),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const resume = fixture.body.querySelector("[data-action='resume-workspace']");
+  assert.ok(resume, "selected workspace should expose a resume action");
+  resume.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "list_resumable_agents");
+  assert.equal(sent[0].workspace_id, "workspace-current");
+});
+
+test("Workspace refresh action rerenders locally without inventing a protocol event", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, sampleProjection(), {
+    send: (message) => sent.push(message),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const refresh = fixture.body.querySelector("[data-action='refresh-workspace-overview']");
+  assert.ok(refresh);
+  refresh.click();
+  assert.deepEqual(sent, []);
+  assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
+});
+
+function sampleProjection() {
+  return {
+    id: "workspace-current",
+    title: "Quiet Work UI redesign",
     status_category: "active",
-    status_text: "Current work is running",
-    journal_entries: [
+    status_text: "Current work is active",
+    summary: "Mona Sans body copy should carry the work summary.",
+    owner: "SPEC-2356",
+    branch: "work/20260521-0234",
+    worktree_path: "/repo/work/20260521-0234",
+    pr_number: 2847,
+    pr_url: "https://github.com/akiojin/gwt/pull/2847",
+    pr_state: "open",
+    board_refs: ["board-claim-1"],
+    lifecycle_stage: "active",
+    agents: [
       {
-        id: "statusless",
-        status_category: null,
-        agent_title_summary: "Statusless journal",
-        summary: "A historical entry without an explicit status.",
-      },
-      {
-        id: "old-active",
+        session_id: "agent-current",
+        display_name: "Codex",
         status_category: "active",
-        agent_title_summary: "Old active journal",
-        summary: "This entry was active when written, but it is not current work.",
-      },
-      {
-        id: "old-blocked",
-        status_category: "blocked",
-        agent_title_summary: "Old blocked journal",
-        summary: "This blocked state is historical.",
-      },
-      {
-        id: "done",
-        status_category: "done",
-        agent_title_summary: "Completed journal",
-        summary: "This entry is complete.",
+        title_summary: "Workspace list detail",
+        current_focus: "Implement list detail shell",
       },
     ],
-  };
-
-  const surface = createSurface(fixture, projection);
-  surface.mount(fixture.body, fixture.windowData, {
-    focusWindowLocally() {},
-    sendFocus() {},
-  });
-
-  const activeTexts = cardTexts(column(fixture.body, "active"));
-  const inactiveTexts = cardTexts(column(fixture.body, "inactive"));
-  const completedTexts = cardTexts(column(fixture.body, "completed"));
-
-  assert.equal(activeTexts.length, 1);
-  assert.match(activeTexts[0], /Current work/);
-  assert.equal(inactiveTexts.length, 3);
-  assert.match(inactiveTexts.join("\n"), /Statusless journal/);
-  assert.match(inactiveTexts.join("\n"), /Old active journal/);
-  assert.match(inactiveTexts.join("\n"), /Old blocked journal/);
-  assert.equal(completedTexts.length, 1);
-  assert.match(completedTexts[0], /Completed journal/);
-});
-
-test("Workspace Kanban labels the non-current history column as Inactive", () => {
-  const fixture = createFixture();
-  const surface = createSurface(fixture, {
-    id: "current-work",
-    title: "Current work",
-    status_category: "idle",
-    journal_entries: [],
-  });
-
-  surface.mount(fixture.body, fixture.windowData, {
-    focusWindowLocally() {},
-    sendFocus() {},
-  });
-
-  const inactiveColumn = column(fixture.body, "inactive");
-  assert.match(
-    inactiveColumn.getAttribute("aria-label"),
-    /Inactive Workspace column/,
-  );
-  assert.equal(
-    inactiveColumn.querySelector(".workspace-column-name").textContent,
-    "Inactive",
-  );
-});
-
-test("Workspace Kanban renders Unassigned agents outside Workspace status columns", () => {
-  const fixture = createFixture();
-  const projection = {
-    id: "project-workspace",
-    title: "Project workspace",
-    status_category: "idle",
-    status_text: "No active Workspace selected",
-    journal_entries: [],
-    workspaces: [],
+    events: [
+      {
+        id: "evt-start",
+        kind: "start",
+        title: "Start Workspace",
+        summary: "Started Quiet Work UI implementation.",
+        updated_at: "2026-05-21T03:20:00Z",
+        board_entry_id: "board-claim-1",
+      },
+    ],
+    workspaces: [
+      {
+        id: "workspace-current",
+        title: "Release Notes cleanup",
+        intent: "Quiet Work UI redesign",
+        summary: "Mona Sans body copy should carry the work summary.",
+        owner: "SPEC-2356",
+        status_category: "active",
+        lifecycle_stage: "active",
+        branch: "work/20260521-0234",
+        worktree_path: "/repo/work/20260521-0234",
+        pr_number: 2847,
+        pr_url: "https://github.com/akiojin/gwt/pull/2847",
+        pr_state: "open",
+        board_refs: ["board-claim-1"],
+        agents: [
+          {
+            session_id: "agent-current",
+            display_name: "Codex",
+            status_category: "active",
+            title_summary: "Workspace list detail",
+            current_focus: "Implement list detail shell",
+          },
+        ],
+        events: [
+          {
+            id: "evt-start",
+            kind: "start",
+            title: "Start Workspace",
+            summary: "Started Quiet Work UI implementation.",
+            updated_at: "2026-05-21T03:20:00Z",
+            board_entry_id: "board-claim-1",
+          },
+        ],
+      },
+      {
+        id: "workspace-done",
+        title: "Completed Workspace",
+        summary: "Already merged.",
+        owner: "Issue #2780",
+        status_category: "done",
+        lifecycle_stage: "done",
+        agents: [],
+        events: [],
+      },
+    ],
     unassigned_agents: [
       {
         session_id: "session-unassigned",
@@ -167,109 +236,7 @@ test("Workspace Kanban renders Unassigned agents outside Workspace status column
       },
     ],
   };
-
-  const surface = createSurface(fixture, projection);
-  surface.mount(fixture.body, fixture.windowData, {
-    focusWindowLocally() {},
-    sendFocus() {},
-  });
-
-  const unassigned = fixture.body.querySelector("[data-role='unassigned-agents']");
-  assert.ok(unassigned, "Unassigned section should be rendered");
-  assert.match(unassigned.textContent, /Unassigned/);
-  assert.match(unassigned.textContent, /No Workspace selected/);
-  assert.match(unassigned.textContent, /Codex/);
-  assert.equal(cardTexts(column(fixture.body, "active")).length, 0);
-  assert.equal(cardTexts(column(fixture.body, "inactive")).length, 1);
-  assert.doesNotMatch(fixture.body.textContent, /WorkItem/);
-});
-
-test("Workspace Kanban renders Workspace history cards with lifecycle timeline detail", () => {
-  const fixture = createFixture();
-  const projection = {
-    id: "current-workspace",
-    title: "Legacy current Workspace",
-    status_category: "idle",
-    status_text: "Idle",
-    workspaces: [
-      {
-        id: "workspace-history",
-        title: "Workspace history",
-        intent: "Group duplicate work under one Workspace",
-        summary: "One Workspace owns the history.",
-        status_category: "active",
-        owner: "SPEC-2359",
-        agents: [
-          {
-            session_id: "session-other",
-            display_name: "Codex",
-            status_category: "active",
-          },
-        ],
-        execution_containers: [
-          {
-            branch: "work/20260510-2353",
-            worktree_path: "/repo/work/20260510-2353",
-            pr_number: 2638,
-            pr_url: "https://github.com/akiojin/gwt/pull/2638",
-            pr_state: "open",
-          },
-        ],
-        board_refs: ["board-claim-1"],
-        events: [
-          {
-            id: "evt-start",
-            kind: "start",
-            title: "Start Workspace",
-            summary: "Started lifecycle implementation.",
-            updated_at: "2026-05-11T01:00:00Z",
-            agent_session_id: "session-other",
-            board_entry_id: "board-claim-1",
-          },
-          {
-            id: "evt-blocked",
-            kind: "blocked",
-            summary: "Waiting for Board coordination.",
-            updated_at: "2026-05-11T01:10:00Z",
-            agent_session_id: "session-other",
-            board_entry_id: "board-blocked-1",
-          },
-        ],
-      },
-    ],
-    journal_entries: [
-      {
-        id: "legacy-journal",
-        status_category: "active",
-        agent_title_summary: "Legacy duplicate card",
-      },
-    ],
-  };
-
-  const surface = createSurface(fixture, projection);
-  surface.mount(fixture.body, fixture.windowData, {
-    focusWindowLocally() {},
-    sendFocus() {},
-  });
-
-  const cardText = cardTexts(column(fixture.body, "active")).join("\n");
-  assert.match(cardText, /Workspace/);
-  assert.match(cardText, /Workspace history/);
-  assert.doesNotMatch(cardText, /WorkItem/);
-  assert.doesNotMatch(cardText, /Legacy duplicate card/);
-
-  const detailText = fixture.body
-    .querySelector(".workspace-kanban-detail-pane")
-    .textContent.replace(/\s+/g, " ")
-    .trim();
-  assert.match(detailText, /Lifecycle/);
-  assert.match(detailText, /start/);
-  assert.match(detailText, /Started lifecycle implementation/);
-  assert.match(detailText, /board-claim-1/);
-  assert.match(detailText, /blocked/);
-  assert.match(detailText, /Waiting for Board coordination/);
-  assert.match(detailText, /board-blocked-1/);
-});
+}
 
 function createFixture() {
   const { document } = parseHTML(`
@@ -288,7 +255,7 @@ function createFixture() {
   };
 }
 
-function createSurface(fixture, projection) {
+function createSurface(fixture, projection, overrides = {}) {
   const workspace = {
     title: "gwt",
     windows: [fixture.windowData],
@@ -300,7 +267,12 @@ function createSurface(fixture, projection) {
       if (!value) return;
       container.appendChild(createNode(fixture.document, "span", "", value));
     },
-    createWorkspacePrMeta: () => null,
+    createWorkspacePrMeta: (entry) => {
+      if (!entry?.pr_number) return null;
+      const node = createNode(fixture.document, "span", "workspace-pr-meta");
+      node.textContent = `PR #${entry.pr_number}`;
+      return node;
+    },
     createNode: (tag, className, text) =>
       createNode(fixture.document, tag, className, text),
     getActiveWorkProjection: () => projection,
@@ -309,6 +281,7 @@ function createSurface(fixture, projection) {
     windowMap: fixture.windowMap,
     workspaceWindowById: (windowId) =>
       workspace.windows.find((window) => window.id === windowId) || null,
+    ...overrides,
   });
 }
 
@@ -317,15 +290,4 @@ function createNode(document, tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-function column(body, key) {
-  const element = body.querySelector(`[data-workspace-column="${key}"]`);
-  assert.ok(element, `missing Workspace Kanban column: ${key}`);
-  return element;
-}
-
-function cardTexts(columnElement) {
-  return Array.from(columnElement.querySelectorAll(".workspace-kanban-card"))
-    .map((card) => card.textContent.replace(/\s+/g, " ").trim());
 }

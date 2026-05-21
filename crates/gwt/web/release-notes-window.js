@@ -32,6 +32,8 @@ export function createReleaseNotesWindow({
     root: null,
     sidebar: null,
     content: null,
+    focusReturn: null,
+    keydownHandler: null,
     entries: [],
     selectedVersion: null,
     pendingFocusVersion: null,
@@ -134,28 +136,34 @@ export function createReleaseNotesWindow({
       return state.root;
     }
     const root = document.createElement("div");
-    root.className = "release-notes-window";
+    root.className = "op-global-window release-notes-window";
     root.id = "release-notes-window";
+    root.dataset.surface = "release-notes";
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-modal", "false");
     root.setAttribute("aria-label", "Release notes");
+    root.setAttribute("tabindex", "-1");
 
     const header = document.createElement("header");
-    header.className = "release-notes-window-header";
+    header.className = "op-global-window__titlebar release-notes-window-header";
     const title = document.createElement("h1");
+    title.className = "op-global-window__title";
     title.textContent = "Release notes";
     header.appendChild(title);
+    const actions = document.createElement("div");
+    actions.className = "op-global-window__actions";
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
-    closeBtn.className = "release-notes-close";
+    closeBtn.className = "icon-button release-notes-close";
     closeBtn.setAttribute("aria-label", "Close release notes");
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", () => close());
-    header.appendChild(closeBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(actions);
     root.appendChild(header);
 
     const body = document.createElement("div");
-    body.className = "release-notes-body";
+    body.className = "op-global-window__body release-notes-body";
 
     const sidebar = document.createElement("aside");
     sidebar.className = "release-notes-sidebar";
@@ -173,7 +181,19 @@ export function createReleaseNotesWindow({
     state.root = root;
     state.sidebar = sidebar;
     state.content = content;
+    state.keydownHandler = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault?.();
+        close();
+      }
+    };
+    document.addEventListener("keydown", state.keydownHandler);
     document.body.appendChild(root);
+    try {
+      root.focus({ preventScroll: true });
+    } catch {
+      root.focus();
+    }
     return root;
   }
 
@@ -243,6 +263,7 @@ export function createReleaseNotesWindow({
 
   function open(focusVersion = null) {
     state.pendingFocusVersion = focusVersion;
+    state.focusReturn = document.activeElement;
     const id = generateId();
     state.lastRequestId = id;
     send({
@@ -283,12 +304,25 @@ export function createReleaseNotesWindow({
   }
 
   function close() {
+    if (state.keydownHandler) {
+      document.removeEventListener("keydown", state.keydownHandler);
+    }
     if (state.root && state.root.parentElement) {
       state.root.parentElement.removeChild(state.root);
     }
+    const focusReturn = state.focusReturn;
     state.root = null;
     state.sidebar = null;
     state.content = null;
+    state.keydownHandler = null;
+    state.focusReturn = null;
+    if (focusReturn && typeof focusReturn.focus === "function") {
+      try {
+        focusReturn.focus({ preventScroll: true });
+      } catch {
+        focusReturn.focus();
+      }
+    }
   }
 
   function isOpen() {

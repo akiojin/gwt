@@ -1028,7 +1028,7 @@ body {
 .board-root,
 .logs-root,
 .knowledge-root,
-.workspace-kanban-root,
+.workspace-overview-root,
 .mock-root {
   position: absolute;
   inset: 0;
