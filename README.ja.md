@@ -338,6 +338,11 @@ OS の `prefers-color-scheme` に追従しつつ、 Project Bar の **Theme** co
 永続化され、 再起動後も維持されます。 xterm の端末本文は可読性のため
 Dark Operator palette に固定し、開発向けに大きめの font metrics を使います。
 端末 window の chrome は overall theme に追従します。
+Workspace Overview と Release Notes のような Quiet Work UI サーフェスでは、
+status-board レイアウト、個別 fixed overlay、本文への display font 適用を避けます。
+Workspace Overview は List + Detail の作業サーフェス、Release Notes は共通の
+app-global window chrome を使い、このルールは SPEC-2356 と frontend UI contract
+test で検証されます。
 `prefers-reduced-motion: reduce` を有効にすると Living Telemetry
 の pulse rim・Status Strip の ticking・Mission Briefing intro が静止表現に
 縮退します。 `forced-colors: active` (Windows High Contrast / macOS Increase

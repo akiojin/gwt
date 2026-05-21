@@ -1585,11 +1585,7 @@ kbd.op-kbd {
   border-color: var(--color-accent, var(--color-text-muted));
 }
 
-/* SPEC-2780 — Release Notes floating window. Without explicit fixed
-   positioning the element flows in document order and ends up below the
-   viewport when appended to document.body (observed live: y=741, mounted
-   but invisible to the user). */
-.release-notes-window {
+.op-global-window {
   position: fixed;
   top: 50%;
   left: 50%;
@@ -1599,44 +1595,41 @@ kbd.op-kbd {
   flex-direction: column;
   width: min(880px, 92vw);
   height: min(640px, 86vh);
-  background: var(--color-surface, #1c1f24);
-  color: var(--color-text, #e8eaed);
-  border: 1px solid var(--color-border, #3a3f47);
-  border-radius: 8px;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-window);
   overflow: hidden;
 }
-.release-notes-window-header {
+
+.release-notes-window {
+  font-family: var(--font-body);
+}
+
+.op-global-window__titlebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border, #3a3f47);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
   flex: 0 0 auto;
 }
-.release-notes-window-header h1 {
+
+.op-global-window__title {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--color-text-muted, #aab0b8);
+  color: var(--color-text-strong);
 }
-.release-notes-close {
-  background: transparent;
-  border: none;
-  color: var(--color-text-muted, #aab0b8);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
+
+.op-global-window__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-.release-notes-close:hover,
-.release-notes-close:focus-visible {
-  background: var(--color-surface-elevated, #2a2e35);
-  color: var(--color-text, #e8eaed);
-}
+
 .release-notes-body {
   display: flex;
   flex: 1 1 auto;
@@ -1644,7 +1637,7 @@ kbd.op-kbd {
 }
 .release-notes-sidebar {
   flex: 0 0 200px;
-  border-right: 1px solid var(--color-border, #3a3f47);
+  border-right: 1px solid var(--color-border);
   overflow-y: auto;
   padding: 8px 0;
   display: flex;
@@ -1656,7 +1649,7 @@ kbd.op-kbd {
   background: transparent;
   border: none;
   border-left: 3px solid transparent;
-  color: var(--color-text, #e8eaed);
+  color: var(--color-text);
   cursor: pointer;
   text-align: left;
   padding: 6px 14px;
@@ -1667,18 +1660,18 @@ kbd.op-kbd {
 }
 .release-notes-sidebar-item:hover,
 .release-notes-sidebar-item:focus-visible {
-  background: var(--color-surface-elevated, #2a2e35);
+  background: var(--color-surface-elevated);
 }
 .release-notes-sidebar-item.is-selected {
-  background: var(--color-surface-elevated, #2a2e35);
-  border-left-color: var(--color-accent, #7aa2f7);
+  background: var(--color-surface-elevated);
+  border-left-color: var(--color-accent);
 }
 .release-notes-sidebar-version {
   font-weight: 600;
 }
 .release-notes-sidebar-date {
   font-size: 11px;
-  color: var(--color-text-muted, #aab0b8);
+  color: var(--color-text-muted);
 }
 .release-notes-content {
   flex: 1 1 auto;
@@ -1697,15 +1690,13 @@ kbd.op-kbd {
   margin-bottom: 12px;
 }
 .release-notes-date {
-  color: var(--color-text-muted, #aab0b8);
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 .release-notes-content h3 {
   margin: 14px 0 6px 0;
   font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted, #aab0b8);
+  color: var(--color-text-muted);
 }
 .release-notes-content ul {
   margin: 0;
@@ -1717,7 +1708,237 @@ kbd.op-kbd {
 }
 .release-notes-empty {
   padding: 24px;
-  color: var(--color-text-muted, #aab0b8);
+  color: var(--color-text-muted);
+}
+
+.workspace-overview-root {
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.workspace-overview-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  border-top: 1px solid var(--color-border);
+}
+
+.workspace-overview-list-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--color-border);
+  padding: 12px;
+  background: color-mix(in oklab, var(--color-surface) 92%, var(--color-canvas));
+}
+
+.workspace-overview-detail-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 24px;
+  font-family: var(--font-body);
+  background: var(--color-surface);
+}
+
+.workspace-overview-section-label {
+  margin: 0 0 8px;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.workspace-overview-list,
+.workspace-overview-agent-list,
+.workspace-detail-agent-list,
+.workspace-detail-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-overview-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-overview-row[aria-selected="true"] {
+  border-color: var(--color-focus-ring);
+  background: var(--color-surface-elevated);
+}
+
+.workspace-overview-status {
+  align-self: start;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-state-active);
+}
+
+.workspace-overview-row-copy,
+.workspace-overview-row-title,
+.workspace-overview-row-meta {
+  min-width: 0;
+}
+
+.workspace-overview-row-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-overview-row-title {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-overview-row-meta,
+.workspace-overview-agent-meta,
+.workspace-detail-agent-meta,
+.workspace-detail-event-meta,
+.workspace-detail-subtitle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.workspace-agent-queue {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.workspace-overview-agent-row,
+.workspace-detail-agent,
+.workspace-detail-event {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+}
+
+.workspace-overview-agent-name,
+.workspace-detail-agent-name,
+.workspace-detail-event-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.workspace-detail-heading {
+  min-width: 0;
+}
+
+.workspace-detail-title {
+  margin: 0 0 6px;
+  color: var(--color-text-strong);
+  font-size: var(--type-lg);
+  line-height: 1.2;
+}
+
+.workspace-detail-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.workspace-detail-section {
+  padding: 14px 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.workspace-detail-section-title {
+  margin: 0 0 8px;
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 700;
+}
+
+.workspace-detail-section-body {
+  min-width: 0;
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  line-height: 1.55;
+}
+
+.workspace-detail-text {
+  margin: 0 0 8px;
+}
+
+.workspace-detail-text.is-warning {
+  color: var(--color-state-blocked);
+}
+
+.workspace-detail-meta-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.workspace-detail-meta-grid dt {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.workspace-detail-meta-grid dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.workspace-board-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-board-ref {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.workspace-overview-empty {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
 }
 
 :root[data-theme] .hint {
@@ -2589,77 +2810,6 @@ kbd.op-kbd {
 
 .kanban-board[data-hide-done="true"] .kanban-column[data-phase="done"] {
   display: none;
-}
-
-.workspace-kanban-board {
-  grid-template-columns: repeat(3, minmax(240px, 1fr));
-}
-
-.workspace-kanban-detail-pane {
-  min-height: 0;
-  overflow: hidden;
-}
-
-.workspace-unassigned {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  gap: var(--space-2);
-  margin: var(--space-3) var(--space-3) 0;
-  padding: var(--space-3);
-  max-height: min(28vh, 260px);
-  overflow-y: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-}
-
-.workspace-unassigned[hidden] {
-  display: none;
-}
-
-.workspace-unassigned-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--type-xs);
-}
-
-.workspace-unassigned-title {
-  color: var(--color-text-strong);
-  font-size: var(--type-sm);
-  font-weight: 600;
-}
-
-.workspace-unassigned-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-2);
-}
-
-.workspace-unassigned-agent {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-elevated);
-}
-
-.workspace-unassigned-agent-name {
-  color: var(--color-text-strong);
-  font-size: var(--type-sm);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.workspace-unassigned-agent-state {
-  color: var(--color-text-muted);
-  font-size: var(--type-xs);
 }
 
 .kanban-column {
@@ -4056,19 +4206,14 @@ kbd.op-kbd {
   border-radius: var(--radius-md);
 }
 
+/* SPEC-2809 — "$ <command>" banner and "→ exit=..." footer lines.
+   Rendered as plain terminal-style monospace text in a muted color so
+   they read like the prompt / exit hint a user would see in iTerm
+   while still distinguishing them from real stdout/stderr. No
+   uppercase, no bold, no block margins. */
 .console-window__invocation-header {
   display: block;
   color: var(--color-text-muted);
-  margin-top: 10px;
-  margin-bottom: 4px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-mono);
-  font-size: var(--type-2xs, 11px);
-}
-
-.console-window__invocation-header:first-child {
-  margin-top: 0;
 }
 
 .console-window__line {

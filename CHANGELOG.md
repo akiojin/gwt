@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.42.2] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Recover Branches refresh after reconnect
+
+## [9.42.1] - 2026-05-21
+
+### Bug Fixes
+
+- **gui:** Keep project actions visible with many tabs
+- **workspace:** Scope auto resume to restored tabs
+- **test:** Pin visual runner playwright resolution
+- **workspace:** Restore codex sessions by project scope
+- Gwt起動時のCPUと電力負荷を抑制する
+- Auto-resumeの件数上限を外す
+- Worktree ResumeをLaunch Agentから分離する
+
 ## [9.42.0] - 2026-05-21
 
 ### Bug Fixes

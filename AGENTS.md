@@ -173,6 +173,17 @@
 - 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
 - **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（GitHub Issue-backed SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / AGENTS.md / CLAUDE.md / README.md 更新のみ
 
+### PR 作成ルール（必須）
+
+> 🚨 **エージェントは、ユーザーの視覚検証結果が `confirmed` になる前に PR を `create` / `update` してはならない。**
+
+- `gwt-verify --mode pre-pr` の **`User Verification Result`** が `confirmed` または `n/a`（UI 影響が無い変更で視覚検証不要な場合に限る）のいずれかになるまで PR 作成・更新を行わない。`pending` / 未確認のまま `gwtd pr create` / `gwtd pr edit` を呼ばない。
+- ユーザーが視覚検証できない状態（例: Open Project picker のクリックがブロックされている、splash から進めない、サーバーが起動しない 等）に遭遇した場合、エージェントの独断で `skipped(<reason>)` に倒さない。**まずブロッカーの根本原因を特定して解消し、ユーザーが実際に視覚確認できる状態を再現してから verification を依頼する**。
+- `skipped(<reason>)` を許容するのは、ユーザーが `AskUserQuestion` 等で明示的に "Skip — proceed to PR" を選択した場合のみ。エージェントが「自動テスト全 PASS だから skip 妥当」と判断して skip するのは禁止。
+- 「進めて」「OK」等の承認指示は、**既に verification 結果を持つ作業**を完了まで進める指示であり、verification 自体の skip 承認ではない。verification 動線がブロックされている時に「進めて」と言われた場合は、ブロッカー解消の作業を進める指示として解釈する。
+- 万が一誤って PR を作成してしまった場合、即座に PR タイトルへ `[DO NOT MERGE — user verification pending]` を付与し、ブロック comment を投稿してマージを物理的に阻止する。verification が `confirmed` になってからタイトルを戻す。
+- 過去事例: PR #2857（SPEC-2809）で `User Verification Result: skipped(reason: develop 側 picker regression)` をエージェントが独断で倒して PR を作成したのは skill 違反だった。原因は picker click-blocking という visualization blocker をエージェントが解消せずに skip に倒したこと。今後は同じ skip 判断を繰り返さない。
+
 ### コミットメッセージポリシー
 
 > 🚨 **コミットログはリリースワークフローがバージョン判定に使用する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**

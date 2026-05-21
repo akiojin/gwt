@@ -261,6 +261,12 @@ impl RunnerSpawner for PythonRunnerSpawner {
             respect_ttl = respect_ttl,
             "process start",
         );
+        crate::process::push_command_banner_to_hub(
+            crate::process_console::ProcessKind::IndexRunner,
+            spawn_id,
+            &label,
+            None,
+        );
 
         let mut cmd = crate::process::hidden_command(&self.python_executable);
         cmd.arg(&self.runner_script)
