@@ -19,6 +19,7 @@ use crate::{
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
+const CODEX_PLACEHOLDER_SESSION_ID: &str = "agent-session";
 
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
@@ -252,12 +253,27 @@ impl Session {
         matches!(
             self.status,
             AgentStatus::Running | AgentStatus::WaitingInput | AgentStatus::Interrupted
-        ) && self.worktree_path.exists()
-            && self
-                .agent_session_id
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
+        ) && self.has_lifecycle_recovery_evidence()
+            && self.worktree_path.exists()
+            && self.has_exact_resume_session_id()
+    }
+
+    fn has_lifecycle_recovery_evidence(&self) -> bool {
+        self.last_hook_event_at.is_some() || self.last_completed_stop_at.is_some()
+    }
+
+    pub fn exact_resume_session_id(&self) -> Option<&str> {
+        self.agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                !(matches!(self.agent_id, AgentId::Codex) && *value == CODEX_PLACEHOLDER_SESSION_ID)
+            })
+    }
+
+    fn has_exact_resume_session_id(&self) -> bool {
+        self.exact_resume_session_id().is_some()
     }
 
     /// Check if the session should be marked as stopped due to idle timeout.
@@ -1229,6 +1245,7 @@ display_name = "Claude Code"
         let path = dir.path().join("legacy.toml");
         let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
         session.status = AgentStatus::Running;
+        session.agent_session_id = Some("legacy-native-session".to_string());
         session.schema_version = 2;
         let mut value = toml::Value::try_from(&session)
             .unwrap()
@@ -1245,6 +1262,10 @@ display_name = "Claude Code"
         assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
         assert_eq!(loaded.status, AgentStatus::Interrupted);
         assert!(loaded.interrupted_recovery_candidate());
+        assert!(
+            !loaded.exact_auto_resume_candidate(),
+            "legacy sessions without lifecycle evidence remain manually recoverable but must not be eagerly auto-resumed"
+        );
     }
 
     #[test]
@@ -1283,6 +1304,23 @@ display_name = "Claude Code"
         std::fs::create_dir_all(&worktree).unwrap();
         session.update_status(AgentStatus::Stopped);
         assert!(!session.exact_auto_resume_candidate());
+    }
+
+    #[test]
+    fn placeholder_agent_session_id_is_not_exact_auto_resume_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "feature/recover", AgentId::Codex);
+        session.agent_session_id = Some(CODEX_PLACEHOLDER_SESSION_ID.to_string());
+
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+
+        assert!(
+            !session.exact_auto_resume_candidate(),
+            "Codex hook placeholder ids are not valid `codex resume <id>` targets"
+        );
     }
 
     #[test]

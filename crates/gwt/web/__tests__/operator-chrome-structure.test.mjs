@@ -1206,7 +1206,12 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
-test("Branches toolbar exposes explicit Launch Agent action for selected branch", () => {
+test("Branches toolbar exposes explicit Resume and Launch Agent actions for selected branch", () => {
+  assert.match(
+    appSource,
+    /data-action="open-branch-resume"/,
+    "expected Branches toolbar to include an explicit Resume action",
+  );
   assert.match(
     appSource,
     /data-action="open-branch-launch"/,
@@ -1214,8 +1219,18 @@ test("Branches toolbar exposes explicit Launch Agent action for selected branch"
   );
   assert.match(
     appSource,
+    /selectedBranchName[\s\S]{0,360}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,360}?selectedBranchName/,
+    "expected Branches toolbar Resume action to resume the selected branch",
+  );
+  assert.match(
+    appSource,
     /selectedBranchName[\s\S]{0,300}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,300}?selectedBranchName/,
     "expected Branches toolbar Launch Agent action to send selectedBranchName",
+  );
+  assert.match(
+    appSource,
+    /row\.addEventListener\("dblclick",\s*activate\)/,
+    "expected branch row double-click to keep Launch Agent activation",
   );
 });
 

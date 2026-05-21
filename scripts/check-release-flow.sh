@@ -6,12 +6,22 @@ RELEASE="$ROOT/.github/workflows/release.yml"
 README_EN="$ROOT/README.md"
 README_JA="$ROOT/README.ja.md"
 INDEX_HTML="$ROOT/crates/gwt/web/index.html"
-APP_JS="$ROOT/crates/gwt/web/app.js"
+FRONTEND_BUNDLE="$ROOT/scripts/check-frontend-bundle.sh"
 
 fail=0
 
 if grep -q "sync-develop" "$RELEASE"; then
   echo "[FAIL] release.yml still contains sync-develop job"
+  fail=1
+fi
+
+if grep -qE "publish-npm|npm publish|registry\.npmjs\.org|NPM_TOKEN" "$RELEASE"; then
+  echo "[FAIL] release.yml still contains npm publishing"
+  fail=1
+fi
+
+if [ -f "$ROOT/package.json" ] || [ -f "$ROOT/pnpm-lock.yaml" ]; then
+  echo "[FAIL] repository still contains npm package metadata"
   fail=1
 fi
 
@@ -35,7 +45,7 @@ if ! node "$ROOT/scripts/test_release_assets.cjs"; then
   fail=1
 fi
 
-if ! node --check "$APP_JS"; then
+if ! bash "$FRONTEND_BUNDLE"; then
   echo "[FAIL] frontend bundle syntax check failed"
   fail=1
 fi

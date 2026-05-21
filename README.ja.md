@@ -436,19 +436,19 @@ cargo test -p gwt-core -p gwt --all-features
 ### Release Asset Contract
 
 ```bash
-npm run test:release-assets
+node scripts/test_release_assets.cjs
 ```
 
 ### Frontend Bundle Contract
 
 ```bash
-npm run test:frontend-bundle
+bash scripts/check-frontend-bundle.sh
 ```
 
 ### Release Flow Checks
 
 ```bash
-npm run test:release-flow
+bash scripts/check-release-flow.sh
 ```
 
 ### Lint
@@ -471,7 +471,7 @@ cargo fmt
 │   ├── gwt/            # Desktop GUI + WebView server + CLI dispatch
 │   ├── gwt-core/       # コアライブラリ
 │   └── gwt-github/     # GitHub Issue SPEC cache / update layer
-└── package.json        # npm package metadata and postinstall
+└── scripts/            # リリース、検証、メンテナンス用スクリプト
 ```
 
 ## SPEC
