@@ -272,6 +272,7 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
     let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
     let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
     let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+    let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
 
     skill_state::save(
         tmp.path(),
@@ -286,8 +287,13 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
     )
     .unwrap();
 
-    let output = event_dispatcher::handle_with_input("Stop", "{}", tmp.path(), Some(&session_id))
-        .expect("blocked Stop should still dispatch");
+    let output = event_dispatcher::handle_with_input(
+        "Stop",
+        r#"{"session_id":"agent-123"}"#,
+        tmp.path(),
+        Some(&session_id),
+    )
+    .expect("blocked Stop should still dispatch");
 
     assert!(matches!(output, HookOutput::StopBlock { .. }));
     let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
