@@ -7056,6 +7056,31 @@ mod tests {
     }
 
     #[test]
+    fn quick_start_treats_codex_placeholder_resume_id_as_metadata_only() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            "agent-session",
+        );
+
+        let entries = quick_start_entries_from_sessions(
+            &worktree,
+            "feature/gui",
+            &load_launch_sessions(dir.path()),
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].resume_session_id, None);
+        assert_eq!(entries[0].reuse_action_label(), None);
+    }
+
+    #[test]
     fn current_options_cover_all_steps_and_reasoning_variants() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.live_sessions = vec![LiveSessionEntry {

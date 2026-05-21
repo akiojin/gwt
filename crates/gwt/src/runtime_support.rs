@@ -1,5 +1,4 @@
 use super::*;
-use crate::app_runtime::workspace_work_item_view_from_item;
 
 pub fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
@@ -79,20 +78,6 @@ pub fn current_app_version() -> &'static str {
 }
 
 pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
-    // SPEC-2359 US-37: workspace_state broadcast に work_items を含めて
-    // Workspace Overview Completed カラムを populate する。読み込み失敗は
-    // 既存の WorkspaceView semantics (welcome/empty) を壊さないよう空 Vec
-    // に縮退する。
-    let work_items =
-        gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&tab.project_root)
-            .map(|projection| {
-                projection
-                    .work_items
-                    .iter()
-                    .map(workspace_work_item_view_from_item)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
     gwt::WorkspaceView {
         viewport: tab.workspace.persisted().viewport.clone(),
         windows: tab
@@ -106,7 +91,7 @@ pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
                 window
             })
             .collect(),
-        work_items,
+        work_items: Vec::new(),
     }
 }
 
