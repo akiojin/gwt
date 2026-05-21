@@ -4703,7 +4703,6 @@ impl AppRuntime {
 
         spawn_branch_load_async(
             self.proxy.clone(),
-            client_id.to_string(),
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
