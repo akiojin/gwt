@@ -389,6 +389,7 @@ fn resolve_window_id<'a>(
 fn status_label(status: WindowState) -> &'static str {
     match status {
         WindowState::Running => "running",
+        WindowState::Idle => "idle",
         WindowState::Waiting => "waiting",
         WindowState::Stopped => "stopped",
         WindowState::Error => "error",

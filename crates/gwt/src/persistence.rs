@@ -36,6 +36,7 @@ pub fn default_canvas_viewport() -> CanvasViewport {
 pub enum WindowState {
     #[serde(alias = "starting", alias = "ready")]
     Running,
+    Idle,
     Waiting,
     #[serde(alias = "exited")]
     Stopped,
@@ -1111,11 +1112,17 @@ mod tests {
     #[test]
     fn window_state_round_trips_modern_variants_and_accepts_legacy_status_names() {
         let waiting = serde_json::from_str::<WindowState>(r#""waiting""#).expect("waiting");
+        let idle = serde_json::from_str::<WindowState>(r#""idle""#).expect("idle");
         let running = serde_json::from_str::<WindowState>(r#""running""#).expect("running");
         let stopped = serde_json::from_str::<WindowState>(r#""stopped""#).expect("stopped");
         let error = serde_json::from_str::<WindowState>(r#""error""#).expect("error");
 
         assert_eq!(waiting, WindowState::Waiting);
+        assert_eq!(idle, WindowState::Idle);
+        assert_eq!(
+            serde_json::to_string(&idle).expect("serialize idle"),
+            r#""idle""#
+        );
         assert_eq!(running, WindowState::Running);
         assert_eq!(stopped, WindowState::Stopped);
         assert_eq!(error, WindowState::Error);

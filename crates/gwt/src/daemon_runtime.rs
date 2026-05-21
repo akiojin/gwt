@@ -99,6 +99,22 @@ pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
     Ok(())
 }
 
+pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
+    if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
+        return Ok(());
+    }
+    runtime_state::record_blocked_stop_from_env()?;
+    emit_live_event_fail_open(RuntimeHookEvent::from_hook(
+        RuntimeHookEventKind::RuntimeState,
+        Some("Stop"),
+        Some("Running".to_string()),
+        Some("blocked-stop".to_string()),
+        current_session_from_env()?,
+        parse_hook_event_best_effort(input),
+    ));
+    Ok(())
+}
+
 pub fn handle_coordination_event(event: &str, input: &str) -> Result<(), HookError> {
     coordination_event::handle(event)?;
     emit_live_event_fail_open(RuntimeHookEvent::from_hook(

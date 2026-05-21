@@ -736,8 +736,12 @@ body {
   background: var(--color-state-active);
 }
 
+.status-chip.idle .status-dot {
+  background: var(--color-state-idle);
+}
+
 .status-chip.waiting .status-dot {
-  background: var(--color-state-active);
+  background: var(--color-state-idle);
 }
 
 .status-chip.error .status-dot {

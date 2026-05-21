@@ -9657,7 +9657,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_live_sessions_report_composed_waiting_runtime_status() {
+    fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -9682,11 +9682,11 @@ exit 1
             },
         );
 
-        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        runtime.handle_runtime_hook_event(runtime_hook_state("Idle", "session-1"));
         let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Waiting);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Idle);
     }
 
     #[test]

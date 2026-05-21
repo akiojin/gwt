@@ -1843,9 +1843,10 @@ kbd.op-kbd {
   letter-spacing: var(--tracking-mono);
 }
 :root[data-theme] .status-chip.starting,
-:root[data-theme] .status-chip.running,
-:root[data-theme] .status-chip.waiting { color: var(--color-state-active); border-color: var(--color-state-active); }
-:root[data-theme] .status-chip.ready { color: var(--color-state-idle); border-color: var(--color-state-idle); }
+:root[data-theme] .status-chip.running { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .status-chip.ready,
+:root[data-theme] .status-chip.idle,
+:root[data-theme] .status-chip.waiting { color: var(--color-state-idle); border-color: var(--color-state-idle); }
 :root[data-theme] .status-chip.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
 :root[data-theme] .status-chip.stopped,
 :root[data-theme] .status-chip.exited { color: var(--color-state-done); border-color: var(--color-state-done); }

@@ -393,7 +393,7 @@ test("Launch Wizard live sessions render window runtime status", () => {
   assert.match(
     appSource,
     /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
-    "expected live-session rows to label Running/Waiting/Error from runtime_status",
+    "expected live-session rows to label Running/Idle/Error from runtime_status",
   );
   assert.match(
     appSource,

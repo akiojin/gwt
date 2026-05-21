@@ -256,6 +256,8 @@ pub enum AgentStatus {
     Unknown,
     #[serde(alias = "running", alias = "Running")]
     Running,
+    #[serde(alias = "idle", alias = "Idle")]
+    Idle,
     #[serde(
         rename = "Waiting",
         alias = "waiting",
@@ -419,6 +421,17 @@ mod tests {
         ] {
             let parsed: AgentStatus = serde_json::from_str(raw).unwrap();
             assert_eq!(parsed, AgentStatus::WaitingInput, "{raw}");
+        }
+    }
+
+    #[test]
+    fn agent_status_idle_preserves_wire_contract_and_aliases() {
+        let json = serde_json::to_string(&AgentStatus::Idle).unwrap();
+        assert_eq!(json, "\"Idle\"");
+
+        for raw in ["\"Idle\"", "\"idle\""] {
+            let parsed: AgentStatus = serde_json::from_str(raw).unwrap();
+            assert_eq!(parsed, AgentStatus::Idle, "{raw}");
         }
     }
 

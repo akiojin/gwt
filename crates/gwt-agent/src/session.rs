@@ -201,7 +201,10 @@ impl Session {
         self.status = status;
         let now = Utc::now();
         self.updated_at = now;
-        if status == AgentStatus::Running || status == AgentStatus::WaitingInput {
+        if matches!(
+            status,
+            AgentStatus::Running | AgentStatus::Idle | AgentStatus::WaitingInput
+        ) {
             self.last_activity_at = now;
         }
     }
@@ -226,7 +229,7 @@ impl Session {
             self.last_hook_event = Some("Stop".to_string());
             self.last_hook_event_at = Some(now);
         }
-        self.update_status(AgentStatus::WaitingInput);
+        self.update_status(AgentStatus::Idle);
     }
 
     /// Whether the latest hook lifecycle indicates the session did not reach a
@@ -252,7 +255,10 @@ impl Session {
     pub fn exact_auto_resume_candidate(&self) -> bool {
         matches!(
             self.status,
-            AgentStatus::Running | AgentStatus::WaitingInput | AgentStatus::Interrupted
+            AgentStatus::Running
+                | AgentStatus::Idle
+                | AgentStatus::WaitingInput
+                | AgentStatus::Interrupted
         ) && self.has_lifecycle_recovery_evidence()
             && self.worktree_path.exists()
             && self.has_exact_resume_session_id()
@@ -533,10 +539,8 @@ pub fn persist_agent_session_id(
 
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
-            Some(AgentStatus::Running)
-        }
-        "Stop" => Some(AgentStatus::WaitingInput),
+        "SessionStart" | "Stop" => Some(AgentStatus::Idle),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStatus::Running),
         _ => None,
     }
 }
@@ -1103,7 +1107,7 @@ display_name = "Claude Code"
     }
 
     #[test]
-    fn hook_runtime_state_maps_running_and_waiting_events() {
+    fn hook_runtime_state_maps_idle_and_running_events() {
         for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"] {
             let runtime = SessionRuntimeState::from_hook_event(event).expect("running event");
             assert_eq!(runtime.status, AgentStatus::Running, "{event}");
@@ -1112,12 +1116,15 @@ display_name = "Claude Code"
 
         let session_start =
             SessionRuntimeState::from_hook_event("SessionStart").expect("session start event");
-        assert_eq!(session_start.status, AgentStatus::Running);
+        assert_eq!(
+            serde_json::to_string(&session_start.status).unwrap(),
+            "\"Idle\""
+        );
         assert_eq!(session_start.source_event.as_deref(), Some("SessionStart"));
 
-        let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
-        assert_eq!(waiting.status, AgentStatus::WaitingInput);
-        assert_eq!(waiting.source_event.as_deref(), Some("Stop"));
+        let idle = SessionRuntimeState::from_hook_event("Stop").expect("idle event");
+        assert_eq!(serde_json::to_string(&idle.status).unwrap(), "\"Idle\"");
+        assert_eq!(idle.source_event.as_deref(), Some("Stop"));
 
         assert!(SessionRuntimeState::from_hook_event("Notification").is_none());
     }
@@ -1129,11 +1136,11 @@ display_name = "Claude Code"
         let first = SessionRuntimeState::new(AgentStatus::Running);
         first.save(&path).unwrap();
 
-        let second = SessionRuntimeState::new(AgentStatus::WaitingInput);
+        let second = SessionRuntimeState::new(AgentStatus::Idle);
         second.save(&path).unwrap();
 
         let loaded = SessionRuntimeState::load(&path).unwrap();
-        assert_eq!(loaded.status, AgentStatus::WaitingInput);
+        assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
     }
 
     #[test]
