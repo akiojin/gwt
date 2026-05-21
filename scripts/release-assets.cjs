@@ -61,7 +61,7 @@ function download(url, dest) {
     const file = fs.createWriteStream(dest);
     const request = (nextUrl) => {
       https
-        .get(nextUrl, { headers: { "User-Agent": "gwt-postinstall" } }, (res) => {
+        .get(nextUrl, { headers: { "User-Agent": "gwt-release-assets" } }, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             request(res.headers.location);
             return;

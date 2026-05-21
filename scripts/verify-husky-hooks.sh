@@ -6,7 +6,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRE_PUSH="$ROOT_DIR/.husky/pre-push"
 PRE_COMMIT="$ROOT_DIR/.husky/pre-commit"
 COMMIT_MSG="$ROOT_DIR/.husky/commit-msg"
-PACKAGE_JSON="$ROOT_DIR/package.json"
 
 fail() {
   echo "Husky hook verification failed: $1" >&2
@@ -48,11 +47,6 @@ require_order() {
   fi
 }
 
-require_file "$PACKAGE_JSON"
-require_contains "$PACKAGE_JSON" '"prepare": "test -n \"$CI\" || bunx husky install"'
-require_contains "$PACKAGE_JSON" "\"lint:skills\": \"bash scripts/validate-skill-frontmatter.sh\""
-require_contains "$PACKAGE_JSON" "\"lint:husky\": \"bash scripts/verify-husky-hooks.sh\""
-
 require_file "$PRE_PUSH"
 require_contains "$PRE_PUSH" "cargo clippy --all-targets --all-features -- -D warnings"
 require_contains "$PRE_PUSH" "cargo fmt --all -- --check"
@@ -64,13 +58,13 @@ require_order "$PRE_PUSH" "if cargo llvm-cov --version >/dev/null 2>&1; then" "i
 require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json"
 require_contains "$PRE_PUSH" "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90"
 require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"
-require_contains "$PRE_PUSH" "pnpm lint:skills"
+require_contains "$PRE_PUSH" "bash scripts/validate-skill-frontmatter.sh"
 
 require_file "$COMMIT_MSG"
 require_contains "$COMMIT_MSG" 'bunx --package @commitlint/cli commitlint --edit "$1"'
 
 if [ -f "$PRE_COMMIT" ]; then
-  require_contains "$PRE_COMMIT" "pnpm lint:skills"
+  require_contains "$PRE_COMMIT" "bash scripts/validate-skill-frontmatter.sh"
   require_contains "$PRE_COMMIT" "bash scripts/run-local-backend-tests-on-commit.sh"
   require_not_contains "$PRE_COMMIT" "cargo clippy --all-targets --all-features -- -D warnings"
   require_not_contains "$PRE_COMMIT" "cargo fmt --all -- --check"

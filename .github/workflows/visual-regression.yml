@@ -20,7 +20,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qE '^(crates/gwt/(web|playwright)/|crates/gwt/src/embedded_(web|server)\.rs|package\.json)'; then
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -qE '^(crates/gwt/(web|playwright)/|crates/gwt/src/embedded_(web|server)\.rs|scripts/run-(frontend|visual)-.*\.sh)'; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "Frontend changes detected; running full visual regression suite."
           else
@@ -48,13 +48,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install npm dependencies
+      - uses: pnpm/action-setup@v6
         if: steps.detect.outputs.should_run == 'true'
-        run: npm install --no-audit --no-fund
+        with:
+          version: 10.29.2
+          run_install: false
 
       - name: Install Playwright browsers
         if: steps.detect.outputs.should_run == 'true'
-        run: npx playwright install --with-deps chromium
+        run: pnpm dlx --package @playwright/test@1.49.1 playwright install --with-deps chromium
 
       - name: Build gwt
         if: steps.detect.outputs.should_run == 'true'
@@ -62,15 +64,15 @@ jobs:
 
       - name: Frontend unit tests
         if: steps.detect.outputs.should_run == 'true'
-        run: npm run test:frontend-unit
+        run: bash scripts/run-frontend-unit-tests.sh
 
       - name: Frontend smoke tests
         if: steps.detect.outputs.should_run == 'true'
-        run: npm run test:frontend-smoke
+        run: bash scripts/run-frontend-smoke-tests.sh
 
       - name: Visual regression
         if: steps.detect.outputs.should_run == 'true'
-        run: npm run test:visual
+        run: bash scripts/run-visual-tests.sh
 
       - name: Upload diff artifacts on failure
         if: failure() && steps.detect.outputs.should_run == 'true'
