@@ -28,6 +28,7 @@ export function renderBranchCleanupModal({
   onCancel,
   onSubmit,
   onDeleteRemoteToggle,
+  onForceFilesystemDeleteToggle,
 }) {
   if (!windowId || !state || !state.cleanupModal.open) {
     const wasOpenBeforeClose = modalEl.classList.contains("open");
@@ -93,13 +94,49 @@ export function renderBranchCleanupModal({
   if (state.cleanupModal.stage === "running") {
     dialogEl.appendChild(createNode("h2", "", "Cleaning up branches"));
     const count = Math.max(selectedEntries.length, 1);
+    const progress = state.cleanupModal.progress || null;
+    const current = progress?.current || null;
+    const runningCopy = current
+      ? `Cleaning ${current.index} of ${current.total}: ${current.branch}`
+      : `Running cleanup for ${count} branch${count === 1 ? "" : "es"}.`;
     dialogEl.appendChild(
       createNode(
         "div",
         "branch-cleanup-running",
-        `Running cleanup for ${count} branch${count === 1 ? "" : "es"}.`,
+        runningCopy,
       ),
     );
+    if (current?.message) {
+      dialogEl.appendChild(
+        createNode("div", "branch-cleanup-item-copy", current.message),
+      );
+    }
+    if (Array.isArray(progress?.items) && progress.items.length > 0) {
+      const progressList = createNode("div", "branch-cleanup-progress-list");
+      for (const item of progress.items) {
+        const row = createNode(
+          "div",
+          `branch-cleanup-progress-item ${item.status || "pending"}`,
+        );
+        row.appendChild(
+          createNode("span", "branch-cleanup-progress-branch", item.branch),
+        );
+        row.appendChild(
+          createNode(
+            "span",
+            "branch-cleanup-progress-status",
+            item.status || "pending",
+          ),
+        );
+        if (item.message) {
+          row.appendChild(
+            createNode("span", "branch-cleanup-progress-message", item.message),
+          );
+        }
+        progressList.appendChild(row);
+      }
+      dialogEl.appendChild(progressList);
+    }
     return;
   }
 
@@ -218,6 +255,20 @@ export function renderBranchCleanupModal({
     );
     dialogEl.appendChild(toggleRow);
   }
+  const forceToggleRow = createNode("label", "branch-cleanup-toggle-row");
+  const forceCheckbox = createNode("input", "");
+  forceCheckbox.type = "checkbox";
+  forceCheckbox.checked = Boolean(state.cleanupModal.forceFilesystemDelete);
+  forceCheckbox.addEventListener("change", () => {
+    if (typeof onForceFilesystemDeleteToggle === "function") {
+      onForceFilesystemDeleteToggle(forceCheckbox.checked);
+    }
+  });
+  forceToggleRow.appendChild(forceCheckbox);
+  forceToggleRow.appendChild(
+    createNode("span", "", "Force remove remaining worktree files"),
+  );
+  dialogEl.appendChild(forceToggleRow);
   const footer = createNode("div", "modal-footer");
   const cancel = createNode("button", "wizard-button", "Cancel");
   cancel.type = "button";

@@ -149,6 +149,8 @@ pub struct ResumableAgentView {
     /// for that id), so a fresh agent will be started while preserving
     /// the Workspace title / owner.
     pub resume_kind: ResumableAgentResumeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_status: Option<ResumableAgentLifecycleStatus>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
@@ -156,6 +158,13 @@ pub struct ResumableAgentView {
 pub enum ResumableAgentResumeKind {
     Session,
     MetadataOnly,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumableAgentLifecycleStatus {
+    Active,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -7044,6 +7053,31 @@ mod tests {
             missing.error.as_deref(),
             Some("No saved session is available")
         );
+    }
+
+    #[test]
+    fn quick_start_treats_codex_placeholder_resume_id_as_metadata_only() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            "agent-session",
+        );
+
+        let entries = quick_start_entries_from_sessions(
+            &worktree,
+            "feature/gui",
+            &load_launch_sessions(dir.path()),
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].resume_session_id, None);
+        assert_eq!(entries[0].reuse_action_label(), None);
     }
 
     #[test]

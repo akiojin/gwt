@@ -155,12 +155,7 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
     if (!kind || !state.panes.has(kind)) return;
     const pane = state.panes.get(kind);
 
-    // Insert an invocation header when spawn_id changes so the user can
-    // see the boundary between separate process spawns.
-    if (line.spawn_id !== pane.lastSpawnId) {
-      pane.lastSpawnId = line.spawn_id;
-      pane.buffer.push({ kind: "header", spawn_id: line.spawn_id });
-    }
+    pane.lastSpawnId = line.spawn_id;
     pane.buffer.push(line);
     while (pane.buffer.length > CAP_PER_KIND) {
       pane.buffer.shift();
@@ -171,10 +166,23 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
         pane.container.removeChild(pane.emptyHint);
         pane.emptyHint = null;
       }
-      if (line.spawn_id !== undefined && pane.buffer[pane.buffer.length - 2]?.kind === "header") {
-        appendHeaderNode(pane.container, pane.buffer[pane.buffer.length - 2]);
+      // The backend pushes a synthetic header line as the very first
+      // entry of each spawn (the actual command string prefixed with
+      // "$ ") and a footer prefixed with "→ ". Agent stage banners use
+      // a short single-word bracket label (e.g. "[wizard] ..."). The
+      // ConsoleTeeLayer also emits "[gwt::index] ..." lines but those
+      // are regular log lines, not banners — so the bracket pattern
+      // requires a short ASCII word with no `::` or `_` separators.
+      const message = String(line.message ?? "");
+      const isHeader =
+        message.startsWith("$ ") ||
+        message.startsWith("→ ") ||
+        /^\[[a-z]+\]\s/i.test(message);
+      if (isHeader) {
+        appendHeaderNode(pane.container, message);
+      } else {
+        appendLineNode(pane.container, line);
       }
-      appendLineNode(pane.container, line);
       if (pane.scrollFollow) {
         pane.container.scrollTop = pane.container.scrollHeight;
       }
@@ -184,12 +192,11 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
     }
   }
 
-  function appendHeaderNode(container, header) {
+  function appendHeaderNode(container, text) {
     const node = document.createElement("span");
     node.className = "console-window__invocation-header";
-    node.textContent = `$ spawn_id=${header.spawn_id ?? "?"}`;
+    node.textContent = text;
     container.appendChild(node);
-    container.appendChild(document.createTextNode("\n"));
   }
 
   function appendLineNode(container, line) {
@@ -200,7 +207,6 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
         : "console-window__line console-window__line--stdout";
     node.textContent = line.message ?? "";
     container.appendChild(node);
-    container.appendChild(document.createTextNode("\n"));
   }
 
   function close() {

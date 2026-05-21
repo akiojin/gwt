@@ -1085,6 +1085,12 @@ mod tests {
         value.to_string()
     }
 
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     struct ScopedHome {
         previous_home: Option<OsString>,
     }
@@ -1323,7 +1329,7 @@ mod tests {
 
     #[test]
     fn workspace_update_persists_workspace_status() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1361,7 +1367,7 @@ mod tests {
 
     #[test]
     fn workspace_join_assigns_unassigned_agent_to_existing_workspace() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1414,7 +1420,7 @@ mod tests {
 
     #[test]
     fn workspace_create_records_workspace_and_assigns_agent() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1473,7 +1479,7 @@ mod tests {
     /// Overview Lifecycle section is never empty on Day-0.
     #[test]
     fn workspace_create_autofills_summary_and_metadata_when_current_focus_missing() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1536,7 +1542,7 @@ mod tests {
 
     #[test]
     fn workspace_candidates_lists_similar_incomplete_workspaces() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1574,7 +1580,7 @@ mod tests {
 
     #[test]
     fn workspace_create_rejects_similar_workspace_without_split_boundary() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1615,7 +1621,7 @@ mod tests {
 
     #[test]
     fn workspace_create_allows_explicit_split_boundary_for_similar_workspace() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1675,7 +1681,7 @@ mod tests {
 
     #[test]
     fn workspace_ensure_joins_similar_incomplete_workspace() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1739,7 +1745,7 @@ mod tests {
 
     #[test]
     fn workspace_ensure_creates_workspace_when_no_candidate_matches() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1789,7 +1795,7 @@ mod tests {
 
     #[test]
     fn workspace_ensure_is_idempotent_for_already_assigned_agent() {
-        let _guard = crate::env_test_lock().lock().unwrap();
+        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");

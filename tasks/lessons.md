@@ -1,5 +1,123 @@
 # Lessons Learned
 
+## 2026-05-21 — PR 作成前に `User Verification Result: confirmed` を必ず取得する
+
+### 事象
+
+SPEC-2809（Console window）の修正で、`gwt-verify --mode pre-pr` の自動テストが全 PASS した
+段階で、ユーザーの視覚確認が click-blocking regression によって実行不能だった。
+エージェントは独断で `User Verification Result: skipped(reason: develop 側 picker regression)`
+に倒して `gwtd pr create` を実行。PR #2857 がユーザー承認なしに作成された。
+ユーザーから「私のチェック前に PR を出した」と指摘された。
+
+### 原因
+
+1. `gwt-verify` skill contract は `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`
+   を要求するが、`skipped` は **ユーザーが明示的に選択した場合のみ** 許容される。エージェントが
+   「自動テスト全 PASS だから skip 妥当」と判断して skip に倒したのは contract 違反。
+2. 視覚検証の動線がブロックされた（Open Project picker click 不能 / app_runtime panic）状態を
+   エージェントが skipped の reason として記録するだけで、ブロッカーそのものを解消せずに次の
+   ステップに進めた。「verification が実行不能」は skip 理由ではなく、解消すべき blocker である。
+3. 「進めて」というユーザー指示を、verification 自体の skip 承認と誤解釈した。本来は
+   「verification 結果が出ている作業を完了まで進めて」という意味で、verification をスキップ
+   する許可ではない。
+
+### 再発防止策
+
+1. AGENTS.md "PR 作成ルール（必須）" セクションを新設し、`gwt-verify` の
+   `User Verification Result` が `confirmed` / `n/a` になるまで `gwtd pr create` / `gwtd pr edit`
+   を呼ばないことを明文化した。`pending` / エージェント独断の `skipped` は禁止。
+2. 視覚検証動線がブロックされた場合は、`skipped` に倒す前にブロッカーの根本原因を特定して
+   解消する。今回のケースなら Open Project picker の panic 修正を先にやり、再起動後に
+   verification を依頼する順番にすべきだった。
+3. 「進めて」を解釈する際は、現在の作業 phase で何が `pending` なのかを明確にしてから動く。
+   verification 待ちなら verification を完了させる作業（= ブロッカー解消）に進む。
+4. 万一誤って PR を作成してしまった場合の rollback 手順: タイトルへ
+   `[DO NOT MERGE — user verification pending]` を即座に付与し、PR comment で
+   `gwtd pr comment <n>` を使ってブロックの理由とブロッカー解消予定を告知する。
+   verification が `confirmed` になった後にタイトルを戻し、ブロック comment を resolve する。
+
+## 2026-05-21 — startup CPU / power は「起動プロセス数」と「hot payload サイズ」を同時に見る
+
+### 事象
+
+gwt 起動中に CPU 使用率と消費電力が高く、macOS ではファンが異様に回るという報告があった。
+`sample` / `ps` / gwt logs を見ると、単一の busy loop ではなく、startup auto-resume、
+project index full status refresh、頻繁な `workspace_state` broadcast が同時に負荷を作っていた。
+
+### 原因
+
+- 起動時の auto-resume が recoverable session を無条件に再開し、同一 native
+  agent session 由来の重複や古い session まで launch 対象になり得た。
+- Settings.Index の full refresh が、startup current-worktree bootstrap と衝突した後の
+  retry だけでなく、同時 full refresh 同士でも二重 probe を起こせる in-flight key になっていた。
+- hot path の `workspace_state` が workspace work item 履歴を毎回含み、履歴が増えるほど
+  serialize / WebSocket / frontend state update のコストが膨らんだ。
+
+### 再発防止策
+
+1. startup の自動再開は、件数上限で復元を落とさない。fresh かつ unique な exact-resumable
+   session は全件復元し、native session id dedupe と staleness gate で不要な二重起動だけを抑える。
+2. startup current-only probe と Settings.Index full refresh は別 key にしつつ、full refresh 同士は
+   single-flight で潰す。retry を許すのは startup bootstrap と衝突した場合だけに限定する。
+3. 高頻度 broadcast には履歴 payload を載せない。workspace history は
+   `active_work_projection` のような用途特化 payload に寄せ、shell state は構造情報だけに保つ。
+4. CPU / power 調査では CPU% だけで結論を出さず、`sample`、子プロセス数、runner 起動ログ、
+   WebSocket payload の大きさを同じタイムラインで見る。
+
+## 2026-05-20 — Phase 26 の visibility 述語だけでは silent no-op を防げない: layout box が立つまで `isReady` を flip しない (Issue #2832 / SPEC-2008 Phase 26.A regression)
+
+### 事象
+
+SPEC-2008 Phase 26 で導入した `runTerminalActivationSequence` (refresh→layout flush→fit) と `createTerminalRuntime` の `isReady` / `deferredWrites` handshake は intact だったにも関わらず、Claude Code を gwt agent pane で起動した直後にテキストをペーストすると terminal 表示全体が崩れる症状がユーザー報告 (`work/20260520-1050`) で再発した。resize / window move で復活する。スクリーンショット `.gwt/paste-images/1779274308833-11-image.png` で確認済み。
+
+### 原因
+
+`completeInitialFitHandshake` は `canRefreshTerminalViewport(windowId)` が true を返した時点で `runTerminalActivationSequence` を呼び、結果に関係なく `runtime.isReady = true` を立てて deferredWrites を flush していた。`viewportEligibleForRefresh` は `element.hidden` と `workspaceWindow.minimized` のみ確認するため、**構造的には visible だが parent の flex/grid layout が rAF 時点で propagate していない (clientWidth/clientHeight=0)** 状態を素通りする。この状態で `fitAddon.fit()` を呼ぶと `_renderService.dimensions.css.cell.width` 自体は font metrics 経由で populate されても、`proposeDimensions` が `getComputedStyle(parent).width / cell.width` を計算する段で 0÷n=0 cols になり、fit が silent no-op するか xterm default 80×24 にロックされる。直後の `isReady = true` で deferredWrites が誤グリッドへ flush され、ユーザーには Claude Code splash と paste 直後の表示が崩れて見える。OS resize で fan-out が走るとそこで初めて正しい cols/rows に fit されるため、resize で復活する signature になる。
+
+Phase 26.A の `isReady` handshake は「writes を fit 完了まで buffer する」ことは保証していたが、「fit が valid cols/rows を返した」ことを保証しておらず、layout が settle するまでの race window がそのまま残っていた。
+
+### 再発防止策
+
+1. **handshake は `isReady=true` を flip する前に container の layout box (`clientWidth/clientHeight > 0`) を確認する。** `terminal-viewport-reflow.js::elementHasLayoutBox` で predicate を export し、`completeInitialFitHandshake` から `terminalContainerHasLayoutBox(windowId)` 経由で gate する (Issue #2832 fix)。
+2. **layout box が無い場合は rAF retry を上限付き (`HANDSHAKE_RETRY_LIMIT = 60` ≒ 1 秒 @ 60Hz) でループさせる。** 上限超過時は `console.warn` で観測可能にしつつ fall-through して activation を強制する (perma-hidden window が deferred writes を永久に pin しない保険)。
+3. **Rust source-string contract で wiring を pin する。** `crates/gwt/src/embedded_web.rs` の `embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake` に `terminalContainerHasLayoutBox` / `handshakeAttempts` / `HANDSHAKE_RETRY_LIMIT` regex を追加し、将来 helper を drop する refactor が CI で即座に炎上するようにする。
+4. **frontend behaviour test に 0-size container の判定を pin する。** `__tests__/terminal-viewport-reflow.test.mjs` の `elementHasLayoutBox blocks 0-size containers` で clientWidth/clientHeight = 0、getBoundingClientRect fallback、null defensive の各分岐を直接 assert する。
+
+`viewportEligibleForRefresh` 自体を破壊的に書き換えると、host resize fan-out / project tab switch / dock target 等の既存 caller が hidden short-circuit に依存している側面を壊しうるため、predicate を増やす形で blast radius を最小化した (Phase 26 が Phase 24 を上書きせずに helper を増やしたのと同じ方針)。
+
+### 関連 PR / Issue
+
+- Issue #2832 (本件 bug Issue)
+- SPEC-2008 Phase 26 / FR-056 / FR-057 / FR-059 (lineage)
+- 過去の closed regressions: #2096 / #2091 / #2668 / #2513
+
+## 2026-05-20 — develop merge ≠ 既存 session で動く: hook 経路 binary は `installed gwtd` で固定される (Phase U-9 self-bench で発見)
+
+### 事象
+
+SPEC-2359 Phase U-9 (PR #2819) を develop に merge 後、self-bench として live Claude Code session の `title_summary` を activity descriptor (`PR チェック中`) に書き換え、RemindersState を stale threshold 直前まで prime したが、次の UserPromptSubmit で stale reminder (`# Agent Title Stale`) は context に注入されず、prime した新 field (`last_title_summary_seen` / `unchanged_turn_count` / `phase_changed_in_window`) はすべて wipe された。
+
+### 原因
+
+`.claude/settings.local.json` の hook command は `'/Applications/GWT.app/Contents/MacOS/gwtd' hook event UserPromptSubmit` のように **installed gwtd binary を絶対 path で固定** している。私のセッションが起動した時点の installed binary は `gwtd 9.40.0` 直前の `gwtd 9.38.0` で、Phase U-9 (FR-178 stale detection / 新 RemindersState field) を含まない。
+
+差分検証で確定 (同 primed state + 同 UserPromptSubmit payload):
+
+- 旧 v9.38.0: `additionalContext` 2825 bytes / `Agent Title Stale` 不在 / RemindersState 新 field を null に wipe
+- 新 v9.40.0 (`target/debug/gwtd`, PR #2819 を含む): 3268 bytes (+443) / `Agent Title Stale` 注入 / `unchanged_turn_count: 8→9`, `last_title_summary_seen: 'PR チェック中'`, `phase_changed_in_window: true` を保持
+
+Phase U-9 のコード自体は正しく動作するが、live session に reach するのは「次に gwt release を切って installed binary が新版に置き換わるか、`.claude/settings.local.json` を手で `target/debug/gwtd` に向ける」のいずれかが必要。
+
+### 再発防止策
+
+1. **hook 経路の binary は worktree 起動時の `installed gwtd` で固定されると認識する**: `.claude/settings.local.json` / `.codex/hooks.json` は generator が `installed_gwt_candidates()` で resolve した path をハードコードする。一度書き出されたら手で書き換えない限り変化しない。`refresh_existing_managed_gwt_assets_for_worktree` が再生成する時も同じ installed path を使う。development fallback の `target/debug/gwtd` に向くのは installed binary が見つからない時だけ。
+2. **release を切らずに動作観測が必要な変更は development binary 経由で test する**: 新 hook 機能の動作観測は `target/debug/gwtd hook event <Event>` を **直接** 投入して output を見るのが正本経路。live session の system-reminder block に injection されるのを待つのは installed binary に依存するため不確実。
+3. **「PR merge = 既存 user の挙動が変わる」と誤解しない**: code が `develop` に届いたタイミングと、user の installed binary が新版になるタイミングはずれる。release ワークフロー (`/release` skill 等) を回して app bundle / installer を新版に bump しないと、既存 session の挙動は変わらない。完了報告で「次回 session から効く」と書く時、それが「次回 SessionStart hook の発火」を指すのか「次回 release 配布後の新 session」を指すのかを区別する。Phase U-9 の場合、新規 worktree の materialization は installed binary が呼ぶ generator の話なので、generator が新バージョンを emit するには installed binary 自体の更新が必要。
+4. **gwt-verify の Overall PASS は live session 動作の証明ではない**: gwt-verify の test matrix は `target/debug/gwtd` を使って unit / integration test を走らせる。これは「コードが正しい」ことの証明であって「user の live session で動く」ことの証明ではない。視認系 verification (E2E headed / live-session dogfooding) は installed binary deploy 後に追加で必要。
+
+---
+
 ## 2026-05-20 — User 観察と code 上の強制機構の方向が逆だった時は salience asymmetry を疑う (title-summary content / Codex vs Claude Code)
 
 ### 事象
@@ -5799,3 +5917,74 @@ async semantic search テストが timeout した。旧 `~/.gwt/runtime/chroma-v
    も取る。
 3. `cargo test -p gwt-core -p gwt --all-features` は単独 targeted pass だけで代替せず、デフォルト並列で
    最後に通して env 競合を拾う。
+
+## URL をユーザー操作ログに出すときは authority までに正規化する
+
+### 事象
+
+`gwt_ui_action` の backend connection test ログで `api_key` は出力していなかったが、`base_url` を
+そのまま `ui_target` に入れていたため、userinfo や signed query を含む URL がログに残る可能性があった。
+
+### 原因
+
+既存の `sanitize_ui_action_field()` は改行や制御文字をログ向けに整形するだけで、URL の
+credential / path / query / fragment を機密情報として扱っていなかった。レビューでは
+`https://user:pass@example.com/v1?token=...` のような入力がそのまま残る点を指摘された。
+
+### 再発防止策
+
+1. ユーザー操作ログに外部 URL を入れるときは、既定で `scheme://authority` までに正規化し、
+   userinfo / path / query / fragment を落とす。
+2. `api_key` の非出力だけで安全と判断せず、URL 自体に credential や token が含まれるケースを
+   regression test に入れる。
+3. ログ sanitization の helper 名は「format sanitization」と「secret redaction」を区別し、
+   期待する保護範囲をテスト名で明示する。
+
+## 起動時 auto resume は保存済みUI状態と履歴セッションを混同しない
+
+### 事象
+
+Agent session auto resume の実装後、実HOMEで `gwt serve` を起動すると、前回開いていた
+プロジェクトだけでなく過去の session TOML に残る多数の worktree が復元候補になった。
+結果としてブラウザURLが出る前に大量の agent/version process が起動し、UIには見覚えのない
+プロジェクトが並ぶ状態になった。
+
+### 原因
+
+起動時の即時復元が `session.json` の保存済み project tabs ではなく、`~/.gwt/sessions/*.toml`
+全体を source of truth として扱っていた。さらに migration で `Interrupted` にした旧セッションや、
+失敗した自動復元で生成された `Resume` セッションには、ユーザーが直前にUIで開いていた根拠がないのに
+exact auto resume 候補として扱える余地があった。
+
+### 再発防止策
+
+1. 起動時に新しい project tab を履歴 session TOML から作らない。即時 auto resume は
+   `session.json` など保存済みUI状態で既に復元された tab に一致する session だけに限定する。
+2. lifecycle hook の根拠がない legacy / migrated session は、manual resume 候補として残しても
+   exact auto resume 候補にはしない。
+3. 復元系の修正では、実HOMEに近い「多数の古い session TOML がある」ケースをテストまたは
+   headed browser smoke で確認し、URL 出力前に大量の agent/version process が起動しないことを見る。
+
+## Hook runtime state の env mutation test は crate-wide lock を共有する
+
+### 事象
+
+Release PR の `cargo test -p gwt-core -p gwt --all-features` で、
+`handle_user_prompt_submit_uses_hook_cwd_for_board_scope` が `HookOutput::Silent` になり、
+後続の workspace tests が `PoisonError` で連鎖失敗した。
+
+### 原因
+
+`runtime_state` tests が独自の `ENV_LOCK` を持っており、crate-wide の `env_test_lock()` で保護された
+`board_reminder` / workspace tests と同時に `GWT_SESSION_ID` などの process-wide env を変更できた。
+そのため並列 test 実行時に hook session env が消え、最初の panic が shared lock を poison した。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `GWT_SESSION_ID` / `GWT_SESSION_RUNTIME_PATH` などの process-wide env を触る
+   gwt tests は、ローカル mutex を作らず必ず `crate::env_test_lock()` を共有する。
+2. lock 共有の regression test では、保持中に取得できないことだけを短い timeout で確認し、
+   lock 解除後の取得完了は固定 timeout ではなく thread join で待つ。全体並列実行では他の env tests が
+   先に lock を取る可能性がある。
+3. env lock を使う巻き添え側の tests は、`lock().unwrap()` ではなく poisoned lock を回復する helper を使い、
+   先行 panic の調査を `PoisonError` のノイズで隠さない。

@@ -159,6 +159,7 @@ fn runtime_state_owner_forwards_live_event_to_loopback_target() {
     let home = tempfile::tempdir().unwrap();
     env.set("HOME", home.path().as_os_str().to_os_string());
     env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
 
     let sessions_dir = home.path().join(".gwt").join("sessions");
     let worktree = home.path().join("repo");
@@ -205,6 +206,7 @@ fn coordination_event_owner_forwards_live_event_to_loopback_target() {
     let home = tempfile::tempdir().unwrap();
     env.set("HOME", home.path().as_os_str().to_os_string());
     env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
 
     let sessions_dir = home.path().join(".gwt").join("sessions");
     let worktree = home.path().join("repo");
@@ -252,6 +254,7 @@ fn forward_owner_forwards_live_event_to_loopback_target() {
     let home = tempfile::tempdir().unwrap();
     env.set("HOME", home.path().as_os_str().to_os_string());
     env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
 
     let sessions_dir = home.path().join(".gwt").join("sessions");
     let worktree = home.path().join("repo");
@@ -297,6 +300,7 @@ fn forward_owner_uses_persisted_agent_session_id_when_hook_session_id_is_missing
     let home = tempfile::tempdir().unwrap();
     env.set("HOME", home.path().as_os_str().to_os_string());
     env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
 
     let sessions_dir = home.path().join(".gwt").join("sessions");
     let worktree = home.path().join("repo");

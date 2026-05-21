@@ -138,6 +138,17 @@ pub async fn spawn_logged(
         "process start",
     );
 
+    // SPEC-2809 (revised) — push the command line as a banner so the
+    // Console window shows e.g. `$ gh pr list ...` instead of an opaque
+    // `spawn_id` marker. The synthetic line uses the kind's hub so a
+    // gh / docker / runner spawn lands under the right tab.
+    crate::process::push_command_banner_to_hub(
+        kind,
+        spawn_id,
+        &options.label,
+        options.current_dir.as_deref(),
+    );
+
     let mut command = TokioCommand::new(&program);
     command.args(args.iter().map(|a| a.as_ref()));
     if let Some(dir) = &options.current_dir {
@@ -201,6 +212,8 @@ pub async fn spawn_logged(
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let exit_code = status.code();
+
+    crate::process::push_command_summary_to_hub(kind, spawn_id, exit_code, duration_ms);
 
     tracing::info!(
         target: SUMMARY_TARGET,

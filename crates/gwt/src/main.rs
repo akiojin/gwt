@@ -14,14 +14,14 @@ use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
-    cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
-    list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
-    load_session_state, migrate_legacy_workspace_state, read_binary_chunk, read_text_file,
-    refresh_managed_gwt_assets_for_agent, resolve_launch_spec, workspace_state_path, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    cleanup_selected_branches_with_progress, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    read_binary_chunk, read_text_file, refresh_managed_gwt_assets_for_agent, resolve_launch_spec,
+    workspace_state_path, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, BranchListEntry,
+    ContentLimits, DockerWizardContext, FileContentError, FrontendEvent, HookForwardTarget,
+    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -1946,6 +1946,7 @@ mod tests {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_auto_resume_sources: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -2897,7 +2898,8 @@ mod tests {
                 if message == "Window is not a knowledge bridge"
         ));
 
-        let cleanup_missing = runtime.run_branch_cleanup_events("client-1", "missing", &[], false);
+        let cleanup_missing =
+            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false);
         assert_eq!(cleanup_missing.len(), 1);
         assert!(matches!(
             cleanup_missing[0].event,
@@ -2905,7 +2907,7 @@ mod tests {
         ));
 
         let cleanup_wrong =
-            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false);
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false);
         assert_eq!(cleanup_wrong.len(), 1);
         assert!(matches!(
             cleanup_wrong[0].event,
@@ -3228,8 +3230,21 @@ mod tests {
             &branches_id,
             &[String::from("feature/prune-me")],
             false,
+            false,
         );
         assert!(cleanup_events.is_empty());
+        wait_for_recorded_event("branch cleanup progress dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupProgress { .. }
+                        ))
+                )
+            })
+        });
         wait_for_recorded_event("branch cleanup dispatch", &events, |events| {
             events.iter().any(|event| {
                 matches!(
@@ -3529,6 +3544,7 @@ mod tests {
                 id: branches_id.clone(),
                 branches: vec!["feature/missing".to_string()],
                 delete_remote: false,
+                force_filesystem_delete: false,
             },
         );
         assert!(cleanup_events.is_empty());
@@ -5403,6 +5419,9 @@ mod tests {
 
     #[test]
     fn docker_launch_plan_and_helper_logic_cover_defaults_and_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         let devcontainer_dir = project.join(".devcontainer");
@@ -5532,6 +5551,9 @@ mod tests {
     fn wizard_docker_context_detection_does_not_spawn_docker_cli() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("project dir");
@@ -5577,6 +5599,9 @@ mod tests {
 
     #[test]
     fn finalize_docker_agent_launch_config_wraps_runtime_command_in_compose_exec() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");
@@ -5621,6 +5646,9 @@ mod tests {
 
     #[test]
     fn finalize_docker_agent_launch_config_includes_override_file_when_present() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");

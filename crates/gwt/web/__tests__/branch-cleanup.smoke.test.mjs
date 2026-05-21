@@ -66,6 +66,8 @@ function makeState(overrides = {}) {
       open: true,
       stage: "confirm",
       deleteRemote: false,
+      forceFilesystemDelete: false,
+      progress: null,
       results: [],
       timeoutId: null,
       ...overrides.cleanupModal,
@@ -208,9 +210,65 @@ test("confirm stage: deleteRemote toggle appears when any entry has upstream", (
   assert.equal(toggledTo, true);
 });
 
+test("confirm stage: force filesystem delete toggle is explicit opt-in", () => {
+  const { dialogEl, modalEl, createNode } = mount();
+  const state = makeState();
+  let toggledTo = null;
+
+  renderBranchCleanupModal({
+    modalEl,
+    dialogEl,
+    windowId: "win-1",
+    state,
+    selectedEntries: [makeEntry("work/old")],
+    createNode,
+    resultSummary,
+    mergeTargetText,
+    riskLabels,
+    onCancel: () => {},
+    onSubmit: () => {},
+    onDeleteRemoteToggle: () => {},
+    onForceFilesystemDeleteToggle: (checked) => {
+      toggledTo = checked;
+    },
+  });
+
+  const labels = Array.from(dialogEl.querySelectorAll(".branch-cleanup-toggle-row"));
+  const forceRow = labels.find((row) =>
+    row.textContent.includes("Force remove remaining worktree files"),
+  );
+  assert.ok(forceRow, "expected force filesystem cleanup checkbox");
+  const checkbox = forceRow.querySelector("input[type='checkbox']");
+  assert.ok(checkbox);
+  assert.equal(checkbox.checked, false);
+
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new dialogEl.ownerDocument.defaultView.Event("change"));
+
+  assert.equal(toggledTo, true);
+});
+
 test("running stage: renders running heading and copy", () => {
   const { modalEl, dialogEl, createNode } = mount();
-  const state = makeState({ cleanupModal: { open: true, stage: "running" } });
+  const state = makeState({
+    cleanupModal: {
+      open: true,
+      stage: "running",
+      progress: {
+        current: {
+          branch: "work/b",
+          index: 2,
+          total: 3,
+          message: "Removing work/b",
+        },
+        items: [
+          { branch: "work/a", status: "done", message: "Deleted local branch" },
+          { branch: "work/b", status: "running", message: "Removing work/b" },
+          { branch: "work/c", status: "pending", message: "" },
+        ],
+      },
+    },
+  });
 
   renderBranchCleanupModal({
     modalEl,
@@ -231,7 +289,11 @@ test("running stage: renders running heading and copy", () => {
   assert.equal(heading.textContent, "Cleaning up branches");
   const running = dialogEl.querySelector(".branch-cleanup-running");
   assert.ok(running);
-  assert.match(running.textContent, /Running cleanup for 2 branches\./);
+  assert.match(running.textContent, /Cleaning 2 of 3: work\/b/);
+  const rows = dialogEl.querySelectorAll(".branch-cleanup-progress-item");
+  assert.equal(rows.length, 3);
+  assert.match(rows[1].textContent, /work\/b/);
+  assert.match(rows[1].textContent, /running/);
 });
 
 test("result stage: renders summary, per-result rows and Close button", () => {

@@ -18,6 +18,7 @@ import {
   applyVisibilityTransition,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
+  elementHasLayoutBox,
   runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
@@ -171,6 +172,8 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
   const callOrder = [];
   let layoutFlushed = 0;
   const parent = {
+    clientWidth: 800,
+    clientHeight: 480,
     getBoundingClientRect: () => {
       callOrder.push("flush-layout");
       layoutFlushed += 1;
@@ -239,6 +242,80 @@ test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry 
   assert.equal(result.ran, true);
 });
 
+test("runTerminalActivationSequence waits for the terminal host layout box before fitting (#2839)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: {
+        parentElement: {
+          clientWidth: 0,
+          clientHeight: 360,
+          getBoundingClientRect: () => {
+            callOrder.push("flush-layout");
+            return { width: 0, height: 360 };
+          },
+        },
+      },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => ({ cols: 100, rows: 28 }),
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-layout-pending",
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, [], "0-size terminal host must not fit, send geometry, or focus");
+  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
+});
+
+test("runTerminalActivationSequence waits when xterm fit dimensions are unavailable (#2839)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: {
+        parentElement: {
+          clientWidth: 800,
+          clientHeight: 420,
+          getBoundingClientRect: () => {
+            callOrder.push("flush-layout");
+            return { width: 800, height: 420 };
+          },
+        },
+      },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => undefined,
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-cell-pending",
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(
+    callOrder,
+    ["refresh", "flush-layout"],
+    "unresolved xterm cell metrics must not fit, send geometry, or focus",
+  );
+  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
+});
+
 test("runTerminalActivationSequence is a no-op when runtime is missing pieces (T-199)", () => {
   assert.deepEqual(
     runTerminalActivationSequence({ runtime: null, windowId: "x" }),
@@ -293,6 +370,40 @@ test("attachHostResizeReflow throws when given a non-DOM window", () => {
   );
 });
 
+test("elementHasLayoutBox blocks 0-size containers (Issue #2832 / SPEC-2008 Phase 26.A regression)", () => {
+  // SPEC-2008 Phase 26.A only checked `.hidden` and `.minimized`, so a
+  // structurally-visible window whose flex/grid layout had not propagated
+  // could pass the visibility predicate while the parent container was
+  // still 0x0. fitAddon then resolved against the broken box, isReady
+  // flipped true, and the deferredWrites flushed into xterm's default
+  // 80x24 grid — the Claude Code post-launch corruption symptom.
+  assert.equal(elementHasLayoutBox({ clientWidth: 800, clientHeight: 480 }), true);
+  assert.equal(elementHasLayoutBox({ clientWidth: 0, clientHeight: 480 }), false);
+  assert.equal(elementHasLayoutBox({ clientWidth: 800, clientHeight: 0 }), false);
+  assert.equal(elementHasLayoutBox({ clientWidth: 0, clientHeight: 0 }), false);
+
+  // Falls back to getBoundingClientRect when client* are unavailable
+  // (e.g. linkedom fixtures used elsewhere in this suite).
+  assert.equal(
+    elementHasLayoutBox({
+      getBoundingClientRect: () => ({ width: 600, height: 320 }),
+    }),
+    true,
+  );
+  assert.equal(
+    elementHasLayoutBox({
+      getBoundingClientRect: () => ({ width: 0, height: 320 }),
+    }),
+    false,
+  );
+
+  // Defensive default: missing element falls through (don't pin the
+  // handshake retry loop on inputs the predicate can not measure).
+  assert.equal(elementHasLayoutBox(null), true);
+  assert.equal(elementHasLayoutBox(undefined), true);
+  assert.equal(elementHasLayoutBox({}), true);
+});
+
 test("app.js wires the reflow controller for resize, transition, and predicate", () => {
   // Source-string contract retained per the lesson — limited to wiring
   // detection so a future refactor that drops the import / call surfaces
@@ -336,5 +447,36 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /scheduleTerminalFocusActivation\(topmostId,\s*\{\s*shouldPersistGeometry:\s*false,?\s*\}\)/,
     "topmost focus activation must not persist geometry on every workspace render",
+  );
+
+  // Issue #2832 — SPEC-2008 Phase 26.A regression fix: completeInitialFitHandshake
+  // must defer (and retry via rAF) while the container has no layout box,
+  // so deferredWrites do not flush into xterm's default 80x24 grid before
+  // fit can resolve real cols/rows. Wiring detection only — behavior
+  // coverage lives in the elementHasLayoutBox unit test above.
+  assert.match(
+    appSource,
+    /elementHasLayoutBox/,
+    "app.js must import elementHasLayoutBox so the initial-fit handshake can gate on container layout",
+  );
+  assert.match(
+    appSource,
+    /terminalContainerHasLayoutBox\(windowId\)/,
+    "completeInitialFitHandshake must consult terminalContainerHasLayoutBox",
+  );
+  assert.match(
+    appSource,
+    /function terminalContainerHasLayoutBox\(windowId\) \{[\s\S]*?terminalMap\.get\(windowId\)[\s\S]*?parentElement[\s\S]*?elementHasLayoutBox/,
+    "terminalContainerHasLayoutBox must measure the actual xterm host, not only the outer workspace window",
+  );
+  assert.match(
+    appSource,
+    /handshakeAttempts/,
+    "completeInitialFitHandshake must bound its retry loop with a handshakeAttempts counter",
+  );
+  assert.match(
+    appSource,
+    /HANDSHAKE_RETRY_LIMIT/,
+    "handshake retry must be capped by HANDSHAKE_RETRY_LIMIT",
   );
 });

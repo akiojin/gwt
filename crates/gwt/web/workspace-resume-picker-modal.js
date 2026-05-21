@@ -128,14 +128,23 @@ export function renderWorkspaceResumePicker({
           agent.display_name || agent.agent_id,
         ),
       );
-      const tagClass = agent.resume_kind === "metadata_only"
-        ? "workspace-resume-picker-row-tag is-fresh"
-        : "workspace-resume-picker-row-tag is-conversation";
+      const lifecycleTag =
+        agent.lifecycle_status === "interrupted"
+          ? { className: "is-interrupted", label: "Interrupted" }
+          : agent.lifecycle_status === "active"
+            ? { className: "is-active", label: "Active" }
+            : null;
+      const tagClass = lifecycleTag
+        ? `workspace-resume-picker-row-tag ${lifecycleTag.className}`
+        : agent.resume_kind === "metadata_only"
+          ? "workspace-resume-picker-row-tag is-fresh"
+          : "workspace-resume-picker-row-tag is-conversation";
       heading.appendChild(
         createNode(
           "span",
           tagClass,
-          agent.resume_kind === "metadata_only" ? "Fresh start" : "Conversation",
+          lifecycleTag?.label
+            || (agent.resume_kind === "metadata_only" ? "Fresh start" : "Conversation"),
         ),
       );
       row.appendChild(heading);

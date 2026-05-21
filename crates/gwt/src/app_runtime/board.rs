@@ -266,14 +266,9 @@ impl AppRuntime {
         let session = gwt_agent::Session::load_and_migrate(&session_path).map_err(|error| {
             format!("Board origin session {origin_session_id} could not be loaded: {error}")
         })?;
-        let resume_session_id = session
-            .agent_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                format!("Board origin session {origin_session_id} has no agent session id")
-            })?;
+        let resume_session_id = session.exact_resume_session_id().ok_or_else(|| {
+            format!("Board origin session {origin_session_id} has no agent session id")
+        })?;
 
         let mut builder = AgentLaunchBuilder::new(session.agent_id.clone())
             .working_dir(session.worktree_path.clone())

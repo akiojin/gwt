@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +24,9 @@ pub struct WorktreeEntry {
     /// Human-friendly label (branch name when available, else last path segment).
     pub label: String,
     pub branch: Option<String>,
+    /// Persisted gwt session ids whose recorded worktree path matches this entry.
+    #[serde(default)]
+    pub session_ids: Vec<String>,
     /// True for the worktree that currently anchors the active project tab.
     pub is_active: bool,
 }
@@ -41,6 +47,18 @@ pub fn enumerate_worktrees(
     repo_root: &Path,
     active_root: Option<&Path>,
 ) -> Result<Vec<WorktreeEntry>, InventoryError> {
+    enumerate_worktrees_with_sessions_dir(
+        repo_root,
+        active_root,
+        &gwt_core::paths::gwt_sessions_dir(),
+    )
+}
+
+pub fn enumerate_worktrees_with_sessions_dir(
+    repo_root: &Path,
+    active_root: Option<&Path>,
+    sessions_dir: &Path,
+) -> Result<Vec<WorktreeEntry>, InventoryError> {
     let manager = WorktreeManager::new(repo_root);
     let infos = manager
         .list()
@@ -50,14 +68,22 @@ pub fn enumerate_worktrees(
         .ok()
         .map(|path| canonicalize_or(path.as_path()));
     let canonical_active = active_root.map(canonicalize_or);
+    let session_ids_by_worktree = load_session_ids_by_worktree(sessions_dir);
 
     let mut entries = Vec::new();
     for info in infos {
         if info.prunable {
             continue;
         }
+        let canonical = canonicalize_or(&info.path);
+        let session_ids = session_ids_by_worktree
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_default();
         entries.push(make_entry(
             &info,
+            canonical,
+            session_ids,
             canonical_main.as_deref(),
             canonical_active.as_deref(),
         )?);
@@ -69,10 +95,11 @@ pub fn enumerate_worktrees(
 
 fn make_entry(
     info: &WorktreeInfo,
+    canonical: PathBuf,
+    session_ids: Vec<String>,
     canonical_main: Option<&Path>,
     canonical_active: Option<&Path>,
 ) -> Result<WorktreeEntry, InventoryError> {
-    let canonical = canonicalize_or(&info.path);
     let id = id_for(&canonical)?;
     let kind = if canonical_main
         .map(|main| main == canonical.as_path())
@@ -93,8 +120,34 @@ fn make_entry(
         path: canonical,
         label,
         branch: info.branch.clone(),
+        session_ids,
         is_active,
     })
+}
+
+fn load_session_ids_by_worktree(sessions_dir: &Path) -> HashMap<PathBuf, Vec<String>> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return HashMap::new();
+    };
+    let mut session_ids_by_worktree: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+            continue;
+        };
+        session_ids_by_worktree
+            .entry(canonicalize_or(&session.worktree_path))
+            .or_default()
+            .push(session.id);
+    }
+    for session_ids in session_ids_by_worktree.values_mut() {
+        session_ids.sort();
+        session_ids.dedup();
+    }
+    session_ids_by_worktree
 }
 
 fn id_for(path: &Path) -> Result<String, InventoryError> {

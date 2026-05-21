@@ -6,7 +6,7 @@ use gwt_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    branch_cleanup::BranchCleanupResultEntry,
+    branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
     file_content::{Encoding, Newline},
@@ -334,10 +334,14 @@ pub enum FrontendEvent {
         id: String,
         branches: Vec<String>,
         delete_remote: bool,
+        #[serde(default)]
+        force_filesystem_delete: bool,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
+        #[serde(default)]
+        force_filesystem_delete: bool,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -424,6 +428,11 @@ pub enum FrontendEvent {
     /// a sensible position inside the visible canvas.
     ResumeWorkspaceAgent {
         session_id: String,
+        bounds: WindowGeometry,
+    },
+    ResumeBranchLatestAgent {
+        id: String,
+        branch_name: String,
         bounds: WindowGeometry,
     },
     OpenLaunchWizard {
@@ -668,12 +677,10 @@ fn default_newline() -> Newline {
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
-    // SPEC-2359 US-37: Workspace Overview Completed カラムは
-    // active_work_projection broadcast に依存していたが、その broadcast
-    // は限定された trigger でしか走らないため起動直後に表示されない
-    // 問題があった。workspace_state は frequently broadcast されるので、
-    // 同 event に work_items を載せて broadcast invariant を 1 本化する。
-    #[serde(default)]
+    // Compatibility field only. Workspace history is intentionally not carried
+    // by frequently-broadcast workspace_state events; active_work_projection is
+    // the owner for work item / history payloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_items: Vec<WorkspaceHistoryView>,
 }
 
@@ -1086,6 +1093,15 @@ pub enum BackendEvent {
     BranchCleanupResult {
         id: String,
         results: Vec<BranchCleanupResultEntry>,
+    },
+    BranchCleanupProgress {
+        id: String,
+        branch: String,
+        execution_branch: Option<String>,
+        index: usize,
+        total: usize,
+        phase: BranchCleanupProgressPhase,
+        message: String,
     },
     BranchError {
         id: String,
@@ -1558,6 +1574,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "branch_cleanup_progress",
+        BackendEventDeliveryClass::Streamed,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "branch_error",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -1836,6 +1857,7 @@ impl BackendEvent {
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
             BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
             BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
+            BackendEvent::BranchCleanupProgress { .. } => "branch_cleanup_progress",
             BackendEvent::BranchError { .. } => "branch_error",
             BackendEvent::BoardError { .. } => "board_error",
             BackendEvent::ProfileError { .. } => "profile_error",

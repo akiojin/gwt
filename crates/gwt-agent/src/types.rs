@@ -266,6 +266,8 @@ pub enum AgentStatus {
     WaitingInput,
     #[serde(alias = "stopped", alias = "Stopped")]
     Stopped,
+    #[serde(alias = "interrupted", alias = "Interrupted")]
+    Interrupted,
 }
 
 /// Session start mode.

@@ -177,9 +177,7 @@ fn live_event_agent_session_id(
             let gwt_session_id =
                 std::env::var(GWT_SESSION_ID_ENV).unwrap_or_else(|_| "-".to_string());
             let persisted_agent_session_id = session
-                .and_then(|session| session.agent_session_id.as_deref())
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
+                .and_then(gwt_agent::Session::exact_resume_session_id)
                 .unwrap_or("-");
             let source_event = source_event.unwrap_or("-");
             let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
@@ -191,9 +189,7 @@ fn live_event_agent_session_id(
     }
 
     session
-        .and_then(|session| session.agent_session_id.as_deref())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+        .and_then(gwt_agent::Session::exact_resume_session_id)
         .map(str::to_string)
 }
 

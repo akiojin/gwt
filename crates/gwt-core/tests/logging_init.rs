@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use gwt_core::logging::{current_log_file, init, read_log_file, LogLevel, LoggingConfig};
+use gwt_core::process_console::ProcessKind;
 
 #[test]
 fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
@@ -30,6 +31,29 @@ fn init_writes_tracing_events_as_jsonl_to_gwt_log() {
         "hello from test"
     );
     tracing::warn!(target: "gwt_core::logging::test", "warning sample");
+
+    // SPEC-2809 revised — the Console window only shows actual
+    // subprocess stdout/stderr (terminal-like view); gwt-domain
+    // tracing events like `gwt::index` must NOT be teed into the
+    // ProcessConsoleHub. They are surfaced by the Logs window via the
+    // canonical JSONL log file. This assertion guards the contract.
+    tracing::info!(
+        target: "gwt::index",
+        worktree = "test-wt",
+        "index status runner kicked"
+    );
+
+    let hub_snapshot_runner = handles
+        .process_console_hub
+        .snapshot_kind(ProcessKind::IndexRunner);
+    assert!(
+        hub_snapshot_runner.is_empty(),
+        "expected IndexRunner hub buffer to remain empty (no tee from `gwt::index` tracing), got: {:?}",
+        hub_snapshot_runner
+            .iter()
+            .map(|l| l.message.as_str())
+            .collect::<Vec<_>>()
+    );
 
     // Drop the handles BEFORE reading the log file. `WorkerGuard::drop`
     // sends a shutdown signal to the non-blocking writer thread and
