@@ -28,63 +28,105 @@ def emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
-DEFAULT_IGNORE_PATTERNS = [
-    ".git",
-    ".gwt/index",
-    "node_modules",
-    "__pycache__",
-    ".DS_Store",
-    "target",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    "*.pyc",
-    "*.pyo",
-    "*.so",
-    "*.dylib",
-    "*.dll",
-    "*.exe",
-    "*.o",
-    "*.a",
-    "*.class",
-    "*.jar",
-    "*.war",
-    "*.wasm",
-    "*.min.js",
-    "*.min.css",
-    "*.map",
-    "*.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "Cargo.lock",
-]
-
-BINARY_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
-    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv",
-    ".dmg", ".msi", ".deb", ".rpm", ".AppImage",
-    ".safetensors", ".bin", ".onnx", ".pt", ".pth",
+INDEX_PATH_POLICY_FILE = "index_path_policy.json"
+FALLBACK_INDEX_PATH_POLICY = {
+    "schema_version": 1,
+    "max_file_size": 1_048_576,
+    "allow_paths": ["tasks/lessons.md", "tasks/memory.md"],
+    "deny_root_prefixes": [
+        ".git",
+        ".claude",
+        ".codex",
+        ".gemini",
+        ".gwt",
+        "tasks",
+        "specs",
+    ],
+    "deny_directory_names": [
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        "vendor",
+        ".venv",
+        "venv",
+        ".tox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".gradle",
+        ".terraform",
+        "coverage",
+        "htmlcov",
+        ".turbo",
+        ".parcel-cache",
+        "__pycache__",
+    ],
+    "deny_file_extensions": [".snap"],
+    "binary_extensions": [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".svg",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        ".pdf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".dmg",
+        ".msi",
+        ".deb",
+        ".rpm",
+        ".AppImage",
+        ".safetensors",
+        ".bin",
+        ".onnx",
+        ".pt",
+        ".pth",
+    ],
 }
 
-MAX_FILE_SIZE = 1_048_576  # 1 MiB
+
+def load_index_path_policy() -> Dict[str, Any]:
+    """Load the shared project-index path policy bundled with the runner."""
+    policy_path = Path(__file__).with_name(INDEX_PATH_POLICY_FILE)
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        policy = dict(FALLBACK_INDEX_PATH_POLICY)
+
+    merged = dict(FALLBACK_INDEX_PATH_POLICY)
+    merged.update(policy)
+    return merged
+
+
+INDEX_PATH_POLICY = load_index_path_policy()
+BINARY_EXTENSIONS = {ext.lower() for ext in INDEX_PATH_POLICY["binary_extensions"]}
+MAX_FILE_SIZE = int(INDEX_PATH_POLICY["max_file_size"])
 CODE_COLLECTION = "files_code"
 DOC_COLLECTION = "files_docs"
 LEGACY_FILE_COLLECTION = "files"
 
-SKIP_FILE_EXTENSIONS = {
-    ".snap",
-}
-
-SKIP_ROOT_DIRECTORIES = {
-    ".claude",
-    ".codex",
-    "specs",
-    "tasks",
-}
+SKIP_FILE_EXTENSIONS = {ext.lower() for ext in INDEX_PATH_POLICY["deny_file_extensions"]}
+SKIP_ROOT_DIRECTORIES = set(INDEX_PATH_POLICY["deny_root_prefixes"])
 
 DOC_FILE_EXTENSIONS = {
     ".md",
@@ -104,19 +146,92 @@ def normalize_rel_path(path: Path) -> str:
     return path.as_posix()
 
 
-def load_gitignore_patterns(project_root: Path) -> List[str]:
-    """Load patterns from .gitignore."""
-    gitignore = project_root / ".gitignore"
-    patterns: List[str] = list(DEFAULT_IGNORE_PATTERNS)
-    if gitignore.is_file():
+def _policy_allowlisted(rel_path: str, policy: Optional[Dict[str, Any]] = None) -> bool:
+    policy = policy or INDEX_PATH_POLICY
+    return rel_path.strip("/") in set(policy["allow_paths"])
+
+
+def _policy_denies_path(rel_path: str, policy: Optional[Dict[str, Any]] = None) -> bool:
+    policy = policy or INDEX_PATH_POLICY
+    rel_path = rel_path.strip("/")
+    if not rel_path or _policy_allowlisted(rel_path, policy):
+        return False
+
+    parts = [part for part in rel_path.split("/") if part]
+    if not parts:
+        return False
+
+    if parts[0] in set(policy["deny_root_prefixes"]):
+        return True
+
+    if any(part in set(policy["deny_directory_names"]) for part in parts):
+        return True
+
+    suffix = Path(rel_path).suffix.lower()
+    return suffix in {ext.lower() for ext in policy["deny_file_extensions"]}
+
+
+def load_gitignore_patterns(project_root: Path) -> List[tuple[str, str]]:
+    """Load root/nested .gitignore and project-local info/exclude patterns."""
+    return load_project_ignore_patterns(project_root)
+
+
+def load_project_ignore_patterns(project_root: Path) -> List[tuple[str, str]]:
+    """Load project-local ignore patterns without consulting global git ignores."""
+    policy = load_index_path_policy()
+    patterns: List[tuple[str, str]] = []
+
+    for root, dirs, files in os.walk(project_root):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(project_root)
+        base_rel = "" if str(rel_root) == "." else rel_root.as_posix()
+
+        dirs[:] = [
+            d for d in dirs
+            if not _policy_denies_path(
+                f"{base_rel}/{d}" if base_rel else d,
+                policy,
+            )
+        ]
+
+        if ".gitignore" not in files:
+            continue
+        gitignore = root_path / ".gitignore"
         for line in gitignore.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                patterns.append(line)
+                patterns.append((base_rel, line))
+
+    info_exclude = _git_info_exclude_path(project_root)
+    if info_exclude and info_exclude.is_file():
+        for line in info_exclude.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(("", line))
+
     return patterns
 
 
-def _pattern_to_regex(pattern: str) -> Optional[re.Pattern]:
+def _git_info_exclude_path(project_root: Path) -> Optional[Path]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--git-path", "info/exclude"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    path_text = completed.stdout.strip()
+    if not path_text:
+        return None
+    path = Path(path_text)
+    return path if path.is_absolute() else project_root / path
+
+
+def _pattern_to_regex(pattern: str, base_rel: str = "") -> Optional[re.Pattern]:
     """Convert a simplified gitignore-style pattern to a regex."""
     negated = pattern.startswith("!")
     if negated:
@@ -127,13 +242,18 @@ def _pattern_to_regex(pattern: str) -> Optional[re.Pattern]:
     if not pattern:
         return None
 
+    base_rel = base_rel.strip("/")
     regex = pattern.replace(".", r"\.")
     regex = regex.replace("**", "{{GLOBSTAR}}")
     regex = regex.replace("*", "[^/]*")
     regex = regex.replace("{{GLOBSTAR}}", ".*")
     regex = regex.replace("?", "[^/]")
 
-    if "/" not in pattern:
+    if base_rel and "/" not in pattern:
+        regex = f"^{re.escape(base_rel)}/(.*/)?{regex}(/.*|$)"
+    elif base_rel:
+        regex = f"^{re.escape(base_rel)}/{regex}(/.*|$)"
+    elif "/" not in pattern:
         regex = f"(^|.*/){regex}(/.*|$)"
     else:
         regex = f"^{regex}(/.*|$)"
@@ -182,9 +302,12 @@ def classify_file_bucket(rel_path: str) -> str:
 
 
 def collect_files(project_root: Path) -> List[Path]:
-    """Recursively collect project files, respecting .gitignore."""
-    patterns = load_gitignore_patterns(project_root)
-    compiled = [p for p in (_pattern_to_regex(pat) for pat in patterns) if p is not None]
+    """Recursively collect project files, respecting the shared path policy."""
+    policy = load_index_path_policy()
+    patterns = load_project_ignore_patterns(project_root)
+    compiled = [
+        p for p in (_pattern_to_regex(pat, base) for base, pat in patterns) if p is not None
+    ]
     result = []
     for root, dirs, files in os.walk(project_root):
         root_path = Path(root)
@@ -193,14 +316,17 @@ def collect_files(project_root: Path) -> List[Path]:
 
         dirs[:] = [
             d for d in dirs
-            if not should_ignore(
+            if not _policy_denies_path(
                 f"{rel_root_str}/{d}" if rel_root_str else d,
-                compiled,
+                policy,
             )
+            and not should_ignore(f"{rel_root_str}/{d}" if rel_root_str else d, compiled)
         ]
 
         for fname in files:
             rel = f"{rel_root_str}/{fname}" if rel_root_str else fname
+            if _policy_denies_path(rel, policy):
+                continue
             if should_ignore(rel, compiled):
                 continue
             fpath = root_path / fname

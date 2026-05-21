@@ -12,7 +12,9 @@ use crate::{GwtError, Result};
 use sha2::{Digest, Sha256};
 
 const RUNNER_SOURCE: &str = include_str!("../runtime/chroma_index_runner.py");
+const INDEX_PATH_POLICY_SOURCE: &str = include_str!("../runtime/index_path_policy.json");
 const REQUIREMENTS_SOURCE: &str = include_str!("../runtime/project_index_requirements.txt");
+const INDEX_PATH_POLICY_FILE: &str = "index_path_policy.json";
 const REQUIREMENTS_FILE: &str = "project_index_requirements.txt";
 const RUNTIME_MANIFEST_FILE: &str = "project_index_runtime_manifest.json";
 const VERSIONED_RUNNER_DIR: &str = "runners";
@@ -43,6 +45,7 @@ pub enum ProjectIndexRuntimeErrorKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndexRuntimeReport {
     pub runner_updated: bool,
+    pub policy_updated: bool,
     pub requirements_updated: bool,
     pub manifest_updated: bool,
     pub venv_created: bool,
@@ -50,6 +53,7 @@ pub struct ProjectIndexRuntimeReport {
     pub dependencies_installed: bool,
     pub runner_smoke_tested: bool,
     pub runner_hash: String,
+    pub policy_hash: String,
     pub requirements_hash: String,
 }
 
@@ -139,6 +143,8 @@ fn ensure_project_index_runtime_with(
     let runtime_dir = crate::paths::gwt_runtime_dir_from(gwt_home);
     let legacy_runner_path = crate::paths::gwt_runtime_runner_path_from(gwt_home);
     let runner_path = project_index_runner_path_from(gwt_home);
+    let legacy_policy_path = runtime_dir.join(INDEX_PATH_POLICY_FILE);
+    let versioned_policy_path = runner_path.with_file_name(INDEX_PATH_POLICY_FILE);
     let requirements_path = runtime_dir.join(REQUIREMENTS_FILE);
     let venv_dir = project_index_venv_dir_from(gwt_home);
 
@@ -146,8 +152,13 @@ fn ensure_project_index_runtime_with(
     let legacy_runner_updated = write_if_changed(&legacy_runner_path, RUNNER_SOURCE)?;
     let versioned_runner_updated = write_if_changed(&runner_path, RUNNER_SOURCE)?;
     report.runner_updated = legacy_runner_updated || versioned_runner_updated;
+    let legacy_policy_updated = write_if_changed(&legacy_policy_path, INDEX_PATH_POLICY_SOURCE)?;
+    let versioned_policy_updated =
+        write_if_changed(&versioned_policy_path, INDEX_PATH_POLICY_SOURCE)?;
+    report.policy_updated = legacy_policy_updated || versioned_policy_updated;
     report.requirements_updated = write_if_changed(&requirements_path, REQUIREMENTS_SOURCE)?;
     report.runner_hash = content_hash(RUNNER_SOURCE);
+    report.policy_hash = content_hash(INDEX_PATH_POLICY_SOURCE);
     report.requirements_hash = content_hash(REQUIREMENTS_SOURCE);
     report.manifest_updated = write_if_changed(
         &runtime_dir.join(RUNTIME_MANIFEST_FILE),
@@ -226,6 +237,11 @@ fn runtime_manifest_contents(report: &ProjectIndexRuntimeReport) -> String {
         "requirements": {
             "path": REQUIREMENTS_FILE,
             "sha256_16": report.requirements_hash,
+        },
+        "index_path_policy": {
+            "path": INDEX_PATH_POLICY_FILE,
+            "versioned_path": format!("{VERSIONED_RUNNER_DIR}/{INDEX_PATH_POLICY_FILE}"),
+            "sha256_16": report.policy_hash,
         },
         "venv": {
             "path": format!("{VERSIONED_VENV_DIR}/chroma-venv-{}", report.requirements_hash),
@@ -724,15 +740,24 @@ mod tests {
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
 
         assert!(report.runner_updated);
+        assert!(report.policy_updated);
         assert!(report.requirements_updated);
         assert!(report.manifest_updated);
         assert!(report.venv_created);
         assert!(report.dependencies_installed);
         assert!(report.runner_smoke_tested);
         assert_eq!(report.runner_hash.len(), 16);
+        assert_eq!(report.policy_hash.len(), 16);
         assert_eq!(report.requirements_hash.len(), 16);
         assert!(gwt_runtime_runner_path_from(&gwt_home).exists());
         assert!(project_index_runner_path_from(&gwt_home).exists());
+        assert!(gwt_home
+            .join("runtime")
+            .join(INDEX_PATH_POLICY_FILE)
+            .exists());
+        assert!(project_index_runner_path_from(&gwt_home)
+            .with_file_name(INDEX_PATH_POLICY_FILE)
+            .exists());
         assert!(gwt_home
             .join("runtime")
             .join(RUNTIME_MANIFEST_FILE)
@@ -763,6 +788,7 @@ mod tests {
 
         let second = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(!second.runner_updated);
+        assert!(!second.policy_updated);
         assert!(!second.requirements_updated);
         assert!(!second.manifest_updated);
         assert!(!second.venv_created);

@@ -1,21 +1,8 @@
 use std::path::{Component, Path, PathBuf};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-
-const BUILTIN_SKIP_PREFIXES: &[&str] = &[
-    ".git",
-    ".claude",
-    ".codex",
-    ".gemini",
-    ".gwt",
-    "tasks",
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-];
+use gwt_core::index::path_policy::{
+    build_project_ignore_matcher, default_index_path_policy, ProjectIgnoreMatcher,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PathFilterError {
@@ -64,40 +51,12 @@ pub(crate) fn safe_resolve(root: &Path, relative: &Path) -> Result<ResolvedPath,
     })
 }
 
-pub(crate) fn build_gitignore(root: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(root);
-    let gitignore_path = root.join(".gitignore");
-    if gitignore_path.is_file() {
-        let _ = builder.add(&gitignore_path);
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
+pub(crate) fn build_gitignore(root: &Path) -> ProjectIgnoreMatcher {
+    build_project_ignore_matcher(root)
 }
 
-pub(crate) fn is_builtin_skip(root: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let first = rel
-        .components()
-        .next()
-        .and_then(|component| match component {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        });
-    match first {
-        Some(name) => BUILTIN_SKIP_PREFIXES.contains(&name),
-        None => false,
-    }
-}
-
-pub(crate) fn is_path_ignored(gitignore: &Gitignore, root: &Path, path: &Path) -> bool {
-    if is_builtin_skip(root, path) {
-        return true;
-    }
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let is_dir = path.is_dir();
-    matches!(
-        gitignore.matched_path_or_any_parents(rel, is_dir),
-        ignore::Match::Ignore(_)
-    )
+pub(crate) fn is_path_ignored(gitignore: &ProjectIgnoreMatcher, root: &Path, path: &Path) -> bool {
+    !default_index_path_policy().is_indexable_path(gitignore, root, path)
 }
 
 pub(crate) fn is_relative_denied(canonical_root: &Path, relative: &Path) -> bool {
