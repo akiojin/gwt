@@ -49,18 +49,33 @@
 6. **No open unmerged PR; at least one merged** --> treat `git rev-list --count "origin/$base..HEAD"` as the source of truth for new work.
 7. **Only closed unmerged PRs** --> create a new PR.
 
-## Step 6: Ensure the head branch is pushed
+## Step 6: Decide PR readiness before pushing
 
+- Apply the Ready PR Gate from the main skill before any push or PR write
+  that would create/update a Ready for review PR.
+- If the change is not a releaseable slice, has known blockers, has
+  Remaining acceptance, or lacks `gwt-verify --mode pre-pr` PASS evidence,
+  the PR state must be Draft.
+- If the user requested Ready for review but the gate fails, do not create
+  or update a Ready/non-draft PR. Create/update only as Draft if the user
+  accepts that state; otherwise return NO ACTION.
+
+## Step 7: Ensure the head branch is pushed
+
+- If creating/updating a Ready for review PR, push only after the Ready PR
+  Gate passes.
+- If creating/updating a Draft PR, push with the draft intent recorded in
+  the PR body and include the exact verification already run.
 - If no upstream: `git push -u origin <head>`
 - Otherwise: `git push`
 
-## Step 7: Collect PR inputs
+## Step 8: Collect PR inputs
 
-- Title, Summary, Context, Changes, Testing, Risk/Impact, Deployment, Screenshots, Related Links, Notes
+- Title, Summary, Context, Changes, Testing, PR Readiness, Risk/Impact, Deployment, Screenshots, Related Links, Notes
 - Optional: labels, reviewers, assignees, draft
 - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
 
-## Step 8: Build PR body from template
+## Step 9: Build PR body from template
 
 - Template path: `.codex/skills/gwt-manage-pr/references/pr-body-template.md`
 - Fill all required placeholders.
@@ -75,6 +90,7 @@
 | Summary | **YES** | 1-3 bullet points. Include both the what and the why. |
 | Changes | **YES** | Enumerate changes by file or module. |
 | Testing | **YES** | List commands or exact manual test steps. |
+| PR Readiness | **YES** | State Ready for review or Draft. Include releaseable slice, Known blockers, and Remaining acceptance. |
 | Closing Issues | **YES** | `Closes #N` or `None`. |
 | Related Issues / Links | **YES** | Reference-only. `#N` or URL or `None`. |
 | Checklist | **YES** | Review every item; mark checked or N/A with reason. |
@@ -90,14 +106,17 @@
 2. Each Summary bullet must be a single sentence. No vague wording.
 3. Changes must reference specific file or module names.
 4. Testing must be reproducible. No vague "tested."
-5. Add a reason comment to every unchecked checklist item.
-6. Closing Issues: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
-7. If `#N` in Related Issues should auto-close, it must also appear in Closing Issues as `Closes #N`.
+5. PR Readiness must be Ready for review only when the Ready PR Gate passed; otherwise it must be Draft with explicit blockers.
+6. Add a reason comment to every unchecked checklist item.
+7. Closing Issues: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
+8. If `#N` in Related Issues should auto-close, it must also appear in Closing Issues as `Closes #N`.
 
 ## Step 10: Create or update the PR
 
 - Canonical path:
   - Create: `gwtd pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
+    - Omit `--draft` only after the Ready PR Gate passes.
+    - Include `--draft` when the PR Readiness state is Draft.
   - Update: `gwtd pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
 - Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwtd pr` surface.
 
@@ -175,7 +194,11 @@ fi
 case "$action" in
   create)
     git push -u origin "$head"
-    gwtd pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md
+    if grep -q 'State: Draft' /tmp/pr-body.md; then
+      gwtd pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md --draft
+    else
+      gwtd pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md
+    fi
     ;;
   fix)
     printf '%s\n' "$pr_summary"

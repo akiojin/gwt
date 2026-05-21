@@ -71,6 +71,15 @@
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
 
+### Ready PR Gate（Draft / Ready 運用）
+
+- `feat` / `fix` / `refactor` の途中成果は **Draft PR** のみ許可する。未完了・未検証・受け入れ未達・既知 blocker ありの変更は **Ready PR 禁止**。
+- Ready PR は、その PR スコープが**単独で配信可能**であり、残件が配信 blocker ではない後続タスクとして明確な場合だけ許可する。
+- 単独で配信可能とは、既存機能を壊さず、ユーザーに見える中途半端な挙動を出さず、rollback / follow-up 境界を PR 本文で説明できる状態を指す。
+- Draft PR は CI / 共有 / 早期レビュー用とし、PR 本文に未完了項目、既知 blocker、Remaining acceptance を明記する。Draft PR で完了や配信可能性を主張しない。
+- Ready 化前に `gwt-verify --mode pre-pr` の `Overall: PASS`、`User Verification Result` の確定、PR 本文 checklist 完了、既知 blocker なしを確認する。
+- Gate を満たさない場合は Draft のまま維持するか、Ready 化せず No Action として報告する。
+
 ## 開発ワークフロー
 
 ### 実装前ワークフロー（必須）
