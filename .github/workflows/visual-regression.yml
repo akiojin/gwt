@@ -48,15 +48,12 @@ jobs:
         with:
           node-version: '20'
 
-      - uses: pnpm/action-setup@v6
+      - uses: oven-sh/setup-bun@v2
         if: steps.detect.outputs.should_run == 'true'
-        with:
-          version: 10.29.2
-          run_install: false
 
       - name: Install Playwright browsers
         if: steps.detect.outputs.should_run == 'true'
-        run: pnpm dlx --package @playwright/test@1.49.1 playwright install --with-deps chromium
+        run: bunx --package @playwright/test@1.49.1 playwright install --with-deps chromium
 
       - name: Build gwt
         if: steps.detect.outputs.should_run == 'true'

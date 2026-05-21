@@ -16,8 +16,7 @@ bash scripts/run-visual-tests.sh
 ## Update baseline (when intentional design change lands)
 
 ```bash
-pnpm dlx --package @playwright/test@1.49.1 playwright test \
-  --update-snapshots --config crates/gwt/playwright/playwright.config.ts
+bash scripts/run-visual-tests.sh --update-snapshots
 ```
 
 ## Test layout

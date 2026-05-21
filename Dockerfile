@@ -3,7 +3,6 @@ FROM node:22-bookworm
 
 ARG ZIG_VERSION=0.15.2
 ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
-ARG PNPM_VERSION=10.29.2
 
 COPY scripts/install-linux-deps.sh /tmp/install-linux-deps.sh
 
@@ -32,9 +31,10 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
     ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig && \
     rm /tmp/zig.tar.xz
 
-# Global tools (minimal - other tools are in devDependencies)
-RUN npm add -g bun@latest
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+# Install Bun for frontend verification helpers without repository package metadata.
+ENV BUN_INSTALL="/root/.bun"
+ENV PATH="${BUN_INSTALL}/bin:${PATH}"
+RUN /bin/bash -c "set -o pipefail && curl -fsSL https://bun.sh/install | bash"
 
 # Install Rust
 RUN /bin/bash -c "set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
