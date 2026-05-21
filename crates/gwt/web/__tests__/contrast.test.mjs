@@ -95,7 +95,7 @@ for (const themeName of ["dark", "light"]) {
 // SPEC-2356 — State colors render as TEXT inside agent cards (chip foreground)
 // and status chips (.ready / .error etc), so each state token must clear
 // WCAG AA against --color-surface AND --color-surface-elevated in both
-// themes. Lesson #2026-05-04: missed this for idle in dark theme — fixed.
+// themes. Memory #2026-05-04: missed this for idle in dark theme — fixed.
 const STATE_TEXT_TOKENS = [
   "--color-state-active",
   "--color-state-idle",
@@ -240,7 +240,7 @@ test("every color token has a forced-colors fallback for high-contrast mode", ()
   // render correctly. Without this, custom tokens leak through and the
   // user sees the design system colors instead of system colors.
   //
-  // Lesson 2 (tasks/lessons.md 2026-05-04): naive regex `[\s\S]*?\n\}`
+  // Memory 2 (tasks/memory.md 2026-05-04): naive regex `[\s\S]*?\n\}`
   // undercaptures @media bodies because nested rules have their own
   // closing braces. Use brace-depth tracking instead.
   const forcedColorsBody = extractMediaBlock(tokensCss, "forced-colors: active");
@@ -262,7 +262,7 @@ test("every color token has a forced-colors fallback for high-contrast mode", ()
   }
 });
 
-// SPEC-2356 Lesson 2 — extract a single @media block body using brace-
+// SPEC-2356 Memory 2 — extract a single @media block body using brace-
 // depth tracking instead of a naive regex. The naive
 // /@media\s*\(...\)\s*\{[\s\S]*?\n\}/ truncates at the first nested `}`
 // when the @media body contains rules with their own closing braces,

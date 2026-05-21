@@ -39,6 +39,52 @@ pub enum FileContentErrorKind {
     WindowMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexSearchScope {
+    Issues,
+    Specs,
+    Memory,
+    Board,
+    Files,
+    #[serde(rename = "files-docs")]
+    FilesDocs,
+}
+
+impl IndexSearchScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Issues => "issues",
+            Self::Specs => "specs",
+            Self::Memory => "memory",
+            Self::Board => "board",
+            Self::Files => "files",
+            Self::FilesDocs => "files-docs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IndexSearchTarget {
+    Issue { number: u64 },
+    Spec { spec_id: u64 },
+    Memory { heading: String, date: String },
+    Board { entry_id: String },
+    File { path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexSearchResult {
+    pub scope: IndexSearchScope,
+    pub title: String,
+    pub subtitle: String,
+    pub preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
+    pub target: IndexSearchTarget,
+}
+
 /// SPEC-2006 Phase 2 amendment: structured error variants for the write
 /// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
 /// can match exhaustively on save-only outcomes (conflict / read-only /
@@ -258,6 +304,14 @@ pub enum FrontendEvent {
         query: String,
         request_id: u64,
         selected_number: Option<u64>,
+    },
+    SearchProjectIndex {
+        id: String,
+        query: String,
+        request_id: u64,
+        scopes: Vec<IndexSearchScope>,
+        #[serde(default)]
+        worktree_hash: Option<String>,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
@@ -1006,6 +1060,18 @@ pub enum BackendEvent {
         empty_message: Option<String>,
         refresh_enabled: bool,
     },
+    ProjectIndexSearchResults {
+        id: String,
+        query: String,
+        request_id: u64,
+        results: Vec<IndexSearchResult>,
+    },
+    ProjectIndexSearchError {
+        id: String,
+        query: String,
+        request_id: u64,
+        message: String,
+    },
     KnowledgeDetail {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -1486,6 +1552,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "project_index_search_results",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "project_index_search_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "knowledge_detail",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -1779,6 +1855,8 @@ impl BackendEvent {
             BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
+            BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
+            BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
             BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
             BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
@@ -1896,8 +1974,9 @@ mod tests {
 
     use super::{
         backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
-        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, ProfileEntryView,
-        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, IndexSearchResult,
+        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
+        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -2309,6 +2388,59 @@ mod tests {
             FrontendEvent::RefreshIndexStatus { project_root }
                 if project_root == "/repo/worktree"
         ));
+    }
+
+    #[test]
+    fn frontend_event_accepts_index_search_request() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "search_project_index",
+            "id": "tab-1:index-1",
+            "query": "Board semantic search",
+            "request_id": 42,
+            "scopes": ["issues", "specs", "board", "files", "files-docs", "memory"],
+            "worktree_hash": "wt-a"
+        }))
+        .expect("deserialize search_project_index");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SearchProjectIndex {
+                id,
+                query,
+                request_id: 42,
+                scopes,
+                worktree_hash
+            } if id == "tab-1:index-1"
+                && query == "Board semantic search"
+                && scopes.contains(&IndexSearchScope::Board)
+                && scopes.contains(&IndexSearchScope::FilesDocs)
+                && worktree_hash.as_deref() == Some("wt-a")
+        ));
+    }
+
+    #[test]
+    fn backend_event_serializes_index_search_results_contract() {
+        let event = BackendEvent::ProjectIndexSearchResults {
+            id: "tab-1:index-1".to_string(),
+            query: "Board semantic search".to_string(),
+            request_id: 42,
+            results: vec![IndexSearchResult {
+                scope: IndexSearchScope::Board,
+                title: "Board search".to_string(),
+                subtitle: "status · Codex".to_string(),
+                preview: "Board discussion history".to_string(),
+                distance: Some(0.1234),
+                target: IndexSearchTarget::Board {
+                    entry_id: "board-1".to_string(),
+                },
+            }],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize event");
+        assert_eq!(value["kind"], "project_index_search_results");
+        assert_eq!(value["results"][0]["scope"], "board");
+        assert_eq!(value["results"][0]["target"]["kind"], "board");
+        assert_eq!(value["results"][0]["target"]["entry_id"], "board-1");
     }
 
     #[test]

@@ -52,7 +52,8 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "all" => Ok(IndexScope::All),
         "issues" => Ok(IndexScope::Issues),
         "specs" => Ok(IndexScope::Specs),
-        "lessons" => Ok(IndexScope::Lessons),
+        "memory" => Ok(IndexScope::Memory),
+        "board" => Ok(IndexScope::Board),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -163,11 +164,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_index_rebuild_lessons_scope() {
+    fn parses_index_rebuild_memory_scope() {
         assert_eq!(
-            parse(&s(&["rebuild", "--scope", "lessons"])).unwrap(),
+            parse(&s(&["rebuild", "--scope", "memory"])).unwrap(),
             IndexCommand::Rebuild {
-                scope: IndexScope::Lessons
+                scope: IndexScope::Memory
+            }
+        );
+    }
+
+    #[test]
+    fn parses_index_rebuild_board_scope() {
+        assert_eq!(
+            parse(&s(&["rebuild", "--scope", "board"])).unwrap(),
+            IndexCommand::Rebuild {
+                scope: IndexScope::Board
             }
         );
     }
@@ -230,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_lessons_scope_health() {
+    fn renders_memory_scope_health() {
         let report = gwt_core::runtime::ProjectIndexRuntimeReport {
             runner_hash: "aaaaaaaaaaaaaaaa".to_string(),
             requirements_hash: "bbbbbbbbbbbbbbbb".to_string(),
@@ -245,7 +256,7 @@ mod tests {
                 "smoke_test": "passed"
             },
             "status": {
-                "lessons": {
+                "memory": {
                     "healthy": true,
                     "repair_required": false,
                     "reason": "ready",
@@ -256,8 +267,8 @@ mod tests {
         let mut out = String::new();
         render_index_status(&mut out, &report, &payload);
         assert!(
-            out.contains("lessons: ready reason=ready documents=234 repair_required=false"),
-            "render output missing lessons line:\n{out}"
+            out.contains("memory: ready reason=ready documents=234 repair_required=false"),
+            "render output missing memory line:\n{out}"
         );
     }
 

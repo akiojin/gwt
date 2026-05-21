@@ -86,6 +86,14 @@ pub struct KnowledgeLoadRequest<'a> {
     pub(crate) refresh: bool,
 }
 
+pub struct ProjectIndexSearchRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) query: &'a str,
+    pub(crate) request_id: u64,
+    pub(crate) scopes: Vec<gwt::IndexSearchScope>,
+    pub(crate) worktree_hash: Option<String>,
+}
+
 struct KnowledgeRefreshTask {
     client_id: String,
     id: String,
@@ -104,6 +112,16 @@ struct KnowledgeSearchTask {
     query: String,
     request_id: u64,
     selected_number: Option<u64>,
+}
+
+struct ProjectIndexSearchTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    query: String,
+    request_id: u64,
+    scopes: Vec<gwt::IndexSearchScope>,
+    worktree_hash: Option<String>,
 }
 
 pub struct WindowRuntime {
@@ -612,6 +630,19 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         } => FrontendUserActionLog::new("search_knowledge_bridge", "knowledge")
             .window(id)
             .mode(format!("{knowledge_kind:?}"))
+            .count(query.len()),
+        FrontendEvent::SearchProjectIndex {
+            id,
+            query,
+            scopes,
+            worktree_hash,
+            ..
+        } => FrontendUserActionLog::new("search_project_index", "index")
+            .window(id)
+            .mode(summarize_ui_action_values(
+                scopes.iter().map(|scope| scope.as_str()),
+            ))
+            .agent(worktree_hash.as_deref().unwrap_or_default())
             .count(query.len()),
         FrontendEvent::SelectKnowledgeBridgeEntry {
             id,
@@ -3102,6 +3133,22 @@ impl AppRuntime {
                     selected_number,
                 },
             ),
+            FrontendEvent::SearchProjectIndex {
+                id,
+                query,
+                request_id,
+                scopes,
+                worktree_hash,
+            } => self.search_project_index_events(
+                &client_id,
+                ProjectIndexSearchRequest {
+                    id: &id,
+                    query: &query,
+                    request_id,
+                    scopes,
+                    worktree_hash,
+                },
+            ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
@@ -5427,6 +5474,106 @@ impl AppRuntime {
                         knowledge_error_event(id, kind, error, Some(request_id), Some(query))
                     }
                 };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+    }
+
+    pub(crate) fn search_project_index_events(
+        &self,
+        client_id: &str,
+        request: ProjectIndexSearchRequest<'_>,
+    ) -> Vec<OutboundEvent> {
+        let id = request.id;
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Index {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProjectIndexSearchError {
+                    id: id.to_string(),
+                    query: request.query.to_string(),
+                    request_id: request.request_id,
+                    message: "Window is not an Index surface".to_string(),
+                },
+            )];
+        }
+
+        self.spawn_project_index_search(ProjectIndexSearchTask {
+            client_id: client_id.to_string(),
+            id: id.to_string(),
+            project_root: tab.project_root.clone(),
+            query: request.query.to_string(),
+            request_id: request.request_id,
+            scopes: request.scopes,
+            worktree_hash: request.worktree_hash,
+        });
+        Vec::new()
+    }
+
+    fn spawn_project_index_search(&self, task: ProjectIndexSearchTask) {
+        let ProjectIndexSearchTask {
+            client_id,
+            id,
+            project_root,
+            query,
+            request_id,
+            scopes,
+            worktree_hash,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = match gwt::search_project_index(
+                &project_root,
+                &query,
+                &scopes,
+                worktree_hash.as_deref(),
+            ) {
+                Ok(results) => BackendEvent::ProjectIndexSearchResults {
+                    id: id.clone(),
+                    query: query.clone(),
+                    request_id,
+                    results,
+                },
+                Err(error) => BackendEvent::ProjectIndexSearchError {
+                    id: id.clone(),
+                    query: query.clone(),
+                    request_id,
+                    message: error,
+                },
+            };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));
@@ -8076,17 +8223,13 @@ mod tests {
 
     #[cfg(unix)]
     fn write_fake_project_index_runtime(home: &Path) {
-        let python = home
+        let legacy_python = home
             .join(".gwt")
             .join("runtime")
             .join("chroma-venv")
             .join("bin")
             .join("python3");
-        fs::create_dir_all(python.parent().expect("fake python parent"))
-            .expect("create fake python dir");
-        fs::write(
-            &python,
-            r#"#!/bin/sh
+        let script = r#"#!/bin/sh
 for arg in "$@"; do
   if [ "$arg" = "-c" ]; then
     exit 0
@@ -8110,11 +8253,14 @@ case "$*" in
 esac
 printf '%s\n' '{"ok":false,"error":"unexpected fake python invocation"}'
 exit 1
-"#,
-        )
-        .expect("write fake python");
-        #[cfg(unix)]
-        {
+"#;
+        for python in [
+            legacy_python,
+            gwt_core::runtime::project_index_python_path(),
+        ] {
+            fs::create_dir_all(python.parent().expect("fake python parent"))
+                .expect("create fake python dir");
+            fs::write(&python, script).expect("write fake python");
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&python, fs::Permissions::from_mode(0o755))
                 .expect("chmod fake python");
@@ -14327,6 +14473,41 @@ exit 1
                 || value.contains("token")
                 || value.contains("secret")),
             "backend test URLs must not leak credentials or query strings: {logged_values:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_user_action_logs_project_index_search_without_query_values() {
+        let log = super::frontend_user_action_log(&FrontendEvent::SearchProjectIndex {
+            id: "index-window".to_string(),
+            query: "secret query".to_string(),
+            request_id: 7,
+            scopes: vec![
+                gwt::IndexSearchScope::Issues,
+                gwt::IndexSearchScope::FilesDocs,
+            ],
+            worktree_hash: Some("worktree-hash".to_string()),
+        })
+        .expect("project index search user action log");
+
+        assert_eq!(log.action, "search_project_index");
+        assert_eq!(log.surface, "index");
+        assert_eq!(log.window_id, "index-window");
+        assert_eq!(log.mode, "files-docs,issues");
+        assert_eq!(log.agent_id, "worktree-hash");
+        assert_eq!(log.count, "secret query".len());
+
+        let logged_values = [
+            log.window_id.as_str(),
+            log.ui_target.as_str(),
+            log.profile_name.as_str(),
+            log.env_keys.as_str(),
+            log.agent_id.as_str(),
+            log.mode.as_str(),
+        ];
+        assert!(
+            !logged_values.iter().any(|value| value.contains("secret")),
+            "project index search query must not be written to the user action log: {logged_values:?}"
         );
     }
 

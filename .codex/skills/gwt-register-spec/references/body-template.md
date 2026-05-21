@@ -13,7 +13,7 @@ pass as `title`). See `validation-rules.md` for the full rule set.
 ## 背景
 
 <Why this work is needed. What problem or constraint prompted it. Reference
-prior incidents, lessons, or upstream decisions. Keep to 3-6 paragraphs.>
+prior incidents, memory, or upstream decisions. Keep to 3-6 paragraphs.>
 
 ## ユビキタス言語
 

@@ -10,17 +10,11 @@ use std::{fs, path::PathBuf, process::Command};
 use gwt_core::{repo_hash::compute_repo_hash, worktree_hash::compute_worktree_hash};
 
 fn runner_python() -> PathBuf {
-    let home = dirs::home_dir().expect("home");
-    if cfg!(windows) {
-        home.join(".gwt/runtime/chroma-venv/Scripts/python.exe")
-    } else {
-        home.join(".gwt/runtime/chroma-venv/bin/python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 fn runner_script() -> PathBuf {
-    let home = dirs::home_dir().expect("home");
-    home.join(".gwt/runtime/chroma_index_runner.py")
+    gwt_core::runtime::project_index_runner_path()
 }
 
 #[test]

@@ -202,7 +202,7 @@ pub fn release_notes_window_js() -> &'static str {
 // SPEC-2809 — Console window for external process stdout/stderr live tail.
 // 5 fixed kind tabs (gh / git / docker / agent / runner). app.js imports
 // `createConsoleWindow` at module top level so this asset MUST be registered
-// here; otherwise the ES module load fails and splash hangs (PR #2797 lesson).
+// here; otherwise the ES module load fails and splash hangs (PR #2797 memory).
 pub fn console_window_js() -> &'static str {
     include_str!("../web/console-window.js")
 }
@@ -917,7 +917,7 @@ mod tests {
         // default 80×24 grid; flushing deferredWrites then renders the
         // post-launch Claude Code output corrupted, with the
         // resize-recovers-on-move signature documented in
-        // tasks/lessons.md 2026-05-13.
+        // tasks/memory.md 2026-05-13.
         let layout_box_gate = regex::Regex::new(
             r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
@@ -1489,7 +1489,7 @@ mod tests {
         // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
         // surface and its supporting controller / progress-toast wiring must
         // not ship in the embedded assets. The aggregated payload still
-        // drives the per-tab dot and the Settings.Index panel.
+        // drives the per-tab dot and the dedicated Index window Health tab.
         assert!(
             !html.contains("id=\"index-status\""),
             "SPEC-1939 Phase 13: project-bar Index badge must be removed",
@@ -1514,12 +1514,11 @@ mod tests {
         assert!(
             js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
-            "frontend must still consume project_index_status events for the dot + Settings panel",
+            "frontend must still consume project_index_status events for the dot + Index Health tab",
         );
         assert!(
-            js.contains("buildSettingsTab(\"index\", \"Index\", false)")
-                && js.contains("renderIndexSettingsPanel({"),
-            "SPEC-1939 T-IDX-106: Settings window must keep the Index tab + panel",
+            !js.contains("buildSettingsTab(\"index\"") && js.contains("renderIndexSettingsPanel({"),
+            "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
         assert!(
             html.contains(".project-tab-dot")
@@ -2213,6 +2212,65 @@ mod tests {
         assert!(
             !html.contains("No matching cached items"),
             "expected semantic search to stop presenting substring-filter empty copy",
+        );
+    }
+
+    #[test]
+    fn embedded_web_index_window_exposes_project_index_search_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("data-preset=\"index\""),
+            "expected Add Window modal to expose an Index preset",
+        );
+        assert!(
+            html.contains("search_project_index"),
+            "expected Index surface search input to call the project index search backend",
+        );
+        assert!(
+            html.contains("project_index_search_results"),
+            "expected frontend to handle Index search result events",
+        );
+        assert!(
+            html.contains("index-search-root"),
+            "expected a dedicated Index window surface instead of overloading Settings",
+        );
+        assert!(
+            html.contains("data-index-tab=\"health\""),
+            "expected Index window to host the existing health/rebuild table",
+        );
+        assert!(
+            html.contains(".index-search-panel[hidden]")
+                && html.contains(".index-health-panel[hidden]")
+                && html.contains("display: none !important"),
+            "Index tabs must hide inactive Search/Health panels even when panel CSS sets display"
+        );
+        assert!(
+            html.contains("index-search-toolbar")
+                && html.contains("index-health-toolbar")
+                && html.contains("index-health-table"),
+            "Index Search and Health controls must be visually separated instead of sharing one toolbar"
+        );
+        assert!(
+            html.contains("index-run-button")
+                && html.contains("formatIndexSearchMatch")
+                && html.contains("File worktree"),
+            "Index Search must expose an explicit search action, friendly match scores, and file-only worktree context"
+        );
+        assert!(
+            html.contains("classList.toggle(\"is-empty\"")
+                && html.contains(".index-search-layout.is-empty")
+                && html.contains(".index-search-layout.is-empty .index-result-detail"),
+            "Index Search must collapse the unused detail pane when there are no results"
+        );
+        assert!(
+            html.contains("INDEX_SEARCH_DEFAULT_SCOPES")
+                && html.contains("selectedScopes: new Set(INDEX_SEARCH_DEFAULT_SCOPES)"),
+            "Index Search must default to lightweight scopes while leaving files/docs opt-in"
+        );
+        assert!(
+            !html.contains("buildSettingsTab(\"index\""),
+            "Settings must no longer expose its own Index tab",
         );
     }
 
@@ -3249,6 +3307,7 @@ mod tests {
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),
             (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Index, "index"),
             (WindowSurface::Workspace, "workspace"),
             (WindowSurface::Mock, "mock"),
         ];

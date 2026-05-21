@@ -40,17 +40,12 @@ pub(crate) fn resolve_index_context(repo_path: &Path) -> Result<IndexContext, Sp
         repo_hash,
         worktree_hash,
         python: project_index_python_path(),
-        runner: gwt_core::paths::gwt_runtime_runner_path(),
+        runner: gwt_core::runtime::project_index_runner_path(),
     })
 }
 
 fn project_index_python_path() -> PathBuf {
-    let venv = gwt_core::paths::gwt_project_index_venv_dir();
-    if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 pub(crate) fn run_runner_status(
@@ -92,8 +87,14 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
-            label: "lessons",
-            action: "index-lessons",
+            label: "memory",
+            action: "index-memory",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
+            label: "board",
+            action: "index-board",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -114,7 +115,8 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
         IndexScope::All => all,
         IndexScope::Issues => all.into_iter().filter(|a| a.label == "issues").collect(),
         IndexScope::Specs => all.into_iter().filter(|a| a.label == "specs").collect(),
-        IndexScope::Lessons => all.into_iter().filter(|a| a.label == "lessons").collect(),
+        IndexScope::Memory => all.into_iter().filter(|a| a.label == "memory").collect(),
+        IndexScope::Board => all.into_iter().filter(|a| a.label == "board").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
             .into_iter()
@@ -190,7 +192,7 @@ pub fn render_index_status(
         report.dependencies_installed
     ));
     if let Some(status) = payload.get("status").and_then(Value::as_object) {
-        for scope in ["issues", "specs", "lessons", "files", "files-docs"] {
+        for scope in ["issues", "specs", "memory", "board", "files", "files-docs"] {
             if let Some(scope_status) = status.get(scope) {
                 let healthy = scope_status
                     .get("healthy")

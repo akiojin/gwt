@@ -1,5 +1,5 @@
-// SPEC-1939 Phase 13 — project-bar Index badge withdrawn. The remaining
-// coverage exercises the per-tab dot aggregator and the Settings.Index
+// SPEC-1939 Phase 15 — project-bar Index badge withdrawn. The remaining
+// coverage exercises the per-tab dot aggregator and the Index window
 // navigation event helper that other entry points still consume.
 
 import { test } from "node:test";
@@ -62,12 +62,14 @@ test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
 });
 
 test("aggregateProjectTabDotState ignores repo-shared scopes", () => {
-  // issues / specs are repo-shared and intentionally do not contribute.
+  // Repo-shared scopes are intentionally excluded from per-worktree dots.
   assert.equal(
     aggregateProjectTabDotState({
       scopes: {
         issues: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
         specs: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
+        memory: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
+        board: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
       },
     }),
     "",
@@ -147,18 +149,76 @@ test("app.js still wires the per-tab dot aggregator", () => {
   );
 });
 
-test("Settings.Index requests full index status only when the Index tab opens", () => {
+test("settings target=index opens the dedicated Index window", () => {
   assert.ok(
-    appSource.includes("function requestFullIndexStatusRefresh()"),
-    "expected a dedicated Settings.Index full refresh request helper",
+    !appSource.includes('buildSettingsTab("index"'),
+    "Settings must not expose an Index tab",
   );
   assert.ok(
-    appSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
-    "Settings.Index must request the expensive all-worktree status on demand",
+    !appSource.includes('dataset.settingsPanel = "index"'),
+    "Settings must not mount an Index panel",
   );
   assert.ok(
     appSource.includes('if (target === "index")') &&
-      appSource.includes("requestFullIndexStatusRefresh();"),
-    "switching to the Index tab must trigger the full status refresh",
+      appSource.includes('focusOrSpawnPreset("index");'),
+    "settings:open target=index must spawn the dedicated Index window",
+  );
+});
+
+test("Index window exposes semantic search and health refresh contract", () => {
+  assert.ok(
+    appSource.includes("function requestFullIndexStatusRefresh()"),
+    "expected a dedicated full index status refresh helper",
+  );
+  assert.ok(
+    appSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
+    "Index window Health tab must request the expensive all-worktree status on demand",
+  );
+  assert.ok(
+    appSource.includes('kind: "search_project_index"') &&
+      appSource.includes('case "project_index_search_results"') &&
+    appSource.includes('case "project_index_search_error"'),
+    "Index window must wire search request, result, and error events",
+  );
+});
+
+test("Index search UI exposes explicit search controls and readable result scoring", () => {
+  assert.ok(
+    appSource.includes("index-run-button") &&
+      appSource.includes("formatIndexSearchMatch") &&
+      appSource.includes("% match"),
+    "Index search should have an explicit search action and user-facing match scores",
+  );
+  assert.ok(
+    appSource.includes("indexFileScopesSelected(state)") &&
+      appSource.includes("File worktree"),
+    "worktree selection should be scoped to Files / Docs search instead of looking globally required",
+  );
+  assert.ok(
+    appSource.includes("moveIndexResultSelection") &&
+      appSource.includes('event.key === "ArrowDown"') &&
+      appSource.includes('event.key === "ArrowUp"'),
+    "result lists should support keyboard movement",
+  );
+  assert.ok(
+    appSource.includes("inFlightSignature") &&
+      appSource.includes("state.searching && state.inFlightSignature === searchSignature"),
+    "explicit search clicks should not duplicate an identical debounced search already in flight",
+  );
+  assert.ok(
+    appSource.includes("state.query = input.value;") &&
+      appSource.includes("renderProjectIndexSearch(windowData.id);\n            scheduleProjectIndexSearch(windowData.id);"),
+    "typing in the search field should immediately enable the explicit Search button before debounce fires",
+  );
+});
+
+test("Index search tab does not trigger full health refresh on mount", () => {
+  const refreshCallCount = (
+    appSource.match(/requestFullIndexStatusRefresh\(\);/g) || []
+  ).length;
+  assert.equal(
+    refreshCallCount,
+    2,
+    "full index status refresh must stay limited to Health tab activation and manual refresh",
   );
 });

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, process::Command};
 
 use gwt::file_content::{
     file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file,
@@ -173,6 +173,23 @@ fn read_text_file_denies_paths_excluded_by_deny_rule() {
     let env_err = read_text_file(dir.path(), Path::new("secrets.env"), &limits)
         .expect_err("gitignore deny rule");
     assert!(matches!(env_err, FileContentError::Denied));
+}
+
+#[test]
+fn read_text_file_denies_paths_excluded_by_git_info_exclude() {
+    let dir = tempdir().expect("tempdir");
+    Command::new("git")
+        .arg("init")
+        .arg(dir.path())
+        .output()
+        .expect("git init");
+    write_at(dir.path(), ".git/info/exclude", b"local-secret.txt\n");
+    write_at(dir.path(), "local-secret.txt", b"secret\n");
+
+    let limits = ContentLimits::default();
+    let err = read_text_file(dir.path(), Path::new("local-secret.txt"), &limits)
+        .expect_err("info exclude deny rule");
+    assert!(matches!(err, FileContentError::Denied));
 }
 
 #[test]

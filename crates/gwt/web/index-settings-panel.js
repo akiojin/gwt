@@ -1,4 +1,4 @@
-// SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
+// SPEC-1939 Phase 15 — Index window health panel renderer.
 //
 // Pure rendering: receives the aggregated payload + a `send` transport
 // (so unit tests can stub WebSocket dispatch) and rebuilds the panel DOM
@@ -6,7 +6,7 @@
 // and a per-cell Rebuild button that emits `rebuild_index_cell` with
 // `(project_root, scope, worktree_hash?)`.
 
-const REPO_SHARED_SCOPES = ["issues", "specs", "lessons"];
+const REPO_SHARED_SCOPES = ["issues", "specs", "memory", "board"];
 const PER_WORKTREE_SCOPES = ["files", "files-docs"];
 const ALL_SCOPES = [...REPO_SHARED_SCOPES, ...PER_WORKTREE_SCOPES];
 
@@ -110,7 +110,8 @@ export function renderIndexSettingsPanel(options) {
     worktreeHashes.length === 0
     && !scopes.issues
     && !scopes.specs
-    && !scopes.lessons
+    && !scopes.memory
+    && !scopes.board
     && (!scopes.files || Object.keys(scopes.files).length === 0)
     && (!scopes["files-docs"] || Object.keys(scopes["files-docs"]).length === 0)
   ) {

@@ -14,7 +14,6 @@ use gwt_core::{
             RefreshIssuesOptions, RunnerSpawner,
         },
     },
-    paths::{gwt_project_index_venv_dir, gwt_runtime_runner_path},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -45,7 +44,7 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
     );
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
-        runner_script: gwt_runtime_runner_path(),
+        runner_script: gwt_core::runtime::project_index_runner_path(),
     };
     bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
 }
@@ -57,7 +56,8 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
 pub enum IndexRebuildScope {
     Issues,
     Specs,
-    Lessons,
+    Memory,
+    Board,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -68,7 +68,8 @@ impl IndexRebuildScope {
         match self {
             Self::Issues => "issues",
             Self::Specs => "specs",
-            Self::Lessons => "lessons",
+            Self::Memory => "memory",
+            Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -161,7 +162,9 @@ pub struct ProjectIndexScopes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specs: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lessons: Option<ScopeHealthView>,
+    pub memory: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -176,7 +179,8 @@ impl ProjectIndexScopes {
     pub fn is_empty(&self) -> bool {
         self.issues.is_none()
             && self.specs.is_none()
-            && self.lessons.is_none()
+            && self.memory.is_none()
+            && self.board.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -339,9 +343,14 @@ pub fn build_aggregated_status_view(
                 scopes.specs = Some(view);
             }
         }
-        if scopes.lessons.is_none() {
-            if let Some(view) = status_obj.get("lessons").and_then(parse_scope_health) {
-                scopes.lessons = Some(view);
+        if scopes.memory.is_none() {
+            if let Some(view) = status_obj.get("memory").and_then(parse_scope_health) {
+                scopes.memory = Some(view);
+            }
+        }
+        if scopes.board.is_none() {
+            if let Some(view) = status_obj.get("board").and_then(parse_scope_health) {
+                scopes.board = Some(view);
             }
         }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
@@ -392,7 +401,10 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         count += 1;
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        count += 1;
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
         count += 1;
     }
     count += scopes.files.values().filter(|view| !view.healthy).count();
@@ -665,7 +677,7 @@ fn probe_worktree_status(
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -803,9 +815,15 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
-        IndexRebuildScope::Lessons => RebuildAction {
-            label: "lessons",
-            action: "index-lessons",
+        IndexRebuildScope::Memory => RebuildAction {
+            label: "memory",
+            action: "index-memory",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        IndexRebuildScope::Board => RebuildAction {
+            label: "board",
+            action: "index-board",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -839,8 +857,11 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
-        targets.push((IndexRebuildScope::Lessons, None));
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     for (wt_hash, view) in &scopes.files {
         if !view.healthy {
@@ -883,8 +904,11 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     if matches!(&scopes.specs, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.lessons, Some(view) if !view.healthy) {
-        targets.push((IndexRebuildScope::Lessons, None));
+    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.board, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
@@ -1044,7 +1068,7 @@ fn project_index_status_for_path_inner(
     );
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_runtime_runner_path())
+        .arg(gwt_core::runtime::project_index_runner_path())
         .arg("--action")
         .arg("status")
         .arg("--repo-hash")
@@ -1221,12 +1245,7 @@ fn canonicalize_path(path: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn project_index_python_path() -> PathBuf {
-    let venv = gwt_project_index_venv_dir();
-    if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python3")
-    }
+    gwt_core::runtime::project_index_python_path()
 }
 
 #[cfg(test)]
@@ -1513,7 +1532,7 @@ detached
                 "status": {
                     "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
                     "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
-                    "lessons": {"healthy": true, "document_count": 243, "reason": "ready"},
+                    "memory": {"healthy": true, "document_count": 243, "reason": "ready"},
                     "files": {"healthy": true, "document_count": 310, "reason": "ready"},
                     "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
                 }
@@ -1527,11 +1546,11 @@ detached
         assert!(view.scopes.issues.is_some());
         assert!(view.scopes.specs.is_some());
         assert!(
-            view.scopes.lessons.is_some(),
-            "lessons scope must be present in aggregated view (SPEC-2805)"
+            view.scopes.memory.is_some(),
+            "memory scope must be present in aggregated view (SPEC-2805)"
         );
         assert_eq!(
-            view.scopes.lessons.as_ref().map(|view| view.document_count),
+            view.scopes.memory.as_ref().map(|view| view.document_count),
             Some(243),
         );
         assert_eq!(view.scopes.files.len(), 1);
@@ -1540,7 +1559,7 @@ detached
     }
 
     #[test]
-    fn build_aggregated_status_view_counts_lessons_in_unhealthy_summary() {
+    fn build_aggregated_status_view_counts_memory_in_unhealthy_summary() {
         let probes = vec![WorktreeProbeOutcome {
             input: WorktreeProbeInput {
                 worktree_hash: "wtAhash".to_string(),
@@ -1551,7 +1570,7 @@ detached
                 "status": {
                     "issues": {"healthy": true, "document_count": 100, "reason": "ready"},
                     "specs": {"healthy": true, "document_count": 50, "reason": "ready"},
-                    "lessons": {"healthy": false, "repair_required": true, "reason": "manifest_missing", "document_count": 0},
+                    "memory": {"healthy": false, "repair_required": true, "reason": "manifest_missing", "document_count": 0},
                     "files": {"healthy": true, "document_count": 310, "reason": "ready"},
                     "files-docs": {"healthy": true, "document_count": 16, "reason": "ready"}
                 }
@@ -1563,7 +1582,7 @@ detached
         assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
         assert!(
             view.detail.contains("1 index scope(s)"),
-            "unhealthy lessons must be counted (SPEC-2805); detail: {}",
+            "unhealthy memory must be counted (SPEC-2805); detail: {}",
             view.detail
         );
     }

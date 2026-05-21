@@ -325,7 +325,7 @@ When the discussion stabilizes, update the right artifacts in one batch.
 
 #### If the result is narrower than a SPEC
 
-- Return `Update Issue` or `Write Lesson` in the `Action Bundle`
+- Return `Update Issue` or `Write Memory` in the `Action Bundle`
 - Use `gwt-register-issue` or `gwt-fix-issue` when the GitHub Issue flow should
   own the next step
 
@@ -356,7 +356,7 @@ Reason: <one sentence>
 - Update Plan
 - Resume Build
 - Update Issue
-- Write Lesson
+- Write Memory
 - No Action
 ```
 
@@ -366,7 +366,7 @@ This final result is the handoff point where the workflow may leave Plan Mode.
 
 - `Update Spec` + `Update Plan` + `Resume Build`
 - `Update Issue` + `No Action`
-- `Write Lesson` only
+- `Write Memory` only
 
 ## Routing notes
 

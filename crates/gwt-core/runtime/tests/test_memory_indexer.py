@@ -1,6 +1,6 @@
-"""Tests for the lessons (post-mortem) scope indexer.
+"""Tests for the memory (post-mortem) scope indexer.
 
-Lessons live in `tasks/lessons.md` as H2 sections with the canonical shape:
+Memory entries live in `tasks/memory.md` as H2 sections with the canonical shape:
 
     ## YYYY-MM-DD — title
     ### 事象
@@ -24,7 +24,7 @@ from pathlib import Path
 import chroma_index_runner as runner
 
 
-SAMPLE_LESSONS = """# Lessons Learned
+SAMPLE_MEMORY = """# Memory Learned
 
 ## 2026-05-20 — alpha section title
 
@@ -51,64 +51,64 @@ This section omits the date prefix and uses a single paragraph format.
 """
 
 
-class LoadLessonsDocumentsTests(unittest.TestCase):
-    def _write_lessons_file(self, contents: str) -> Path:
+class LoadMemoryDocumentsTests(unittest.TestCase):
+    def _write_memory_file(self, contents: str) -> Path:
         tmp = tempfile.mkdtemp()
         root = Path(tmp)
         tasks = root / "tasks"
         tasks.mkdir(parents=True, exist_ok=True)
-        (tasks / "lessons.md").write_text(contents, encoding="utf-8")
+        (tasks / "memory.md").write_text(contents, encoding="utf-8")
         return root
 
     def test_returns_chunks_for_each_h2_section(self):
-        root = self._write_lessons_file(SAMPLE_LESSONS)
-        lessons, manifest = runner._load_lessons_documents(str(root))
-        # 3 H2 sections in SAMPLE_LESSONS
-        self.assertEqual(len(lessons), 3)
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        memory, manifest = runner._load_memory_documents(str(root))
+        # 3 H2 sections in SAMPLE_MEMORY
+        self.assertEqual(len(memory), 3)
         # manifest has exactly one entry (the single source file)
         self.assertEqual(len(manifest), 1)
-        self.assertEqual(manifest[0]["path"], "tasks/lessons.md")
+        self.assertEqual(manifest[0]["path"], "tasks/memory.md")
 
     def test_extracts_date_from_dated_sections(self):
-        root = self._write_lessons_file(SAMPLE_LESSONS)
-        lessons, _manifest = runner._load_lessons_documents(str(root))
-        dates = [lesson["date"] for lesson in lessons]
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        memory, _manifest = runner._load_memory_documents(str(root))
+        dates = [memory["date"] for memory in memory]
         self.assertIn("2026-05-20", dates)
         self.assertIn("2026-05-19", dates)
 
     def test_date_less_section_uses_empty_string(self):
-        root = self._write_lessons_file(SAMPLE_LESSONS)
-        lessons, _manifest = runner._load_lessons_documents(str(root))
-        undated = [lesson for lesson in lessons if lesson["date"] == ""]
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        memory, _manifest = runner._load_memory_documents(str(root))
+        undated = [memory for memory in memory if memory["date"] == ""]
         self.assertEqual(len(undated), 1)
         self.assertIn("undated tail section", undated[0]["title"])
 
-    def test_lesson_id_is_stable_for_same_content(self):
-        root = self._write_lessons_file(SAMPLE_LESSONS)
-        first, _ = runner._load_lessons_documents(str(root))
-        second, _ = runner._load_lessons_documents(str(root))
-        self.assertEqual([l["lesson_id"] for l in first], [l["lesson_id"] for l in second])
+    def test_memory_id_is_stable_for_same_content(self):
+        root = self._write_memory_file(SAMPLE_MEMORY)
+        first, _ = runner._load_memory_documents(str(root))
+        second, _ = runner._load_memory_documents(str(root))
+        self.assertEqual([l["memory_id"] for l in first], [l["memory_id"] for l in second])
 
-    def test_missing_lessons_file_returns_empty(self):
+    def test_missing_memory_file_returns_empty(self):
         tmp = Path(tempfile.mkdtemp())
-        lessons, manifest = runner._load_lessons_documents(str(tmp))
-        self.assertEqual(lessons, [])
+        memory, manifest = runner._load_memory_documents(str(tmp))
+        self.assertEqual(memory, [])
         self.assertEqual(manifest, [])
 
-    def test_empty_lessons_file_returns_empty(self):
-        root = self._write_lessons_file("")
-        lessons, manifest = runner._load_lessons_documents(str(root))
-        self.assertEqual(lessons, [])
+    def test_empty_memory_file_returns_empty(self):
+        root = self._write_memory_file("")
+        memory, manifest = runner._load_memory_documents(str(root))
+        self.assertEqual(memory, [])
         # manifest still records the file presence so unhealthy detection can work
         # (single-file scope behaviour)
         self.assertEqual(len(manifest), 1)
 
 
-class BuildLessonRecordsTests(unittest.TestCase):
+class BuildMemoryRecordsTests(unittest.TestCase):
     def test_returns_chroma_records_with_metadata(self):
-        lessons = [
+        memory = [
             {
-                "lesson_id": "abc123def456",
+                "memory_id": "abc123def456",
                 "date": "2026-05-20",
                 "title": "alpha",
                 "heading": "## 2026-05-20 — alpha",
@@ -117,9 +117,9 @@ class BuildLessonRecordsTests(unittest.TestCase):
                 "total_chunks": 1,
             }
         ]
-        records = runner._build_lesson_records(lessons)
+        records = runner._build_memory_records(memory)
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["id"], "lesson-abc123def456")
+        self.assertEqual(records[0]["id"], "memory-abc123def456")
         self.assertIn("alpha", records[0]["document"])
         meta = records[0]["metadata"]
         self.assertEqual(meta["date"], "2026-05-20")
@@ -127,15 +127,15 @@ class BuildLessonRecordsTests(unittest.TestCase):
         self.assertEqual(meta["chunk_idx"], 0)
 
 
-class ActionIndexLessonsTests(unittest.TestCase):
+class ActionIndexMemoryTests(unittest.TestCase):
     def test_full_mode_writes_manifest_and_chunks(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
             root = Path(wt)
             tasks = root / "tasks"
             tasks.mkdir(parents=True, exist_ok=True)
-            (tasks / "lessons.md").write_text(SAMPLE_LESSONS, encoding="utf-8")
+            (tasks / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
 
-            result = runner.action_index_lessons_v2(
+            result = runner.action_index_memory_v2(
                 project_root=str(root),
                 repo_hash="abc1234567890def",
                 worktree_hash=None,
@@ -143,22 +143,22 @@ class ActionIndexLessonsTests(unittest.TestCase):
                 db_root=Path(db_root_dir),
             )
             self.assertTrue(result.get("ok"), result)
-            self.assertEqual(result["scope"], "lessons")
+            self.assertEqual(result["scope"], "memory")
             self.assertGreaterEqual(result["indexed"], 3)
 
             db_path = runner.resolve_db_path(
-                "abc1234567890def", None, "lessons", db_root=Path(db_root_dir)
+                "abc1234567890def", None, "memory", db_root=Path(db_root_dir)
             )
-            manifest_file = runner._manifest_path(db_path, "lessons")
+            manifest_file = runner._manifest_path(db_path, "memory")
             self.assertTrue(manifest_file.is_file(), f"missing manifest at {manifest_file}")
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["path"], "tasks/lessons.md")
+            self.assertEqual(entries[0]["path"], "tasks/memory.md")
 
-    def test_missing_lessons_file_returns_indexed_zero(self):
+    def test_missing_memory_file_returns_indexed_zero(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
-            result = runner.action_index_lessons_v2(
+            result = runner.action_index_memory_v2(
                 project_root=wt,
                 repo_hash="abc1234567890def",
                 worktree_hash=None,
@@ -169,14 +169,14 @@ class ActionIndexLessonsTests(unittest.TestCase):
             self.assertEqual(result["indexed"], 0)
 
 
-class FormatLessonsResultsTests(unittest.TestCase):
+class FormatMemoryResultsTests(unittest.TestCase):
     def test_collapses_chunks_by_date_title_and_limits_to_n(self):
         items = [
             {
-                "id": "lesson-aaa",
+                "id": "memory-aaa",
                 "distance": 0.12,
                 "metadata": {
-                    "lesson_id": "aaa",
+                    "memory_id": "aaa",
                     "date": "2026-05-20",
                     "title": "alpha",
                     "heading": "## 2026-05-20 — alpha",
@@ -185,10 +185,10 @@ class FormatLessonsResultsTests(unittest.TestCase):
                 },
             },
             {
-                "id": "lesson-aaa-2",
+                "id": "memory-aaa-2",
                 "distance": 0.15,
                 "metadata": {
-                    "lesson_id": "aaa-2",
+                    "memory_id": "aaa-2",
                     "date": "2026-05-20",
                     "title": "alpha",
                     "heading": "## 2026-05-20 — alpha [2]",
@@ -197,10 +197,10 @@ class FormatLessonsResultsTests(unittest.TestCase):
                 },
             },
             {
-                "id": "lesson-bbb",
+                "id": "memory-bbb",
                 "distance": 0.20,
                 "metadata": {
-                    "lesson_id": "bbb",
+                    "memory_id": "bbb",
                     "date": "2026-05-19",
                     "title": "beta",
                     "heading": "## 2026-05-19 — beta",
@@ -209,7 +209,7 @@ class FormatLessonsResultsTests(unittest.TestCase):
                 },
             },
         ]
-        out = runner._format_lessons_results(items, n_results=10)
+        out = runner._format_memory_results(items, n_results=10)
         # 2 unique (date, title) groups
         self.assertEqual(len(out), 2)
         # best-scoring chunk wins for each group

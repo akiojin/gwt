@@ -133,6 +133,50 @@ async fn gitignored_files_are_excluded() {
 }
 
 #[tokio::test]
+async fn nested_gitignored_files_are_excluded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("packages/app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(app.join(".gitignore"), "*.generated\n").unwrap();
+
+    let cfg = WatcherConfig {
+        debounce: Duration::from_secs(2),
+        batch_limit: 100,
+    };
+    let mut handle = start_watcher(tmp.path(), cfg).unwrap();
+
+    fs::write(app.join("view.generated"), "ignored\n").unwrap();
+    fs::write(app.join("view.rs"), "// kept\n").unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_kept = false;
+    while !saw_kept {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let batch = tokio::time::timeout(remaining, handle.recv_batch())
+            .await
+            .expect("watcher must emit a batch before deadline")
+            .expect("channel open");
+        let paths: Vec<String> = batch
+            .changed_paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("view.generated")),
+            "nested gitignored path leaked into batch: {paths:?}"
+        );
+        if paths.iter().any(|p| p.contains("view.rs")) {
+            saw_kept = true;
+        }
+    }
+    assert!(saw_kept, "kept nested path never observed");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn watcher_shutdown_releases_resources() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = WatcherConfig::default();

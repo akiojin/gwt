@@ -177,7 +177,7 @@ impl SemanticSearchClient for RunnerSemanticSearchClient {
         gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
         let output =
             gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
-                .arg(gwt_core::paths::gwt_runtime_runner_path())
+                .arg(gwt_core::runtime::project_index_runner_path())
                 .arg("--action")
                 .arg(action)
                 .arg("--repo-hash")

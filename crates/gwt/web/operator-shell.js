@@ -660,6 +660,7 @@ function createActionRegistry(doc) {
     { id: "spawn-agent", label: "Start Work", group: "Spawn", handler: dispatch("start-work") },
     { id: "open-branches", label: "Open Branches surface", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
+    { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
   ];
   seed.forEach((a) => items.set(a.id, a));

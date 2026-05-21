@@ -11,6 +11,7 @@
 //! coordinates job dispatch and on-disk metadata only.
 
 pub mod manifest;
+pub mod path_policy;
 pub mod paths;
 pub mod runtime;
 pub mod watcher;
