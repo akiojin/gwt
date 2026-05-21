@@ -266,6 +266,32 @@ fn append_title_summary_stale_context(
     }
 }
 
+fn memory_source_present(worktree_path: &Path) -> bool {
+    worktree_path.join("tasks/memory.md").is_file()
+        || worktree_path.join("tasks/lessons.md").is_file()
+}
+
+fn append_memory_update_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    present: bool,
+    language: &str,
+) -> HookOutput {
+    if !present || event == IntentBoundaryEvent::SessionStart {
+        return output;
+    }
+    let reminder = texts::memory_update_reminder(language, event == IntentBoundaryEvent::Stop);
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
+        }
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{reminder}"))
+        }
+        other => other,
+    }
+}
+
 /// IO wrapper: read Board state from disk, build [`ReminderInputs`], and
 /// call the pure [`plan_reminder`]. Used by [`handle_with_input`] and kept
 /// public so tests can exercise the IO boundary.
@@ -341,6 +367,12 @@ pub fn compute_plan(
     );
     plan.next_reminders = updated_state;
     plan.output = append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+    plan.output = append_memory_update_context(
+        plan.output,
+        intent_event,
+        memory_source_present(&session.worktree_path),
+        &language,
+    );
 
     Ok(Some(plan))
 }
@@ -495,6 +527,47 @@ mod tests {
             panic!("expected additional context");
         };
         assert_eq!(text, "existing reminder");
+    }
+
+    #[test]
+    fn user_prompt_submit_includes_memory_reminder_when_memory_file_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = plan.output else {
+            panic!("expected additional context");
+        };
+        assert!(text.contains("Memory Reminder"));
+        assert!(text.contains("gwtd memory add"));
+        assert!(text.contains("tasks/memory.md"));
+        assert!(text.contains("Future Action"));
+    }
+
+    #[test]
+    fn stop_includes_memory_reminder_without_stop_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let plan = compute_plan("Stop", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+
+        let HookOutput::SystemMessage(text) = plan.output else {
+            panic!("expected non-blocking system message");
+        };
+        assert!(text.contains("Memory Reminder"));
+        assert!(text.contains("gwtd memory add"));
+        assert!(text.contains("tasks/memory.md"));
     }
 
     #[test]

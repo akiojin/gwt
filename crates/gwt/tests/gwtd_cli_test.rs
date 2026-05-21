@@ -36,6 +36,7 @@ fn gwtd_help_describes_the_headless_cli_surface() {
     assert!(stdout.contains("issue"));
     assert!(stdout.contains("pr"));
     assert!(stdout.contains("hook"));
+    assert!(stdout.contains("memory"));
     assert!(
         !stdout.contains("Launch `gwt` instead"),
         "gwtd help must not redirect agent-facing CLI users to the GUI front door"

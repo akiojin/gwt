@@ -11,8 +11,9 @@ gwt maintains a vector search index over post-mortem memory entries kept in
 the canonical `### 事象 / 原因 / 再発防止策` subsections) is chunked and
 embedded. The index is repo-scoped and stored at
 `~/.gwt/index/<repo-hash>/memory/`, shared across worktrees. Memory is the
-only canonical record of post-mortem learning for this project — write to
-`tasks/memory.md` directly; this skill never edits content.
+only canonical record of post-mortem learning for this project. Use
+`gwtd memory add` for new entries; direct edits to `tasks/memory.md` are only
+for unusual bulk cleanup.
 
 ## gwtd resolution
 
@@ -103,12 +104,22 @@ field to locate the exact section in `tasks/memory.md`.
 - Code review: cite the original memory that motivates a defensive change.
 - Onboarding: discover recurring failure modes documented in the project.
 
-## Write path is unchanged
+## Write path
 
-This skill does **not** write to `tasks/memory.md`. New memory must be added
-by editing the file directly with the canonical structure (`## YYYY-MM-DD —
-title` + `### 事象 / ### 原因 / ### 再発防止策`). The watcher and the
-auto-build fallback pick up the change automatically.
+Use `gwtd memory add` for new reusable learning. `gwtd lessons add` remains a
+legacy CLI alias and writes the same canonical `tasks/memory.md` file:
+
+```bash
+"$GWT_BIN" memory add \
+  --type lesson \
+  --title "short title" \
+  --context "What happened or where the learning applies." \
+  --learning "The reusable insight." \
+  --future-action "What future agents should do differently."
+```
+
+Direct file edits remain acceptable for unusual bulk edits or manual cleanup.
+The watcher and the auto-build fallback pick up either path automatically.
 
 ## Notes
 

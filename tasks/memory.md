@@ -1,5 +1,19 @@
 # Project Memory
 
+## 2026-05-20 — memory 更新は検索導線だけでなく hook reminder で可視化する
+
+Type: workflow
+Context: `tasks/lessons.md` を semantic search できるようにしても、gwt の機能として Agent に memory 更新を促す hook reminder が無ければ、再利用可能な学びがファイルに記録されない。
+Learning: 永続 memory は「検索できること」と「更新タイミングで Agent に見えること」の両方が必要。canonical path は `tasks/memory.md` とし、`tasks/lessons.md` は legacy alias / fallback に限定する。
+Future Action: memory 関連の修正では `search-memory` / `index-memory` / `gwt-memory-search` を正導線にし、UserPromptSubmit / Stop hook は自動書き込みではなく `tasks/memory.md` 更新 reminder を出す。`lessons` は互換 alias として残す。
+
+## 2026-05-20 — memory 更新は reminder だけでなく writer command を提供する
+
+Type: workflow
+Context: SPEC-2805 の memory 化では hook reminder と検索導線を追加したが、active objective は gwt の機能として memory/lessons を更新できることだった。
+Learning: Agent に更新を促すだけでは gwt の更新機能とは言えない。永続 memory の運用には検索、reminder、supported writer command の 3 点が必要。
+Future Action: memory/lessons 更新導線を変更するときは gwtd memory add と legacy gwtd lessons add の動作、hook reminder、skill guidance を同時に検証する。
+
 ## 2026-05-21 — PR 作成前に `User Verification Result: confirmed` を必ず取得する
 
 ### 事象

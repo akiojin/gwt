@@ -11,7 +11,7 @@
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
-- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/memory.md` に記録し、同種の作業を始める前に確認する。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd memory add` で `tasks/memory.md` に記録し、同種の作業を始める前に確認する。`tasks/lessons.md` は legacy alias / 移行 stub として扱う。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -152,7 +152,7 @@
 
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
-- 再発防止に値する失敗やレビュー指摘は `tasks/memory.md` に「事象 / 原因 / 再発防止策」の形式で記録する。
+- 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` で `tasks/memory.md` に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。`gwtd lessons add` は legacy alias として同じ `tasks/memory.md` に追記する。
 - 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
