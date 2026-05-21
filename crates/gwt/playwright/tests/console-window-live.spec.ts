@@ -136,12 +136,38 @@ test.describe.serial("Console window (live backend)", () => {
 
     const panes = consoleRoot.locator(".console-window__pane");
     await expect(panes).toHaveCount(KINDS.length);
-    for (const kind of KINDS) {
+    // After SPEC-2809 ConsoleTeeLayer wiring (commit a94015c7b), the
+    // runner tab starts populating as soon as gwt startup emits
+    // `gwt::index` tracing events (project index status runner /
+    // bootstrap helper / repository reconcile). The other four kinds
+    // remain idle until the user opens a project or launches an agent,
+    // so they keep the empty hint. Assert per-kind to reflect that
+    // observable startup behaviour rather than blanket-empty.
+    const IDLE_KINDS = ["gh", "git", "docker", "agent"];
+    for (const kind of IDLE_KINDS) {
       const hint = consoleRoot.locator(
         `.console-window__pane[data-kind='${kind}'] .console-window__empty`,
       );
       await expect(hint).toHaveText(new RegExp(`Waiting for ${kind} process output`));
     }
+    // Runner: either the empty hint is still visible (timing-lucky case
+    // where the snapshot reaches the controller before the first
+    // gwt::index event) or at least one line/header has been rendered
+    // by ConsoleTeeLayer. Both states pass.
+    const runnerPane = consoleRoot.locator(
+      ".console-window__pane[data-kind='runner']",
+    );
+    await expect
+      .poll(async () =>
+        await runnerPane.evaluate((node) => {
+          const empty = node.querySelector(".console-window__empty");
+          const hasLine = node.querySelector(
+            ".console-window__line, .console-window__invocation-header",
+          );
+          return Boolean(empty) || Boolean(hasLine);
+        }),
+      )
+      .toBe(true);
 
     // SPEC-2809 Phase F2 snapshot handshake — the controller must emit
     // `load_process_console` once it mounts so historical lines are
