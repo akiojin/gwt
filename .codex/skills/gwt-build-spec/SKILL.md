@@ -44,7 +44,8 @@ active. Register the skill lifecycle with the exit CLI:
 - `gwtd build start --spec <n>` when the skill starts an implementation pass
 - `gwtd build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
   TDD milestone (logging only)
-- `gwtd build complete --spec <n>` once the PR is open and verification passed
+- `gwtd build complete --spec <n>` once the Ready PR Gate is satisfied for a
+  releaseable slice and verification passed
 - `gwtd build abort --spec <n> --reason '<text>'` when implementation cannot
   proceed without a product decision or blocking merge conflict
 
@@ -176,7 +177,12 @@ Handle PR operations autonomously using the `gwt-manage-pr` skill:
 - If the current PR has CI failures, conflicts, or review blockers, use `gwt-manage-pr` to fix.
 - Let `gwt-manage-pr` handle routine merge/push/fix loops.
 
-Do not create a PR until Phase 3 verification passes.
+Do not create or update a Ready for review PR until Phase 3 verification
+passes and the Ready PR Gate confirms a releaseable slice. If work is
+intentionally incomplete or blocked but needs shared CI/early review,
+`gwt-manage-pr` may create/update only a Draft PR that lists known
+blockers and Remaining acceptance. Draft PR does not satisfy build
+completion.
 
 ## Phase 5: Completion Gate
 
@@ -191,6 +197,8 @@ Required checks:
 - tasks セクションの TDD チェックボックスが実際の検証エビデンスを反映している
 - tasks セクションの完了マーカーがコードで裏付けられていない完了を主張していない
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
+- Ready PR Gate passed for a releaseable slice. An incomplete Draft PR
+  handoff must be reported separately and does not satisfy completion.
 
 Update execution tracking:
 
@@ -207,6 +215,11 @@ Update execution tracking:
 ### Chain suggestion
 
 On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-manage-pr` if not already done.
+
+Only call `gwtd build complete --spec <n>` after the Ready PR Gate is
+satisfied for a releaseable slice. A Draft PR handoff must keep the
+remaining work visible in the report and must not be represented as a
+completed build.
 
 ## Stop conditions
 

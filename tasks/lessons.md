@@ -5966,3 +5966,26 @@ Release PR の `cargo test -p gwt-core -p gwt --all-features` で、
    先に lock を取る可能性がある。
 3. env lock を使う巻き添え側の tests は、`lock().unwrap()` ではなく poisoned lock を回復する helper を使い、
    先行 panic の調査を `PoisonError` のノイズで隠さない。
+
+## Hook tests は親エージェントの Codex env を暗黙に使わない
+
+### 事象
+
+PR #2861 の Linux CI で `event_dispatcher_keeps_blocked_stop_runtime_state_running` が失敗した。
+ローカルでは同じ test が通っていたが、これは実行中の Codex agent 由来の `CODEX_THREAD_ID` が
+process env に残っていたためだった。
+
+### 原因
+
+hook integration tests が `CODEX_THREAD_ID` / `GWT_SESSION_ID` /
+`GWT_SESSION_RUNTIME_PATH` などの親プロセス環境を明示的に固定していなかった。
+さらに Codex の placeholder session id (`agent-session`) と実 session id の違いを test payload が
+曖昧にしていたため、CI の clean env でだけ missing `session_id` と判定された。
+
+### 再発防止策
+
+1. Codex hook identity を扱う tests は、`CODEX_THREAD_ID` を明示的に unset または set して期待条件を固定する。
+2. hook diagnostics など runtime state が主目的ではない tests は、`GWT_SESSION_ID` /
+   `GWT_SESSION_RUNTIME_PATH` を unset して現在の agent session を汚染しない。
+3. Codex payload の `session_id` を使う tests では placeholder の `agent-session` を避け、
+   実 resume 可能 ID を表す別値を使う。

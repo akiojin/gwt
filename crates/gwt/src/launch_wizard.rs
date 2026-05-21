@@ -3825,6 +3825,8 @@ fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str 
 fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
     match status {
         crate::WindowProcessStatus::Running => "running",
+        crate::WindowProcessStatus::NotStarted => "not_started",
+        crate::WindowProcessStatus::Idle => "idle",
         crate::WindowProcessStatus::Waiting => "waiting",
         crate::WindowProcessStatus::Stopped => "stopped",
         crate::WindowProcessStatus::Error => "error",
@@ -4911,14 +4913,14 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
-            runtime_status: crate::WindowProcessStatus::Waiting,
+            runtime_status: crate::WindowProcessStatus::Idle,
         }];
 
         let state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
         let view = state.view();
 
         assert_eq!(view.live_sessions.len(), 1);
-        assert_eq!(view.live_sessions[0].runtime_status, "waiting");
+        assert_eq!(view.live_sessions[0].runtime_status, "idle");
     }
 
     #[test]

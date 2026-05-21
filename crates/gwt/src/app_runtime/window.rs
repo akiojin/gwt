@@ -24,8 +24,8 @@
 use gwt::{ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
-    close_window_from_workspace, combined_window_id, workspace_view_for_tab, AppRuntime,
-    BackendEvent, OutboundEvent, WindowGeometry, WindowPreset,
+    close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
+    WindowGeometry, WindowPreset,
 };
 
 impl AppRuntime {
@@ -371,7 +371,7 @@ impl AppRuntime {
             .active_tab_id
             .as_ref()
             .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| workspace_view_for_tab(tab).windows)
+            .map(|tab| self.workspace_view_for_tab(tab).windows)
             .unwrap_or_default();
         BackendEvent::WindowList { windows }
     }

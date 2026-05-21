@@ -81,34 +81,62 @@ impossible.**
    use **FIX** immediately instead of push-only/create. Outside that
    override, PR state (MERGED / CLOSED) is not consulted.
 
-## Pre-PR Verification (mandatory)
+## Ready PR Gate and Pre-PR Verification (mandatory)
 
-Before any push, PR create, or PR update operation, invoke
-`gwt-verify --mode pre-pr` and require `Overall: PASS` in the evidence
-bundle. `gwt-verify` is a project-agnostic Generic Verification Contract:
-it autodetects the host project's test runners (Cargo.toml /
-package.json / pyproject.toml / go.mod / ProjectSettings / *.sln / etc.),
-runs the appropriate unit / integration / E2E / visual tests for the
-changed surfaces, emits a Test Inventory naming exactly which tests
-were executed, and hands off to the user with a 4-step 導線 + Check
-Items before finalizing the report. Project-local AGENTS.md / README
-testing instructions always take precedence over the generic matrix.
+Use the Ready PR Gate before any push, PR create, PR update, or state
+change that would present the branch as Ready for review. A PR may be
+Ready for review only when all of the following are true:
 
-The push / PR-write gate **fails** when any of:
+- the PR scope is a releaseable slice: it can be merged and shipped by
+  itself without exposing incomplete behavior or breaking existing users
+- all acceptance criteria for the PR scope are satisfied
+- no known blockers remain for the PR scope
+- rollback / follow-up boundaries are explained in the PR body when relevant
+- `gwt-verify --mode pre-pr` returns `Overall: PASS`
+- `User Verification Result` is `confirmed`, `n/a`, or
+  `skipped(<reason>)`
+- every PR body checklist item is checked or explicitly marked N/A with
+  a reason
+
+`gwt-verify` is a project-agnostic Generic Verification Contract: it
+autodetects the host project's test runners (Cargo.toml / package.json /
+pyproject.toml / go.mod / ProjectSettings / *.sln / etc.), runs the
+appropriate unit / integration / E2E / visual tests for the changed
+surfaces, emits a Test Inventory naming exactly which tests were
+executed, and hands off to the user with a 4-step 導線 + Check Items
+before finalizing the report. Project-local AGENTS.md / README testing
+instructions always take precedence over the generic matrix.
+
+Draft PR is the only allowed PR state for unfinished, partially
+verified, acceptance-incomplete, or blocker-bearing work. Draft PR is
+allowed for CI, shared visibility, and early review, but the PR body
+must set `State: Draft`, list known blockers, list Remaining acceptance,
+and avoid any claim that the change is complete or a releaseable slice.
+Full `gwt-verify --mode pre-pr` is not required solely to create or
+update a Draft PR, but the agent must include the exact verification
+that was run and the reason full Ready verification is not yet claimed.
+
+The Ready PR Gate **fails** when any of:
 
 - `gwt-verify --mode pre-pr` returns `Overall: FAIL`
 - `failed: tooling-missing` is recorded
 - `User Verification Result` is `pending` (handoff never completed) or
   `rejected(<reason>)` (user declined). The user's reason is preserved
   in the evidence bundle.
+- the PR body lists known blockers or Remaining acceptance for the PR
+  scope
+- the PR is not a releaseable slice
 
-On failure, do not push, do not create a PR, and do not update an
-existing PR. Route the failure for repair (back to the TDD loop or
-`gwt-discussion`) and re-run pre-pr verification before retrying.
+On Ready PR Gate failure, do not push a Ready/non-draft update, do not
+create a Ready PR, and do not mark an existing Draft PR as Ready for
+review. Either keep/create the PR as Draft PR with explicit blockers, or
+return **NO ACTION** and route the failure for repair (back to the TDD
+loop or `gwt-discussion`) before retrying.
 
-This applies equally to Create and Fix modes — every code-changing
-re-push must be preceded by a fresh `gwt-verify --mode pre-pr` PASS
-with a satisfied `User Verification Result`.
+This applies equally to Create and Fix modes. Every code-changing
+re-push to a Ready/non-draft PR must be preceded by a fresh
+`gwt-verify --mode pre-pr` PASS with a satisfied
+`User Verification Result`.
 
 ## Mode: Create
 
@@ -120,9 +148,10 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 1. **Do not create or switch branches.** Always use the current branch as head.
 2. **If open PR exists and is `CONFLICTING` / `DIRTY` / `BEHIND`** → enter Fix mode before any push-only path.
-3. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode.
-4. **If no open PR** → create new PR.
-5. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
+4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
+5. **If no open PR** → create new PR; pass `--draft` unless the Ready PR Gate is satisfied.
+6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
 ### PR Title Rules
 
@@ -134,7 +163,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 ### PR Body Rules
 
 - Template: `.claude/skills/gwt-manage-pr/references/pr-body-template.md`
-- Required sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
+- Required sections: Summary, Changes, Testing, PR Readiness, Closing Issues, Related Issues, Checklist
 - Conditional sections (remove if N/A): Context, Risk/Impact, Screenshots, Deployment
 - Remove all `<!-- GUIDE: ... -->` comments from final output
 - No `TODO` in required sections; derive content from diff/Issues/SPECs before asking user

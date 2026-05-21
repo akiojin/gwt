@@ -12,7 +12,9 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-use gwt_agent::{persist_agent_session_id, PendingDiscussionResume, Session};
+use gwt_agent::{
+    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume, Session,
+};
 use serde::Serialize;
 
 use super::{
@@ -41,6 +43,8 @@ pub struct RuntimeState {
 pub fn status_for_event(event: &str) -> Option<&'static str> {
     match window_state_for_hook_event(event)? {
         crate::persistence::WindowState::Running => Some("Running"),
+        crate::persistence::WindowState::NotStarted => Some("NotStarted"),
+        crate::persistence::WindowState::Idle => Some("Idle"),
         crate::persistence::WindowState::Waiting => Some("Waiting"),
         crate::persistence::WindowState::Stopped => Some("Stopped"),
         crate::persistence::WindowState::Error => Some("Error"),
@@ -70,7 +74,15 @@ fn write_for_event_with_pending_discussion(
 ) -> Result<(), HookError> {
     let status =
         status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
+    write_state_with_status(path, event, status, pending_discussion)
+}
 
+fn write_state_with_status(
+    path: &Path,
+    event: &str,
+    status: &str,
+    pending_discussion: Option<PendingDiscussionResume>,
+) -> Result<(), HookError> {
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let state = RuntimeState {
         status: status.to_string(),
@@ -217,6 +229,27 @@ pub fn record_completed_stop_from_env() -> Result<(), HookError> {
         .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
     gwt_agent::persist_session_completed_stop(&sessions_dir, gwt_session_id.as_str())?;
     Ok(())
+}
+
+pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
+    let Some(gwt_session_id) = GwtSessionId::from_env() else {
+        return Ok(());
+    };
+    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
+        return Ok(());
+    };
+    let runtime_path = PathBuf::from(runtime_path);
+    let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id)?;
+    if session.is_some() {
+        persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)?;
+    }
+    let pending_discussion = session.as_ref().and_then(|session| {
+        pending_discussion_for_session(&sessions_dir, &session.id)
+            .ok()
+            .flatten()
+    });
+    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion)
 }
 
 fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
@@ -370,7 +403,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&path).unwrap();
         let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(state.status, "Waiting");
+        assert_eq!(state.status, "Idle");
         assert_eq!(state.source_event, "Stop");
         assert_eq!(
             state.pending_discussion,
@@ -383,12 +416,12 @@ mod tests {
     }
 
     #[test]
-    fn status_for_event_maps_stop_to_waiting_and_runtime_events_to_running() {
-        assert_eq!(status_for_event("SessionStart"), Some("Running"));
+    fn status_for_event_maps_idle_and_running_lifecycle_events() {
+        assert_eq!(status_for_event("SessionStart"), Some("Idle"));
         assert_eq!(status_for_event("UserPromptSubmit"), Some("Running"));
         assert_eq!(status_for_event("PreToolUse"), Some("Running"));
         assert_eq!(status_for_event("PostToolUse"), Some("Running"));
-        assert_eq!(status_for_event("Stop"), Some("Waiting"));
+        assert_eq!(status_for_event("Stop"), Some("Idle"));
     }
 
     #[test]
@@ -653,7 +686,7 @@ mod tests {
 
         assert_eq!(loaded.last_hook_event.as_deref(), Some("Stop"));
         assert!(loaded.last_completed_stop_at.is_some());
-        assert_eq!(loaded.status, gwt_agent::AgentStatus::WaitingInput);
+        assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
         assert!(!loaded.should_mark_interrupted_from_lifecycle());
     }
 }
