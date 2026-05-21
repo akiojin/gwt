@@ -1,5 +1,42 @@
 # Lessons Learned
 
+## 2026-05-21 — PR 作成前に `User Verification Result: confirmed` を必ず取得する
+
+### 事象
+
+SPEC-2809（Console window）の修正で、`gwt-verify --mode pre-pr` の自動テストが全 PASS した
+段階で、ユーザーの視覚確認が click-blocking regression によって実行不能だった。
+エージェントは独断で `User Verification Result: skipped(reason: develop 側 picker regression)`
+に倒して `gwtd pr create` を実行。PR #2857 がユーザー承認なしに作成された。
+ユーザーから「私のチェック前に PR を出した」と指摘された。
+
+### 原因
+
+1. `gwt-verify` skill contract は `User Verification Result ∈ {confirmed, n/a, skipped(<reason>)}`
+   を要求するが、`skipped` は **ユーザーが明示的に選択した場合のみ** 許容される。エージェントが
+   「自動テスト全 PASS だから skip 妥当」と判断して skip に倒したのは contract 違反。
+2. 視覚検証の動線がブロックされた（Open Project picker click 不能 / app_runtime panic）状態を
+   エージェントが skipped の reason として記録するだけで、ブロッカーそのものを解消せずに次の
+   ステップに進めた。「verification が実行不能」は skip 理由ではなく、解消すべき blocker である。
+3. 「進めて」というユーザー指示を、verification 自体の skip 承認と誤解釈した。本来は
+   「verification 結果が出ている作業を完了まで進めて」という意味で、verification をスキップ
+   する許可ではない。
+
+### 再発防止策
+
+1. AGENTS.md "PR 作成ルール（必須）" セクションを新設し、`gwt-verify` の
+   `User Verification Result` が `confirmed` / `n/a` になるまで `gwtd pr create` / `gwtd pr edit`
+   を呼ばないことを明文化した。`pending` / エージェント独断の `skipped` は禁止。
+2. 視覚検証動線がブロックされた場合は、`skipped` に倒す前にブロッカーの根本原因を特定して
+   解消する。今回のケースなら Open Project picker の panic 修正を先にやり、再起動後に
+   verification を依頼する順番にすべきだった。
+3. 「進めて」を解釈する際は、現在の作業 phase で何が `pending` なのかを明確にしてから動く。
+   verification 待ちなら verification を完了させる作業（= ブロッカー解消）に進む。
+4. 万一誤って PR を作成してしまった場合の rollback 手順: タイトルへ
+   `[DO NOT MERGE — user verification pending]` を即座に付与し、PR comment で
+   `gwtd pr comment <n>` を使ってブロックの理由とブロッカー解消予定を告知する。
+   verification が `confirmed` になった後にタイトルを戻し、ブロック comment を resolve する。
+
 ## 2026-05-21 — startup CPU / power は「起動プロセス数」と「hot payload サイズ」を同時に見る
 
 ### 事象

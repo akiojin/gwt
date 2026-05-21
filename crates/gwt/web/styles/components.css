@@ -4198,19 +4198,14 @@ kbd.op-kbd {
   border-radius: var(--radius-md);
 }
 
+/* SPEC-2809 — "$ <command>" banner and "→ exit=..." footer lines.
+   Rendered as plain terminal-style monospace text in a muted color so
+   they read like the prompt / exit hint a user would see in iTerm
+   while still distinguishing them from real stdout/stderr. No
+   uppercase, no bold, no block margins. */
 .console-window__invocation-header {
   display: block;
   color: var(--color-text-muted);
-  margin-top: 10px;
-  margin-bottom: 4px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-mono);
-  font-size: var(--type-2xs, 11px);
-}
-
-.console-window__invocation-header:first-child {
-  margin-top: 0;
 }
 
 .console-window__line {
