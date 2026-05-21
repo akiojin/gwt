@@ -270,6 +270,15 @@ fn startup_auto_resume_is_fresh(
         <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
 }
 
+fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
+    if session.restore_window_on_startup {
+        return true;
+    }
+    // Compatibility for sessions saved before the explicit GUI restore flag
+    // existed, and for files already migrated once with that flag defaulted.
+    session.status != gwt_agent::AgentStatus::Stopped
+}
+
 fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
     let path = sessions_dir.join(format!("{session_id}.toml"));
     let Ok(mut session) = gwt_agent::Session::load_and_migrate(&path) else {
@@ -2756,7 +2765,7 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
-            if !session.restore_window_on_startup {
+            if !startup_auto_resume_window_was_open(&session) {
                 continue;
             }
             if !session.exact_auto_resume_candidate() {
@@ -11540,7 +11549,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_startup_auto_resume_requires_open_window_restore_flag() {
+    fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11568,9 +11577,9 @@ exit 1
             &[],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
-        for (session_id, native_session_id, restore_window_on_startup) in [
-            ("session-open-window", "native-open-window", true),
-            ("session-closed-window", "native-closed-window", false),
+        for (session_id, native_session_id, restore_window_on_startup, stopped) in [
+            ("session-open-window", "native-open-window", true, false),
+            ("session-closed-window", "native-closed-window", false, true),
         ] {
             let mut session =
                 gwt_agent::Session::new(&worktree, "work/restore-flag", gwt_agent::AgentId::Codex);
@@ -11579,6 +11588,9 @@ exit 1
             session.restore_window_on_startup = restore_window_on_startup;
             session.record_hook_event("Stop");
             session.record_completed_stop();
+            if stopped {
+                session.update_status(gwt_agent::AgentStatus::Stopped);
+            }
             session
                 .save(&runtime.sessions_dir)
                 .expect("save resumable session");
@@ -11600,6 +11612,66 @@ exit 1
         assert_eq!(
             resumed_sources,
             std::collections::HashSet::from(["session-open-window".to_string()])
+        );
+    }
+
+    #[test]
+    fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("legacy-restore");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/legacy-restore",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let tab = sample_project_tab(
+            "tab-auto",
+            "Auto Resume",
+            worktree.clone(),
+            ProjectKind::Git,
+            &[],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/legacy-restore", gwt_agent::AgentId::Codex);
+        session.id = "session-legacy-open-window".to_string();
+        session.agent_session_id = Some("native-legacy-open-window".to_string());
+        session.restore_window_on_startup = false;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save legacy open session");
+
+        runtime.bootstrap();
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::StartupAutoResumeReady {
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let resumed_sources = runtime
+            .pending_auto_resume_sources
+            .values()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            resumed_sources,
+            std::collections::HashSet::from(["session-legacy-open-window".to_string()]),
+            "legacy sessions without the new restore flag should still restore when they were not explicitly stopped"
         );
     }
 
