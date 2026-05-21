@@ -109,6 +109,7 @@ impl AppRuntime {
             }
         }
         if should_auto_close {
+            self.clear_agent_window_startup_restore(&id);
             self.stop_window_runtime(&id);
             self.remove_window_state_tracking(&id);
             if !close_window_from_workspace(
@@ -192,6 +193,7 @@ impl AppRuntime {
         );
         let detail = self.window_details.get(&window_id).cloned();
         if should_auto_close {
+            self.clear_agent_window_startup_restore(&window_id);
             self.stop_window_runtime(&window_id);
             self.remove_window_state_tracking(&window_id);
             if close_window_from_workspace(
