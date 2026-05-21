@@ -43,6 +43,21 @@ fn gwtd_help_describes_the_headless_cli_surface() {
 }
 
 #[test]
+fn gwtd_index_help_lists_every_rebuild_scope() {
+    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .args(["index", "--help"])
+        .output()
+        .expect("run gwtd index --help");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("all|issues|specs|memory|board|files|files-docs"),
+        "index help must list every accepted rebuild scope, got: {stdout}"
+    );
+}
+
+#[test]
 fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     let project = tempfile::tempdir().expect("project tempdir");
     let codex_home = tempfile::tempdir().expect("codex tempdir");
