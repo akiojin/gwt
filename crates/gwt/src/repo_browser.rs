@@ -7,7 +7,7 @@ use std::{
 use crate::{AppEventProxy, OutboundEvent, UserEvent};
 use gwt::{
     hydrate_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, BranchScope,
+    BranchEntriesPhase, BranchListEntry, BranchResumeInfo, BranchScope,
 };
 
 pub fn spawn_branch_load_async(
@@ -15,6 +15,7 @@ pub fn spawn_branch_load_async(
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
+    resume_sessions: Vec<gwt_agent::Session>,
 ) {
     thread::spawn(move || {
         dispatch_branch_load_progressive(
@@ -22,6 +23,7 @@ pub fn spawn_branch_load_async(
             &window_id,
             &project_root,
             &active_session_branches,
+            &resume_sessions,
         );
     });
 }
@@ -49,9 +51,11 @@ fn dispatch_branch_load_progressive(
     window_id: &str,
     project_root: &Path,
     active_session_branches: &HashSet<String>,
+    resume_sessions: &[gwt_agent::Session],
 ) {
     match list_branch_inventory(project_root) {
-        Ok(entries) => {
+        Ok(mut entries) => {
+            apply_branch_resume_availability(project_root, &mut entries, resume_sessions);
             dispatch_async_events(
                 proxy,
                 vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
@@ -65,14 +69,17 @@ fn dispatch_branch_load_progressive(
                 entries,
                 active_session_branches,
             ) {
-                Ok(entries) => dispatch_async_events(
-                    proxy,
-                    vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
-                        id: window_id.to_string(),
-                        phase: BranchEntriesPhase::Hydrated,
-                        entries,
-                    })],
-                ),
+                Ok(mut entries) => {
+                    apply_branch_resume_availability(project_root, &mut entries, resume_sessions);
+                    dispatch_async_events(
+                        proxy,
+                        vec![OutboundEvent::broadcast(BackendEvent::BranchEntries {
+                            id: window_id.to_string(),
+                            phase: BranchEntriesPhase::Hydrated,
+                            entries,
+                        })],
+                    )
+                }
                 Err(error) => dispatch_async_events(
                     proxy,
                     vec![OutboundEvent::broadcast(BackendEvent::BranchError {
@@ -92,6 +99,27 @@ fn dispatch_branch_load_progressive(
     }
 }
 
+fn apply_branch_resume_availability(
+    project_root: &Path,
+    entries: &mut [BranchListEntry],
+    resume_sessions: &[gwt_agent::Session],
+) {
+    for entry in entries {
+        let has_resumable_session = gwt::launch_wizard::quick_start_entries_from_sessions(
+            project_root,
+            &entry.name,
+            resume_sessions,
+        )
+        .into_iter()
+        .any(|quick_start| quick_start.resume_session_id.is_some());
+        entry.resume = if has_resumable_session {
+            BranchResumeInfo::available()
+        } else {
+            BranchResumeInfo::unavailable()
+        };
+    }
+}
+
 fn dispatch_async_events(proxy: &AppEventProxy, events: Vec<OutboundEvent>) {
     proxy.send(UserEvent::Dispatch(events));
 }
@@ -99,8 +127,12 @@ fn dispatch_async_events(proxy: &AppEventProxy, events: Vec<OutboundEvent>) {
 #[cfg(test)]
 mod tests {
     use gwt::{BranchCleanupInfo, BranchListEntry};
+    use tempfile::tempdir;
 
-    use super::{preferred_issue_launch_branch, BranchScope};
+    use super::{
+        apply_branch_resume_availability, preferred_issue_launch_branch, BranchResumeInfo,
+        BranchScope,
+    };
 
     fn local_branch(name: &str, is_head: bool) -> BranchListEntry {
         BranchListEntry {
@@ -113,6 +145,7 @@ mod tests {
             last_commit_date: None,
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
         }
     }
 
@@ -127,6 +160,7 @@ mod tests {
             last_commit_date: None,
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
         }
     }
 
@@ -157,6 +191,27 @@ mod tests {
         ];
 
         assert_eq!(preferred_issue_launch_branch(&entries), None);
+    }
+
+    #[test]
+    fn branch_resume_availability_marks_only_resumable_branch_sessions() {
+        let repo = tempdir().expect("repo");
+        let mut session = gwt_agent::Session::new(
+            repo.path(),
+            "feature/resumable",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.agent_session_id = Some("claude-session-1".to_string());
+        let sessions = vec![session];
+        let mut entries = vec![
+            local_branch("feature/resumable", false),
+            local_branch("feature/no-session", false),
+        ];
+
+        apply_branch_resume_availability(repo.path(), &mut entries, &sessions);
+
+        assert_eq!(entries[0].resume, BranchResumeInfo::available());
+        assert_eq!(entries[1].resume, BranchResumeInfo::unavailable());
     }
 
     #[test]

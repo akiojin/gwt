@@ -1206,31 +1206,61 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
-test("Branches toolbar exposes explicit Resume and Launch Agent actions for selected branch", () => {
+test("Branches separates row actions from cleanup toolbar action", () => {
+  const branchesBlock = appSource
+    .split('if (surface === "branches")')
+    .at(1)
+    ?.split('if (surface === "profile")')
+    .at(0);
+
+  assert.ok(branchesBlock, "expected Branches surface render block");
+  assert.match(branchesBlock, /<div class="branch-heading">Repository branches<\/div>/);
+  assert.doesNotMatch(
+    branchesBlock,
+    /double-click to launch/i,
+    "Branches heading should not explain the double-click shortcut",
+  );
+  assert.match(
+    branchesBlock,
+    /data-action="open-branch-cleanup"/,
+    "cleanup remains a toolbar-level selection action",
+  );
+  assert.doesNotMatch(
+    branchesBlock,
+    /data-action="open-branch-resume"|data-action="open-branch-launch"/,
+    "Resume and Launch must not remain toolbar-level selected-branch actions",
+  );
+
+  assert.match(appSource, /branch-row-actions/, "branch rows must render action buttons");
   assert.match(
     appSource,
-    /data-action="open-branch-resume"/,
-    "expected Branches toolbar to include an explicit Resume action",
+    /setAttribute\("data-branch-row-action",\s*"resume"\)/,
+    "branch rows must expose a row-level Resume action",
   );
   assert.match(
     appSource,
-    /data-action="open-branch-launch"/,
-    "expected Branches toolbar to include an explicit Launch Agent action",
+    /setAttribute\("data-branch-row-action",\s*"launch"\)/,
+    "branch rows must expose a row-level Launch action",
   );
   assert.match(
     appSource,
-    /selectedBranchName[\s\S]{0,360}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,360}?selectedBranchName/,
-    "expected Branches toolbar Resume action to resume the selected branch",
+    /entry\.resume\.available[\s\S]{0,500}?resumeButton\.disabled/,
+    "Resume row action must be disabled when the branch is not resumable",
   );
   assert.match(
     appSource,
-    /selectedBranchName[\s\S]{0,300}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,300}?selectedBranchName/,
-    "expected Branches toolbar Launch Agent action to send selectedBranchName",
+    /branchName[\s\S]{0,260}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,260}?branchName/,
+    "row Resume action must send its own branch name",
+  );
+  assert.match(
+    appSource,
+    /branchName[\s\S]{0,220}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,220}?branchName/,
+    "row Launch action must send its own branch name",
   );
   assert.match(
     appSource,
     /row\.addEventListener\("dblclick",\s*activate\)/,
-    "expected branch row double-click to keep Launch Agent activation",
+    "branch row double-click remains a Launch Agent shortcut",
   );
 });
 

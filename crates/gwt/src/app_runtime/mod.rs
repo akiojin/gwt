@@ -4833,6 +4833,7 @@ impl AppRuntime {
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
+            self.launch_wizard_cache.sessions.clone(),
         );
         Vec::new()
     }
@@ -8973,6 +8974,7 @@ exit 1
                         last_commit_date: None,
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: None,
@@ -9086,6 +9088,7 @@ exit 1
                         last_commit_date: None,
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: Some(project_root.to_path_buf()),
