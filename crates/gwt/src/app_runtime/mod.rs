@@ -1142,6 +1142,12 @@ impl LaunchWizardMemoryCache {
             .cloned()
     }
 
+    fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)
+    }
+
     fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
         gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.sessions)
     }
@@ -6087,7 +6093,23 @@ impl AppRuntime {
                     .unwrap_or(WindowProcessStatus::Running),
             })
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.sort_by(|left, right| {
+            match (
+                self.launch_wizard_cache.session_by_id(&left.session_id),
+                self.launch_wizard_cache.session_by_id(&right.session_id),
+            ) {
+                (Some(left_session), Some(right_session)) => right_session
+                    .last_activity_at
+                    .cmp(&left_session.last_activity_at)
+                    .then_with(|| right_session.updated_at.cmp(&left_session.updated_at))
+                    .then_with(|| right_session.created_at.cmp(&left_session.created_at))
+                    .then_with(|| right_session.id.cmp(&left_session.id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left.name.cmp(&right.name),
+            }
+            .then_with(|| left.name.cmp(&right.name))
+        });
         entries
     }
 
@@ -7421,7 +7443,8 @@ impl AppRuntime {
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "quick_start",
             gwt::LaunchWizardAction::SetLaunchPath { .. }
             | gwt::LaunchWizardAction::SelectQuickStart { .. }
-            | gwt::LaunchWizardAction::SelectLiveSession { .. } => "launch_path_select",
+            | gwt::LaunchWizardAction::SelectLiveSession { .. }
+            | gwt::LaunchWizardAction::UseStartMethod { .. } => "launch_path_select",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
@@ -7437,6 +7460,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Cancel => "cancel",
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+            gwt::LaunchWizardAction::UseStartMethod { .. } => "use_start_method",
             gwt::LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
             gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
             gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
@@ -10010,9 +10034,25 @@ exit 1
             .view();
         assert_eq!(view.mode, gwt::LaunchWizardMode::Branch);
         assert_eq!(view.branch_name, "work/20260504-1234");
-        assert!(view.show_branch_controls);
+        assert!(view.show_start_methods);
+        assert!(!view.show_branch_controls);
         assert_eq!(view.live_sessions.len(), 1);
         assert_eq!(view.live_sessions[0].name, "Codex");
+
+        let _ = runtime.handle_launch_wizard_action(
+            gwt::LaunchWizardAction::UseStartMethod {
+                method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+            },
+            None,
+        );
+        let configured_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("configured active work launch wizard")
+            .wizard
+            .view();
+        assert!(!configured_view.show_start_methods);
+        assert!(configured_view.show_branch_controls);
     }
 
     #[test]
@@ -11591,7 +11631,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_open_launch_wizard_shows_multiple_resume_candidates_latest_first() {
+    fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -11611,6 +11651,18 @@ exit 1
             session.created_at = session.last_activity_at;
             session.save(&sessions_dir).expect("save session");
         }
+        for (session_id, hour) in [("session-live-older", 11), ("session-live-newer", 12)] {
+            let mut session =
+                gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = None;
+            session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+            session.updated_at = session.last_activity_at;
+            session.created_at = session.last_activity_at;
+            session
+                .save(&sessions_dir)
+                .expect("save live session metadata");
+        }
 
         let tab = sample_project_tab_with_window_at(
             "tab-1",
@@ -11621,6 +11673,26 @@ exit 1
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "branches-1");
+        for (window, session, display) in [
+            ("agent-older", "session-live-older", "Codex Older"),
+            ("agent-newer", "session-live-newer", "Codex Newer"),
+        ] {
+            let agent_window_id = combined_window_id("tab-1", window);
+            runtime.active_agent_sessions.insert(
+                agent_window_id.clone(),
+                ActiveAgentSession {
+                    window_id: agent_window_id,
+                    session_id: session.to_string(),
+                    agent_id: "codex".to_string(),
+                    branch_name: "work/manual-resume".to_string(),
+                    display_name: display.to_string(),
+                    worktree_path: PathBuf::from("/tmp/repo"),
+                    agent_project_root: "/tmp/repo".to_string(),
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                    tab_id: "tab-1".to_string(),
+                },
+            );
+        }
 
         runtime.handle_frontend_event(
             "client-1".to_string(),
@@ -11642,7 +11714,29 @@ exit 1
                 .iter()
                 .map(|entry| entry.resume_session_id.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("native-newer"), Some("native-older")]
+            vec![Some("native-newer")]
+        );
+        let continue_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue method");
+        assert!(
+            continue_method
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("native-newer"),
+            "continue method should describe the latest resumable session"
+        );
+        let focus_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "focus_running_session")
+            .expect("focus method");
+        assert!(
+            focus_method.summary.contains("Codex Newer"),
+            "focus method should target the latest live session"
         );
     }
 

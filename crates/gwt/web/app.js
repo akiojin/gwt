@@ -148,6 +148,7 @@
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
       const wizardError = document.getElementById("wizard-error");
+      const wizardBackButton = document.getElementById("wizard-back-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const cloneProjectModal = document.getElementById("clone-project-modal");
@@ -3068,15 +3069,6 @@
           return windowRuntimeLabel(runtimeState);
         }
         return agentStatusLabel(agent.status_category);
-      }
-
-      function liveSessionStatusLabel(session) {
-        const fallback = session.active ? "running" : "stopped";
-        const runtimeState = normalizeWindowRuntimeState(
-          session.runtime_status || fallback,
-          "agent",
-        );
-        return `${windowRuntimeLabel(runtimeState)} window`;
       }
 
       function focusActiveWorkAgentWindow(agent) {
@@ -7183,6 +7175,8 @@
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
           wizardSubmitButton.hidden = false;
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardCancelButton.textContent = "Cancel";
           wizardCancelButton.disabled = false;
           syncWizardDraftState();
@@ -7219,6 +7213,8 @@
             launchWizardOpenError.title === "Start Work"
               ? "Workspace launch"
               : "Launch Agent";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardSubmitButton.hidden = true;
           wizardSubmitButton.disabled = true;
           wizardCancelButton.textContent = "Close";
@@ -7232,6 +7228,12 @@
         }
 
         wizardSubmitButton.hidden = false;
+        wizardBackButton.hidden = !launchWizard.show_back_button;
+        wizardBackButton.disabled = Boolean(
+          launchWizard.is_hydrating
+            || launchWizard.runtime_resolution_pending
+            || !launchWizard.show_back_button,
+        );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
@@ -7270,6 +7272,12 @@
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
         );
+        const showStartMethods = Boolean(
+          launchWizard.show_start_methods
+            && !isRuntimeConfirmation
+            && !launchWizard.runtime_resolution_pending
+            && (launchWizard.start_methods || []).length > 0,
+        );
         const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
@@ -7297,117 +7305,44 @@
           );
         }
 
-        if (!isRuntimeConfirmation && (
-          (launchWizard.quick_start_entries || []).length > 0 ||
-          (launchWizard.live_sessions || []).length > 0
-        )) {
+        if (showStartMethods) {
           const section = createLaunchSection(
-            "Quick start",
-            "Reuse a recent launch profile or jump to a running window.",
+            "Start methods",
+            "Choose how this agent should start on the selected branch.",
           );
 
-          if ((launchWizard.quick_start_entries || []).length > 0) {
-            const quickStartGrid = createNode("div", "quick-start-grid");
-            for (const entry of launchWizard.quick_start_entries) {
-              const card = createNode("button", "quick-start-card");
-              card.type = "button";
-              const selected =
-                launchWizard.selected_launch_path === "quick_start"
-                && launchWizard.selected_quick_start_index === entry.index;
-              card.setAttribute("aria-pressed", selected ? "true" : "false");
-              if (selected) {
-                card.classList.add("selected");
-              }
-              const head = createNode("div", "quick-start-head");
-              head.appendChild(
-                createNode("div", "quick-start-title", entry.tool_label),
-              );
-              head.appendChild(
-                createNode("div", "quick-start-meta", entry.summary),
-              );
-              if (entry.resume_session_id) {
-                head.appendChild(
-                  createNode(
-                    "div",
-                    "quick-start-secondary",
-                    `Resume ID · ${entry.resume_session_id}`,
-                  ),
-                );
-              }
-              card.appendChild(head);
-              card.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "select_quick_start",
-                  index: entry.index,
-                });
-              });
-              quickStartGrid.appendChild(card);
+          const methodList = createNode("div", "start-method-list");
+          for (const method of launchWizard.start_methods || []) {
+            const button = createNode("button", "start-method-button");
+            button.type = "button";
+            button.disabled = method.enabled === false;
+            const head = createNode("div", "start-method-head");
+            head.appendChild(createNode("div", "start-method-title", method.label));
+            if (method.badge) {
+              head.appendChild(createNode("div", "start-method-badge", method.badge));
             }
-            section.appendChild(quickStartGrid);
-          }
-
-          if ((launchWizard.live_sessions || []).length > 0) {
-            const liveSection = createNode("div", "live-session-list");
-            for (const session of launchWizard.live_sessions) {
-              const button = createNode("button", "live-session-button");
-              button.type = "button";
-              const selected =
-                launchWizard.selected_launch_path === "focus_session"
-                && launchWizard.selected_live_session_index === session.index;
-              button.setAttribute("aria-pressed", selected ? "true" : "false");
-              if (selected) {
-                button.classList.add("selected");
-              }
-              button.appendChild(
-                createNode("div", "live-session-name", session.name),
-              );
-              button.appendChild(
-                createNode(
-                  "div",
-                  "live-session-status",
-                  liveSessionStatusLabel(session),
-                ),
-              );
-              if (session.detail) {
-                button.appendChild(
-                  createNode("div", "live-session-detail", session.detail),
-                );
-              }
-              button.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "select_live_session",
-                  index: session.index,
-                });
-              });
-              liveSection.appendChild(button);
+            button.appendChild(head);
+            button.appendChild(
+              createNode("div", "start-method-summary", method.summary || ""),
+            );
+            const detail = method.enabled === false
+              ? method.disabled_reason
+              : method.detail;
+            if (detail) {
+              button.appendChild(createNode("div", "start-method-detail", detail));
             }
-            section.appendChild(liveSection);
-          }
-
-          const manualButton = createNode("button", "quick-start-card manual");
-          manualButton.type = "button";
-          const manualSelected = launchWizard.selected_launch_path === "manual_setup";
-          manualButton.setAttribute("aria-pressed", manualSelected ? "true" : "false");
-          if (manualSelected) {
-            manualButton.classList.add("selected");
-          }
-          const manualHead = createNode("div", "quick-start-head");
-          manualHead.appendChild(createNode("div", "quick-start-title", "Configure launch"));
-          manualHead.appendChild(
-            createNode(
-              "div",
-              "quick-start-meta",
-              "Choose branch, agent, model, and runtime.",
-            ),
-          );
-          manualButton.appendChild(manualHead);
-          manualButton.addEventListener("click", () => {
-            sendWizardAction({
-              kind: "set_launch_path",
-              path: "manual_setup",
+            button.addEventListener("click", () => {
+              if (button.disabled) {
+                return;
+              }
+              sendWizardAction({
+                kind: "use_start_method",
+                method: method.kind,
+              });
             });
-          });
-          section.appendChild(manualButton);
+            methodList.appendChild(button);
+          }
+          section.appendChild(methodList);
 
           panel.appendChild(section);
         }
@@ -12648,6 +12583,13 @@
         }
       });
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
+      wizardBackButton.addEventListener("click", () => {
+        if (launchWizardOpenError || wizardBackButton.disabled) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        frontendUnits.launchWizardSurface.sendAction({ kind: "back" });
+      });
       wizardSubmitButton.addEventListener("click", () => {
         if (launchWizardOpenError) {
           return;
