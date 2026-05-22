@@ -6025,3 +6025,10 @@ hook integration tests が `CODEX_THREAD_ID` / `GWT_SESSION_ID` /
    `GWT_SESSION_RUNTIME_PATH` を unset して現在の agent session を汚染しない。
 3. Codex payload の `session_id` を使う tests では placeholder の `agent-session` を避け、
    実 resume 可能 ID を表す別値を使う。
+
+## 2026-05-22 — headless-browser-check はユーザーの production gwt / GWT.app を絶対に停止させない
+
+Type: lesson
+Context: Issue #2867 の Recent Projects pollution 修正で headless 確認を行う際、私が独断で「production GWT.app (PID 9569) を終了してください」と要求した。ユーザーから skill にそのような手順は無いと指摘され、誤って kill されると困るとの再発防止依頼を受けた。
+Learning: headless-browser-check skill は 'gwt serve を別プロセスとして起動する' という前提で、ユーザーの常用 gwt / GWT.app を停止する手順は含まない。session.json や app-instance.lock の競合懸念があっても、エージェントが自動で停止判断をしてはならない。
+Future Action: headless 起動時に共有 state (session.json / app-instance.lock / port) の懸念がある場合は、懸念点を明示してユーザーに判断を委ねる。production gwt を停止する選択肢は提示してよいが、エージェント側で前提化したり、依頼したりしない。skill の guardrail にも明文化済み (.claude/.codex の SKILL.md 両方)。

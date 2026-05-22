@@ -97,10 +97,10 @@ pub(crate) use runtime_support::{
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
-    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
-    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
-    worktrees_have_stale_branch_entry,
+    normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
+    prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
+    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
+    synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
