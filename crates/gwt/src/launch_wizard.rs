@@ -414,9 +414,10 @@ pub fn previous_launch_profile_from_sessions(
     repo_path: &Path,
     sessions: &[gwt_agent::Session],
 ) -> Option<LaunchWizardPreviousProfile> {
+    let mut repo_scope = LaunchProfileRepoScope::new(repo_path);
     sessions
         .iter()
-        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .filter(|session| repo_scope.matches_session(session))
         .max_by(|left, right| launch_profile_session_cmp(left, right))
         .cloned()
         .map(previous_profile_from_session)
@@ -496,10 +497,11 @@ pub fn quick_start_entries_from_sessions(
     branch_name: &str,
     sessions: &[gwt_agent::Session],
 ) -> Vec<QuickStartEntry> {
+    let mut repo_scope = LaunchProfileRepoScope::new(repo_path);
     let sessions = sessions
         .iter()
         .filter(|session| session.branch == branch_name)
-        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .filter(|session| repo_scope.matches_session(session))
         .cloned()
         .map(|mut session| {
             session.worktree_path = repo_path.to_path_buf();
@@ -530,28 +532,107 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
     }
 }
 
-fn same_launch_profile_repo(repo_path: &Path, session: &gwt_agent::Session) -> bool {
-    let session_worktree_path = &session.worktree_path;
-    if same_path_or_exact(repo_path, session_worktree_path) {
-        return true;
-    }
+struct LaunchProfileRepoScope {
+    repo_path: PathBuf,
+    canonical_repo_path: Option<PathBuf>,
+    repo_hash: Option<String>,
+    repo_root_resolved: bool,
+    repo_root: Option<PathBuf>,
+    canonical_repo_root: Option<PathBuf>,
+    session_root_cache: HashMap<PathBuf, Option<PathBuf>>,
+}
 
-    if let (Some(current_repo_hash), Some(session_repo_hash)) = (
-        repo_hash_for_existing_path(repo_path),
-        session.repo_hash.as_deref(),
-    ) {
-        if current_repo_hash == session_repo_hash {
-            return true;
+impl LaunchProfileRepoScope {
+    fn new(repo_path: &Path) -> Self {
+        Self {
+            repo_path: repo_path.to_path_buf(),
+            canonical_repo_path: std::fs::canonicalize(repo_path).ok(),
+            repo_hash: repo_hash_for_existing_path(repo_path),
+            repo_root_resolved: false,
+            repo_root: None,
+            canonical_repo_root: None,
+            session_root_cache: HashMap::new(),
         }
     }
 
-    let Ok(repo_root) = gwt_git::worktree::main_worktree_root(repo_path) else {
-        return false;
-    };
-    let Ok(session_root) = gwt_git::worktree::main_worktree_root(session_worktree_path) else {
-        return false;
-    };
-    same_path_or_exact(&repo_root, &session_root)
+    fn matches_session(&mut self, session: &gwt_agent::Session) -> bool {
+        let session_worktree_path = &session.worktree_path;
+        if self.same_repo_path(session_worktree_path) {
+            return true;
+        }
+
+        if let (Some(current_repo_hash), Some(session_repo_hash)) =
+            (self.repo_hash.as_deref(), session.repo_hash.as_deref())
+        {
+            return current_repo_hash == session_repo_hash;
+        }
+
+        if !session_worktree_path.exists() {
+            return false;
+        }
+
+        let Some(repo_root) = self.repo_root() else {
+            return false;
+        };
+        let Some(session_root) = self.session_main_worktree_root(session_worktree_path) else {
+            return false;
+        };
+        self.same_repo_root(&repo_root, &session_root)
+    }
+
+    fn same_repo_path(&self, candidate: &Path) -> bool {
+        if self.repo_path == candidate {
+            return true;
+        }
+        if !candidate.exists() {
+            return false;
+        }
+
+        match (
+            self.canonical_repo_path.as_ref(),
+            std::fs::canonicalize(candidate).ok(),
+        ) {
+            (Some(repo_path), Some(candidate)) => repo_path == &candidate,
+            _ => false,
+        }
+    }
+
+    fn repo_root(&mut self) -> Option<PathBuf> {
+        if !self.repo_root_resolved {
+            self.repo_root = gwt_git::worktree::main_worktree_root(&self.repo_path).ok();
+            self.canonical_repo_root = self
+                .repo_root
+                .as_ref()
+                .and_then(|path| std::fs::canonicalize(path).ok());
+            self.repo_root_resolved = true;
+        }
+        self.repo_root.clone()
+    }
+
+    fn same_repo_root(&self, repo_root: &Path, session_root: &Path) -> bool {
+        if repo_root == session_root {
+            return true;
+        }
+
+        match (
+            self.canonical_repo_root.as_ref(),
+            std::fs::canonicalize(session_root).ok(),
+        ) {
+            (Some(repo_root), Some(session_root)) => repo_root == &session_root,
+            _ => false,
+        }
+    }
+
+    fn session_main_worktree_root(&mut self, path: &Path) -> Option<PathBuf> {
+        if let Some(cached) = self.session_root_cache.get(path) {
+            return cached.clone();
+        }
+
+        let root = gwt_git::worktree::main_worktree_root(path).ok();
+        self.session_root_cache
+            .insert(path.to_path_buf(), root.clone());
+        root
+    }
 }
 
 fn repo_hash_for_existing_path(path: &Path) -> Option<String> {
@@ -562,17 +643,6 @@ fn repo_hash_for_existing_path(path: &Path) -> Option<String> {
                 .and_then(|root| gwt_core::repo_hash::detect_repo_hash(&root))
         })
         .map(|hash| hash.as_str().to_string())
-}
-
-fn same_path_or_exact(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1162,8 +1232,10 @@ impl LaunchWizardState {
 
     pub fn apply_runtime_context(&mut self, hydration: LaunchWizardHydration) {
         self.apply_hydration(hydration);
-        self.is_new_branch = false;
-        self.base_branch_name = None;
+        if self.context.worktree_path.is_some() {
+            self.is_new_branch = false;
+            self.base_branch_name = None;
+        }
         self.runtime_context_resolved = true;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
@@ -4515,6 +4587,33 @@ mod tests {
     }
 
     #[test]
+    fn previous_launch_profile_treats_mismatched_repo_hash_as_authoritative() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        init_repo_with_origin(&repo, "https://github.com/example/project.git");
+        let nested_path = repo.join("nested");
+        std::fs::create_dir_all(&nested_path).expect("nested dir");
+
+        let mut session = sample_session_record(
+            "feature/wrong-repo",
+            &nested_path,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 5, 22, 10, 0, 0).unwrap(),
+            None,
+        );
+        session.repo_hash = Some(
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                .as_str()
+                .to_string(),
+        );
+
+        assert!(
+            previous_launch_profile_from_sessions(&repo, &[session]).is_none(),
+            "repo_hash mismatch must not fall back to legacy root matching"
+        );
+    }
+
+    #[test]
     fn branch_action_create_new_from_selected_sets_base_branch() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -5244,6 +5343,50 @@ mod tests {
             config.working_dir.is_none(),
             "Start Work must defer worktree materialization until launch confirmation"
         );
+    }
+
+    #[test]
+    fn runtime_confirmation_without_worktree_preserves_start_work_base_branch() {
+        let mut state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260504-1234"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            None,
+        );
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion,
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "work/20260504-1234".to_string(),
+            worktree_path: None,
+            quick_start_root: PathBuf::from("/tmp/repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        state.apply(LaunchWizardAction::Submit);
+
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(config))
+                if matches!(
+                    config.as_ref(),
+                    LaunchWizardLaunchRequest::Agent(config)
+                        if config.branch.as_deref() == Some("work/20260504-1234")
+                            && config.base_branch.as_deref() == Some("origin/develop")
+                            && config.working_dir.is_none()
+                )
+        ));
     }
 
     #[test]

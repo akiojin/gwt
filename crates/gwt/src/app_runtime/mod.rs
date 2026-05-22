@@ -9874,6 +9874,95 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+        fs::write(
+            repo.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+        run_git(&repo, &["add", "docker-compose.yml"]);
+        run_git(&repo, &["commit", "-qm", "add compose"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+
+        let branch_name = "work/runtime-deferral";
+        let expected_worktree = gwt_git::worktree::sibling_worktree_path(&repo, branch_name);
+        assert!(
+            !expected_worktree.exists(),
+            "fixture branch worktree should start absent"
+        );
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, branch_name, None, None)
+            .expect("open launch wizard");
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert_eq!(
+            pending_view.runtime_resolution_message.as_deref(),
+            Some("Preparing runtime context...")
+        );
+
+        wait_for_recorded_event(
+            "launch wizard runtime deferral",
+            &recorded_events,
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            },
+        );
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
+
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(
+            wizard.context.worktree_path.is_none(),
+            "runtime confirmation should not resolve a newly-created target worktree"
+        );
+        assert!(
+            !expected_worktree.exists(),
+            "Runtime confirmation must not create {expected_worktree:?}"
+        );
+        let view = wizard.view();
+        assert!(!view.runtime_resolution_pending);
+        assert!(view.runtime_context_resolved);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
     fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker_context() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
