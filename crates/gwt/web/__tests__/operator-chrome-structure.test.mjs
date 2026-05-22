@@ -221,6 +221,70 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
   );
 });
 
+test("Agent title role badges resolve runtime identity instead of generic presets", () => {
+  assert.match(
+    appSource,
+    /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"/,
+    "expected Agent role badges to map runtime ids to display names",
+  );
+  assert.match(
+    appSource,
+    /function\s+agentRoleLabel\(windowData\)[\s\S]+windowData\?\.agent_id[\s\S]+AGENT_ROLE_LABELS/,
+    "expected Agent role badge labels to resolve from window.agent_id",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+agentRoleLabel\(windowData\)/,
+    "expected titlebar and list role badges to share an Agent-aware label helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /window-role-badge"\)\.textContent\s*=\s*presetRoleLabel\(windowData\.preset\)/,
+    "titlebar role badge must not show the generic Agent preset label",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /window-list-role">\$\{presetRoleLabel\(entry\.preset\)\}/,
+    "window list role badge must not show the generic Agent preset label",
+  );
+});
+
+test("Non-Agent duplicate title role badges are omitted", () => {
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+windowDisplayTitle\(windowData\)[\s\S]+return\s+""/,
+    "expected duplicate role badges such as Branches / Branches to be suppressed",
+  );
+  assert.match(
+    appSource,
+    /function\s+setWindowRoleBadge\(badgeElement,\s*windowData\)[\s\S]+badgeElement\.hidden\s*=\s*!label/,
+    "expected titlebar role badge updates to hide empty labels",
+  );
+  assert.match(
+    inlineStyle,
+    /\.window-role-badge\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden role badges must stay hidden even though .window-role-badge uses inline-flex",
+  );
+});
+
+test("Agent fallback runtime titles still show Agent role badges", () => {
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+const\s+isAgentWindow\s*=\s*isAgentWindowPreset\(windowData\?\.preset\)/,
+    "expected duplicate suppression to distinguish Agent windows from static panels",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!isAgentWindow\s*&&\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "Agent role badges must remain visible when the fallback title is the same runtime name",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /if\s*\(!label\s*\|\|\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "generic duplicate suppression must not hide Agent role badges",
+  );
+});
+
 test("Memo is not exposed as a workspace window feature", () => {
   assert.equal(
     document.querySelector('.preset-button[data-preset="memo"]'),
