@@ -161,6 +161,51 @@ pub fn dedupe_recent_projects(
     deduped
 }
 
+/// Issue #2867: Recent Projects は worktree path ではなく workspace home に
+/// 正規化する。Bare layout なら bare repo の親 (例 `…/gwt`)、normal Git repo
+/// なら repo root をそのまま返す。Git でない、または resolution に失敗した
+/// 場合 (NonRepo、git 未インストール、不正パスなど) は入力 path をそのまま
+/// 返す。タブ open 時の direct-pick semantics (worktree path で開く) には
+/// 影響しない。Recent Projects 登録経路と persisted state load 経路の双方で
+/// 使う。
+pub fn normalize_recent_project_path(path: &Path) -> PathBuf {
+    let Ok(layout_root) = gwt_git::worktree::main_worktree_root(path) else {
+        return path.to_path_buf();
+    };
+    if is_bare_repo_dir(&layout_root) {
+        layout_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        layout_root
+    }
+}
+
+fn is_bare_repo_dir(path: &Path) -> bool {
+    path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists()
+}
+
+/// Normalize every Recent Projects entry via [`normalize_recent_project_path`]
+/// and re-derive its title when the path changes. Combine with
+/// [`dedupe_recent_projects`] to collapse repeated worktrees down to a single
+/// workspace home entry.
+pub fn normalize_recent_projects(
+    entries: Vec<gwt::RecentProjectEntry>,
+) -> Vec<gwt::RecentProjectEntry> {
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            let normalized = normalize_recent_project_path(&entry.path);
+            if normalized != entry.path {
+                entry.title = gwt::project_title_from_path(&normalized);
+                entry.path = normalized;
+            }
+            entry
+        })
+        .collect()
+}
+
 /// Issue #1678: drop recent project entries whose paths no longer exist on
 /// disk. Called once at load time so subsequent `persist()` writes a clean
 /// list back. A separate function (rather than baked into `dedupe_*`) so
@@ -1209,6 +1254,156 @@ upstream\tgit@github.com:anthropics/example.git (push)
         run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
 
         assert!(super::branch_worktree_path(&repo, "feature/never-exists").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #2867: Recent Projects worktree pollution
+    // normalize_recent_project_path must collapse worktree paths under a
+    // bare layout down to the workspace home so the Recent Projects list
+    // does not fill up with repeated entries for the same project.
+    // -------------------------------------------------------------------
+
+    fn make_bare_workspace_with_worktrees(tmp: &std::path::Path, worktrees: &[&str]) {
+        let bare = tmp.join("repo.git");
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        run_git(&bare, &["init", "--bare"]);
+
+        let bootstrap = tmp.join(".bootstrap");
+        run_git(tmp, &["clone", bare.to_str().unwrap(), ".bootstrap"]);
+        seed_git_identity(&bootstrap);
+        run_git(&bootstrap, &["checkout", "-b", "develop"]);
+        run_git(&bootstrap, &["commit", "--allow-empty", "-m", "init"]);
+        run_git(&bootstrap, &["push", "origin", "develop"]);
+
+        for (index, worktree) in worktrees.iter().enumerate() {
+            let path = tmp.join(worktree);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("worktree parent");
+            }
+            // First worktree reuses `develop`; subsequent worktrees create
+            // unique branches so `git worktree add` doesn't reject them.
+            if index == 0 {
+                run_git(
+                    &bare,
+                    &["worktree", "add", path.to_str().unwrap(), "develop"],
+                );
+            } else {
+                let branch = format!("feature/wt-{index}");
+                run_git(
+                    &bare,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        &branch,
+                        path.to_str().unwrap(),
+                        "develop",
+                    ],
+                );
+            }
+        }
+        std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+    }
+
+    #[test]
+    fn normalize_recent_project_path_returns_workspace_home_for_bare_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        make_bare_workspace_with_worktrees(tmp.path(), &["develop"]);
+        let worktree = tmp.path().join("develop");
+
+        let normalized = super::normalize_recent_project_path(&worktree);
+
+        let expected = std::fs::canonicalize(tmp.path()).expect("canonical workspace home");
+        assert_eq!(
+            std::fs::canonicalize(&normalized).expect("canonical normalized"),
+            expected,
+            "worktree path must normalize to workspace home (Issue #2867)"
+        );
+    }
+
+    #[test]
+    fn normalize_recent_project_path_keeps_workspace_home_for_bare_layout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        make_bare_workspace_with_worktrees(tmp.path(), &["develop"]);
+
+        let normalized = super::normalize_recent_project_path(tmp.path());
+
+        let expected = std::fs::canonicalize(tmp.path()).expect("canonical");
+        assert_eq!(
+            std::fs::canonicalize(&normalized).expect("canonical normalized"),
+            expected,
+            "workspace home itself must stay as workspace home"
+        );
+    }
+
+    #[test]
+    fn normalize_recent_project_path_returns_repo_root_for_normal_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        run_git(&repo, &["init"]);
+        seed_git_identity(&repo);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+        let normalized = super::normalize_recent_project_path(&repo);
+
+        assert_eq!(
+            std::fs::canonicalize(&normalized).expect("canonical normalized"),
+            std::fs::canonicalize(&repo).expect("canonical repo"),
+            "normal repo root must normalize to itself"
+        );
+    }
+
+    #[test]
+    fn normalize_recent_project_path_returns_input_for_non_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("plain dir");
+
+        let normalized = super::normalize_recent_project_path(&plain);
+
+        assert_eq!(
+            normalized, plain,
+            "non-repo path must be returned unchanged"
+        );
+    }
+
+    #[test]
+    fn normalize_recent_projects_collapses_worktrees_into_single_workspace_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        make_bare_workspace_with_worktrees(tmp.path(), &["develop", "work/20260518"]);
+
+        let entries = vec![
+            gwt::RecentProjectEntry {
+                path: tmp.path().to_path_buf(),
+                title: "workspace".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: tmp.path().join("develop"),
+                title: "develop".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: tmp.path().join("work/20260518"),
+                title: "20260518".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+        ];
+
+        let normalized = super::dedupe_recent_projects(super::normalize_recent_projects(entries));
+
+        assert_eq!(
+            normalized.len(),
+            1,
+            "all three entries must collapse to the single workspace home"
+        );
+        let expected = std::fs::canonicalize(tmp.path()).expect("canonical workspace home");
+        assert_eq!(
+            std::fs::canonicalize(&normalized[0].path).expect("canonical normalized entry"),
+            expected,
+            "remaining entry must be the workspace home, not a worktree"
+        );
     }
 
     #[test]
