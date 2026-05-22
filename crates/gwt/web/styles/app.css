@@ -2564,6 +2564,10 @@ body {
   overflow-wrap: anywhere;
 }
 
+.branch-list-root {
+  container-type: inline-size;
+}
+
 .file-tree-list,
 .branch-list {
   padding: 8px 0;
@@ -2721,6 +2725,10 @@ body {
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
   color: var(--color-text-muted);
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .branch-cleanup-detail {
@@ -2728,6 +2736,10 @@ body {
   font-family: var(--font-body);
   font-size: var(--type-xs);
   color: var(--color-text-muted);
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .branch-cleanup-detail.blocked {
@@ -2740,6 +2752,9 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
+  overflow-wrap: normal;
+  white-space: normal;
 }
 
 .branch-row-actions {
@@ -2748,6 +2763,9 @@ body {
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: normal;
+  white-space: normal;
 }
 
 .branch-row-action {
@@ -2775,7 +2793,32 @@ body {
   cursor: default;
 }
 
-@media (max-width: 720px) {
+@container (max-width: 900px) {
+  .branch-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .branch-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .branch-meta {
+    grid-column: 2 / 4;
+    grid-row: 2;
+    justify-content: flex-start;
+  }
+
+  .branch-row-actions {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: start;
+    flex-wrap: nowrap;
+  }
+}
+
+@container (max-width: 560px) {
   .branch-row {
     grid-template-columns: auto minmax(0, 1fr);
   }
@@ -2784,6 +2827,10 @@ body {
   .branch-row-actions {
     grid-column: 2;
     justify-content: flex-start;
+  }
+
+  .branch-row-actions {
+    grid-row: 3;
   }
 }
 

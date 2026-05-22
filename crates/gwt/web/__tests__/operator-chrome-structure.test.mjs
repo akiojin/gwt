@@ -73,6 +73,34 @@ function extractMediaBlocks(css, condition) {
   return out.join("\n");
 }
 
+function extractContainerBlocks(css, condition) {
+  const out = [];
+  const marker = `@container`;
+  let cursor = 0;
+  while (true) {
+    const at = css.indexOf(marker, cursor);
+    if (at < 0) break;
+    const headerEnd = css.indexOf("{", at);
+    if (headerEnd < 0) break;
+    const header = css.slice(at, headerEnd);
+    if (!header.includes(condition)) {
+      cursor = headerEnd + 1;
+      continue;
+    }
+    let depth = 1;
+    let i = headerEnd + 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      i += 1;
+    }
+    out.push(css.slice(headerEnd + 1, i - 1));
+    cursor = i;
+  }
+  return out.join("\n");
+}
+
 test("index.html declares Operator chrome scaffold", () => {
   for (const sel of [
     "#op-theme-toggle",
@@ -1325,6 +1353,36 @@ test("Branches separates row actions from cleanup toolbar action", () => {
     appSource,
     /row\.addEventListener\("dblclick",\s*activate\)/,
     "branch row double-click remains a Launch Agent shortcut",
+  );
+});
+
+test("Branches row layout responds to minimized window width", () => {
+  assert.match(
+    inlineStyle,
+    /\.branch-list-root\s*{[\s\S]*container-type:\s*inline-size/,
+    "Branches list must own an inline-size container so minimized app windows drive row layout",
+  );
+
+  const minimizedBranchBlock = extractContainerBlocks(inlineStyle, "max-width: 900px");
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-row\s*{[\s\S]*grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/,
+    "minimized Branches rows should keep branch text wide and reserve one actions column",
+  );
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-meta\s*{[\s\S]*grid-column:\s*2\s*\/\s*4[\s\S]*grid-row:\s*2/,
+    "minimized Branches rows should move metadata below the branch text instead of squeezing it",
+  );
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-row-actions\s*{[\s\S]*grid-column:\s*3[\s\S]*grid-row:\s*1/,
+    "minimized Branches rows should keep Resume/Launch aligned on the top row",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-upstream,\s*\n\.branch-date\s*{[\s\S]*white-space:\s*nowrap[\s\S]*text-overflow:\s*ellipsis/,
+    "branch upstream/date text should truncate instead of wrapping into vertical columns",
   );
 });
 
