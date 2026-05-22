@@ -148,6 +148,7 @@
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
       const wizardError = document.getElementById("wizard-error");
+      const wizardBackButton = document.getElementById("wizard-back-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const cloneProjectModal = document.getElementById("clone-project-modal");
@@ -7098,6 +7099,8 @@
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
           wizardSubmitButton.hidden = false;
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardCancelButton.textContent = "Cancel";
           wizardCancelButton.disabled = false;
           syncWizardDraftState();
@@ -7134,6 +7137,8 @@
             launchWizardOpenError.title === "Start Work"
               ? "Workspace launch"
               : "Launch Agent";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardSubmitButton.hidden = true;
           wizardSubmitButton.disabled = true;
           wizardCancelButton.textContent = "Close";
@@ -7147,6 +7152,12 @@
         }
 
         wizardSubmitButton.hidden = false;
+        wizardBackButton.hidden = !launchWizard.show_back_button;
+        wizardBackButton.disabled = Boolean(
+          launchWizard.is_hydrating
+            || launchWizard.runtime_resolution_pending
+            || !launchWizard.show_back_button,
+        );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
@@ -12480,6 +12491,13 @@
         }
       });
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
+      wizardBackButton.addEventListener("click", () => {
+        if (launchWizardOpenError || wizardBackButton.disabled) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        frontendUnits.launchWizardSurface.sendAction({ kind: "back" });
+      });
       wizardSubmitButton.addEventListener("click", () => {
         if (launchWizardOpenError) {
           return;

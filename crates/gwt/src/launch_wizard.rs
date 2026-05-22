@@ -274,6 +274,7 @@ pub struct LaunchWizardView {
     pub show_codex_fast_mode: bool,
     pub show_branch_controls: bool,
     pub show_start_methods: bool,
+    pub show_back_button: bool,
     pub show_manual_setup: bool,
     pub show_runtime_confirmation: bool,
     // SPEC-2014 Amendment 2026-05-20 (FR-057): gate the Linked issue section
@@ -849,6 +850,7 @@ pub struct LaunchWizardState {
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
     start_method_selected: bool,
+    manual_setup_initialized: bool,
 }
 
 impl LaunchWizardState {
@@ -930,6 +932,7 @@ impl LaunchWizardState {
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
             start_method_selected: false,
+            manual_setup_initialized: false,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -1074,6 +1077,7 @@ impl LaunchWizardState {
 
     pub fn view(&self) -> LaunchWizardView {
         let show_start_methods = self.show_start_methods();
+        let show_back_button = self.show_back_button();
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
         LaunchWizardView {
@@ -1151,6 +1155,7 @@ impl LaunchWizardState {
                 && self.agent_is_codex(),
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
             show_start_methods,
+            show_back_button,
             show_manual_setup,
             show_runtime_confirmation,
             show_linked_issue: matches!(
@@ -1367,7 +1372,16 @@ impl LaunchWizardState {
                 self.codex_fast_mode = enabled && self.agent_is_codex();
             }
             LaunchWizardAction::Back => {
-                if let Some(prev) = prev_step(self.step, self) {
+                if self.show_runtime_confirmation() {
+                    return;
+                }
+                if self.show_back_button() {
+                    self.start_method_selected = false;
+                    self.launch_path = LaunchWizardLaunchPath::ManualSetup;
+                    self.step = LaunchWizardStep::LaunchTarget;
+                    self.selected = step_default_selection(self.step, self);
+                    self.completion = None;
+                } else if let Some(prev) = prev_step(self.step, self) {
                     self.step = prev;
                     self.selected = step_default_selection(prev, self);
                 } else {
@@ -1771,7 +1785,10 @@ impl LaunchWizardState {
     fn use_start_method(&mut self, method: LaunchWizardStartMethodKind) {
         match method {
             LaunchWizardStartMethodKind::ConfigureAndStart => {
-                self.apply_latest_start_settings();
+                if !self.manual_setup_initialized {
+                    self.apply_latest_start_settings();
+                    self.manual_setup_initialized = true;
+                }
                 self.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 self.start_method_selected = true;
                 self.step = LaunchWizardStep::LaunchTarget;
@@ -2523,6 +2540,14 @@ impl LaunchWizardState {
 
     fn show_manual_setup(&self) -> bool {
         self.launch_path == LaunchWizardLaunchPath::ManualSetup && !self.show_start_methods()
+    }
+
+    fn show_back_button(&self) -> bool {
+        self.start_method_selected
+            && self.launch_path == LaunchWizardLaunchPath::ManualSetup
+            && !self.is_hydrating
+            && !self.runtime_resolution_pending
+            && !self.show_runtime_confirmation()
     }
 
     fn show_start_methods(&self) -> bool {
@@ -4690,6 +4715,54 @@ mod tests {
         assert!(configured.show_manual_setup);
         assert_eq!(configured.primary_action_label, "Continue");
         assert!(configured.primary_action_enabled);
+    }
+
+    #[test]
+    fn back_from_configure_returns_to_start_methods_and_preserves_setup_draft() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "gpt-5.4".to_string(),
+        });
+
+        let configured = state.view();
+        assert!(!configured.show_start_methods);
+        assert!(configured.show_manual_setup);
+        assert_eq!(configured.selected_model, "gpt-5.4");
+
+        state.apply(LaunchWizardAction::Back);
+
+        let backed = state.view();
+        assert!(state.completion.is_none());
+        assert!(backed.show_start_methods);
+        assert!(!backed.show_manual_setup);
+        assert_eq!(backed.selected_model, "gpt-5.4");
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        let configured_again = state.view();
+        assert!(!configured_again.show_start_methods);
+        assert!(configured_again.show_manual_setup);
+        assert_eq!(configured_again.selected_model, "gpt-5.4");
     }
 
     #[test]

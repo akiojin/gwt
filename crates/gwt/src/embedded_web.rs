@@ -2737,6 +2737,13 @@ mod tests {
             "expected footer dismiss control to own the wizard close helper",
         );
         assert!(
+            html.contains(r#"id="wizard-back-button""#)
+                && html.contains("show_back_button")
+                && html.contains("wizardBackButton.addEventListener(\"click\"")
+                && html.contains("kind: \"back\""),
+            "expected footer Back control to be backend-gated and dispatch the canonical back action",
+        );
+        assert!(
             html.contains("function closeLaunchWizardFromChrome()")
                 && html.contains("closeLaunchWizardLocal();")
                 && html.contains("frontendUnits.launchWizardSurface.sendAction({ kind: \"cancel\" });"),

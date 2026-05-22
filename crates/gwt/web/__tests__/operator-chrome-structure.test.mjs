@@ -1324,6 +1324,28 @@ test("Launch wizard uses one visible dismiss control in the footer", () => {
   );
 });
 
+test("Launch wizard renders a backend-gated Back control in the footer", () => {
+  assert.ok(
+    document.getElementById("wizard-back-button"),
+    "Launch wizard footer must expose a Back button for returning to Start methods",
+  );
+  assert.match(
+    appSource,
+    /const wizardBackButton = document\.getElementById\("wizard-back-button"\)/,
+    "expected app.js to bind the footer Back button",
+  );
+  assert.match(
+    appSource,
+    /wizardBackButton\.hidden\s*=\s*!launchWizard\.show_back_button/,
+    "expected Back visibility to be controlled by backend view state",
+  );
+  assert.match(
+    appSource,
+    /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
+    "expected Back to dispatch the canonical backend action",
+  );
+});
+
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
   // <div>-based rows can't be Tab'd to or activated with the keyboard
   // unless explicitly opted in. Add tabindex, role="button", and a
