@@ -12,8 +12,9 @@ use crate::{
     coordination::{BoardEntry, BoardEntryKind},
     error::{GwtError, Result},
     paths::{
-        gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
-        gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
+        gwt_project_dir_for_repo_path, gwt_workspace_journal_path_for_repo_path,
+        gwt_workspace_projection_path_for_repo_path, gwt_workspace_work_events_path_for_repo_path,
+        gwt_workspace_work_items_path_for_repo_path,
     },
 };
 
@@ -964,8 +965,76 @@ fn coordination_scope_for_entry(entry: &BoardEntry) -> Option<String> {
     }
 }
 
+fn legacy_workspace_projection_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("workspace/current.json")
+}
+
+fn legacy_workspace_journal_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("workspace/journal.jsonl")
+}
+
+fn legacy_workspace_work_items_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("workspace/work_items.json")
+}
+
+fn legacy_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("workspace/work_events.jsonl")
+}
+
+fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Path) -> Result<()> {
+    if canonical_path.exists() || legacy_path == canonical_path || !legacy_path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = canonical_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(legacy_path, canonical_path)?;
+    Ok(())
+}
+
+fn migrate_legacy_workspace_projection(
+    repo_path: &Path,
+    canonical_path: &Path,
+) -> Result<Option<WorkspaceProjection>> {
+    if canonical_path.exists() {
+        return load_workspace_projection_from_path(canonical_path);
+    }
+
+    let legacy_path = legacy_workspace_projection_path_for_repo_path(repo_path);
+    if legacy_path == canonical_path {
+        return load_workspace_projection_from_path(canonical_path);
+    }
+    let Some(projection) = load_workspace_projection_from_path(&legacy_path)? else {
+        return Ok(None);
+    };
+    save_workspace_projection_to_path(canonical_path, &projection)?;
+    Ok(Some(projection))
+}
+
+fn migrate_legacy_workspace_work_items(
+    repo_path: &Path,
+    canonical_path: &Path,
+) -> Result<Option<WorkspaceWorkItemsProjection>> {
+    if let Some(projection) = load_workspace_work_items_from_path(canonical_path)? {
+        return Ok(Some(projection));
+    }
+    let legacy_path = legacy_workspace_work_items_path_for_repo_path(repo_path);
+    if legacy_path == canonical_path {
+        return load_workspace_work_items_from_path(canonical_path);
+    }
+    let Some(projection) = load_workspace_work_items_from_path(&legacy_path)? else {
+        return Ok(None);
+    };
+    save_workspace_work_items_projection_to_path(canonical_path, &projection)?;
+    Ok(Some(projection))
+}
+
 pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspaceProjection>> {
-    load_workspace_projection_from_path(&gwt_workspace_projection_path_for_repo_path(repo_path))
+    let path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    if let Some(projection) = load_workspace_projection_from_path(&path)? {
+        return Ok(Some(projection));
+    }
+    migrate_legacy_workspace_projection(repo_path, &path)
 }
 
 /// SPEC-2359 FR-094 / FR-097 / FR-098 / FR-099: resolve the currently
@@ -1013,10 +1082,8 @@ pub fn resolve_workspace_id_for_mention(
 }
 
 pub fn load_or_default_workspace_projection(repo_path: &Path) -> Result<WorkspaceProjection> {
-    load_or_default_workspace_projection_from_path(
-        &gwt_workspace_projection_path_for_repo_path(repo_path),
-        repo_path,
-    )
+    Ok(load_workspace_projection(repo_path)?
+        .unwrap_or_else(|| WorkspaceProjection::default_for_project(repo_path)))
 }
 
 pub fn save_workspace_projection(repo_path: &Path, projection: &WorkspaceProjection) -> Result<()> {
@@ -1030,9 +1097,16 @@ pub fn update_workspace_projection_with_journal(
     repo_path: &Path,
     update: WorkspaceProjectionUpdate,
 ) -> Result<WorkspaceJournalEntry> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_journal_path_for_repo_path(repo_path),
+        &journal_path,
+    )?;
     let entry = update_workspace_projection_with_journal_paths(
-        &gwt_workspace_projection_path_for_repo_path(repo_path),
-        &gwt_workspace_journal_path_for_repo_path(repo_path),
+        &current_path,
+        &journal_path,
         repo_path,
         update,
     )?;
@@ -1048,13 +1122,9 @@ pub fn mark_workspace_agent_stopped(
     session_id: &str,
     window_id: Option<&str>,
 ) -> Result<bool> {
-    mark_workspace_agent_stopped_at(
-        &gwt_workspace_projection_path_for_repo_path(repo_path),
-        repo_path,
-        session_id,
-        window_id,
-        Utc::now(),
-    )
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    mark_workspace_agent_stopped_at(&current_path, repo_path, session_id, window_id, Utc::now())
 }
 
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
@@ -1068,7 +1138,10 @@ pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<Workspa
 }
 
 pub fn load_workspace_work_items(repo_path: &Path) -> Result<Option<WorkspaceWorkItemsProjection>> {
-    load_workspace_work_items_from_path(&gwt_workspace_work_items_path_for_repo_path(repo_path))
+    migrate_legacy_workspace_work_items(
+        repo_path,
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+    )
 }
 
 pub fn load_workspace_work_items_from_path(
@@ -1086,10 +1159,19 @@ pub fn load_workspace_work_items_from_path(
 pub fn load_or_synthesize_workspace_work_items(
     repo_path: &Path,
 ) -> Result<WorkspaceWorkItemsProjection> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_journal_path_for_repo_path(repo_path),
+        &journal_path,
+    )?;
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     load_or_synthesize_workspace_work_items_from_paths(
-        &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_projection_path_for_repo_path(repo_path),
-        &gwt_workspace_journal_path_for_repo_path(repo_path),
+        &work_items_path,
+        &current_path,
+        &journal_path,
         repo_path,
     )
 }
@@ -1116,11 +1198,14 @@ pub fn save_workspace_work_items_projection_to_path(
 }
 
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkspaceWorkEvent) -> Result<()> {
-    record_workspace_work_event_paths(
-        &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
-        event,
-    )
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_work_events_path_for_repo_path(repo_path),
+        &events_path,
+    )?;
+    record_workspace_work_event_paths(&work_items_path, &events_path, event)
 }
 
 pub fn record_workspace_work_event_paths(
@@ -1330,6 +1415,11 @@ pub fn rebuild_work_items_from_events_for_repo(
 ) -> Result<WorkspaceWorkItemsRebuildOutcome> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_work_events_path_for_repo_path(repo_path),
+        &events_path,
+    )?;
     let marker_path = work_items_path
         .parent()
         .map(|dir| dir.join("work_items.migration.json"))
@@ -1366,12 +1456,16 @@ fn write_rebuild_marker(path: &Path) -> Result<()> {
 /// current, work_items, and work_events paths from `repo_path` and invoking
 /// [`retroactive_auto_done_scan_paths`].
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
-    retroactive_auto_done_scan_paths(
-        &gwt_workspace_projection_path_for_repo_path(repo_path),
-        &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
-        now,
-    )
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_work_events_path_for_repo_path(repo_path),
+        &events_path,
+    )?;
+    retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
 
 fn work_item_is_eligible_for_auto_done(item: &WorkspaceWorkItem) -> bool {
@@ -2088,11 +2182,16 @@ where
         if !project_dir.is_dir() {
             continue;
         }
-        let workspace_dir = project_dir.join("workspace");
-        let current_json = workspace_dir.join("current.json");
-        if !current_json.is_file() {
+        let state_dir = project_dir.join("project-state");
+        let legacy_dir = project_dir.join("workspace");
+        let workspace_dir = if state_dir.join("current.json").is_file() {
+            state_dir
+        } else if legacy_dir.join("current.json").is_file() {
+            legacy_dir
+        } else {
             continue;
-        }
+        };
+        let current_json = workspace_dir.join("current.json");
         let projection = match load_workspace_projection_from_path(&current_json) {
             Ok(Some(p)) => p,
             _ => continue,

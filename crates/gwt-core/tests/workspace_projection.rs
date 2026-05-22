@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 use gwt_core::{
-    paths::gwt_workspace_projection_path,
+    paths::{
+        gwt_project_state_projection_path, gwt_workspace_projection_path,
+        gwt_workspace_projection_path_for_repo_path,
+    },
     repo_hash::compute_repo_hash,
     workspace_projection::{
         load_or_default_workspace_projection_from_path, load_workspace_projection_from_path,
@@ -10,6 +13,13 @@ use gwt_core::{
         WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
     },
 };
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("env lock")
+}
 
 fn projection(project_root: &Path) -> WorkspaceProjection {
     WorkspaceProjection {
@@ -381,7 +391,50 @@ fn workspace_projection_path_is_project_scoped() {
 
     let path = gwt_workspace_projection_path(&repo_hash);
 
-    assert!(path.ends_with(PathBuf::from(repo_hash.as_str()).join("workspace/current.json")));
+    assert!(path.ends_with(PathBuf::from(repo_hash.as_str()).join("project-state/current.json")));
+    assert_eq!(path, gwt_project_state_projection_path(&repo_hash));
+}
+
+#[test]
+fn workspace_projection_repo_path_migrates_legacy_workspace_current_json() {
+    let temp_home = tempfile::tempdir().expect("home");
+    let repo = tempfile::tempdir().expect("repo");
+    let _guard = env_lock();
+    let original_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", temp_home.path());
+
+    let legacy_path =
+        gwt_core::paths::gwt_project_dir_for_repo_path(repo.path()).join("workspace/current.json");
+    save_workspace_projection_to_path(&legacy_path, &projection(repo.path()))
+        .expect("save legacy projection");
+    let new_path = gwt_workspace_projection_path_for_repo_path(repo.path());
+    assert!(
+        new_path.ends_with("project-state/current.json"),
+        "new canonical path must be project-state/current.json"
+    );
+    assert!(
+        !new_path.exists(),
+        "test precondition: canonical project-state file should not exist"
+    );
+
+    let loaded = gwt_core::workspace_projection::load_workspace_projection(repo.path())
+        .expect("migrate")
+        .expect("migrated projection");
+
+    assert_eq!(loaded.title, "Start payment cleanup");
+    assert!(
+        new_path.is_file(),
+        "load must materialize migrated project-state file"
+    );
+    assert!(
+        legacy_path.is_file(),
+        "legacy workspace/current.json remains for non-destructive migration"
+    );
+
+    match original_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
 }
 
 #[test]

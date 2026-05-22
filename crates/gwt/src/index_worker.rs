@@ -57,6 +57,7 @@ pub enum IndexRebuildScope {
     Issues,
     Specs,
     Memory,
+    Discussions,
     Board,
     Files,
     #[serde(rename = "files-docs")]
@@ -69,6 +70,7 @@ impl IndexRebuildScope {
             Self::Issues => "issues",
             Self::Specs => "specs",
             Self::Memory => "memory",
+            Self::Discussions => "discussions",
             Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
@@ -164,6 +166,8 @@ pub struct ProjectIndexScopes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub discussions: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub board: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
@@ -180,6 +184,7 @@ impl ProjectIndexScopes {
         self.issues.is_none()
             && self.specs.is_none()
             && self.memory.is_none()
+            && self.discussions.is_none()
             && self.board.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
@@ -348,6 +353,11 @@ pub fn build_aggregated_status_view(
                 scopes.memory = Some(view);
             }
         }
+        if scopes.discussions.is_none() {
+            if let Some(view) = status_obj.get("discussions").and_then(parse_scope_health) {
+                scopes.discussions = Some(view);
+            }
+        }
         if scopes.board.is_none() {
             if let Some(view) = status_obj.get("board").and_then(parse_scope_health) {
                 scopes.board = Some(view);
@@ -402,6 +412,9 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
         count += 1;
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
+        count += 1;
+    }
+    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
         count += 1;
     }
     if matches!(&scopes.board, Some(view) if !view.healthy) {
@@ -821,6 +834,12 @@ pub fn default_rebuild_runner(
             scope: None,
             needs_worktree_hash: false,
         },
+        IndexRebuildScope::Discussions => RebuildAction {
+            label: "discussions",
+            action: "index-discussions",
+            scope: None,
+            needs_worktree_hash: false,
+        },
         IndexRebuildScope::Board => RebuildAction {
             label: "board",
             action: "index-board",
@@ -859,6 +878,9 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Discussions, None));
     }
     if matches!(&scopes.board, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Board, None));
@@ -906,6 +928,9 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     }
     if matches!(&scopes.memory, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Memory, None));
+    }
+    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+        targets.push((IndexRebuildScope::Discussions, None));
     }
     if matches!(&scopes.board, Some(view) if !view.healthy) {
         targets.push((IndexRebuildScope::Board, None));

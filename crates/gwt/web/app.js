@@ -559,6 +559,7 @@
         { id: "issues", label: "Issues" },
         { id: "specs", label: "SPECs" },
         { id: "board", label: "Board" },
+        { id: "discussions", label: "Discussions" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
         { id: "memory", label: "Memory" },
@@ -567,6 +568,7 @@
         "issues",
         "specs",
         "board",
+        "discussions",
         "memory",
       ]);
 
@@ -956,6 +958,7 @@
             focusOrSpawnPreset("file_tree");
             return;
           case "memory":
+          case "discussion":
             focusOrSpawnPreset("index");
             return;
           default:

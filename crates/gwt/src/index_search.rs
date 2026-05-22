@@ -175,6 +175,7 @@ fn default_index_search_scopes() -> Vec<IndexSearchScope> {
         IndexSearchScope::Issues,
         IndexSearchScope::Specs,
         IndexSearchScope::Memory,
+        IndexSearchScope::Discussions,
         IndexSearchScope::Board,
         IndexSearchScope::Files,
         IndexSearchScope::FilesDocs,
@@ -339,6 +340,7 @@ fn search_action(scope: IndexSearchScope) -> &'static str {
         IndexSearchScope::Issues => "search-issues",
         IndexSearchScope::Specs => "search-specs",
         IndexSearchScope::Memory => "search-memory",
+        IndexSearchScope::Discussions => "search-discussions",
         IndexSearchScope::Board => "search-board",
         IndexSearchScope::Files => "search-files",
         IndexSearchScope::FilesDocs => "search-files-docs",
@@ -355,6 +357,7 @@ fn append_scope_results(
         IndexSearchScope::Issues => "issueResults",
         IndexSearchScope::Specs => "specResults",
         IndexSearchScope::Memory => "memoryResults",
+        IndexSearchScope::Discussions => "discussionResults",
         IndexSearchScope::Board => "boardResults",
         IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
     };
@@ -366,6 +369,7 @@ fn append_scope_results(
             IndexSearchScope::Issues => issue_result(item),
             IndexSearchScope::Specs => spec_result(item),
             IndexSearchScope::Memory => memory_result(item),
+            IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
@@ -418,6 +422,25 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
         preview: heading.clone(),
         distance: item.get("distance").and_then(Value::as_f64),
         target: IndexSearchTarget::Memory { heading, date },
+    })
+}
+
+fn discussion_result(item: &Value) -> Option<IndexSearchResult> {
+    let heading = value_str(item.get("heading"))?;
+    let title = value_str(item.get("title")).unwrap_or_else(|| heading.clone());
+    let date = value_str(item.get("date")).unwrap_or_default();
+    let status = value_str(item.get("status")).unwrap_or_else(|| "discussion".to_string());
+    Some(IndexSearchResult {
+        scope: IndexSearchScope::Discussions,
+        title,
+        subtitle: if date.is_empty() {
+            status
+        } else {
+            format!("{status} · {date}")
+        },
+        preview: heading.clone(),
+        distance: item.get("distance").and_then(Value::as_f64),
+        target: IndexSearchTarget::Discussion { heading, date },
     })
 }
 
@@ -585,6 +608,7 @@ mod tests {
                 IndexSearchScope::Issues,
                 IndexSearchScope::Specs,
                 IndexSearchScope::Memory,
+                IndexSearchScope::Discussions,
                 IndexSearchScope::Board,
                 IndexSearchScope::Files,
                 IndexSearchScope::FilesDocs,
@@ -593,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn append_scope_results_formats_issue_spec_memory_and_file_targets() {
+    fn append_scope_results_formats_issue_spec_memory_discussion_and_file_targets() {
         let mut results = Vec::new();
         let board_scope = BoardAudienceScope::All;
 
@@ -640,6 +664,20 @@ mod tests {
         );
         append_scope_results(
             &mut results,
+            IndexSearchScope::Discussions,
+            &json!({
+                "discussionResults": [{
+                    "heading": "## 2026-05-22 — Workspace terminology",
+                    "title": "Workspace terminology",
+                    "date": "2026-05-22",
+                    "status": "active",
+                    "distance": 0.25
+                }]
+            }),
+            &board_scope,
+        );
+        append_scope_results(
+            &mut results,
             IndexSearchScope::FilesDocs,
             &json!({
                 "results": [{
@@ -652,7 +690,7 @@ mod tests {
             &board_scope,
         );
 
-        assert_eq!(results.len(), 4);
+        assert_eq!(results.len(), 5);
         assert_eq!(results[0].title, "#42 Search index");
         assert_eq!(results[0].preview, "enhancement, index");
         assert!(matches!(
@@ -670,9 +708,14 @@ mod tests {
             results[2].target,
             IndexSearchTarget::Memory { .. }
         ));
-        assert_eq!(results[3].title, "README.md");
-        assert_eq!(results[3].subtitle, "Markdown");
-        assert!(matches!(results[3].target, IndexSearchTarget::File { .. }));
+        assert_eq!(results[3].subtitle, "active · 2026-05-22");
+        assert!(matches!(
+            results[3].target,
+            IndexSearchTarget::Discussion { .. }
+        ));
+        assert_eq!(results[4].title, "README.md");
+        assert_eq!(results[4].subtitle, "Markdown");
+        assert!(matches!(results[4].target, IndexSearchTarget::File { .. }));
     }
 
     #[test]
@@ -804,6 +847,7 @@ mod tests {
                 IndexSearchScope::Issues,
                 IndexSearchScope::Specs,
                 IndexSearchScope::Board,
+                IndexSearchScope::Discussions,
                 IndexSearchScope::Memory,
             ],
             "Git",
@@ -813,7 +857,8 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "search-multi"));
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "--scopes" && pair[1] == "issues,specs,board,memory"),
+                .any(|pair| pair[0] == "--scopes"
+                    && pair[1] == "issues,specs,board,discussions,memory"),
             "repo-scoped searches should share one runner process"
         );
         assert!(args.iter().any(|arg| arg == "--no-auto-build"));
@@ -851,6 +896,11 @@ mod tests {
             ScopeSearchJob {
                 search_root: PathBuf::from("/repo"),
                 worktree_hash: None,
+                scope: IndexSearchScope::Discussions,
+            },
+            ScopeSearchJob {
+                search_root: PathBuf::from("/repo"),
+                worktree_hash: None,
                 scope: IndexSearchScope::Memory,
             },
         ];
@@ -864,6 +914,7 @@ mod tests {
                 IndexSearchScope::Issues => "issueResults",
                 IndexSearchScope::Specs => "specResults",
                 IndexSearchScope::Board => "boardResults",
+                IndexSearchScope::Discussions => "discussionResults",
                 IndexSearchScope::Memory => "memoryResults",
                 IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
             };
@@ -874,7 +925,7 @@ mod tests {
         })
         .expect("parallel scope search should succeed");
 
-        assert_eq!(results.len(), 4);
+        assert_eq!(results.len(), 5);
         assert!(
             peak.load(Ordering::SeqCst) > 1,
             "expected selected scope searches to overlap"

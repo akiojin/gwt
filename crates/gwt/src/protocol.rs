@@ -45,6 +45,7 @@ pub enum IndexSearchScope {
     Issues,
     Specs,
     Memory,
+    Discussions,
     Board,
     Files,
     #[serde(rename = "files-docs")]
@@ -57,6 +58,7 @@ impl IndexSearchScope {
             Self::Issues => "issues",
             Self::Specs => "specs",
             Self::Memory => "memory",
+            Self::Discussions => "discussions",
             Self::Board => "board",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
@@ -70,6 +72,7 @@ pub enum IndexSearchTarget {
     Issue { number: u64 },
     Spec { spec_id: u64 },
     Memory { heading: String, date: String },
+    Discussion { heading: String, date: String },
     Board { entry_id: String },
     File { path: String },
 }
@@ -2397,7 +2400,7 @@ mod tests {
             "id": "tab-1:index-1",
             "query": "Board semantic search",
             "request_id": 42,
-            "scopes": ["issues", "specs", "board", "files", "files-docs", "memory"],
+            "scopes": ["issues", "specs", "board", "files", "files-docs", "memory", "discussions"],
             "worktree_hash": "wt-a"
         }))
         .expect("deserialize search_project_index");
@@ -2413,6 +2416,7 @@ mod tests {
             } if id == "tab-1:index-1"
                 && query == "Board semantic search"
                 && scopes.contains(&IndexSearchScope::Board)
+                && scopes.contains(&IndexSearchScope::Discussions)
                 && scopes.contains(&IndexSearchScope::FilesDocs)
                 && worktree_hash.as_deref() == Some("wt-a")
         ));

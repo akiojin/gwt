@@ -32,7 +32,7 @@ INDEX_PATH_POLICY_FILE = "index_path_policy.json"
 FALLBACK_INDEX_PATH_POLICY = {
     "schema_version": 1,
     "max_file_size": 1_048_576,
-    "allow_paths": ["tasks/memory.md"],
+    "allow_paths": ["tasks/memory.md", "tasks/discussions.md"],
     "deny_root_prefixes": [
         ".git",
         ".claude",
@@ -1098,7 +1098,7 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "memory", "board", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
@@ -1106,6 +1106,7 @@ V2_FILES_DOCS_COLLECTION = "files_docs"
 V2_SPECS_COLLECTION = "specs"
 V2_ISSUES_COLLECTION = "issues"
 V2_MEMORY_COLLECTION = "memory"
+V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
 
 
@@ -1130,7 +1131,7 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "memory", "board"}:
+    if scope in {"issues", "specs", "memory", "discussions", "board"}:
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
@@ -1382,7 +1383,15 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
-    if worktree_dir.name in ("specs", "files", "files-docs", "issues", "memory", "board"):
+    if worktree_dir.name in (
+        "specs",
+        "files",
+        "files-docs",
+        "issues",
+        "memory",
+        "discussions",
+        "board",
+    ):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
 
@@ -2235,6 +2244,233 @@ def action_index_memory_v2(
     return {"ok": True, "scope": "memory", "indexed": indexed}
 
 
+def _extract_discussion_field(body: str, field: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(field)}:\s*(.*?)\s*$", body)
+    return match.group(1).strip() if match else ""
+
+
+def _split_discussion_csv(value: str) -> List[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _parse_related_specs(value: str) -> List[str]:
+    specs: List[str] = []
+    for raw in _split_discussion_csv(value):
+        cleaned = raw.strip()
+        if cleaned.startswith("#"):
+            cleaned = cleaned[1:]
+        if cleaned.lower().startswith("spec-"):
+            cleaned = cleaned[5:]
+        if cleaned:
+            specs.append(cleaned)
+    return specs
+
+
+def _load_discussion_documents(
+    project_root: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load ``<project_root>/tasks/discussions.md`` into discussion chunks."""
+    root = Path(project_root)
+    source_path = root / "tasks" / "discussions.md"
+    if not source_path.is_file():
+        return [], []
+
+    try:
+        content = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return [], []
+
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return [], []
+    manifest_entries = [
+        {
+            "path": "tasks/discussions.md",
+            "mtime": int(stat.st_mtime),
+            "size": int(stat.st_size),
+        }
+    ]
+
+    chunks = _chunk_spec_content(content)
+    if not chunks:
+        return [], manifest_entries
+
+    discussions: List[Dict[str, Any]] = []
+    grouped: Dict[tuple[str, str], int] = {}
+    for chunk in chunks:
+        heading = chunk["heading"]
+        body = chunk["body"]
+        if not heading.startswith("## "):
+            continue
+
+        date, title = _parse_memory_heading(heading)
+        key = (date, title)
+        chunk_idx = grouped.get(key, 0)
+        grouped[key] = chunk_idx + 1
+        digest_input = f"{heading}\n{body}".encode("utf-8")
+        discussion_id = hashlib.sha1(digest_input).hexdigest()[:12]
+        discussions.append(
+            {
+                "discussion_id": discussion_id,
+                "date": date,
+                "title": title,
+                "status": _extract_discussion_field(body, "Status"),
+                "topics": _split_discussion_csv(_extract_discussion_field(body, "Topics")),
+                "related_specs": _parse_related_specs(
+                    _extract_discussion_field(body, "Related SPECs")
+                ),
+                "related_works": _split_discussion_csv(
+                    _extract_discussion_field(body, "Related Works")
+                ),
+                "promoted_to": _split_discussion_csv(
+                    _extract_discussion_field(body, "Promoted To")
+                ),
+                "heading": heading,
+                "body": body,
+                "chunk_idx": chunk_idx,
+                "total_chunks": 0,
+            }
+        )
+
+    for entry in discussions:
+        key = (entry["date"], entry["title"])
+        entry["total_chunks"] = grouped[key]
+
+    return discussions, manifest_entries
+
+
+def _build_discussion_records(
+    discussions: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Materialize Chroma upsert records for the discussions scope."""
+    records: List[Dict[str, Any]] = []
+    for entry in discussions:
+        title = entry.get("title", "")
+        heading = entry.get("heading", "")
+        body = entry.get("body", "")
+        document = f"{title}\n{heading}\n{body}".strip()
+        records.append(
+            {
+                "id": f"discussion-{entry.get('discussion_id', '')}",
+                "document": document,
+                "metadata": {
+                    "discussion_id": entry.get("discussion_id", ""),
+                    "date": entry.get("date", ""),
+                    "title": title,
+                    "status": entry.get("status", ""),
+                    "topics": ",".join(entry.get("topics", [])),
+                    "related_specs": ",".join(entry.get("related_specs", [])),
+                    "related_works": ",".join(entry.get("related_works", [])),
+                    "promoted_to": ",".join(entry.get("promoted_to", [])),
+                    "heading": heading,
+                    "chunk_idx": int(entry.get("chunk_idx", 0)),
+                    "total_chunks": int(entry.get("total_chunks", 1)),
+                },
+            }
+        )
+    return records
+
+
+def action_index_discussions_v2(
+    project_root: str,
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+) -> dict:
+    """Index ``tasks/discussions.md`` into the repo-scoped discussions store."""
+    del worktree_hash
+    db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
+    discussions, new_entries = _load_discussion_documents(project_root)
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "discussions",
+            "mode": mode,
+            "done": 0,
+            "total": len(discussions),
+        }
+    )
+
+    indexed = 0
+    with acquire_lock(db_path, exclusive=True):
+        if mode != "incremental":
+            _reset_chroma_store(db_path)
+        make_collection = (
+            _make_chroma_collection
+            if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(db_path, V2_DISCUSSIONS_COLLECTION)
+        try:
+            old_entries = read_manifest(db_path, scope="discussions")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+
+            if mode != "incremental" or file_changed:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                records = _build_discussion_records(discussions)
+            else:
+                records = []
+
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "discussions",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+
+            if records:
+                ids = [r["id"] for r in records]
+                documents = [r["document"] for r in records]
+                metadatas = [r["metadata"] for r in records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+                indexed = len(records)
+
+            write_manifest(db_path, scope="discussions", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                scope="discussions",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": indexed,
+                },
+            )
+        finally:
+            _close_chroma_client(client)
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "discussions",
+            "mode": mode,
+            "indexed": indexed,
+            "total": indexed,
+        }
+    )
+    return {"ok": True, "scope": "discussions", "indexed": indexed}
+
+
 def _gwt_home() -> Path:
     return Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home()) / ".gwt"
 
@@ -2480,6 +2716,40 @@ def _format_memory_results(
     return formatted
 
 
+def _format_discussion_results(
+    items: List[Dict[str, Any]], n_results: int = 10
+) -> List[Dict[str, Any]]:
+    """Collapse chunked discussion results so each dated title appears once."""
+    formatted: List[Dict[str, Any]] = []
+    seen: set = set()
+    for it in items:
+        meta = it.get("metadata") or {}
+        date = meta.get("date", "")
+        title = meta.get("title", "")
+        key = (date, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        formatted.append(
+            {
+                "discussion_id": meta.get("discussion_id", it.get("id", "")),
+                "date": date,
+                "title": title,
+                "status": meta.get("status", ""),
+                "topics": _split_csv_meta(meta.get("topics", "")),
+                "related_specs": _split_csv_meta(meta.get("related_specs", "")),
+                "related_works": _split_csv_meta(meta.get("related_works", "")),
+                "promoted_to": _split_csv_meta(meta.get("promoted_to", "")),
+                "heading": meta.get("heading", ""),
+                "chunk_idx": int(meta.get("chunk_idx", 0)),
+                "distance": it.get("distance"),
+            }
+        )
+        if len(formatted) >= n_results:
+            break
+    return formatted
+
+
 def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for spec in specs:
@@ -2551,6 +2821,8 @@ def _scope_meta_path(
         return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
     if scope == "memory":
         return resolve_db_path(repo_hash, None, "memory", db_root=db_root) / META_FILENAME
+    if scope == "discussions":
+        return resolve_db_path(repo_hash, None, "discussions", db_root=db_root) / META_FILENAME
     if scope == "board":
         return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
@@ -2623,6 +2895,7 @@ def _scope_collection_name(scope: str) -> str:
         "specs": V2_SPECS_COLLECTION,
         "issues": V2_ISSUES_COLLECTION,
         "memory": V2_MEMORY_COLLECTION,
+        "discussions": V2_DISCUSSIONS_COLLECTION,
         "board": V2_BOARD_COLLECTION,
     }[scope]
 
@@ -2695,11 +2968,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory", "board") and document_count < manifest_count:
+    elif scope in ("specs", "memory", "discussions", "board") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "memory", "board") and document_count != manifest_count:
+    elif scope not in ("specs", "memory", "discussions", "board") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -3003,6 +3276,7 @@ def action_search_v2(
         "search-specs": "specs",
         "search-issues": "issues",
         "search-memory": "memory",
+        "search-discussions": "discussions",
         "search-board": "board",
     }
     if action not in scope_for_action:
@@ -3061,6 +3335,14 @@ def action_search_v2(
                 mode="full",
                 db_root=db_root,
             )
+        elif scope == "discussions":
+            build = action_index_discussions_v2(
+                project_root=project_root,
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                mode="full",
+                db_root=db_root,
+            )
         elif scope == "board":
             build = action_index_board_v2(
                 repo_hash=repo_hash,
@@ -3086,7 +3368,7 @@ def action_search_v2(
         try:
             # SPECs / Memory are chunked, so a single owner can span many
             # Chroma records. Over-fetch by 5x then collapse in the formatter.
-            fetch_n = n_results * 5 if scope in ("specs", "memory") else n_results
+            fetch_n = n_results * 5 if scope in ("specs", "memory", "discussions") else n_results
             items = _search_collection_v2(collection, query, fetch_n)
         finally:
             _close_chroma_client(client)
@@ -3097,6 +3379,8 @@ def action_search_v2(
         return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
     if scope == "memory":
         return {"ok": True, "memoryResults": _format_memory_results(items, n_results)}
+    if scope == "discussions":
+        return {"ok": True, "discussionResults": _format_discussion_results(items, n_results)}
     if scope == "board":
         return {"ok": True, "boardResults": _format_board_results(items)[:n_results]}
     return {"ok": True, "issueResults": _format_issue_results(items)}
@@ -3121,6 +3405,7 @@ def action_search_multi_v2(
         "issues": "search-issues",
         "specs": "search-specs",
         "memory": "search-memory",
+        "discussions": "search-discussions",
         "board": "search-board",
         "files": "search-files",
         "files-docs": "search-files-docs",
@@ -3181,6 +3466,7 @@ def action_status_v2(
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
         "memory": _scope_status_v2(repo_hash, None, "memory", db_root=db_root),
+        "discussions": _scope_status_v2(repo_hash, None, "discussions", db_root=db_root),
         "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
     }
     if worktree_hash:
@@ -3215,6 +3501,8 @@ def parse_args() -> argparse.Namespace:
             "search-specs",
             "index-memory",
             "search-memory",
+            "index-discussions",
+            "search-discussions",
             "index-board",
             "search-board",
             "search-multi",
@@ -3230,7 +3518,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "memory", "board"],
+        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board"],
     )
     parser.add_argument("--scopes", default="")
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
@@ -3306,6 +3594,20 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
+        if action == "index-discussions":
+            if not args.project_root:
+                emit({"ok": False, "error_code": "BAD_ARGS", "error": "--project-root is required"})
+                return 2
+            emit(
+                action_index_discussions_v2(
+                    project_root=args.project_root,
+                    repo_hash=repo_hash,
+                    worktree_hash=None,
+                    mode=args.mode,
+                )
+            )
+            return 0
+
         if action == "index-board":
             emit(
                 action_index_board_v2(
@@ -3339,6 +3641,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             "search-specs",
             "search-issues",
             "search-memory",
+            "search-discussions",
             "search-board",
         ):
             if not args.query:

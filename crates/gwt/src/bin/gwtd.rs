@@ -67,6 +67,7 @@ fn print_help() {
     println!("  memory      Append reusable project memory");
     println!("  lessons     Legacy alias for memory add");
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
+    println!("  discussion  Persist/update Git-managed discussion notes");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
@@ -88,6 +89,7 @@ fn family_help(family: &str) -> Option<String> {
         "index" => Some(format_index_help()),
         "memory" | "lessons" => Some(format_memory_help()),
         "discuss" => Some(format_discuss_help()),
+        "discussion" => Some(format_discussion_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
         "register" => Some(format_register_help()),
@@ -268,7 +270,7 @@ fn format_index_help() -> String {
         "",
         "Subcommands:",
         "  status                                  Show index runtime + asset status",
-        "  rebuild [--scope all|issues|specs|memory|board|files|files-docs]",
+        "  rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs]",
         "                                          Rebuild a specific scope",
         "",
     ]
@@ -290,6 +292,30 @@ fn format_memory_help() -> String {
         "  --context <text>                        What happened or what was observed",
         "  --learning <text>                       Reusable learning",
         "  --future-action <text>                  What future agents should do",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_discussion_help() -> String {
+    [
+        "gwtd discussion — Persist/update Git-managed discussion notes.",
+        "",
+        "Usage: gwtd discussion update [fields]",
+        "",
+        "Fields:",
+        "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",
+        "  --title <text>                          Discussion title",
+        "  --status <active|suspended|completed|promoted>",
+        "                                          Discussion lifecycle status",
+        "  --topic <text>                          Repeatable topic tag",
+        "  --related-spec <n>                      Repeatable related SPEC number",
+        "  --related-work <id>                     Repeatable related Work id",
+        "  --promoted-to <target>                  Repeatable target if promoted",
+        "  --summary <text>                        Current discussion summary",
+        "  --decision <text>                       Repeatable decision",
+        "  --open-question <text>                  Repeatable open question",
+        "  --next <text>                           Next discussion step",
         "",
     ]
     .join("\n")

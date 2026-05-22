@@ -53,6 +53,7 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "issues" => Ok(IndexScope::Issues),
         "specs" => Ok(IndexScope::Specs),
         "memory" => Ok(IndexScope::Memory),
+        "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
@@ -169,6 +170,16 @@ mod tests {
             parse(&s(&["rebuild", "--scope", "memory"])).unwrap(),
             IndexCommand::Rebuild {
                 scope: IndexScope::Memory
+            }
+        );
+    }
+
+    #[test]
+    fn parses_index_rebuild_discussions_scope() {
+        assert_eq!(
+            parse(&s(&["rebuild", "--scope", "discussions"])).unwrap(),
+            IndexCommand::Rebuild {
+                scope: IndexScope::Discussions
             }
         );
     }

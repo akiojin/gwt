@@ -72,24 +72,52 @@ pub fn gwt_project_dir_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_project_dir(&repo_hash)
 }
 
+/// Return the Project State current projection path for a repository hash.
+pub fn gwt_project_state_projection_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/current.json")
+}
+
+/// Return the Project State summary journal path for a repository hash.
+pub fn gwt_project_state_journal_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/journal.jsonl")
+}
+
+/// Return the Project State Work hot projection path for a repository hash.
+pub fn gwt_project_state_works_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/works.json")
+}
+
+/// Return the Project State Work event log path for a repository hash.
+pub fn gwt_project_state_work_events_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/work-events.jsonl")
+}
+
 /// Return the Workspace current projection path for a repository hash.
+///
+/// This compatibility function now points at the Project State storage root.
 pub fn gwt_workspace_projection_path(repo_hash: &RepoHash) -> PathBuf {
-    gwt_project_dir(repo_hash).join("workspace/current.json")
+    gwt_project_state_projection_path(repo_hash)
 }
 
 /// Return the Workspace summary journal path for a repository hash.
+///
+/// This compatibility function now points at the Project State storage root.
 pub fn gwt_workspace_journal_path(repo_hash: &RepoHash) -> PathBuf {
-    gwt_project_dir(repo_hash).join("workspace/journal.jsonl")
+    gwt_project_state_journal_path(repo_hash)
 }
 
 /// Return the Workspace WorkItem hot projection path for a repository hash.
+///
+/// This compatibility function now points at `project-state/works.json`.
 pub fn gwt_workspace_work_items_path(repo_hash: &RepoHash) -> PathBuf {
-    gwt_project_dir(repo_hash).join("workspace/work_items.json")
+    gwt_project_state_works_path(repo_hash)
 }
 
 /// Return the Workspace WorkItem event log path for a repository hash.
+///
+/// This compatibility function now points at `project-state/work-events.jsonl`.
 pub fn gwt_workspace_work_events_path(repo_hash: &RepoHash) -> PathBuf {
-    gwt_project_dir(repo_hash).join("workspace/work_events.jsonl")
+    gwt_project_state_work_events_path(repo_hash)
 }
 
 /// Return the Workspace current projection path for a repository path.

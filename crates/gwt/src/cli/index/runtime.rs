@@ -93,6 +93,12 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
+            label: "discussions",
+            action: "index-discussions",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
             label: "board",
             action: "index-board",
             scope: None,
@@ -116,6 +122,10 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
         IndexScope::Issues => all.into_iter().filter(|a| a.label == "issues").collect(),
         IndexScope::Specs => all.into_iter().filter(|a| a.label == "specs").collect(),
         IndexScope::Memory => all.into_iter().filter(|a| a.label == "memory").collect(),
+        IndexScope::Discussions => all
+            .into_iter()
+            .filter(|a| a.label == "discussions")
+            .collect(),
         IndexScope::Board => all.into_iter().filter(|a| a.label == "board").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
@@ -192,7 +202,15 @@ pub fn render_index_status(
         report.dependencies_installed
     ));
     if let Some(status) = payload.get("status").and_then(Value::as_object) {
-        for scope in ["issues", "specs", "memory", "board", "files", "files-docs"] {
+        for scope in [
+            "issues",
+            "specs",
+            "memory",
+            "discussions",
+            "board",
+            "files",
+            "files-docs",
+        ] {
             if let Some(scope_status) = status.get(scope) {
                 let healthy = scope_status
                     .get("healthy")
