@@ -1643,10 +1643,12 @@
 
       function windowRoleBadgeLabel(windowData) {
         const displayTitle = windowDisplayTitle(windowData);
-        const label = isAgentWindowPreset(windowData?.preset)
+        const isAgentWindow = isAgentWindowPreset(windowData?.preset);
+        const label = isAgentWindow
           ? agentRoleLabel(windowData)
           : presetRoleLabel(windowData?.preset || "");
-        if (!label || label === displayTitle) return "";
+        if (!label) return "";
+        if (!isAgentWindow && label === displayTitle) return "";
         return label;
       }
 

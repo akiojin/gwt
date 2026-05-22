@@ -267,6 +267,24 @@ test("Non-Agent duplicate title role badges are omitted", () => {
   );
 });
 
+test("Agent fallback runtime titles still show Agent role badges", () => {
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+const\s+isAgentWindow\s*=\s*isAgentWindowPreset\(windowData\?\.preset\)/,
+    "expected duplicate suppression to distinguish Agent windows from static panels",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!isAgentWindow\s*&&\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "Agent role badges must remain visible when the fallback title is the same runtime name",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /if\s*\(!label\s*\|\|\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "generic duplicate suppression must not hide Agent role badges",
+  );
+});
+
 test("Memo is not exposed as a workspace window feature", () => {
   assert.equal(
     document.querySelector('.preset-button[data-preset="memo"]'),
