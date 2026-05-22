@@ -7185,6 +7185,12 @@
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
         );
+        const showStartMethods = Boolean(
+          launchWizard.show_start_methods
+            && !isRuntimeConfirmation
+            && !launchWizard.runtime_resolution_pending
+            && (launchWizard.start_methods || []).length > 0,
+        );
         const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
@@ -7212,7 +7218,7 @@
           );
         }
 
-        if (!isRuntimeConfirmation && (launchWizard.start_methods || []).length > 0) {
+        if (showStartMethods) {
           const section = createLaunchSection(
             "Start methods",
             "Choose how this agent should start on the selected branch.",

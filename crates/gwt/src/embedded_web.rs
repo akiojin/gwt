@@ -2802,6 +2802,7 @@ mod tests {
         assert!(
             html.contains("progress_steps")
                 && html.contains("start_methods")
+                && html.contains("show_start_methods")
                 && html.contains("primary_action_label"),
             "expected Launch Wizard renderer to follow backend progress, start methods, and footer label",
         );
@@ -2832,7 +2833,8 @@ mod tests {
         );
         assert!(
             html.contains("renderWizardSummary();")
-                && html.contains("if (!isRuntimeConfirmation"),
+                && html.contains("const showStartMethods = Boolean(")
+                && html.contains("if (showStartMethods)"),
             "expected Runtime confirmation to keep the read-only summary while hiding selection/setup rows",
         );
         assert!(

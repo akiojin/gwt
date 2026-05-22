@@ -1444,7 +1444,7 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     appSource,
-    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showStartMethods = Boolean\([\s\S]*?launchWizard\.show_start_methods[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
     "expected showManualSetup to be initialized before Runtime confirmation setup gating",
   );
   assert.match(
@@ -1464,8 +1464,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     appSource,
-    /if\s*\(\s*!isRuntimeConfirmation\s*&&\s*\(launchWizard\.start_methods \|\| \[\]\)\.length > 0\)/,
-    "expected Start methods rows to be hidden during Runtime confirmation",
+    /if\s*\(\s*showStartMethods\s*\)/,
+    "expected Start methods rows to be gated by backend start-method state",
   );
   assert.match(
     appSource,
@@ -1588,6 +1588,7 @@ test("Launch wizard renders start methods as direct actions", () => {
   );
   assert.ok(
     appSource.includes("start_methods")
+      && appSource.includes("show_start_methods")
       && appSource.includes('kind: "use_start_method"'),
     "expected start method rows to dispatch direct backend actions",
   );

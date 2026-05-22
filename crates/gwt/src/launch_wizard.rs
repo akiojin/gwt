@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use crate::BranchListEntry;
@@ -272,6 +273,7 @@ pub struct LaunchWizardView {
     pub show_skip_permissions: bool,
     pub show_codex_fast_mode: bool,
     pub show_branch_controls: bool,
+    pub show_start_methods: bool,
     pub show_manual_setup: bool,
     pub show_runtime_confirmation: bool,
     // SPEC-2014 Amendment 2026-05-20 (FR-057): gate the Linked issue section
@@ -446,9 +448,10 @@ pub fn previous_launch_profile_from_sessions(
     repo_path: &Path,
     sessions: &[gwt_agent::Session],
 ) -> Option<LaunchWizardPreviousProfile> {
+    let repo_scope = LaunchProfileRepoScope::new(repo_path);
     sessions
         .iter()
-        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .filter(|session| repo_scope.matches(session))
         .max_by(|left, right| launch_profile_session_cmp(left, right))
         .cloned()
         .map(previous_profile_from_session)
@@ -528,10 +531,11 @@ pub fn quick_start_entries_from_sessions(
     branch_name: &str,
     sessions: &[gwt_agent::Session],
 ) -> Vec<QuickStartEntry> {
+    let repo_scope = QuickStartRepoScope::new(repo_path);
     let sessions = sessions
         .iter()
         .filter(|session| session.branch == branch_name)
-        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .filter(|session| repo_scope.matches(session))
         .cloned()
         .map(|mut session| {
             session.worktree_path = repo_path.to_path_buf();
@@ -562,28 +566,86 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
     }
 }
 
-fn same_launch_profile_repo(repo_path: &Path, session: &gwt_agent::Session) -> bool {
-    let session_worktree_path = &session.worktree_path;
-    if same_path_or_exact(repo_path, session_worktree_path) {
-        return true;
-    }
+struct LaunchProfileRepoScope<'a> {
+    repo_path: &'a Path,
+    repo_hash: Option<String>,
+    repo_root: OnceLock<Option<PathBuf>>,
+}
 
-    if let (Some(current_repo_hash), Some(session_repo_hash)) = (
-        repo_hash_for_existing_path(repo_path),
-        session.repo_hash.as_deref(),
-    ) {
-        if current_repo_hash == session_repo_hash {
-            return true;
+impl<'a> LaunchProfileRepoScope<'a> {
+    fn new(repo_path: &'a Path) -> Self {
+        Self {
+            repo_path,
+            repo_hash: repo_hash_for_existing_path(repo_path),
+            repo_root: OnceLock::new(),
         }
     }
 
-    let Ok(repo_root) = gwt_git::worktree::main_worktree_root(repo_path) else {
-        return false;
-    };
-    let Ok(session_root) = gwt_git::worktree::main_worktree_root(session_worktree_path) else {
-        return false;
-    };
-    same_path_or_exact(&repo_root, &session_root)
+    fn matches(&self, session: &gwt_agent::Session) -> bool {
+        let session_worktree_path = &session.worktree_path;
+        if same_path_or_exact(self.repo_path, session_worktree_path) {
+            return true;
+        }
+
+        if let (Some(current_repo_hash), Some(session_repo_hash)) =
+            (self.repo_hash.as_deref(), session.repo_hash.as_deref())
+        {
+            if current_repo_hash == session_repo_hash {
+                return true;
+            }
+        }
+
+        if !session_worktree_path.exists() {
+            return false;
+        }
+
+        let Some(repo_root) = self.repo_root() else {
+            return false;
+        };
+        let Ok(session_root) = gwt_git::worktree::main_worktree_root(session_worktree_path) else {
+            return false;
+        };
+        same_path_or_exact(repo_root, &session_root)
+    }
+
+    fn repo_root(&self) -> Option<&Path> {
+        self.repo_root
+            .get_or_init(|| gwt_git::worktree::main_worktree_root(self.repo_path).ok())
+            .as_deref()
+    }
+}
+
+struct QuickStartRepoScope<'a> {
+    repo_path: &'a Path,
+    canonical: Option<PathBuf>,
+    repo_hash: Option<String>,
+}
+
+impl<'a> QuickStartRepoScope<'a> {
+    fn new(repo_path: &'a Path) -> Self {
+        Self {
+            repo_path,
+            canonical: repo_path.canonicalize().ok(),
+            repo_hash: repo_hash_for_existing_path(repo_path),
+        }
+    }
+
+    fn matches(&self, session: &gwt_agent::Session) -> bool {
+        let candidate = &session.worktree_path;
+        if candidate == self.repo_path {
+            return true;
+        }
+        if let (Some(expected), Ok(candidate)) = (self.canonical.as_ref(), candidate.canonicalize())
+        {
+            if candidate == *expected {
+                return true;
+            }
+        }
+        matches!(
+            (self.repo_hash.as_deref(), session.repo_hash.as_deref()),
+            (Some(current), Some(session_hash)) if current == session_hash
+        )
+    }
 }
 
 fn repo_hash_for_existing_path(path: &Path) -> Option<String> {
@@ -786,6 +848,7 @@ pub struct LaunchWizardState {
     pub runtime_resolution_message: Option<String>,
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
+    start_method_selected: bool,
 }
 
 impl LaunchWizardState {
@@ -866,6 +929,7 @@ impl LaunchWizardState {
             runtime_resolution_message: None,
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
+            start_method_selected: false,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -1009,6 +1073,7 @@ impl LaunchWizardState {
     }
 
     pub fn view(&self) -> LaunchWizardView {
+        let show_start_methods = self.show_start_methods();
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
         LaunchWizardView {
@@ -1085,6 +1150,7 @@ impl LaunchWizardState {
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
+            show_start_methods,
             show_manual_setup,
             show_runtime_confirmation,
             show_linked_issue: matches!(
@@ -1707,6 +1773,7 @@ impl LaunchWizardState {
             LaunchWizardStartMethodKind::ConfigureAndStart => {
                 self.apply_latest_start_settings();
                 self.launch_path = LaunchWizardLaunchPath::ManualSetup;
+                self.start_method_selected = true;
                 self.step = LaunchWizardStep::LaunchTarget;
                 self.selected = step_default_selection(self.step, self);
                 self.completion = None;
@@ -1718,6 +1785,7 @@ impl LaunchWizardState {
                 }
                 self.apply_latest_start_settings();
                 self.launch_path = LaunchWizardLaunchPath::QuickStart;
+                self.start_method_selected = true;
                 self.finish_launch_request();
             }
             LaunchWizardStartMethodKind::ContinueLastSession => {
@@ -1768,6 +1836,7 @@ impl LaunchWizardState {
         };
         self.selected_quick_start_index = Some(index);
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.start_method_selected = true;
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
@@ -1791,11 +1860,13 @@ impl LaunchWizardState {
             self.error = Some("No running session is available".to_string());
             return;
         }
+        self.start_method_selected = true;
         self.focus_existing_session(0);
     }
 
     fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.start_method_selected = true;
         self.selected_quick_start_index = Some(index);
         if self.prepare_quick_start_launch(index, mode, false) {
             self.finish_launch_request();
@@ -1911,6 +1982,7 @@ impl LaunchWizardState {
     fn focus_existing_session(&mut self, index: usize) {
         if let Some(entry) = self.context.live_sessions.get(index) {
             self.launch_path = LaunchWizardLaunchPath::FocusSession;
+            self.start_method_selected = true;
             self.selected_live_session_index = Some(index);
             self.completion = Some(LaunchWizardCompletion::FocusWindow {
                 window_id: entry.window_id.clone(),
@@ -1928,10 +2000,12 @@ impl LaunchWizardState {
                     return;
                 }
                 self.launch_path = path;
+                self.start_method_selected = true;
                 self.selected_quick_start_index.get_or_insert(0);
             }
             LaunchWizardLaunchPath::ManualSetup => {
                 self.launch_path = path;
+                self.start_method_selected = true;
             }
             LaunchWizardLaunchPath::FocusSession => {
                 if self.context.live_sessions.is_empty() {
@@ -1939,6 +2013,7 @@ impl LaunchWizardState {
                     return;
                 }
                 self.launch_path = path;
+                self.start_method_selected = true;
                 self.selected_live_session_index.get_or_insert(0);
             }
         }
@@ -2447,7 +2522,14 @@ impl LaunchWizardState {
     }
 
     fn show_manual_setup(&self) -> bool {
-        self.launch_path == LaunchWizardLaunchPath::ManualSetup
+        self.launch_path == LaunchWizardLaunchPath::ManualSetup && !self.show_start_methods()
+    }
+
+    fn show_start_methods(&self) -> bool {
+        !self.start_method_selected
+            && !self.is_hydrating
+            && !self.runtime_resolution_pending
+            && !self.show_runtime_confirmation()
     }
 
     fn show_runtime_confirmation(&self) -> bool {
@@ -2464,6 +2546,9 @@ impl LaunchWizardState {
         }
         if self.runtime_resolution_pending {
             return "Preparing...".to_string();
+        }
+        if self.show_start_methods() {
+            return "Choose start method".to_string();
         }
         match self.launch_path {
             LaunchWizardLaunchPath::FocusSession => "Focus".to_string(),
@@ -2484,7 +2569,7 @@ impl LaunchWizardState {
     }
 
     fn primary_action_enabled(&self) -> bool {
-        if self.is_hydrating || self.runtime_resolution_pending {
+        if self.is_hydrating || self.runtime_resolution_pending || self.show_start_methods() {
             return false;
         }
         match self.launch_path {
@@ -4575,6 +4660,39 @@ mod tests {
     }
 
     #[test]
+    fn start_methods_gate_setup_until_configure_is_selected() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+        state.mark_runtime_context_unresolved();
+
+        let initial = state.view();
+        assert!(initial.show_start_methods);
+        assert!(!initial.show_manual_setup);
+        assert_eq!(initial.primary_action_label, "Choose start method");
+        assert!(!initial.primary_action_enabled);
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+
+        let configured = state.view();
+        assert!(!configured.show_start_methods);
+        assert!(configured.show_manual_setup);
+        assert_eq!(configured.primary_action_label, "Continue");
+        assert!(configured.primary_action_enabled);
+    }
+
+    #[test]
     fn start_with_last_settings_launches_new_session_without_resume_id() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -4834,6 +4952,35 @@ mod tests {
             .expect("profile should match persisted repo identity");
 
         assert_eq!(profile.agent_id, "codex");
+    }
+
+    #[test]
+    fn quick_start_entries_match_deleted_worktree_by_persisted_repo_hash() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let origin = "https://github.com/example/project.git";
+        init_repo_with_origin(&repo, origin);
+        let removed_worktree = dir.path().join("removed-worktree");
+        let mut session = sample_session_record(
+            "feature/gui",
+            &removed_worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            Some("native-session"),
+        );
+        session.repo_hash = Some(
+            gwt_core::repo_hash::compute_repo_hash(origin)
+                .as_str()
+                .to_string(),
+        );
+
+        let entries = quick_start_entries_from_sessions(&repo, "feature/gui", &[session]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("native-session")
+        );
     }
 
     #[test]
@@ -7118,7 +7265,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_submit_skips_manual_settings_until_runtime_confirmation() {
+    fn continue_last_session_start_method_skips_manual_settings_until_runtime_confirmation() {
         let mut ctx = context(branch("feature/current"), "feature/current");
         ctx.docker_context = Some(DockerWizardContext {
             services: vec!["app".to_string()],
@@ -7143,11 +7290,14 @@ mod tests {
         let view = state.view();
         assert_eq!(view.selected_launch_path, "quick_start");
         assert_eq!(view.selected_quick_start_index, Some(0));
+        assert!(view.show_start_methods);
         assert!(!view.show_manual_setup);
         assert!(!view.show_runtime_confirmation);
-        assert_eq!(view.primary_action_label, "Continue");
+        assert_eq!(view.primary_action_label, "Choose start method");
 
-        state.apply(LaunchWizardAction::Submit);
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ContinueLastSession,
+        });
         assert!(matches!(
             state.completion.as_ref(),
             Some(LaunchWizardCompletion::ResolveRuntime(config))

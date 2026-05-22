@@ -10018,9 +10018,25 @@ exit 1
             .view();
         assert_eq!(view.mode, gwt::LaunchWizardMode::Branch);
         assert_eq!(view.branch_name, "work/20260504-1234");
-        assert!(view.show_branch_controls);
+        assert!(view.show_start_methods);
+        assert!(!view.show_branch_controls);
         assert_eq!(view.live_sessions.len(), 1);
         assert_eq!(view.live_sessions[0].name, "Codex");
+
+        let _ = runtime.handle_launch_wizard_action(
+            gwt::LaunchWizardAction::UseStartMethod {
+                method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+            },
+            None,
+        );
+        let configured_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("configured active work launch wizard")
+            .wizard
+            .view();
+        assert!(!configured_view.show_start_methods);
+        assert!(configured_view.show_branch_controls);
     }
 
     #[test]
