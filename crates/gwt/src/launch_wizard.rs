@@ -620,6 +620,7 @@ struct QuickStartRepoScope<'a> {
     repo_path: &'a Path,
     canonical: Option<PathBuf>,
     repo_hash: Option<String>,
+    repo_root: OnceLock<Option<PathBuf>>,
 }
 
 impl<'a> QuickStartRepoScope<'a> {
@@ -628,6 +629,7 @@ impl<'a> QuickStartRepoScope<'a> {
             repo_path,
             canonical: repo_path.canonicalize().ok(),
             repo_hash: repo_hash_for_existing_path(repo_path),
+            repo_root: OnceLock::new(),
         }
     }
 
@@ -642,10 +644,30 @@ impl<'a> QuickStartRepoScope<'a> {
                 return true;
             }
         }
-        matches!(
+        if matches!(
             (self.repo_hash.as_deref(), session.repo_hash.as_deref()),
             (Some(current), Some(session_hash)) if current == session_hash
-        )
+        ) {
+            return true;
+        }
+
+        if !candidate.exists() {
+            return false;
+        }
+
+        let Some(repo_root) = self.repo_root() else {
+            return false;
+        };
+        let Ok(candidate_root) = gwt_git::worktree::main_worktree_root(candidate) else {
+            return false;
+        };
+        same_path_or_exact(repo_root, &candidate_root)
+    }
+
+    fn repo_root(&self) -> Option<&Path> {
+        self.repo_root
+            .get_or_init(|| gwt_git::worktree::main_worktree_root(self.repo_path).ok())
+            .as_deref()
     }
 }
 
@@ -1615,13 +1637,11 @@ impl LaunchWizardState {
                 QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => {}
             },
             LaunchWizardStep::FocusExistingSession => {
-                if let Some(entry) = self.context.live_sessions.get(self.selected) {
-                    self.completion = Some(LaunchWizardCompletion::FocusWindow {
-                        window_id: entry.window_id.clone(),
-                    });
-                } else {
+                let Some((index, _)) = self.running_live_sessions().nth(self.selected) else {
                     self.error = Some("No running session is available".to_string());
-                }
+                    return;
+                };
+                self.focus_existing_session(index);
             }
             LaunchWizardStep::BranchAction => {
                 if self.selected == 0 {
@@ -1873,12 +1893,12 @@ impl LaunchWizardState {
     }
 
     fn focus_latest_running_session(&mut self) {
-        if self.context.live_sessions.is_empty() {
+        let Some((index, _)) = self.latest_running_session() else {
             self.error = Some("No running session is available".to_string());
             return;
-        }
+        };
         self.start_method_selected = true;
-        self.focus_existing_session(0);
+        self.focus_existing_session(index);
     }
 
     fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
@@ -1997,7 +2017,12 @@ impl LaunchWizardState {
     }
 
     fn focus_existing_session(&mut self, index: usize) {
-        if let Some(entry) = self.context.live_sessions.get(index) {
+        if let Some(entry) = self
+            .context
+            .live_sessions
+            .get(index)
+            .filter(|entry| entry.runtime_status == crate::WindowProcessStatus::Running)
+        {
             self.launch_path = LaunchWizardLaunchPath::FocusSession;
             self.start_method_selected = true;
             self.selected_live_session_index = Some(index);
@@ -2025,13 +2050,13 @@ impl LaunchWizardState {
                 self.start_method_selected = true;
             }
             LaunchWizardLaunchPath::FocusSession => {
-                if self.context.live_sessions.is_empty() {
+                let Some((index, _)) = self.latest_running_session() else {
                     self.error = Some("No running session is available".to_string());
                     return;
-                }
+                };
                 self.launch_path = path;
                 self.start_method_selected = true;
-                self.selected_live_session_index.get_or_insert(0);
+                self.selected_live_session_index = Some(index);
             }
         }
     }
@@ -2046,7 +2071,13 @@ impl LaunchWizardState {
     }
 
     fn select_live_session(&mut self, index: usize) {
-        if self.context.live_sessions.get(index).is_none() {
+        if self
+            .context
+            .live_sessions
+            .get(index)
+            .filter(|entry| entry.runtime_status == crate::WindowProcessStatus::Running)
+            .is_none()
+        {
             self.error = Some("No running session is available".to_string());
             return;
         }
@@ -2231,7 +2262,7 @@ impl LaunchWizardState {
         let latest_resume = self
             .latest_quick_start_entry()
             .and_then(|(_, entry)| entry.resume_session_id.as_deref().map(|id| (entry, id)));
-        let latest_live = self.context.live_sessions.first();
+        let latest_live = self.latest_running_session().map(|(_, session)| session);
 
         vec![
             LaunchWizardStartMethodView {
@@ -3055,6 +3086,18 @@ impl LaunchWizardState {
         self.quick_start_entries.iter().enumerate().next()
     }
 
+    fn running_live_sessions(&self) -> impl Iterator<Item = (usize, &LiveSessionEntry)> {
+        self.context
+            .live_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| session.runtime_status == crate::WindowProcessStatus::Running)
+    }
+
+    fn latest_running_session(&self) -> Option<(usize, &LiveSessionEntry)> {
+        self.running_live_sessions().next()
+    }
+
     fn quick_start_actions(&self) -> Vec<QuickStartAction> {
         let mut actions = Vec::new();
         for (index, entry) in self.quick_start_entries.iter().enumerate() {
@@ -3063,7 +3106,7 @@ impl LaunchWizardState {
             }
             actions.push(QuickStartAction::StartNewEntry { index });
         }
-        if !self.context.live_sessions.is_empty() {
+        if self.latest_running_session().is_some() {
             actions.push(QuickStartAction::FocusExistingSession);
         }
         actions.push(QuickStartAction::ChooseDifferent);
@@ -3148,7 +3191,7 @@ impl LaunchWizardState {
                         color: None,
                     });
                 }
-                if !self.context.live_sessions.is_empty() {
+                if self.latest_running_session().is_some() {
                     options.push(LaunchWizardOptionView {
                         value: "focus_existing".to_string(),
                         label: "Focus existing session".to_string(),
@@ -3165,10 +3208,8 @@ impl LaunchWizardState {
                 options
             }
             LaunchWizardStep::FocusExistingSession => self
-                .context
-                .live_sessions
-                .iter()
-                .map(|entry| LaunchWizardOptionView {
+                .running_live_sessions()
+                .map(|(_, entry)| LaunchWizardOptionView {
                     value: entry.window_id.clone(),
                     label: entry.name.clone(),
                     description: entry.detail.clone(),
@@ -4686,6 +4727,88 @@ mod tests {
     }
 
     #[test]
+    fn start_methods_focus_running_session_uses_latest_running_window() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![
+            LiveSessionEntry {
+                session_id: "session-idle".to_string(),
+                window_id: "tab-1:agent-idle".to_string(),
+                agent_id: "codex".to_string(),
+                kind: "agent".to_string(),
+                name: "Idle Codex".to_string(),
+                detail: Some("/tmp/repo-idle".to_string()),
+                active: true,
+                runtime_status: crate::WindowProcessStatus::Idle,
+            },
+            LiveSessionEntry {
+                session_id: "session-running".to_string(),
+                window_id: "tab-1:agent-running".to_string(),
+                agent_id: "codex".to_string(),
+                kind: "agent".to_string(),
+                name: "Running Codex".to_string(),
+                detail: Some("/tmp/repo-running".to_string()),
+                active: true,
+                runtime_status: crate::WindowProcessStatus::Running,
+            },
+        ];
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        let view = state.view();
+        let focus_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "focus_running_session")
+            .expect("focus method");
+        assert!(focus_method.enabled);
+        assert_eq!(focus_method.summary, "Running Codex");
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::FocusRunningSession,
+        });
+
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::FocusWindow { window_id })
+                if window_id == "tab-1:agent-running"
+        ));
+    }
+
+    #[test]
+    fn start_methods_focus_running_session_is_disabled_without_running_window() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-idle".to_string(),
+            window_id: "tab-1:agent-idle".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Idle Codex".to_string(),
+            detail: Some("/tmp/repo-idle".to_string()),
+            active: true,
+            runtime_status: crate::WindowProcessStatus::Idle,
+        }];
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        let view = state.view();
+        let focus_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "focus_running_session")
+            .expect("focus method");
+        assert!(!focus_method.enabled);
+        assert_eq!(focus_method.summary, "No running session");
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::FocusRunningSession,
+        });
+
+        assert_eq!(
+            state.error.as_deref(),
+            Some("No running session is available")
+        );
+        assert!(state.completion.is_none());
+    }
+
+    #[test]
     fn start_methods_gate_setup_until_configure_is_selected() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -5047,6 +5170,59 @@ mod tests {
                 .as_str()
                 .to_string(),
         );
+
+        let entries = quick_start_entries_from_sessions(&repo, "feature/gui", &[session]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("native-session")
+        );
+    }
+
+    #[test]
+    fn quick_start_entries_match_sibling_worktree_without_persisted_repo_hash() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("repo-work");
+        let origin = "https://github.com/example/project.git";
+        init_repo_with_origin(&repo, origin);
+        std::fs::write(repo.join("README.md"), "# project\n").expect("write readme");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .status()
+            .expect("git add");
+        assert!(status.success(), "git add failed");
+        let status = gwt_core::process::hidden_command("git")
+            .args([
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit");
+        assert!(status.success(), "git commit failed");
+        let worktree_arg = worktree.to_str().expect("worktree path");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-b", "feature/gui", worktree_arg])
+            .current_dir(&repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed");
+        let mut session = sample_session_record(
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            Some("native-session"),
+        );
+        session.repo_hash = None;
 
         let entries = quick_start_entries_from_sessions(&repo, "feature/gui", &[session]);
 
