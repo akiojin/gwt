@@ -6108,7 +6108,6 @@ impl AppRuntime {
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => left.name.cmp(&right.name),
             }
-            .then_with(|| left.name.cmp(&right.name))
         });
         entries
     }
