@@ -52,7 +52,9 @@ pub use branch_list::{
     hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
     BranchCleanupAvailability, BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
-pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
+pub use branch_list::{
+    list_branch_entries, list_branch_inventory, BranchListEntry, BranchResumeInfo, BranchScope,
+};
 pub use custom_agents_service::{
     add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,
     update_custom_agent, CustomAgentsServiceError,

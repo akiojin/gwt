@@ -1421,6 +1421,12 @@ body {
   justify-content: flex-end;
 }
 
+.branch-selection-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .workspace-toolbar.is-stacked {
   align-items: flex-start;
 }
@@ -2617,7 +2623,7 @@ body {
 
 .branch-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--color-border);
@@ -2734,6 +2740,51 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.branch-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.branch-row-action {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.branch-row-action.primary {
+  background: var(--color-state-active);
+  border-color: var(--color-state-active);
+  color: var(--color-canvas);
+}
+
+.branch-row-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+@media (max-width: 720px) {
+  .branch-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .branch-meta,
+  .branch-row-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
 }
 
 .branch-scope {

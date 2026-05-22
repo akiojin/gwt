@@ -7956,6 +7956,27 @@
         meta.appendChild(summary);
         row.appendChild(meta);
 
+        const actions = document.createElement("div");
+        actions.className = "branch-row-actions";
+        actions.addEventListener("click", (event) => event.stopPropagation());
+        actions.addEventListener("dblclick", (event) => event.stopPropagation());
+
+        const resumeButton = document.createElement("button");
+        resumeButton.type = "button";
+        resumeButton.className = "branch-row-action";
+        resumeButton.textContent = "Resume";
+        resumeButton.setAttribute("data-branch-row-action", "resume");
+        actions.appendChild(resumeButton);
+
+        const launchButton = document.createElement("button");
+        launchButton.type = "button";
+        launchButton.className = "branch-row-action primary";
+        launchButton.textContent = "Launch";
+        launchButton.setAttribute("data-branch-row-action", "launch");
+        actions.appendChild(launchButton);
+
+        row.appendChild(actions);
+
         row._fields = {
           toggle,
           main,
@@ -7968,6 +7989,9 @@
           scope,
           cleanupBadge,
           summary,
+          actions,
+          resumeButton,
+          launchButton,
         };
 
         const select = () => {
@@ -7984,6 +8008,24 @@
             branch_name: branchName,
           });
         };
+        const resume = () => {
+          select();
+          send({
+            kind: "resume_branch_latest_agent",
+            id: windowId,
+            branch_name: branchName,
+            bounds: visibleBounds(),
+          });
+        };
+        resumeButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (resumeButton.disabled) return;
+          resume();
+        });
+        launchButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          activate();
+        });
         row.addEventListener("click", select);
         row.addEventListener("dblclick", activate);
         // SPEC-2356 — keyboard activation parity:
@@ -8054,6 +8096,21 @@
         fields.cleanupBadge.textContent = cleanupBadgeText(entry, state);
         fields.summary.textContent =
           entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced";
+
+        const resumeAvailable = entry.resume && entry.resume.available;
+        const resumeReason = entry.resume?.reason || "No resumable session";
+        fields.resumeButton.disabled = !resumeAvailable;
+        fields.resumeButton.title = resumeAvailable
+          ? `Resume latest agent on ${entry.name}`
+          : resumeReason;
+        fields.resumeButton.setAttribute(
+          "aria-label",
+          resumeAvailable
+            ? `Resume latest agent on ${entry.name}`
+            : `Resume unavailable for ${entry.name}: ${resumeReason}`,
+        );
+        fields.launchButton.title = `Launch Agent on ${entry.name}`;
+        fields.launchButton.setAttribute("aria-label", `Launch Agent on ${entry.name}`);
       }
 
       function setBranchListPlaceholder(list, text) {
@@ -8082,8 +8139,6 @@
         syncBranchSelectionState(state);
         const list = element.querySelector(".branch-list");
         const notice = element.querySelector(".branch-notice");
-        const resumeButton = element.querySelector("[data-action='open-branch-resume']");
-        const launchButton = element.querySelector("[data-action='open-branch-launch']");
         const cleanupButton = element.querySelector("[data-action='open-branch-cleanup']");
         if (!list) {
           return;
@@ -8091,12 +8146,6 @@
 
         for (const button of element.querySelectorAll("[data-branch-filter]")) {
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
-        }
-        if (resumeButton) {
-          resumeButton.disabled = !state.selectedBranchName;
-        }
-        if (launchButton) {
-          launchButton.disabled = !state.selectedBranchName;
         }
         if (cleanupButton) {
           const selectedCount = selectedBranchCleanupEntries(windowId).length;
@@ -9262,7 +9311,7 @@
             <div class="branch-list-root">
               <div class="branch-toolbar workspace-toolbar is-stacked">
                 <div class="branch-toolbar-main workspace-toolbar-main">
-                  <div class="branch-heading">Repository branches · double-click to launch</div>
+                  <div class="branch-heading">Repository branches</div>
                   <div class="branch-filter-group">
                     <button class="branch-filter-button" type="button" data-branch-filter="local">Local</button>
                     <button class="branch-filter-button" type="button" data-branch-filter="remote">Remote</button>
@@ -9270,9 +9319,9 @@
                   </div>
                 </div>
                 <div class="branch-toolbar-actions workspace-toolbar-actions">
-                  <button class="wizard-button branch-resume-trigger" type="button" data-action="open-branch-resume" disabled>Resume</button>
-                  <button class="wizard-button primary branch-launch-trigger" type="button" data-action="open-branch-launch" disabled>Launch Agent</button>
-                  <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
+                  <div class="branch-selection-actions">
+                    <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
+                  </div>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
               </div>
@@ -9308,39 +9357,6 @@
               frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
-          body
-            .querySelector("[data-action='open-branch-resume']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-                windowData.id,
-              );
-              if (!state.selectedBranchName) {
-                return;
-              }
-              send({
-                kind: "resume_branch_latest_agent",
-                id: windowData.id,
-                branch_name: state.selectedBranchName,
-                bounds: visibleBounds(),
-              });
-            });
-          body
-            .querySelector("[data-action='open-branch-launch']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-                windowData.id,
-              );
-              if (!state.selectedBranchName) {
-                return;
-              }
-              send({
-                kind: "open_launch_wizard",
-                id: windowData.id,
-                branch_name: state.selectedBranchName,
-              });
-            });
           body
             .querySelector("[data-action='open-branch-cleanup']")
             .addEventListener("click", (event) => {
