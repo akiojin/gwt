@@ -690,6 +690,10 @@ body {
   white-space: nowrap;
 }
 
+.window-role-badge[hidden] {
+  display: none;
+}
+
 .window-list-role {
   min-height: 18px;
   padding-inline: 6px;

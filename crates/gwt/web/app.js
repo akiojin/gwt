@@ -1587,6 +1587,76 @@
         return labels[preset] || presetLabel(preset);
       }
 
+      const AGENT_ROLE_LABELS = Object.freeze({
+        claude: "Claude Code",
+        "claude-code": "Claude Code",
+        claudecode: "Claude Code",
+        "claude code": "Claude Code",
+        claude_code: "Claude Code",
+        codex: "Codex",
+        gemini: "Gemini CLI",
+        "gemini-cli": "Gemini CLI",
+        "gemini cli": "Gemini CLI",
+        gemini_cli: "Gemini CLI",
+        opencode: "OpenCode",
+        "open-code": "OpenCode",
+        open_code: "OpenCode",
+        openclaw: "OpenClaw",
+        "open-claw": "OpenClaw",
+        open_claw: "OpenClaw",
+        hermes: "Hermes Agent",
+        "hermes-agent": "Hermes Agent",
+        "hermes agent": "Hermes Agent",
+        hermes_agent: "Hermes Agent",
+        gh: "GitHub Copilot",
+        copilot: "GitHub Copilot",
+        "github-copilot": "GitHub Copilot",
+        "github copilot": "GitHub Copilot",
+        github_copilot: "GitHub Copilot",
+      });
+
+      const GENERIC_AGENT_ROLE_LABELS = new Set(["agent", "window"]);
+
+      function normalizedAgentRoleKey(value) {
+        return String(value || "").trim().toLowerCase();
+      }
+
+      function isGenericAgentRoleLabel(value) {
+        return GENERIC_AGENT_ROLE_LABELS.has(normalizedAgentRoleKey(value));
+      }
+
+      function isAgentWindowPreset(preset) {
+        return preset === "agent" || preset === "claude" || preset === "codex";
+      }
+
+      function agentRoleLabel(windowData) {
+        const agentIdLabel =
+          AGENT_ROLE_LABELS[normalizedAgentRoleKey(windowData?.agent_id)] || "";
+        if (agentIdLabel) return agentIdLabel;
+        const presetLabel =
+          AGENT_ROLE_LABELS[normalizedAgentRoleKey(windowData?.preset)] || "";
+        if (presetLabel) return presetLabel;
+        const launchTitle = String(windowData?.title || "").trim();
+        if (launchTitle && !isGenericAgentRoleLabel(launchTitle)) return launchTitle;
+        return "";
+      }
+
+      function windowRoleBadgeLabel(windowData) {
+        const displayTitle = windowDisplayTitle(windowData);
+        const label = isAgentWindowPreset(windowData?.preset)
+          ? agentRoleLabel(windowData)
+          : presetRoleLabel(windowData?.preset || "");
+        if (!label || label === displayTitle) return "";
+        return label;
+      }
+
+      function setWindowRoleBadge(badgeElement, windowData) {
+        if (!badgeElement) return;
+        const label = windowRoleBadgeLabel(windowData);
+        badgeElement.textContent = label;
+        badgeElement.hidden = !label;
+      }
+
       function shouldShowRuntimeStatus(windowData) {
         return presetSurface(windowData?.preset) === "terminal";
       }
@@ -1722,11 +1792,15 @@
                 <span class="status-label">${runtimeLabel}</span>
               </span>`
             : "";
+          const roleBadgeLabel = windowRoleBadgeLabel(entry);
+          const roleBadge = roleBadgeLabel
+            ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+            : "";
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
-                <span class="window-role-badge window-list-role">${presetRoleLabel(entry.preset)}</span>
+                ${roleBadge}
                 <span class="window-list-geometry">${geometryLabel}</span>
               </div>
             </div>
@@ -10659,7 +10733,7 @@
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
-        element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
+        setWindowRoleBadge(element.querySelector(".window-role-badge"), windowData);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;

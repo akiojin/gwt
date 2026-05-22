@@ -6588,6 +6588,9 @@ impl AppRuntime {
                 .workspace
                 .set_purpose_title(&window.id, Some(purpose_title));
         }
+        let _ = tab
+            .workspace
+            .set_agent_id(&window.id, config.agent_id.command().to_string());
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
@@ -15320,6 +15323,48 @@ exit 1
             Some("SPEC: Workspace purpose titles")
         );
         assert_eq!(agent_window.title, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+
+        let events = runtime
+            .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+            .expect("spawn agent window");
+
+        let workspace = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::WorkspaceState { workspace } => Some(workspace),
+                _ => None,
+            })
+            .expect("initial WorkspaceState broadcast");
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-1")
+            .expect("tab in WorkspaceState");
+        let agent_window = tab
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.preset == WindowPreset::Agent)
+            .expect("agent window in WorkspaceState");
+
+        assert_eq!(agent_window.title, "Claude Code");
+        assert_eq!(agent_window.agent_id.as_deref(), Some("claude"));
     }
 
     #[test]
