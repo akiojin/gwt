@@ -88,8 +88,9 @@ pub use launch_wizard::{
     LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
     LaunchWizardPreviousProfile, LaunchWizardPreviousProfiles, LaunchWizardProgressStepView,
-    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
-    LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    LaunchWizardQuickStartView, LaunchWizardStartMethodKind, LaunchWizardStartMethodView,
+    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
+    LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
     ResumableAgentLifecycleStatus, ResumableAgentResumeKind, ResumableAgentView, ShellLaunchConfig,
 };
 pub use managed_assets::{

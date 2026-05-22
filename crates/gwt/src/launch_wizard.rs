@@ -114,6 +114,26 @@ impl LaunchWizardLaunchPath {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchWizardStartMethodKind {
+    ConfigureAndStart,
+    StartWithLastSettings,
+    ContinueLastSession,
+    FocusRunningSession,
+}
+
+impl LaunchWizardStartMethodKind {
+    fn value(self) -> &'static str {
+        match self {
+            LaunchWizardStartMethodKind::ConfigureAndStart => "configure_and_start",
+            LaunchWizardStartMethodKind::StartWithLastSettings => "start_with_last_settings",
+            LaunchWizardStartMethodKind::ContinueLastSession => "continue_last_session",
+            LaunchWizardStartMethodKind::FocusRunningSession => "focus_running_session",
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardQuickStartView {
     pub index: usize,
@@ -121,6 +141,17 @@ pub struct LaunchWizardQuickStartView {
     pub summary: String,
     pub resume_session_id: Option<String>,
     pub reuse_action_label: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardStartMethodView {
+    pub kind: String,
+    pub label: String,
+    pub badge: String,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
 }
 
 /// SPEC-2359 US-42 — Workspace Resume Picker entry.
@@ -200,6 +231,7 @@ pub struct LaunchWizardView {
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
     pub hydration_error: Option<String>,
+    pub start_methods: Vec<LaunchWizardStartMethodView>,
     pub quick_start_entries: Vec<LaunchWizardQuickStartView>,
     pub live_sessions: Vec<LaunchWizardLiveSessionView>,
     pub selected_launch_path: String,
@@ -650,6 +682,9 @@ pub enum LaunchWizardAction {
         index: usize,
         mode: QuickStartLaunchMode,
     },
+    UseStartMethod {
+        method: LaunchWizardStartMethodKind,
+    },
     SetLaunchPath {
         path: LaunchWizardLaunchPath,
     },
@@ -989,6 +1024,7 @@ impl LaunchWizardState {
             is_hydrating: self.is_hydrating,
             runtime_context_resolved: self.runtime_context_resolved,
             hydration_error: self.hydration_error.clone(),
+            start_methods: self.start_methods_view(),
             quick_start_entries: self.quick_start_entries_view(),
             live_sessions: self.live_sessions_view(),
             selected_launch_path: self.launch_path.value().to_string(),
@@ -1197,6 +1233,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::ApplyQuickStart { index, mode } => {
                 self.apply_quick_start_action(index, mode);
+            }
+            LaunchWizardAction::UseStartMethod { method } => {
+                self.use_start_method(method);
             }
             LaunchWizardAction::SetLaunchPath { path } => {
                 self.set_launch_path_selection(path);
@@ -1663,6 +1702,98 @@ impl LaunchWizardState {
         }
     }
 
+    fn use_start_method(&mut self, method: LaunchWizardStartMethodKind) {
+        match method {
+            LaunchWizardStartMethodKind::ConfigureAndStart => {
+                self.apply_latest_start_settings();
+                self.launch_path = LaunchWizardLaunchPath::ManualSetup;
+                self.step = LaunchWizardStep::LaunchTarget;
+                self.selected = step_default_selection(self.step, self);
+                self.completion = None;
+            }
+            LaunchWizardStartMethodKind::StartWithLastSettings => {
+                if !self.has_previous_start_settings() {
+                    self.error = Some("No previous launch settings are available".to_string());
+                    return;
+                }
+                self.apply_latest_start_settings();
+                self.launch_path = LaunchWizardLaunchPath::QuickStart;
+                self.finish_launch_request();
+            }
+            LaunchWizardStartMethodKind::ContinueLastSession => {
+                self.continue_latest_session();
+            }
+            LaunchWizardStartMethodKind::FocusRunningSession => {
+                self.focus_latest_running_session();
+            }
+        }
+    }
+
+    fn apply_latest_start_settings(&mut self) {
+        if let Some((index, _)) = self.latest_quick_start_entry() {
+            let previous_completion = self.completion.take();
+            let previous_error = self.error.take();
+            let applied =
+                self.prepare_quick_start_launch(index, QuickStartLaunchMode::StartNew, false);
+            if !applied {
+                self.completion = previous_completion;
+                self.error = previous_error;
+                return;
+            }
+            self.completion = previous_completion;
+            self.error = previous_error;
+        } else {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+        }
+    }
+
+    fn has_previous_start_settings(&self) -> bool {
+        self.latest_quick_start_entry().is_some()
+            || self.previous_profiles.preferred_agent_id().is_some()
+            || self.previous_profiles.repo_local().is_some()
+    }
+
+    fn continue_latest_session(&mut self) {
+        let Some((index, entry)) = self
+            .latest_quick_start_entry()
+            .map(|(index, entry)| (index, entry.clone()))
+        else {
+            self.error = Some("No saved session is available".to_string());
+            return;
+        };
+        let Some(resume_session_id) = entry.resume_session_id.clone() else {
+            self.error = Some("No saved session is available".to_string());
+            return;
+        };
+        self.selected_quick_start_index = Some(index);
+        self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.launch_target = LaunchTargetKind::Agent;
+        self.agent_id = entry.agent_id.clone();
+        self.sync_selected_agent_options();
+        self.apply_quick_start_runtime_selection(&entry);
+        self.apply_saved_model(entry.model.as_deref());
+        if let Some(reasoning) = entry.reasoning.clone() {
+            self.reasoning = reasoning;
+        }
+        if let Some(version) = entry.version.clone() {
+            self.version = version;
+        }
+        self.skip_permissions = entry.skip_permissions;
+        self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
+        self.mode = "resume".to_string();
+        self.resume_session_id = Some(resume_session_id);
+        self.finish_launch_request();
+    }
+
+    fn focus_latest_running_session(&mut self) {
+        if self.context.live_sessions.is_empty() {
+            self.error = Some("No running session is available".to_string());
+            return;
+        }
+        self.focus_existing_session(0);
+    }
+
     fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
         self.selected_quick_start_index = Some(index);
@@ -2000,6 +2131,112 @@ impl LaunchWizardState {
         } else {
             self.error = Some("Execution mode is unavailable".to_string());
         }
+    }
+
+    fn start_methods_view(&self) -> Vec<LaunchWizardStartMethodView> {
+        let settings_summary = self.start_settings_summary();
+        let has_previous_settings = self.has_previous_start_settings();
+        let latest_resume = self
+            .latest_quick_start_entry()
+            .and_then(|(_, entry)| entry.resume_session_id.as_deref().map(|id| (entry, id)));
+        let latest_live = self.context.live_sessions.first();
+
+        vec![
+            LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::ConfigureAndStart
+                    .value()
+                    .to_string(),
+                label: "Configure and start".to_string(),
+                badge: "Settings".to_string(),
+                summary: settings_summary.clone(),
+                detail: Some("Review and edit settings before starting".to_string()),
+                enabled: true,
+                disabled_reason: None,
+            },
+            LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::StartWithLastSettings
+                    .value()
+                    .to_string(),
+                label: "Start with last settings".to_string(),
+                badge: "New".to_string(),
+                summary: settings_summary,
+                detail: Some(
+                    "Start a new session without resuming conversation history".to_string(),
+                ),
+                enabled: has_previous_settings,
+                disabled_reason: (!has_previous_settings)
+                    .then(|| "No previous launch settings yet".to_string()),
+            },
+            LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::ContinueLastSession
+                    .value()
+                    .to_string(),
+                label: "Continue last session".to_string(),
+                badge: "Session".to_string(),
+                summary: latest_resume
+                    .map(|(entry, _)| quick_start_summary(entry))
+                    .unwrap_or_else(|| "No resumable session".to_string()),
+                detail: latest_resume.map(|(_, resume_id)| format!("Resume ID · {resume_id}")),
+                enabled: latest_resume.is_some(),
+                disabled_reason: latest_resume
+                    .is_none()
+                    .then(|| "No saved session is available".to_string()),
+            },
+            LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::FocusRunningSession
+                    .value()
+                    .to_string(),
+                label: "Focus running session".to_string(),
+                badge: "Running".to_string(),
+                summary: latest_live
+                    .map(|session| session.name.clone())
+                    .unwrap_or_else(|| "No running session".to_string()),
+                detail: latest_live.and_then(|session| {
+                    session
+                        .detail
+                        .clone()
+                        .or_else(|| Some(live_session_status_label(session)))
+                }),
+                enabled: latest_live.is_some(),
+                disabled_reason: latest_live
+                    .is_none()
+                    .then(|| "No running session is available".to_string()),
+            },
+        ]
+    }
+
+    fn start_settings_summary(&self) -> String {
+        if let Some((_, entry)) = self.latest_quick_start_entry() {
+            return quick_start_summary(entry);
+        }
+        let mut parts = vec![self
+            .selected_agent()
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| self.effective_agent_id().to_string())];
+        if !self.model.trim().is_empty() {
+            parts.push(self.model.clone());
+        }
+        if !self.reasoning.trim().is_empty() {
+            parts.push(self.reasoning.clone());
+        }
+        if !self.version.trim().is_empty() {
+            parts.push(self.version.clone());
+        }
+        if self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+            parts.push(
+                self.docker_service
+                    .as_ref()
+                    .map(|service| format!("docker:{service}"))
+                    .unwrap_or_else(|| "docker".to_string()),
+            );
+        } else {
+            parts.push("host".to_string());
+        }
+        parts
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ")
     }
 
     fn quick_start_entries_view(&self) -> Vec<LaunchWizardQuickStartView> {
@@ -2702,6 +2939,10 @@ impl LaunchWizardState {
             }
             QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => None,
         }
+    }
+
+    fn latest_quick_start_entry(&self) -> Option<(usize, &QuickStartEntry)> {
+        self.quick_start_entries.iter().enumerate().next()
     }
 
     fn quick_start_actions(&self) -> Vec<QuickStartAction> {
@@ -3833,6 +4074,10 @@ fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
     }
 }
 
+fn live_session_status_label(session: &LiveSessionEntry) -> String {
+    format!("Status · {}", window_status_wire(session.runtime_status))
+}
+
 fn docker_lifecycle_value(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
     match intent {
         gwt_agent::DockerLifecycleIntent::Connect => "connect",
@@ -4282,6 +4527,84 @@ mod tests {
         );
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
+    }
+
+    #[test]
+    fn start_methods_view_exposes_four_direct_methods() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-live".to_string(),
+            window_id: "tab-1:agent-live".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
+        }];
+        let state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                Some("gwt"),
+            )],
+        );
+
+        let methods = state.view().start_methods;
+        assert_eq!(methods.len(), 4);
+        assert_eq!(methods[0].kind, "configure_and_start");
+        assert_eq!(methods[0].label, "Configure and start");
+        assert!(methods[0].summary.contains("Codex"));
+        assert_eq!(methods[1].kind, "start_with_last_settings");
+        assert!(methods[1].summary.contains("docker:gwt"));
+        assert_eq!(methods[2].kind, "continue_last_session");
+        assert_eq!(methods[2].badge, "Session");
+        assert!(methods[2]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("native-newer"));
+        assert_eq!(methods[3].kind, "focus_running_session");
+        assert_eq!(methods[3].badge, "Running");
+        assert!(methods.iter().all(|method| method.enabled));
+    }
+
+    #[test]
+    fn start_with_last_settings_launches_new_session_without_resume_id() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::StartWithLastSettings,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::ResolveRuntime(config))
+            | Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id.command(), "codex");
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+                    assert_eq!(config.resume_session_id, None);
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected start method launch completion, got {other:?}"),
+        }
     }
 
     #[test]

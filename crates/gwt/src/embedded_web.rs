@@ -2790,7 +2790,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_launch_wizard_flow_redesign_contract() {
+    fn embedded_web_launch_wizard_start_methods_contract() {
         let html = frontend_bundle_source();
 
         assert!(
@@ -2800,14 +2800,19 @@ mod tests {
             "expected Launch Wizard to render a split progress/content layout",
         );
         assert!(
-            html.contains("selected_launch_path")
-                && html.contains("selected_quick_start_index")
+            html.contains("progress_steps")
+                && html.contains("start_methods")
                 && html.contains("primary_action_label"),
-            "expected Launch Wizard renderer to follow backend-selected path and footer label",
+            "expected Launch Wizard renderer to follow backend progress, start methods, and footer label",
         );
         assert!(
-            html.contains(r#"kind: "select_quick_start""#) && !html.contains("quick-start-actions"),
-            "expected Quick Start to be a selectable path submitted by the footer primary button",
+            html.contains("\"Start methods\"")
+                && html.contains("start_methods")
+                && html.contains(r#"kind: "use_start_method""#)
+                && !html.contains("\"Quick start\"")
+                && !html.contains(r#"kind: "select_quick_start""#)
+                && !html.contains("quick-start-actions"),
+            "expected Start methods to render direct actions instead of the old Quick Start selection model",
         );
     }
 

@@ -388,16 +388,16 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
 });
 
-test("Launch Wizard live sessions render window runtime status", () => {
+test("Launch Wizard focus start method renders backend-provided running session detail", () => {
   assert.match(
     appSource,
-    /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
-    "expected live-session rows to label Running/Idle/Error from runtime_status",
+    /for\s*\(\s*const method of launchWizard\.start_methods \|\| \[\]\s*\)/,
+    "expected Launch Wizard to render backend-provided start methods",
   );
   assert.match(
     appSource,
-    /createNode\(\s*"div",\s*"live-session-status",\s*liveSessionStatusLabel\(session\),?\s*\)/,
-    "expected Launch Wizard live-session status copy to use runtime_status instead of active boolean copy",
+    /const detail = method\.enabled === false[\s\S]*?method\.disabled_reason[\s\S]*?: method\.detail;[\s\S]*?createNode\("div", "start-method-detail", detail\)/,
+    "expected running-session Focus details to come from the backend start method payload",
   );
 });
 
@@ -1464,8 +1464,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     appSource,
-    /if\s*\(\s*!isRuntimeConfirmation\s*&&\s*\(\s*\(launchWizard\.quick_start_entries \|\| \[\]\)\.length > 0/,
-    "expected Quick Start selection rows to be hidden during Runtime confirmation",
+    /if\s*\(\s*!isRuntimeConfirmation\s*&&\s*\(launchWizard\.start_methods \|\| \[\]\)\.length > 0\)/,
+    "expected Start methods rows to be hidden during Runtime confirmation",
   );
   assert.match(
     appSource,
@@ -1568,29 +1568,43 @@ test("Launch wizard renders centered split flow without backdrop dismissal", () 
   );
 });
 
-test("Launch wizard selected quick start hover preserves selected styling", () => {
+test("Launch wizard start methods keep disabled and hover states distinct", () => {
   assert.match(
     inlineStyle,
-    /\.quick-start-card:hover:not\(\.selected\),\r?\n\.live-session-button:hover:not\(\.selected\)/,
-    "selected quick start and live session rows must not use the unselected hover background",
+    /\.start-method-button:hover:not\(:disabled\)/,
+    "enabled start method rows should expose a hover state",
+  );
+  assert.match(
+    inlineStyle,
+    /\.start-method-button:disabled/,
+    "disabled start method rows should expose a disabled state",
   );
 });
 
-test("Launch wizard quick start is selected before footer submit", () => {
+test("Launch wizard renders start methods as direct actions", () => {
   assert.ok(
-    appSource.includes('kind: "select_quick_start"'),
-    "expected quick start rows to update wizard selection instead of launching inline",
+    appSource.includes('"Start methods"'),
+    "expected Launch Wizard to label the first section as Start methods",
   );
   assert.ok(
-    appSource.includes("selected_launch_path")
-      && appSource.includes("selected_quick_start_index")
-      && appSource.includes("primary_action_label"),
-    "expected frontend to render the backend-selected launch path and footer primary label",
+    appSource.includes("start_methods")
+      && appSource.includes('kind: "use_start_method"'),
+    "expected start method rows to dispatch direct backend actions",
+  );
+  assert.equal(
+    appSource.includes('"Quick start"'),
+    false,
+    "Launch Wizard must not expose the old Quick start heading",
+  );
+  assert.equal(
+    appSource.includes('kind: "select_quick_start"'),
+    false,
+    "start methods should not use the old selection-before-footer-submit model",
   );
   assert.equal(
     appSource.includes("quick-start-actions"),
     false,
-    "quick start rows should not render multiple inline action buttons",
+    "start methods should not render multiple inline action buttons",
   );
 });
 
