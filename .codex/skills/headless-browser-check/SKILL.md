@@ -68,3 +68,11 @@ not use it for CI-only Playwright runs or generic web app servers.
   the user required that exact port.
 - Keep user-facing status messages concise and in Japanese. Keep command names
   and log identifiers as-is.
+- **Never stop, kill, or ask the user to quit the user's production gwt /
+  `GWT.app` instance** (`/Applications/GWT.app`, any locally installed gwt
+  GUI, or any long-running `gwt` process the user did not launch in this
+  session). `gwt serve` is launched as a separate process from this skill;
+  let the production instance keep running. If a shared-state concern
+  arises (`~/.gwt/session.json`, `~/.gwt/app-instance.lock`, port
+  conflicts), point it out and let the user decide — never preempt that
+  decision by stopping their app.
