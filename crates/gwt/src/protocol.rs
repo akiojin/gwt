@@ -1970,7 +1970,7 @@ mod tests {
     use crate::{
         branch_list::{
             BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
-            BranchScope,
+            BranchResumeInfo, BranchScope,
         },
         persistence::{WindowGeometry, WindowState},
     };
@@ -2099,6 +2099,10 @@ mod tests {
                     blocked_reason: None,
                     risks: vec![BranchCleanupRisk::RemoteTracking],
                 },
+                resume: BranchResumeInfo {
+                    available: true,
+                    reason: None,
+                },
             }],
         };
 
@@ -2114,6 +2118,65 @@ mod tests {
             Value::String("origin/develop".to_string()),
             "expected branch entries payload to expose the actual merge target ref",
         );
+    }
+
+    #[test]
+    fn branch_entries_resume_availability_serializes_and_defaults() {
+        let legacy_entry = serde_json::from_value::<BranchListEntry>(serde_json::json!({
+            "name": "feature/no-session",
+            "scope": "local",
+            "is_head": false,
+            "upstream": null,
+            "ahead": 0,
+            "behind": 0,
+            "last_commit_date": null,
+            "cleanup_ready": false,
+            "cleanup": {
+                "availability": "blocked",
+                "execution_branch": null,
+                "merge_target": null,
+                "upstream": null,
+                "blocked_reason": "unknown",
+                "risks": []
+            }
+        }))
+        .expect("deserialize legacy branch entry without resume metadata");
+
+        assert_eq!(
+            legacy_entry.resume,
+            BranchResumeInfo {
+                available: false,
+                reason: Some("No resumable session".to_string()),
+            },
+            "legacy branch entries should default to a disabled Resume action",
+        );
+
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Hydrated,
+            entries: vec![BranchListEntry {
+                name: "feature/with-session".to_string(),
+                scope: BranchScope::Local,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup_ready: false,
+                cleanup: BranchCleanupInfo::default(),
+                resume: BranchResumeInfo {
+                    available: true,
+                    reason: None,
+                },
+            }],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        assert_eq!(
+            value["entries"][0]["resume"]["available"],
+            Value::Bool(true)
+        );
+        assert_eq!(value["entries"][0]["resume"]["reason"], Value::Null);
     }
 
     #[test]

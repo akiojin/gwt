@@ -73,6 +73,34 @@ function extractMediaBlocks(css, condition) {
   return out.join("\n");
 }
 
+function extractContainerBlocks(css, condition) {
+  const out = [];
+  const marker = `@container`;
+  let cursor = 0;
+  while (true) {
+    const at = css.indexOf(marker, cursor);
+    if (at < 0) break;
+    const headerEnd = css.indexOf("{", at);
+    if (headerEnd < 0) break;
+    const header = css.slice(at, headerEnd);
+    if (!header.includes(condition)) {
+      cursor = headerEnd + 1;
+      continue;
+    }
+    let depth = 1;
+    let i = headerEnd + 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      i += 1;
+    }
+    out.push(css.slice(headerEnd + 1, i - 1));
+    cursor = i;
+  }
+  return out.join("\n");
+}
+
 test("index.html declares Operator chrome scaffold", () => {
   for (const sel of [
     "#op-theme-toggle",
@@ -218,6 +246,70 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     appSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
+  );
+});
+
+test("Agent title role badges resolve runtime identity instead of generic presets", () => {
+  assert.match(
+    appSource,
+    /const\s+AGENT_ROLE_LABELS\s*=\s*Object\.freeze\(\{[\s\S]*claude:\s*"Claude Code"[\s\S]*codex:\s*"Codex"/,
+    "expected Agent role badges to map runtime ids to display names",
+  );
+  assert.match(
+    appSource,
+    /function\s+agentRoleLabel\(windowData\)[\s\S]+windowData\?\.agent_id[\s\S]+AGENT_ROLE_LABELS/,
+    "expected Agent role badge labels to resolve from window.agent_id",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+agentRoleLabel\(windowData\)/,
+    "expected titlebar and list role badges to share an Agent-aware label helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /window-role-badge"\)\.textContent\s*=\s*presetRoleLabel\(windowData\.preset\)/,
+    "titlebar role badge must not show the generic Agent preset label",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /window-list-role">\$\{presetRoleLabel\(entry\.preset\)\}/,
+    "window list role badge must not show the generic Agent preset label",
+  );
+});
+
+test("Non-Agent duplicate title role badges are omitted", () => {
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+windowDisplayTitle\(windowData\)[\s\S]+return\s+""/,
+    "expected duplicate role badges such as Branches / Branches to be suppressed",
+  );
+  assert.match(
+    appSource,
+    /function\s+setWindowRoleBadge\(badgeElement,\s*windowData\)[\s\S]+badgeElement\.hidden\s*=\s*!label/,
+    "expected titlebar role badge updates to hide empty labels",
+  );
+  assert.match(
+    inlineStyle,
+    /\.window-role-badge\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden role badges must stay hidden even though .window-role-badge uses inline-flex",
+  );
+});
+
+test("Agent fallback runtime titles still show Agent role badges", () => {
+  assert.match(
+    appSource,
+    /function\s+windowRoleBadgeLabel\(windowData\)[\s\S]+const\s+isAgentWindow\s*=\s*isAgentWindowPreset\(windowData\?\.preset\)/,
+    "expected duplicate suppression to distinguish Agent windows from static panels",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!isAgentWindow\s*&&\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "Agent role badges must remain visible when the fallback title is the same runtime name",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /if\s*\(!label\s*\|\|\s*label\s*===\s*displayTitle\)\s*return\s+""/,
+    "generic duplicate suppression must not hide Agent role badges",
   );
 });
 
@@ -388,16 +480,16 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
 });
 
-test("Launch Wizard live sessions render window runtime status", () => {
+test("Launch Wizard focus start method renders backend-provided running session detail", () => {
   assert.match(
     appSource,
-    /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
-    "expected live-session rows to label Running/Idle/Error from runtime_status",
+    /for\s*\(\s*const method of launchWizard\.start_methods \|\| \[\]\s*\)/,
+    "expected Launch Wizard to render backend-provided start methods",
   );
   assert.match(
     appSource,
-    /createNode\(\s*"div",\s*"live-session-status",\s*liveSessionStatusLabel\(session\),?\s*\)/,
-    "expected Launch Wizard live-session status copy to use runtime_status instead of active boolean copy",
+    /const detail = method\.enabled === false[\s\S]*?method\.disabled_reason[\s\S]*?: method\.detail;[\s\S]*?createNode\("div", "start-method-detail", detail\)/,
+    "expected running-session Focus details to come from the backend start method payload",
   );
 });
 
@@ -1206,31 +1298,91 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
-test("Branches toolbar exposes explicit Resume and Launch Agent actions for selected branch", () => {
+test("Branches separates row actions from cleanup toolbar action", () => {
+  const branchesBlock = appSource
+    .split('if (surface === "branches")')
+    .at(1)
+    ?.split('if (surface === "profile")')
+    .at(0);
+
+  assert.ok(branchesBlock, "expected Branches surface render block");
+  assert.match(branchesBlock, /<div class="branch-heading">Repository branches<\/div>/);
+  assert.doesNotMatch(
+    branchesBlock,
+    /double-click to launch/i,
+    "Branches heading should not explain the double-click shortcut",
+  );
+  assert.match(
+    branchesBlock,
+    /data-action="open-branch-cleanup"/,
+    "cleanup remains a toolbar-level selection action",
+  );
+  assert.doesNotMatch(
+    branchesBlock,
+    /data-action="open-branch-resume"|data-action="open-branch-launch"/,
+    "Resume and Launch must not remain toolbar-level selected-branch actions",
+  );
+
+  assert.match(appSource, /branch-row-actions/, "branch rows must render action buttons");
   assert.match(
     appSource,
-    /data-action="open-branch-resume"/,
-    "expected Branches toolbar to include an explicit Resume action",
+    /setAttribute\("data-branch-row-action",\s*"resume"\)/,
+    "branch rows must expose a row-level Resume action",
   );
   assert.match(
     appSource,
-    /data-action="open-branch-launch"/,
-    "expected Branches toolbar to include an explicit Launch Agent action",
+    /setAttribute\("data-branch-row-action",\s*"launch"\)/,
+    "branch rows must expose a row-level Launch action",
   );
   assert.match(
     appSource,
-    /selectedBranchName[\s\S]{0,360}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,360}?selectedBranchName/,
-    "expected Branches toolbar Resume action to resume the selected branch",
+    /entry\.resume\.available[\s\S]{0,500}?resumeButton\.disabled/,
+    "Resume row action must be disabled when the branch is not resumable",
   );
   assert.match(
     appSource,
-    /selectedBranchName[\s\S]{0,300}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,300}?selectedBranchName/,
-    "expected Branches toolbar Launch Agent action to send selectedBranchName",
+    /branchName[\s\S]{0,260}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,260}?branchName/,
+    "row Resume action must send its own branch name",
+  );
+  assert.match(
+    appSource,
+    /branchName[\s\S]{0,220}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,220}?branchName/,
+    "row Launch action must send its own branch name",
   );
   assert.match(
     appSource,
     /row\.addEventListener\("dblclick",\s*activate\)/,
-    "expected branch row double-click to keep Launch Agent activation",
+    "branch row double-click remains a Launch Agent shortcut",
+  );
+});
+
+test("Branches row layout responds to minimized window width", () => {
+  assert.match(
+    inlineStyle,
+    /\.branch-list-root\s*{[\s\S]*container-type:\s*inline-size/,
+    "Branches list must own an inline-size container so minimized app windows drive row layout",
+  );
+
+  const minimizedBranchBlock = extractContainerBlocks(inlineStyle, "max-width: 900px");
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-row\s*{[\s\S]*grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/,
+    "minimized Branches rows should keep branch text wide and reserve one actions column",
+  );
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-meta\s*{[\s\S]*grid-column:\s*2\s*\/\s*4[\s\S]*grid-row:\s*2/,
+    "minimized Branches rows should move metadata below the branch text instead of squeezing it",
+  );
+  assert.match(
+    minimizedBranchBlock,
+    /\.branch-row-actions\s*{[\s\S]*grid-column:\s*3[\s\S]*grid-row:\s*1/,
+    "minimized Branches rows should keep Resume/Launch aligned on the top row",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-upstream,\s*\n\.branch-date\s*{[\s\S]*white-space:\s*nowrap[\s\S]*text-overflow:\s*ellipsis/,
+    "branch upstream/date text should truncate instead of wrapping into vertical columns",
   );
 });
 
@@ -1321,6 +1473,28 @@ test("Launch wizard uses one visible dismiss control in the footer", () => {
     appSource,
     /wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\)/,
     "expected the footer dismiss button to own the close helper",
+  );
+});
+
+test("Launch wizard renders a backend-gated Back control in the footer", () => {
+  assert.ok(
+    document.getElementById("wizard-back-button"),
+    "Launch wizard footer must expose a Back button for returning to Start methods",
+  );
+  assert.match(
+    appSource,
+    /const wizardBackButton = document\.getElementById\("wizard-back-button"\)/,
+    "expected app.js to bind the footer Back button",
+  );
+  assert.match(
+    appSource,
+    /wizardBackButton\.hidden\s*=\s*!launchWizard\.show_back_button/,
+    "expected Back visibility to be controlled by backend view state",
+  );
+  assert.match(
+    appSource,
+    /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
+    "expected Back to dispatch the canonical backend action",
   );
 });
 
@@ -1444,7 +1618,7 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     appSource,
-    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showStartMethods = Boolean\([\s\S]*?launchWizard\.show_start_methods[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
     "expected showManualSetup to be initialized before Runtime confirmation setup gating",
   );
   assert.match(
@@ -1464,8 +1638,8 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     appSource,
-    /if\s*\(\s*!isRuntimeConfirmation\s*&&\s*\(\s*\(launchWizard\.quick_start_entries \|\| \[\]\)\.length > 0/,
-    "expected Quick Start selection rows to be hidden during Runtime confirmation",
+    /if\s*\(\s*showStartMethods\s*\)/,
+    "expected Start methods rows to be gated by backend start-method state",
   );
   assert.match(
     appSource,
@@ -1568,29 +1742,44 @@ test("Launch wizard renders centered split flow without backdrop dismissal", () 
   );
 });
 
-test("Launch wizard selected quick start hover preserves selected styling", () => {
+test("Launch wizard start methods keep disabled and hover states distinct", () => {
   assert.match(
     inlineStyle,
-    /\.quick-start-card:hover:not\(\.selected\),\r?\n\.live-session-button:hover:not\(\.selected\)/,
-    "selected quick start and live session rows must not use the unselected hover background",
+    /\.start-method-button:hover:not\(:disabled\)/,
+    "enabled start method rows should expose a hover state",
+  );
+  assert.match(
+    inlineStyle,
+    /\.start-method-button:disabled/,
+    "disabled start method rows should expose a disabled state",
   );
 });
 
-test("Launch wizard quick start is selected before footer submit", () => {
+test("Launch wizard renders start methods as direct actions", () => {
   assert.ok(
-    appSource.includes('kind: "select_quick_start"'),
-    "expected quick start rows to update wizard selection instead of launching inline",
+    appSource.includes('"Start methods"'),
+    "expected Launch Wizard to label the first section as Start methods",
   );
   assert.ok(
-    appSource.includes("selected_launch_path")
-      && appSource.includes("selected_quick_start_index")
-      && appSource.includes("primary_action_label"),
-    "expected frontend to render the backend-selected launch path and footer primary label",
+    appSource.includes("start_methods")
+      && appSource.includes("show_start_methods")
+      && appSource.includes('kind: "use_start_method"'),
+    "expected start method rows to dispatch direct backend actions",
+  );
+  assert.equal(
+    appSource.includes('"Quick start"'),
+    false,
+    "Launch Wizard must not expose the old Quick start heading",
+  );
+  assert.equal(
+    appSource.includes('kind: "select_quick_start"'),
+    false,
+    "start methods should not use the old selection-before-footer-submit model",
   );
   assert.equal(
     appSource.includes("quick-start-actions"),
     false,
-    "quick start rows should not render multiple inline action buttons",
+    "start methods should not render multiple inline action buttons",
   );
 });
 

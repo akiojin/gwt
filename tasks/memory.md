@@ -6026,6 +6026,13 @@ hook integration tests が `CODEX_THREAD_ID` / `GWT_SESSION_ID` /
 3. Codex payload の `session_id` を使う tests では placeholder の `agent-session` を避け、
    実 resume 可能 ID を表す別値を使う。
 
+## 2026-05-22 — SPEC section edit stdin must be validated before piping to gwtd
+
+Type: failure-pattern
+Context: While updating SPEC-2014 tasks, a malformed perl append command produced no stdout, but the downstream `gwtd issue spec 2014 --edit tasks -f -` still wrote an empty tasks section.
+Learning: Pipelines into section-edit commands can erase canonical SPEC content when the producer fails; pipefail alone is not enough if the consumer accepts empty stdin.
+Future Action: For `gwtd issue spec --edit <section> -f -`, first materialize or generate the new section content with a size/header check, then edit; after editing, immediately reread the section and verify nonzero size plus expected tail.
+
 ## 2026-05-22 — headless-browser-check はユーザーの production gwt / GWT.app を絶対に停止させない
 
 Type: lesson

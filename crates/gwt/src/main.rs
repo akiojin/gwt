@@ -1981,6 +1981,7 @@ mod tests {
                         last_commit_date: None,
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: None,
@@ -2008,6 +2009,7 @@ mod tests {
             last_commit_date: None,
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
+            resume: gwt::BranchResumeInfo::unavailable(),
         }
     }
 
@@ -4600,6 +4602,7 @@ mod tests {
                 last_commit_date: None,
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
+                resume: gwt::BranchResumeInfo::unavailable(),
             },
             BranchListEntry {
                 name: "develop".to_string(),
@@ -4611,6 +4614,7 @@ mod tests {
                 last_commit_date: None,
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
+                resume: gwt::BranchResumeInfo::unavailable(),
             },
         ];
         assert_eq!(
@@ -4628,6 +4632,7 @@ mod tests {
             last_commit_date: None,
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
+            resume: gwt::BranchResumeInfo::unavailable(),
         }];
         assert_eq!(
             super::preferred_issue_launch_branch(&head_only),

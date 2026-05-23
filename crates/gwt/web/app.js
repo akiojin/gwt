@@ -148,6 +148,7 @@
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
       const wizardError = document.getElementById("wizard-error");
+      const wizardBackButton = document.getElementById("wizard-back-button");
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const cloneProjectModal = document.getElementById("clone-project-modal");
@@ -1590,6 +1591,78 @@
         return labels[preset] || presetLabel(preset);
       }
 
+      const AGENT_ROLE_LABELS = Object.freeze({
+        claude: "Claude Code",
+        "claude-code": "Claude Code",
+        claudecode: "Claude Code",
+        "claude code": "Claude Code",
+        claude_code: "Claude Code",
+        codex: "Codex",
+        gemini: "Gemini CLI",
+        "gemini-cli": "Gemini CLI",
+        "gemini cli": "Gemini CLI",
+        gemini_cli: "Gemini CLI",
+        opencode: "OpenCode",
+        "open-code": "OpenCode",
+        open_code: "OpenCode",
+        openclaw: "OpenClaw",
+        "open-claw": "OpenClaw",
+        open_claw: "OpenClaw",
+        hermes: "Hermes Agent",
+        "hermes-agent": "Hermes Agent",
+        "hermes agent": "Hermes Agent",
+        hermes_agent: "Hermes Agent",
+        gh: "GitHub Copilot",
+        copilot: "GitHub Copilot",
+        "github-copilot": "GitHub Copilot",
+        "github copilot": "GitHub Copilot",
+        github_copilot: "GitHub Copilot",
+      });
+
+      const GENERIC_AGENT_ROLE_LABELS = new Set(["agent", "window"]);
+
+      function normalizedAgentRoleKey(value) {
+        return String(value || "").trim().toLowerCase();
+      }
+
+      function isGenericAgentRoleLabel(value) {
+        return GENERIC_AGENT_ROLE_LABELS.has(normalizedAgentRoleKey(value));
+      }
+
+      function isAgentWindowPreset(preset) {
+        return preset === "agent" || preset === "claude" || preset === "codex";
+      }
+
+      function agentRoleLabel(windowData) {
+        const agentIdLabel =
+          AGENT_ROLE_LABELS[normalizedAgentRoleKey(windowData?.agent_id)] || "";
+        if (agentIdLabel) return agentIdLabel;
+        const presetLabel =
+          AGENT_ROLE_LABELS[normalizedAgentRoleKey(windowData?.preset)] || "";
+        if (presetLabel) return presetLabel;
+        const launchTitle = String(windowData?.title || "").trim();
+        if (launchTitle && !isGenericAgentRoleLabel(launchTitle)) return launchTitle;
+        return "";
+      }
+
+      function windowRoleBadgeLabel(windowData) {
+        const displayTitle = windowDisplayTitle(windowData);
+        const isAgentWindow = isAgentWindowPreset(windowData?.preset);
+        const label = isAgentWindow
+          ? agentRoleLabel(windowData)
+          : presetRoleLabel(windowData?.preset || "");
+        if (!label) return "";
+        if (!isAgentWindow && label === displayTitle) return "";
+        return label;
+      }
+
+      function setWindowRoleBadge(badgeElement, windowData) {
+        if (!badgeElement) return;
+        const label = windowRoleBadgeLabel(windowData);
+        badgeElement.textContent = label;
+        badgeElement.hidden = !label;
+      }
+
       function shouldShowRuntimeStatus(windowData) {
         return presetSurface(windowData?.preset) === "terminal";
       }
@@ -1725,11 +1798,15 @@
                 <span class="status-label">${runtimeLabel}</span>
               </span>`
             : "";
+          const roleBadgeLabel = windowRoleBadgeLabel(entry);
+          const roleBadge = roleBadgeLabel
+            ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+            : "";
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
-                <span class="window-role-badge window-list-role">${presetRoleLabel(entry.preset)}</span>
+                ${roleBadge}
                 <span class="window-list-geometry">${geometryLabel}</span>
               </div>
             </div>
@@ -2995,15 +3072,6 @@
           return windowRuntimeLabel(runtimeState);
         }
         return agentStatusLabel(agent.status_category);
-      }
-
-      function liveSessionStatusLabel(session) {
-        const fallback = session.active ? "running" : "stopped";
-        const runtimeState = normalizeWindowRuntimeState(
-          session.runtime_status || fallback,
-          "agent",
-        );
-        return `${windowRuntimeLabel(runtimeState)} window`;
       }
 
       function focusActiveWorkAgentWindow(agent) {
@@ -7110,6 +7178,8 @@
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
           wizardSubmitButton.hidden = false;
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardCancelButton.textContent = "Cancel";
           wizardCancelButton.disabled = false;
           syncWizardDraftState();
@@ -7146,6 +7216,8 @@
             launchWizardOpenError.title === "Start Work"
               ? "Workspace launch"
               : "Launch Agent";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = false;
           wizardSubmitButton.hidden = true;
           wizardSubmitButton.disabled = true;
           wizardCancelButton.textContent = "Close";
@@ -7159,6 +7231,12 @@
         }
 
         wizardSubmitButton.hidden = false;
+        wizardBackButton.hidden = !launchWizard.show_back_button;
+        wizardBackButton.disabled = Boolean(
+          launchWizard.is_hydrating
+            || launchWizard.runtime_resolution_pending
+            || !launchWizard.show_back_button,
+        );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
@@ -7197,6 +7275,12 @@
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
         );
+        const showStartMethods = Boolean(
+          launchWizard.show_start_methods
+            && !isRuntimeConfirmation
+            && !launchWizard.runtime_resolution_pending
+            && (launchWizard.start_methods || []).length > 0,
+        );
         const showSetupForms = showManualSetup && !isRuntimeConfirmation;
         wizardBody.innerHTML = "";
         const wizardMain = createNode("div", "wizard-main");
@@ -7224,117 +7308,44 @@
           );
         }
 
-        if (!isRuntimeConfirmation && (
-          (launchWizard.quick_start_entries || []).length > 0 ||
-          (launchWizard.live_sessions || []).length > 0
-        )) {
+        if (showStartMethods) {
           const section = createLaunchSection(
-            "Quick start",
-            "Reuse a recent launch profile or jump to a running window.",
+            "Start methods",
+            "Choose how this agent should start on the selected branch.",
           );
 
-          if ((launchWizard.quick_start_entries || []).length > 0) {
-            const quickStartGrid = createNode("div", "quick-start-grid");
-            for (const entry of launchWizard.quick_start_entries) {
-              const card = createNode("button", "quick-start-card");
-              card.type = "button";
-              const selected =
-                launchWizard.selected_launch_path === "quick_start"
-                && launchWizard.selected_quick_start_index === entry.index;
-              card.setAttribute("aria-pressed", selected ? "true" : "false");
-              if (selected) {
-                card.classList.add("selected");
-              }
-              const head = createNode("div", "quick-start-head");
-              head.appendChild(
-                createNode("div", "quick-start-title", entry.tool_label),
-              );
-              head.appendChild(
-                createNode("div", "quick-start-meta", entry.summary),
-              );
-              if (entry.resume_session_id) {
-                head.appendChild(
-                  createNode(
-                    "div",
-                    "quick-start-secondary",
-                    `Resume ID · ${entry.resume_session_id}`,
-                  ),
-                );
-              }
-              card.appendChild(head);
-              card.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "select_quick_start",
-                  index: entry.index,
-                });
-              });
-              quickStartGrid.appendChild(card);
+          const methodList = createNode("div", "start-method-list");
+          for (const method of launchWizard.start_methods || []) {
+            const button = createNode("button", "start-method-button");
+            button.type = "button";
+            button.disabled = method.enabled === false;
+            const head = createNode("div", "start-method-head");
+            head.appendChild(createNode("div", "start-method-title", method.label));
+            if (method.badge) {
+              head.appendChild(createNode("div", "start-method-badge", method.badge));
             }
-            section.appendChild(quickStartGrid);
-          }
-
-          if ((launchWizard.live_sessions || []).length > 0) {
-            const liveSection = createNode("div", "live-session-list");
-            for (const session of launchWizard.live_sessions) {
-              const button = createNode("button", "live-session-button");
-              button.type = "button";
-              const selected =
-                launchWizard.selected_launch_path === "focus_session"
-                && launchWizard.selected_live_session_index === session.index;
-              button.setAttribute("aria-pressed", selected ? "true" : "false");
-              if (selected) {
-                button.classList.add("selected");
-              }
-              button.appendChild(
-                createNode("div", "live-session-name", session.name),
-              );
-              button.appendChild(
-                createNode(
-                  "div",
-                  "live-session-status",
-                  liveSessionStatusLabel(session),
-                ),
-              );
-              if (session.detail) {
-                button.appendChild(
-                  createNode("div", "live-session-detail", session.detail),
-                );
-              }
-              button.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "select_live_session",
-                  index: session.index,
-                });
-              });
-              liveSection.appendChild(button);
+            button.appendChild(head);
+            button.appendChild(
+              createNode("div", "start-method-summary", method.summary || ""),
+            );
+            const detail = method.enabled === false
+              ? method.disabled_reason
+              : method.detail;
+            if (detail) {
+              button.appendChild(createNode("div", "start-method-detail", detail));
             }
-            section.appendChild(liveSection);
-          }
-
-          const manualButton = createNode("button", "quick-start-card manual");
-          manualButton.type = "button";
-          const manualSelected = launchWizard.selected_launch_path === "manual_setup";
-          manualButton.setAttribute("aria-pressed", manualSelected ? "true" : "false");
-          if (manualSelected) {
-            manualButton.classList.add("selected");
-          }
-          const manualHead = createNode("div", "quick-start-head");
-          manualHead.appendChild(createNode("div", "quick-start-title", "Configure launch"));
-          manualHead.appendChild(
-            createNode(
-              "div",
-              "quick-start-meta",
-              "Choose branch, agent, model, and runtime.",
-            ),
-          );
-          manualButton.appendChild(manualHead);
-          manualButton.addEventListener("click", () => {
-            sendWizardAction({
-              kind: "set_launch_path",
-              path: "manual_setup",
+            button.addEventListener("click", () => {
+              if (button.disabled) {
+                return;
+              }
+              sendWizardAction({
+                kind: "use_start_method",
+                method: method.kind,
+              });
             });
-          });
-          section.appendChild(manualButton);
+            methodList.appendChild(button);
+          }
+          section.appendChild(methodList);
 
           panel.appendChild(section);
         }
@@ -7883,6 +7894,27 @@
         meta.appendChild(summary);
         row.appendChild(meta);
 
+        const actions = document.createElement("div");
+        actions.className = "branch-row-actions";
+        actions.addEventListener("click", (event) => event.stopPropagation());
+        actions.addEventListener("dblclick", (event) => event.stopPropagation());
+
+        const resumeButton = document.createElement("button");
+        resumeButton.type = "button";
+        resumeButton.className = "branch-row-action";
+        resumeButton.textContent = "Resume";
+        resumeButton.setAttribute("data-branch-row-action", "resume");
+        actions.appendChild(resumeButton);
+
+        const launchButton = document.createElement("button");
+        launchButton.type = "button";
+        launchButton.className = "branch-row-action primary";
+        launchButton.textContent = "Launch";
+        launchButton.setAttribute("data-branch-row-action", "launch");
+        actions.appendChild(launchButton);
+
+        row.appendChild(actions);
+
         row._fields = {
           toggle,
           main,
@@ -7895,6 +7927,9 @@
           scope,
           cleanupBadge,
           summary,
+          actions,
+          resumeButton,
+          launchButton,
         };
 
         const select = () => {
@@ -7911,6 +7946,24 @@
             branch_name: branchName,
           });
         };
+        const resume = () => {
+          select();
+          send({
+            kind: "resume_branch_latest_agent",
+            id: windowId,
+            branch_name: branchName,
+            bounds: visibleBounds(),
+          });
+        };
+        resumeButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (resumeButton.disabled) return;
+          resume();
+        });
+        launchButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          activate();
+        });
         row.addEventListener("click", select);
         row.addEventListener("dblclick", activate);
         // SPEC-2356 — keyboard activation parity:
@@ -7981,6 +8034,21 @@
         fields.cleanupBadge.textContent = cleanupBadgeText(entry, state);
         fields.summary.textContent =
           entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced";
+
+        const resumeAvailable = entry.resume && entry.resume.available;
+        const resumeReason = entry.resume?.reason || "No resumable session";
+        fields.resumeButton.disabled = !resumeAvailable;
+        fields.resumeButton.title = resumeAvailable
+          ? `Resume latest agent on ${entry.name}`
+          : resumeReason;
+        fields.resumeButton.setAttribute(
+          "aria-label",
+          resumeAvailable
+            ? `Resume latest agent on ${entry.name}`
+            : `Resume unavailable for ${entry.name}: ${resumeReason}`,
+        );
+        fields.launchButton.title = `Launch Agent on ${entry.name}`;
+        fields.launchButton.setAttribute("aria-label", `Launch Agent on ${entry.name}`);
       }
 
       function setBranchListPlaceholder(list, text) {
@@ -8009,8 +8077,6 @@
         syncBranchSelectionState(state);
         const list = element.querySelector(".branch-list");
         const notice = element.querySelector(".branch-notice");
-        const resumeButton = element.querySelector("[data-action='open-branch-resume']");
-        const launchButton = element.querySelector("[data-action='open-branch-launch']");
         const cleanupButton = element.querySelector("[data-action='open-branch-cleanup']");
         if (!list) {
           return;
@@ -8018,12 +8084,6 @@
 
         for (const button of element.querySelectorAll("[data-branch-filter]")) {
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
-        }
-        if (resumeButton) {
-          resumeButton.disabled = !state.selectedBranchName;
-        }
-        if (launchButton) {
-          launchButton.disabled = !state.selectedBranchName;
         }
         if (cleanupButton) {
           const selectedCount = selectedBranchCleanupEntries(windowId).length;
@@ -9189,7 +9249,7 @@
             <div class="branch-list-root">
               <div class="branch-toolbar workspace-toolbar is-stacked">
                 <div class="branch-toolbar-main workspace-toolbar-main">
-                  <div class="branch-heading">Repository branches · double-click to launch</div>
+                  <div class="branch-heading">Repository branches</div>
                   <div class="branch-filter-group">
                     <button class="branch-filter-button" type="button" data-branch-filter="local">Local</button>
                     <button class="branch-filter-button" type="button" data-branch-filter="remote">Remote</button>
@@ -9197,9 +9257,9 @@
                   </div>
                 </div>
                 <div class="branch-toolbar-actions workspace-toolbar-actions">
-                  <button class="wizard-button branch-resume-trigger" type="button" data-action="open-branch-resume" disabled>Resume</button>
-                  <button class="wizard-button primary branch-launch-trigger" type="button" data-action="open-branch-launch" disabled>Launch Agent</button>
-                  <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
+                  <div class="branch-selection-actions">
+                    <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
+                  </div>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
               </div>
@@ -9235,39 +9295,6 @@
               frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
-          body
-            .querySelector("[data-action='open-branch-resume']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-                windowData.id,
-              );
-              if (!state.selectedBranchName) {
-                return;
-              }
-              send({
-                kind: "resume_branch_latest_agent",
-                id: windowData.id,
-                branch_name: state.selectedBranchName,
-                bounds: visibleBounds(),
-              });
-            });
-          body
-            .querySelector("[data-action='open-branch-launch']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-                windowData.id,
-              );
-              if (!state.selectedBranchName) {
-                return;
-              }
-              send({
-                kind: "open_launch_wizard",
-                id: windowData.id,
-                branch_name: state.selectedBranchName,
-              });
-            });
           body
             .querySelector("[data-action='open-branch-cleanup']")
             .addEventListener("click", (event) => {
@@ -10662,7 +10689,7 @@
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
-        element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
+        setWindowRoleBadge(element.querySelector(".window-role-badge"), windowData);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
@@ -12559,6 +12586,13 @@
         }
       });
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
+      wizardBackButton.addEventListener("click", () => {
+        if (launchWizardOpenError || wizardBackButton.disabled) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        frontendUnits.launchWizardSurface.sendAction({ kind: "back" });
+      });
       wizardSubmitButton.addEventListener("click", () => {
         if (launchWizardOpenError) {
           return;

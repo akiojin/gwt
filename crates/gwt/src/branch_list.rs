@@ -66,6 +66,34 @@ pub enum BranchScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchResumeInfo {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+impl BranchResumeInfo {
+    pub fn available() -> Self {
+        Self {
+            available: true,
+            reason: None,
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            reason: Some("No resumable session".to_string()),
+        }
+    }
+}
+
+impl Default for BranchResumeInfo {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchListEntry {
     pub name: String,
     pub scope: BranchScope,
@@ -77,6 +105,8 @@ pub struct BranchListEntry {
     #[serde(default)]
     pub cleanup_ready: bool,
     pub cleanup: BranchCleanupInfo,
+    #[serde(default)]
+    pub resume: BranchResumeInfo,
 }
 
 pub fn list_branch_entries(repo_path: &Path) -> std::io::Result<Vec<BranchListEntry>> {
@@ -161,6 +191,7 @@ fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry
             last_commit_date: branch.last_commit_date,
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
         })
         .collect();
 
@@ -622,6 +653,7 @@ mod tests {
             last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
