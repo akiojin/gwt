@@ -63,14 +63,15 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
-    normalize_branch_name, preferred_issue_launch_branch, resolve_launch_worktree,
-    resolve_shell_launch_worktree, synthetic_branch_entry, workspace_projection_for_current_resume,
+    normalize_branch_name, preferred_issue_launch_branch, resolve_shell_launch_worktree,
+    synthetic_branch_entry, workspace_projection_for_current_resume,
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
     workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
     IssueLaunchWizardPrepared, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
     WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
+use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
     pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
@@ -1074,7 +1075,7 @@ impl AppRuntime {
                 let proxy = self.proxy.clone();
                 session
                     .wizard
-                    .mark_runtime_resolution_pending("Preparing worktree...");
+                    .mark_runtime_resolution_pending("Preparing runtime context...");
                 thread::spawn(move || {
                     let result = resolve_launch_wizard_runtime_context_hydration(
                         &project_root,
@@ -1194,42 +1195,45 @@ impl AppRuntime {
 
 fn resolve_launch_wizard_runtime_context_hydration(
     project_root: &Path,
-    mut config: LaunchWizardLaunchRequest,
+    _config: LaunchWizardLaunchRequest,
     branch_name: String,
     cache: LaunchWizardMemoryCache,
 ) -> Result<LaunchWizardHydration, String> {
-    let worktree_path = match &mut config {
-        LaunchWizardLaunchRequest::Agent(config) => {
-            resolve_launch_worktree(project_root, config)?;
-            config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| project_root.to_path_buf())
-        }
-        LaunchWizardLaunchRequest::Shell(config) => {
-            resolve_shell_launch_worktree(project_root, config)?;
-            config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| project_root.to_path_buf())
-        }
-    };
-    let quick_start_entries = cache.quick_start_entries(&worktree_path, &branch_name);
-    let previous_profiles = cache.previous_profiles(&worktree_path);
+    let (context_path, resolved_worktree_path) =
+        launch_runtime_context_paths(project_root, &branch_name);
+    let quick_start_entries = cache.quick_start_entries(&context_path, &branch_name);
+    let previous_profiles = cache.previous_profiles(&context_path);
     let agent_options = cache.agent_options();
     let (docker_context, docker_service_status) =
-        detect_wizard_docker_context_and_status(&worktree_path);
+        detect_wizard_docker_context_and_status(&context_path);
     Ok(LaunchWizardHydration {
         selected_branch: None,
         normalized_branch_name: branch_name,
-        worktree_path: Some(worktree_path.clone()),
-        quick_start_root: worktree_path,
+        worktree_path: resolved_worktree_path,
+        quick_start_root: context_path,
         docker_context,
         docker_service_status,
         agent_options,
         quick_start_entries,
         previous_profiles: Some(previous_profiles),
     })
+}
+
+fn launch_runtime_context_paths(
+    project_root: &Path,
+    branch_name: &str,
+) -> (PathBuf, Option<PathBuf>) {
+    if let Some(worktree_path) = existing_launch_worktree_path(project_root, branch_name) {
+        return (worktree_path.clone(), Some(worktree_path));
+    }
+    (project_root.to_path_buf(), None)
+}
+
+fn existing_launch_worktree_path(project_root: &Path, branch_name: &str) -> Option<PathBuf> {
+    let main_repo_path = gwt_git::worktree::main_worktree_root(project_root).ok()?;
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().ok()?;
+    usable_worktree_path_for_branch(&worktrees, branch_name)
 }
 
 impl AppRuntime {

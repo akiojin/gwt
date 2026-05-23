@@ -82,6 +82,28 @@ fn frontend_event_rebuild_index_cell_deserializes_with_all_scopes() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+
+    let discussions = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "rebuild_index_cell",
+        "project_root": "/abs/repo",
+        "scope": "discussions"
+    }))
+    .expect("rebuild_index_cell scope=discussions should deserialize");
+    match discussions {
+        FrontendEvent::RebuildIndexCell {
+            project_root,
+            scope,
+            worktree_hash,
+        } => {
+            assert_eq!(project_root, "/abs/repo");
+            assert_eq!(scope, IndexRebuildScope::Discussions);
+            assert_eq!(
+                worktree_hash, None,
+                "discussions is repo-scoped, worktree_hash must not be required"
+            );
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }
 
 #[test]
@@ -91,5 +113,12 @@ fn index_rebuild_scope_memory_metadata_matches_repo_scoped_contract() {
     assert!(
         !scope.requires_worktree_hash(),
         "memory is repo-scoped — rebuild cell must not require worktree_hash"
+    );
+
+    let scope = IndexRebuildScope::Discussions;
+    assert_eq!(scope.label(), "discussions");
+    assert!(
+        !scope.requires_worktree_hash(),
+        "discussions is repo-scoped — rebuild cell must not require worktree_hash"
     );
 }

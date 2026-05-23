@@ -92,6 +92,7 @@ pub struct ProjectIndexSearchRequest<'a> {
     pub(crate) request_id: u64,
     pub(crate) scopes: Vec<gwt::IndexSearchScope>,
     pub(crate) worktree_hash: Option<String>,
+    pub(crate) match_mode: gwt::IndexSearchMatchMode,
 }
 
 struct KnowledgeRefreshTask {
@@ -122,6 +123,7 @@ struct ProjectIndexSearchTask {
     request_id: u64,
     scopes: Vec<gwt::IndexSearchScope>,
     worktree_hash: Option<String>,
+    match_mode: gwt::IndexSearchMatchMode,
 }
 
 pub struct WindowRuntime {
@@ -1140,6 +1142,12 @@ impl LaunchWizardMemoryCache {
             .iter()
             .find(|session| session.id == entry.session_id)
             .cloned()
+    }
+
+    fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)
     }
 
     fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
@@ -2691,7 +2699,7 @@ impl AppRuntime {
             tabs,
             active_tab_id,
             recent_projects: prune_missing_recent_projects(dedupe_recent_projects(
-                persisted.recent_projects,
+                normalize_recent_projects(persisted.recent_projects),
             )),
             profile_selections: HashMap::new(),
             profile_config_path: None,
@@ -3139,6 +3147,7 @@ impl AppRuntime {
                 request_id,
                 scopes,
                 worktree_hash,
+                match_mode,
             } => self.search_project_index_events(
                 &client_id,
                 ProjectIndexSearchRequest {
@@ -3147,6 +3156,7 @@ impl AppRuntime {
                     request_id,
                     scopes,
                     worktree_hash,
+                    match_mode,
                 },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -4226,14 +4236,24 @@ impl AppRuntime {
     }
 
     /// SPEC-1934 FR-019: user accepted the migration confirmation modal.
+    ///
+    /// Issue #2867: Recent Projects は同一プロジェクトの worktree で埋め尽く
+    /// されないよう、`target.project_root` を workspace home に正規化してから
+    /// 登録する。タブ open 時の direct-pick semantics は `target` 側で保持。
     pub(crate) fn remember_recent_project(&mut self, target: &ProjectOpenTarget) {
+        let recent_path = normalize_recent_project_path(&target.project_root);
+        let recent_title = if recent_path == target.project_root {
+            target.title.clone()
+        } else {
+            gwt::project_title_from_path(&recent_path)
+        };
         self.recent_projects
-            .retain(|entry| !same_worktree_path(&entry.path, &target.project_root));
+            .retain(|entry| !same_worktree_path(&entry.path, &recent_path));
         self.recent_projects.insert(
             0,
             gwt::RecentProjectEntry {
-                path: target.project_root.clone(),
-                title: target.title.clone(),
+                path: recent_path,
+                title: recent_title,
                 kind: target.kind,
             },
         );
@@ -4823,6 +4843,7 @@ impl AppRuntime {
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
+            self.launch_wizard_cache.sessions.clone(),
         );
         Vec::new()
     }
@@ -5539,6 +5560,7 @@ impl AppRuntime {
             request_id: request.request_id,
             scopes: request.scopes,
             worktree_hash: request.worktree_hash,
+            match_mode: request.match_mode,
         });
         Vec::new()
     }
@@ -5552,6 +5574,7 @@ impl AppRuntime {
             request_id,
             scopes,
             worktree_hash,
+            match_mode,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
@@ -5560,12 +5583,14 @@ impl AppRuntime {
                 &query,
                 &scopes,
                 worktree_hash.as_deref(),
+                match_mode,
             ) {
-                Ok(results) => BackendEvent::ProjectIndexSearchResults {
+                Ok(outcome) => BackendEvent::ProjectIndexSearchResults {
                     id: id.clone(),
                     query: query.clone(),
                     request_id,
-                    results,
+                    results: outcome.results,
+                    suggestions: outcome.suggestions,
                 },
                 Err(error) => BackendEvent::ProjectIndexSearchError {
                     id: id.clone(),
@@ -6076,7 +6101,22 @@ impl AppRuntime {
                     .unwrap_or(WindowProcessStatus::Running),
             })
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.sort_by(|left, right| {
+            match (
+                self.launch_wizard_cache.session_by_id(&left.session_id),
+                self.launch_wizard_cache.session_by_id(&right.session_id),
+            ) {
+                (Some(left_session), Some(right_session)) => right_session
+                    .last_activity_at
+                    .cmp(&left_session.last_activity_at)
+                    .then_with(|| right_session.updated_at.cmp(&left_session.updated_at))
+                    .then_with(|| right_session.created_at.cmp(&left_session.created_at))
+                    .then_with(|| right_session.id.cmp(&left_session.id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left.name.cmp(&right.name),
+            }
+        });
         entries
     }
 
@@ -6578,6 +6618,9 @@ impl AppRuntime {
                 .workspace
                 .set_purpose_title(&window.id, Some(purpose_title));
         }
+        let _ = tab
+            .workspace
+            .set_agent_id(&window.id, config.agent_id.command().to_string());
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
@@ -7407,7 +7450,8 @@ impl AppRuntime {
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "quick_start",
             gwt::LaunchWizardAction::SetLaunchPath { .. }
             | gwt::LaunchWizardAction::SelectQuickStart { .. }
-            | gwt::LaunchWizardAction::SelectLiveSession { .. } => "launch_path_select",
+            | gwt::LaunchWizardAction::SelectLiveSession { .. }
+            | gwt::LaunchWizardAction::UseStartMethod { .. } => "launch_path_select",
             gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
@@ -7423,6 +7467,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::Cancel => "cancel",
             gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
             gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+            gwt::LaunchWizardAction::UseStartMethod { .. } => "use_start_method",
             gwt::LaunchWizardAction::SetLaunchPath { .. } => "set_launch_path",
             gwt::LaunchWizardAction::SelectQuickStart { .. } => "select_quick_start",
             gwt::LaunchWizardAction::SelectLiveSession { .. } => "select_live_session",
@@ -8963,6 +9008,7 @@ exit 1
                         last_commit_date: None,
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: None,
@@ -9076,6 +9122,7 @@ exit 1
                         last_commit_date: None,
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: Some(project_root.to_path_buf()),
@@ -9858,6 +9905,95 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+        fs::write(
+            repo.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+        run_git(&repo, &["add", "docker-compose.yml"]);
+        run_git(&repo, &["commit", "-qm", "add compose"]);
+        run_git(&repo, &["push", "origin", "develop"]);
+
+        let branch_name = "work/runtime-deferral";
+        let expected_worktree = gwt_git::worktree::sibling_worktree_path(&repo, branch_name);
+        assert!(
+            !expected_worktree.exists(),
+            "fixture branch worktree should start absent"
+        );
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, branch_name, None, None)
+            .expect("open launch wizard");
+
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert_eq!(
+            pending_view.runtime_resolution_message.as_deref(),
+            Some("Preparing runtime context...")
+        );
+
+        wait_for_recorded_event(
+            "launch wizard runtime deferral",
+            &recorded_events,
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            },
+        );
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
+
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(
+            wizard.context.worktree_path.is_none(),
+            "runtime confirmation should not resolve a newly-created target worktree"
+        );
+        assert!(
+            !expected_worktree.exists(),
+            "Runtime confirmation must not create {expected_worktree:?}"
+        );
+        let view = wizard.view();
+        assert!(!view.runtime_resolution_pending);
+        assert!(view.runtime_context_resolved);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
     fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker_context() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -9994,9 +10130,25 @@ exit 1
             .view();
         assert_eq!(view.mode, gwt::LaunchWizardMode::Branch);
         assert_eq!(view.branch_name, "work/20260504-1234");
-        assert!(view.show_branch_controls);
+        assert!(view.show_start_methods);
+        assert!(!view.show_branch_controls);
         assert_eq!(view.live_sessions.len(), 1);
         assert_eq!(view.live_sessions[0].name, "Codex");
+
+        let _ = runtime.handle_launch_wizard_action(
+            gwt::LaunchWizardAction::UseStartMethod {
+                method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+            },
+            None,
+        );
+        let configured_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("configured active work launch wizard")
+            .wizard
+            .view();
+        assert!(!configured_view.show_start_methods);
+        assert!(configured_view.show_branch_controls);
     }
 
     #[test]
@@ -11575,7 +11727,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_open_launch_wizard_shows_multiple_resume_candidates_latest_first() {
+    fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -11595,6 +11747,18 @@ exit 1
             session.created_at = session.last_activity_at;
             session.save(&sessions_dir).expect("save session");
         }
+        for (session_id, hour) in [("session-live-older", 11), ("session-live-newer", 12)] {
+            let mut session =
+                gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
+            session.id = session_id.to_string();
+            session.agent_session_id = None;
+            session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+            session.updated_at = session.last_activity_at;
+            session.created_at = session.last_activity_at;
+            session
+                .save(&sessions_dir)
+                .expect("save live session metadata");
+        }
 
         let tab = sample_project_tab_with_window_at(
             "tab-1",
@@ -11605,6 +11769,26 @@ exit 1
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "branches-1");
+        for (window, session, display) in [
+            ("agent-older", "session-live-older", "Codex Older"),
+            ("agent-newer", "session-live-newer", "Codex Newer"),
+        ] {
+            let agent_window_id = combined_window_id("tab-1", window);
+            runtime.active_agent_sessions.insert(
+                agent_window_id.clone(),
+                ActiveAgentSession {
+                    window_id: agent_window_id,
+                    session_id: session.to_string(),
+                    agent_id: "codex".to_string(),
+                    branch_name: "work/manual-resume".to_string(),
+                    display_name: display.to_string(),
+                    worktree_path: PathBuf::from("/tmp/repo"),
+                    agent_project_root: "/tmp/repo".to_string(),
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                    tab_id: "tab-1".to_string(),
+                },
+            );
+        }
 
         runtime.handle_frontend_event(
             "client-1".to_string(),
@@ -11626,7 +11810,29 @@ exit 1
                 .iter()
                 .map(|entry| entry.resume_session_id.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("native-newer"), Some("native-older")]
+            vec![Some("native-newer")]
+        );
+        let continue_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue method");
+        assert!(
+            continue_method
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("native-newer"),
+            "continue method should describe the latest resumable session"
+        );
+        let focus_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "focus_running_session")
+            .expect("focus method");
+        assert!(
+            focus_method.summary.contains("Codex Newer"),
+            "focus method should target the latest live session"
         );
     }
 
@@ -14487,6 +14693,7 @@ exit 1
                 gwt::IndexSearchScope::FilesDocs,
             ],
             worktree_hash: Some("worktree-hash".to_string()),
+            match_mode: gwt::IndexSearchMatchMode::AllTerms,
         })
         .expect("project index search user action log");
 
@@ -15310,6 +15517,48 @@ exit 1
             Some("SPEC: Workspace purpose titles")
         );
         assert_eq!(agent_window.title, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+
+        let events = runtime
+            .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+            .expect("spawn agent window");
+
+        let workspace = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::WorkspaceState { workspace } => Some(workspace),
+                _ => None,
+            })
+            .expect("initial WorkspaceState broadcast");
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-1")
+            .expect("tab in WorkspaceState");
+        let agent_window = tab
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.preset == WindowPreset::Agent)
+            .expect("agent window in WorkspaceState");
+
+        assert_eq!(agent_window.title, "Claude Code");
+        assert_eq!(agent_window.agent_id.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -17257,6 +17506,137 @@ exit 1
                 event: BackendEvent::WorkspaceState { .. },
             }
         )));
+    }
+
+    #[test]
+    fn open_project_path_for_worktree_remembers_workspace_home_only() {
+        // Issue #2867: open_project_path で worktree path を渡したとき、tab は
+        // worktree で開く (direct-pick) が、recent_projects は workspace home
+        // (bare repo の親) に正規化されて 1 件だけ残る。同じ workspace の
+        // 別 worktree を続けて開いても recent_projects は増えない。
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        fs::create_dir_all(&workspace_home).expect("workspace home");
+        let output = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().expect("bare path")])
+            .output()
+            .expect("git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bootstrap = workspace_home.join(".bootstrap");
+        let clone = gwt_core::process::hidden_command("git")
+            .args([
+                "clone",
+                bare_repo.to_str().unwrap(),
+                bootstrap.to_str().unwrap(),
+            ])
+            .output()
+            .expect("git clone");
+        assert!(clone.status.success(), "git clone failed");
+        for (key, value) in [
+            ("user.email", "test@example.com"),
+            ("user.name", "Test User"),
+        ] {
+            let cfg = gwt_core::process::hidden_command("git")
+                .args(["config", key, value])
+                .current_dir(&bootstrap)
+                .output()
+                .expect("git config");
+            assert!(cfg.status.success(), "git config {key} failed");
+        }
+        for args in [
+            vec!["checkout", "-b", "develop"],
+            vec!["commit", "--allow-empty", "-m", "init"],
+            vec!["push", "origin", "develop"],
+        ] {
+            let out = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&bootstrap)
+                .output()
+                .expect("git command");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+
+        let develop_worktree = workspace_home.join("develop");
+        let feature_worktree = workspace_home.join("feature/alpha");
+        for (path, branch_args) in [
+            (
+                &develop_worktree,
+                vec!["worktree", "add", "@PATH@", "develop"],
+            ),
+            (
+                &feature_worktree,
+                vec![
+                    "worktree",
+                    "add",
+                    "-b",
+                    "feature/alpha",
+                    "@PATH@",
+                    "develop",
+                ],
+            ),
+        ] {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("worktree parent");
+            }
+            let path_str = path.to_str().unwrap().to_string();
+            let resolved: Vec<&str> = branch_args
+                .iter()
+                .map(|a| {
+                    if *a == "@PATH@" {
+                        path_str.as_str()
+                    } else {
+                        *a
+                    }
+                })
+                .collect();
+            let out = gwt_core::process::hidden_command("git")
+                .args(&resolved)
+                .current_dir(&bare_repo)
+                .output()
+                .expect("git worktree add");
+            assert!(
+                out.status.success(),
+                "git {resolved:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let canonical_home = dunce::canonicalize(&workspace_home).unwrap();
+
+        runtime
+            .open_project_path(develop_worktree.clone())
+            .expect("open develop worktree");
+        assert_eq!(runtime.tabs.len(), 1);
+        assert_eq!(
+            runtime.tabs[0].project_root,
+            dunce::canonicalize(&develop_worktree).unwrap(),
+            "tab must open at the chosen worktree (SC-035 direct-pick preserved)"
+        );
+        assert_eq!(runtime.recent_projects.len(), 1);
+        assert_eq!(
+            runtime.recent_projects[0].path, canonical_home,
+            "recent_projects must collapse to workspace home, not worktree path (Issue #2867)"
+        );
+
+        runtime
+            .open_project_path(feature_worktree.clone())
+            .expect("open feature worktree");
+        assert_eq!(
+            runtime.recent_projects.len(),
+            1,
+            "opening another worktree in the same workspace must not add a new recent entry"
+        );
+        assert_eq!(
+            runtime.recent_projects[0].path, canonical_home,
+            "second worktree open must keep workspace home as the canonical recent entry"
+        );
     }
 
     #[test]

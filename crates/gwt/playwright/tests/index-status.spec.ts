@@ -372,6 +372,105 @@ test.describe("Project Index status surface", () => {
     await expect(animatedDot).toHaveCSS("animation-name", /index-search-loading/);
   });
 
+  test("Index window Search all-terms mode separates strict results and suggestions", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        specs: { healthy: true, repair_required: false, document_count: 774 },
+        discussions: { healthy: true, repair_required: false, document_count: 91 },
+      },
+      worktrees: {},
+    });
+
+    await page.goto(APP_URL);
+    const { root } = await openIndexSearchPanel(page);
+    await expect(root.locator(".index-search-input")).toHaveAttribute(
+      "placeholder",
+      "Search by meaning, e.g. workspace lifecycle",
+    );
+    await root.locator("[data-match-mode='all_terms']").click();
+    await expect(root.locator(".index-search-input")).toHaveAttribute(
+      "placeholder",
+      "All terms required, e.g. Workspace discussion",
+    );
+    await root.locator(".index-search-input").fill("Workspace volatile");
+    await root.locator(".index-run-button").click();
+
+    const request = await page.waitForFunction(() => {
+      const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
+      return sends
+        .map((raw) => {
+          try {
+            return JSON.parse(raw);
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter((m) => m && m.kind === "search_project_index")
+        .pop();
+    });
+    const requestPayload = await request.jsonValue();
+    expect(requestPayload).toMatchObject({
+      kind: "search_project_index",
+      match_mode: "all_terms",
+      query: "Workspace volatile",
+    });
+
+    await page.evaluate((payload) => {
+      window.__gwtFixtureWebSocket.emit(payload);
+    }, {
+      kind: "project_index_search_results",
+      project_root: "/fixture",
+      id: requestPayload.id,
+      request_id: requestPayload.request_id,
+      query: requestPayload.query,
+      scope: "all",
+      results: [
+        {
+          scope: "specs",
+          title: "Workspace volatility decision",
+          subtitle: "SPEC #1939",
+          preview: "Workspace is current state; Work is durable.",
+          distance: 0.08,
+          match_mode: "all_terms",
+          matched_terms: ["Workspace", "volatile"],
+          missing_terms: [],
+        },
+      ],
+      suggestions: [
+        {
+          scope: "discussions",
+          title: "Workspace naming discussion",
+          subtitle: "discussion",
+          preview: "Workspace was confusing and Work may be a better durable unit.",
+          distance: 0.18,
+          match_mode: "all_terms",
+          matched_terms: ["Workspace"],
+          missing_terms: ["volatile"],
+        },
+      ],
+    });
+
+    await expect(root.locator(".index-search-status")).toContainText(
+      "1 strict results · 1 semantic suggestions",
+    );
+    await expect(root.locator(".index-result-group-label").first()).toContainText("Strict results");
+    await expect(root.locator(".index-result-row").first()).toContainText(
+      "Workspace volatility decision",
+    );
+    await expect(root.locator(".index-result-row.is-suggestion")).toContainText(
+      "Workspace naming discussion",
+    );
+    await expect(root.locator(".index-result-row.is-suggestion")).toContainText(
+      "Matched: Workspace",
+    );
+    await root.locator(".index-result-row.is-suggestion").click();
+    await expect(root.locator(".index-detail-meta", { hasText: "Missing: volatile" })).toBeVisible();
+  });
+
   test("Index window Health per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
     page,
   }) => {

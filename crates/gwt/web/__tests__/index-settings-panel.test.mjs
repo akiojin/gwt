@@ -48,6 +48,12 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
           document_count: 5,
           reason: "count_mismatch",
         },
+        discussions: {
+          healthy: true,
+          document_count: 8,
+          repair_required: false,
+          reason: "ready",
+        },
         board: { healthy: true, document_count: 21, repair_required: false, reason: "ready" },
         files: {
           wtAhash: { healthy: true, document_count: 310, repair_required: false, reason: "ready" },
@@ -83,7 +89,15 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
 
   const scopeRows = Array.from(table.querySelectorAll("tbody tr"));
   const scopes = scopeRows.map((tr) => tr.dataset.scope);
-  assert.deepEqual(scopes, ["issues", "specs", "memory", "board", "files", "files-docs"]);
+  assert.deepEqual(scopes, [
+    "issues",
+    "specs",
+    "memory",
+    "discussions",
+    "board",
+    "files",
+    "files-docs",
+  ]);
 
   // Repo-shared issues row spans all worktree columns and reports ready.
   const issuesCell = scopeRows[0].querySelector(".settings-index-cell");
@@ -99,20 +113,25 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   const memoryCell = scopeRows[2].querySelector(".settings-index-cell");
   assert.equal(memoryCell.colSpan, 2);
 
+  // discussions row is repo-shared and reports the Discussion semantic index.
+  const discussionsCell = scopeRows[3].querySelector(".settings-index-cell");
+  assert.equal(discussionsCell.colSpan, 2);
+  assert.match(discussionsCell.textContent, /8 docs/);
+
   // board row is repo-shared and reports the Board semantic index.
-  const boardCell = scopeRows[3].querySelector(".settings-index-cell");
+  const boardCell = scopeRows[4].querySelector(".settings-index-cell");
   assert.equal(boardCell.colSpan, 2);
   assert.match(boardCell.textContent, /21 docs/);
 
   // files row has one cell per worktree, in worktree-hash sort order.
-  const filesCells = scopeRows[4].querySelectorAll(".settings-index-cell");
+  const filesCells = scopeRows[5].querySelectorAll(".settings-index-cell");
   assert.equal(filesCells.length, 2);
   assert.equal(filesCells[0].dataset.worktreeHash, "wtAhash");
   assert.equal(filesCells[1].dataset.worktreeHash, "wtBhash");
   assert.ok(filesCells[1].classList.contains("unhealthy"));
 
   // files-docs only seeded wtAhash — wtB renders an empty placeholder.
-  const docsCells = scopeRows[5].querySelectorAll(".settings-index-cell");
+  const docsCells = scopeRows[6].querySelectorAll(".settings-index-cell");
   assert.equal(docsCells.length, 2);
   assert.ok(docsCells[1].classList.contains("settings-index-cell-empty"));
 });

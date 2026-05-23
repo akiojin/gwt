@@ -6025,3 +6025,38 @@ hook integration tests が `CODEX_THREAD_ID` / `GWT_SESSION_ID` /
    `GWT_SESSION_RUNTIME_PATH` を unset して現在の agent session を汚染しない。
 3. Codex payload の `session_id` を使う tests では placeholder の `agent-session` を避け、
    実 resume 可能 ID を表す別値を使う。
+
+## 2026-05-22 — SPEC section edit stdin must be validated before piping to gwtd
+
+Type: failure-pattern
+Context: While updating SPEC-2014 tasks, a malformed perl append command produced no stdout, but the downstream `gwtd issue spec 2014 --edit tasks -f -` still wrote an empty tasks section.
+Learning: Pipelines into section-edit commands can erase canonical SPEC content when the producer fails; pipefail alone is not enough if the consumer accepts empty stdin.
+Future Action: For `gwtd issue spec --edit <section> -f -`, first materialize or generate the new section content with a size/header check, then edit; after editing, immediately reread the section and verify nonzero size plus expected tail.
+
+## 2026-05-22 — headless-browser-check はユーザーの production gwt / GWT.app を絶対に停止させない
+
+Type: lesson
+Context: Issue #2867 の Recent Projects pollution 修正で headless 確認を行う際、私が独断で「production GWT.app (PID 9569) を終了してください」と要求した。ユーザーから skill にそのような手順は無いと指摘され、誤って kill されると困るとの再発防止依頼を受けた。
+Learning: headless-browser-check skill は 'gwt serve を別プロセスとして起動する' という前提で、ユーザーの常用 gwt / GWT.app を停止する手順は含まない。session.json や app-instance.lock の競合懸念があっても、エージェントが自動で停止判断をしてはならない。
+Future Action: headless 起動時に共有 state (session.json / app-instance.lock / port) の懸念がある場合は、懸念点を明示してユーザーに判断を委ねる。production gwt を停止する選択肢は提示してよいが、エージェント側で前提化したり、依頼したりしない。skill の guardrail にも明文化済み (.claude/.codex の SKILL.md 両方)。
+
+## 2026-05-23 — Index search must resolve workspace-home project roots
+
+Type: lesson
+Context: Index window search can run with the active tab project_root set to the gwt workspace home rather than a concrete git worktree. The workspace home itself has no git origin, while its child bare repo and launched worktree do.
+Learning: Project-index callers must separate repository identity from the searchable/default worktree. Resolve repo hash through the workspace-home child bare repo and prefer the running process cwd worktree for repo-scoped and file searches.
+Future Action: When changing index search or status paths, test both direct worktree roots and workspace-home roots created by gwt-managed layouts before relying on git rev-parse or origin detection.
+
+## 2026-05-23 — Do not assume Workspace update is the current coordination path after Project State migration
+
+Type: lesson
+Context: After implementing durable discussions and Project State storage paths, I still followed stale generated gwt-coordination guidance and ran gwtd workspace update. The user pointed out from Board that Workspace is gone for the current discussion/coordination framing and told me to merge origin/develop to see the current state.
+Learning: Generated local skill text can lag the branch's product terminology. For this work, current-state reporting should be checked against Board and the latest develop/SPEC context; do not treat gwtd workspace update as the default user-facing path when Project State / Work / Discussion / Branch separation is being discussed.
+Future Action: Before posting coordination updates in SPEC-2359 terminology work, merge or inspect origin/develop, read recent Board entries, and prefer Board-only reporting unless the active instructions explicitly require the compatibility gwtd workspace path.
+
+## 2026-05-22 — Launch Runtime confirmation must stay side-effect free and cached
+
+Type: lesson
+Context: User reported that Launch Agent Runtime felt slow and asked whether Runtime startup was creating a worktree. During SPEC-2014 follow-up, Runtime confirmation called resolve_launch_worktree and also scanned thousands of stale session records through legacy git root matching.
+Learning: Runtime confirmation should only inspect an existing target worktree or project root for Docker/runtime context; final Launch owns materialization. Session repo matching must cache current repo identity, treat mismatched repo_hash as authoritative, and avoid git root probes for missing session paths.
+Future Action: When changing Launch Wizard Runtime hydration or previous-profile/Quick Start matching, add tests that missing target worktrees are not created and that stale session history does not fan out per-session git probes.

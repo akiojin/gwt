@@ -2244,6 +2244,7 @@ kbd.op-kbd {
 :root[data-theme] .preset-button:focus-visible,
 :root[data-theme] .branch-filter-button:focus-visible,
 :root[data-theme] .branch-cleanup-toggle:focus-visible,
+:root[data-theme] .branch-row-action:focus-visible,
 :root[data-theme] .icon-button:focus-visible,
 :root[data-theme] .text-button:focus-visible,
 :root[data-theme] .recent-project-row:focus-visible,

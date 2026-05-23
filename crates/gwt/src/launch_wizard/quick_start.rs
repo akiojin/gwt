@@ -1,6 +1,5 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -32,9 +31,8 @@ pub(super) fn collect_quick_start_entries_from_sessions(
     branch_name: &str,
     sessions: Vec<gwt_agent::Session>,
 ) -> Vec<QuickStartEntry> {
-    let mut resumable_sessions = Vec::new();
-    let mut agents_with_resumable: HashSet<String> = HashSet::new();
-    let mut latest_metadata_only_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
+    let mut latest_resumable_session = None::<gwt_agent::Session>;
+    let mut latest_metadata_only_session = None::<gwt_agent::Session>;
     let repo_scope = WorktreePathScope::new(repo_path);
 
     for session in sessions {
@@ -42,31 +40,27 @@ pub(super) fn collect_quick_start_entries_from_sessions(
             continue;
         }
 
-        let agent_key = session.agent_id.command().to_string();
         if agent_session_resume_id(&session).is_some() {
-            agents_with_resumable.insert(agent_key);
-            resumable_sessions.push(session);
-        } else {
-            let replace = latest_metadata_only_by_agent
-                .get(&agent_key)
+            let replace = latest_resumable_session
+                .as_ref()
                 .map(|current| session_is_newer(&session, current))
                 .unwrap_or(true);
             if replace {
-                latest_metadata_only_by_agent.insert(agent_key, session);
+                latest_resumable_session = Some(session);
+            }
+        } else {
+            let replace = latest_metadata_only_session
+                .as_ref()
+                .map(|current| session_is_newer(&session, current))
+                .unwrap_or(true);
+            if replace {
+                latest_metadata_only_session = Some(session);
             }
         }
     }
 
-    let mut sessions = resumable_sessions;
-    sessions.extend(
-        latest_metadata_only_by_agent
-            .into_iter()
-            .filter(|(agent_key, _)| !agents_with_resumable.contains(agent_key))
-            .map(|(_, session)| session),
-    );
-    sessions.sort_by(|left, right| compare_session_recency(right, left));
-
-    sessions
+    latest_resumable_session
+        .or(latest_metadata_only_session)
         .into_iter()
         .map(|session| QuickStartEntry {
             session_id: session.id.clone(),
@@ -208,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn load_quick_start_entries_orders_resumable_sessions_latest_first() {
+    fn load_quick_start_entries_uses_latest_resumable_session_profile() {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
         std::fs::create_dir_all(&worktree).expect("repo dir");
@@ -230,14 +224,14 @@ mod tests {
         );
 
         let entries = load_quick_start_entries(&worktree, dir.path(), "feature/gui");
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_id, "codex");
         assert_eq!(entries[0].resume_session_id.as_deref(), Some("newer"));
         assert_eq!(entries[0].docker_service.as_deref(), Some("gwt"));
     }
 
     #[test]
-    fn load_quick_start_entries_keeps_multiple_resumable_sessions_latest_first() {
+    fn load_quick_start_entries_keeps_only_latest_resumable_session() {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
         std::fs::create_dir_all(&worktree).expect("repo dir");
@@ -262,15 +256,15 @@ mod tests {
 
         assert_eq!(
             entries.len(),
-            2,
-            "Launch Agent must expose each resumable session instead of collapsing by agent"
+            1,
+            "Launch Agent start methods must expose only the latest resumable session"
         );
         assert_eq!(
             entries
                 .iter()
                 .map(|entry| entry.resume_session_id.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("newer-resume"), Some("older-resume")]
+            vec![Some("newer-resume")]
         );
     }
 

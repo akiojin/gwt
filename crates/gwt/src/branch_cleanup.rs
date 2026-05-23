@@ -277,6 +277,7 @@ mod tests {
             last_commit_date: None,
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
+            resume: crate::BranchResumeInfo::unavailable(),
         }
     }
 
