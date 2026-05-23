@@ -24,14 +24,19 @@ pub(crate) struct IndexContext {
 }
 
 pub(crate) fn resolve_index_context(repo_path: &Path) -> Result<IndexContext, SpecOpsError> {
-    let project_root = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
-    let repo_hash = crate::index_worker::detect_repo_hash(&project_root).ok_or_else(|| {
-        SpecOpsError::from(ApiError::Unexpected(
-            "could not resolve project index repo hash from git origin".to_string(),
-        ))
-    })?;
+    let project_root = crate::index_worker::default_project_index_worktree_root(repo_path)
+        .unwrap_or_else(|| {
+            repo_path
+                .canonicalize()
+                .unwrap_or_else(|_| repo_path.to_path_buf())
+        });
+    let repo_hash = crate::index_worker::detect_repo_hash(repo_path)
+        .or_else(|| crate::index_worker::detect_repo_hash(&project_root))
+        .ok_or_else(|| {
+            SpecOpsError::from(ApiError::Unexpected(
+                "could not resolve project index repo hash from git origin".to_string(),
+            ))
+        })?;
     let worktree_hash = compute_worktree_hash(&project_root)
         .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?
         .to_string();

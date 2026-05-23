@@ -6032,3 +6032,10 @@ Type: lesson
 Context: Issue #2867 の Recent Projects pollution 修正で headless 確認を行う際、私が独断で「production GWT.app (PID 9569) を終了してください」と要求した。ユーザーから skill にそのような手順は無いと指摘され、誤って kill されると困るとの再発防止依頼を受けた。
 Learning: headless-browser-check skill は 'gwt serve を別プロセスとして起動する' という前提で、ユーザーの常用 gwt / GWT.app を停止する手順は含まない。session.json や app-instance.lock の競合懸念があっても、エージェントが自動で停止判断をしてはならない。
 Future Action: headless 起動時に共有 state (session.json / app-instance.lock / port) の懸念がある場合は、懸念点を明示してユーザーに判断を委ねる。production gwt を停止する選択肢は提示してよいが、エージェント側で前提化したり、依頼したりしない。skill の guardrail にも明文化済み (.claude/.codex の SKILL.md 両方)。
+
+## 2026-05-23 — Index search must resolve workspace-home project roots
+
+Type: lesson
+Context: Index window search can run with the active tab project_root set to the gwt workspace home rather than a concrete git worktree. The workspace home itself has no git origin, while its child bare repo and launched worktree do.
+Learning: Project-index callers must separate repository identity from the searchable/default worktree. Resolve repo hash through the workspace-home child bare repo and prefer the running process cwd worktree for repo-scoped and file searches.
+Future Action: When changing index search or status paths, test both direct worktree roots and workspace-home roots created by gwt-managed layouts before relying on git rev-parse or origin detection.

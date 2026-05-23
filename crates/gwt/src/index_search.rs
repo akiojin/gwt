@@ -23,8 +23,12 @@ pub fn search_project_index(
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    let repo_hash = crate::index_worker::detect_repo_hash(project_root)
+    let index_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
         .ok_or_else(|| "project index search requires a git origin remote".to_string())?;
+    let repo_hash = crate::index_worker::detect_repo_hash(&index_repo_root)
+        .ok_or_else(|| "project index search requires a git origin remote".to_string())?;
+    let repo_search_root = crate::index_worker::default_project_index_worktree_root(project_root)
+        .unwrap_or_else(|| index_repo_root.clone());
     gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
 
     let effective_scopes = if scopes.is_empty() {
@@ -66,7 +70,7 @@ pub fn search_project_index(
     }
     if !repo_scopes.is_empty() {
         let payload = run_repo_scope_search(
-            project_root,
+            &repo_search_root,
             repo_hash.as_str(),
             &repo_scopes,
             query,
@@ -191,26 +195,51 @@ fn resolve_file_search_worktree(
     project_root: &Path,
     selected_worktree_hash: Option<&str>,
 ) -> Result<FileSearchWorktree, String> {
+    let index_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
     if let Some(hash) = selected_worktree_hash
         .map(str::trim)
         .filter(|hash| !hash.is_empty())
     {
-        let entries = worktree_inventory::enumerate_worktrees(project_root, Some(project_root))
-            .map_err(|error| error.to_string())?;
+        let active_root = crate::index_worker::default_project_index_worktree_root(project_root);
+        let entries =
+            worktree_inventory::enumerate_worktrees(&index_repo_root, active_root.as_deref())
+                .map_err(|error| error.to_string())?;
         let entry = entries
             .into_iter()
             .find(|entry| entry.id == hash)
             .ok_or_else(|| format!("worktree with hash {hash} not found"))?;
+        if matches!(entry.kind, worktree_inventory::WorktreeEntryKind::BareMain) {
+            return Err("file search requires a non-bare worktree".to_string());
+        }
         return Ok(FileSearchWorktree {
             path: entry.path,
             hash: hash.to_string(),
         });
     }
-    let hash = gwt_core::worktree_hash::compute_worktree_hash(project_root)
+    let worktree_root = crate::index_worker::default_project_index_worktree_root(project_root)
+        .ok_or_else(|| "file search requires a git worktree".to_string())?;
+    if worktree_root == index_repo_root {
+        let entries = worktree_inventory::enumerate_worktrees(&index_repo_root, None)
+            .map_err(|error| error.to_string())?;
+        if let Some(entry) = entries
+            .into_iter()
+            .find(|entry| matches!(entry.kind, worktree_inventory::WorktreeEntryKind::Workspace))
+        {
+            let hash = gwt_core::worktree_hash::compute_worktree_hash(&entry.path)
+                .map_err(|error| error.to_string())?
+                .to_string();
+            return Ok(FileSearchWorktree {
+                path: entry.path,
+                hash,
+            });
+        }
+    }
+    let hash = gwt_core::worktree_hash::compute_worktree_hash(&worktree_root)
         .map_err(|error| error.to_string())?
         .to_string();
     Ok(FileSearchWorktree {
-        path: project_root.to_path_buf(),
+        path: worktree_root,
         hash,
     })
 }
@@ -592,6 +621,52 @@ mod tests {
     use gwt_core::coordination::BoardAudienceScope;
     use serde_json::json;
 
+    fn run_git_at(path: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_bare_workspace_with_worktree(home: &Path) -> PathBuf {
+        let bare = home.join("gwt.git");
+        let bootstrap = home.join(".bootstrap");
+        let develop = home.join("develop");
+        std::fs::create_dir_all(home).expect("workspace home");
+        run_git_at(home, &["init", "--bare", bare.to_str().unwrap()]);
+        run_git_at(
+            &bare,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/gwt.git",
+            ],
+        );
+        run_git_at(home, &["clone", bare.to_str().unwrap(), ".bootstrap"]);
+        run_git_at(&bootstrap, &["config", "user.email", "test@example.com"]);
+        run_git_at(&bootstrap, &["config", "user.name", "Test User"]);
+        run_git_at(&bootstrap, &["checkout", "-b", "develop"]);
+        run_git_at(&bootstrap, &["commit", "--allow-empty", "-m", "init"]);
+        run_git_at(&bootstrap, &["push", "origin", "develop"]);
+        run_git_at(
+            &bare,
+            &["worktree", "add", develop.to_str().unwrap(), "develop"],
+        );
+        std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+        develop
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
     #[test]
     fn empty_index_search_query_returns_no_results_without_runtime() {
         let results = search_project_index(Path::new("/definitely/not/a/repo"), "   ", &[], None)
@@ -800,6 +875,23 @@ mod tests {
             &workspace,
             &BoardAudienceScope::Workspace("workspace-b".to_string())
         ));
+    }
+
+    #[test]
+    fn file_search_default_worktree_uses_workspace_entry_for_workspace_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let develop = make_bare_workspace_with_worktree(temp.path());
+
+        let resolved =
+            resolve_file_search_worktree(temp.path(), None).expect("file search worktree");
+
+        assert_eq!(canonical(&resolved.path), canonical(&develop));
+        assert_eq!(
+            resolved.hash,
+            gwt_core::worktree_hash::compute_worktree_hash(&develop)
+                .expect("worktree hash")
+                .to_string()
+        );
     }
 
     #[test]

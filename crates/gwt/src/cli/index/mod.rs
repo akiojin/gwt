@@ -138,13 +138,55 @@ fn runtime_error(err: gwt_core::GwtError) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::runtime::IndexContext;
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    fn run_git_at(path: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_bare_workspace_with_worktree(home: &Path) -> PathBuf {
+        let bare = home.join("gwt.git");
+        let bootstrap = home.join(".bootstrap");
+        let develop = home.join("develop");
+        std::fs::create_dir_all(home).expect("workspace home");
+        run_git_at(home, &["init", "--bare", bare.to_str().unwrap()]);
+        run_git_at(
+            &bare,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/gwt.git",
+            ],
+        );
+        run_git_at(home, &["clone", bare.to_str().unwrap(), ".bootstrap"]);
+        run_git_at(&bootstrap, &["config", "user.email", "test@example.com"]);
+        run_git_at(&bootstrap, &["config", "user.name", "Test User"]);
+        run_git_at(&bootstrap, &["checkout", "-b", "develop"]);
+        run_git_at(&bootstrap, &["commit", "--allow-empty", "-m", "init"]);
+        run_git_at(&bootstrap, &["push", "origin", "develop"]);
+        run_git_at(
+            &bare,
+            &["worktree", "add", develop.to_str().unwrap(), "develop"],
+        );
+        std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+        develop
     }
 
     #[test]
@@ -191,6 +233,29 @@ mod tests {
             IndexCommand::Rebuild {
                 scope: IndexScope::Board
             }
+        );
+    }
+
+    #[test]
+    fn index_context_uses_active_worktree_for_workspace_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let develop = make_bare_workspace_with_worktree(temp.path());
+
+        let context = super::runtime::resolve_index_context(temp.path()).expect("index context");
+
+        assert_eq!(
+            dunce::canonicalize(&context.project_root).expect("context root"),
+            dunce::canonicalize(&develop).expect("develop root")
+        );
+        assert_eq!(
+            context.repo_hash.as_str(),
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/gwt.git").as_str()
+        );
+        assert_eq!(
+            context.worktree_hash,
+            gwt_core::worktree_hash::compute_worktree_hash(&develop)
+                .expect("develop hash")
+                .to_string()
         );
     }
 

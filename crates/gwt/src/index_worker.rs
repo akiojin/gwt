@@ -22,7 +22,45 @@ use serde::Serialize;
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
-    gwt_core::repo_hash::detect_repo_hash(repo_root)
+    gwt_core::repo_hash::detect_repo_hash(repo_root).or_else(|| {
+        let index_root = resolve_project_index_repo_root(repo_root)?;
+        gwt_core::repo_hash::detect_repo_hash(&index_root)
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIndexGitContext {
+    pub repo_root: PathBuf,
+    pub current_worktree_root: Option<PathBuf>,
+}
+
+pub fn project_index_git_context(project_root: &Path) -> Option<ProjectIndexGitContext> {
+    if !project_root.exists() {
+        return None;
+    }
+    let current_worktree_root = resolve_current_git_worktree_root(project_root);
+    let repo_root = gwt_git::worktree::main_worktree_root(project_root)
+        .ok()
+        .map(canonicalize_path)
+        .or_else(|| current_worktree_root.clone())?;
+    Some(ProjectIndexGitContext {
+        repo_root,
+        current_worktree_root,
+    })
+}
+
+pub fn resolve_project_index_repo_root(project_root: &Path) -> Option<PathBuf> {
+    project_index_git_context(project_root).map(|context| context.repo_root)
+}
+
+pub fn default_project_index_worktree_root(project_root: &Path) -> Option<PathBuf> {
+    let context = project_index_git_context(project_root)?;
+    if context.current_worktree_root.is_some() {
+        return context.current_worktree_root;
+    }
+    process_cwd_worktree_root_for_repo(&context.repo_root)
+        .or_else(|| first_active_worktree_path(&context.repo_root))
+        .or(Some(context.repo_root))
 }
 
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
@@ -519,12 +557,13 @@ fn aggregate_project_index_status_for_path_inner(
     project_root: &Path,
     probe_scope: StatusProbeScope,
 ) -> Result<ProjectIndexStatusView, String> {
-    let Some(repo_root) = resolve_git_worktree_root(project_root) else {
+    let Some(context) = project_index_git_context(project_root) else {
         return Ok(ProjectIndexStatusView::new(
             ProjectIndexStatusState::Skipped,
             "No git worktree detected",
         ));
     };
+    let repo_root = context.repo_root;
     let Some(repo_hash) = detect_repo_hash(&repo_root) else {
         return Ok(ProjectIndexStatusView::new(
             ProjectIndexStatusState::Skipped,
@@ -545,7 +584,11 @@ fn aggregate_project_index_status_for_path_inner(
         StatusProbeScope::AllWorktrees => list_worktree_probe_inputs(&repo_root)?,
         StatusProbeScope::CurrentWorktree => {
             let inputs = list_worktree_probe_inputs(&repo_root)?;
-            collect_current_worktree_probe_inputs(inputs, &repo_root)
+            if let Some(current_worktree_root) = context.current_worktree_root.as_deref() {
+                collect_current_worktree_probe_inputs(inputs, current_worktree_root)
+            } else {
+                inputs
+            }
         }
     };
     let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(inputs.len());
@@ -1068,20 +1111,25 @@ where
 fn project_index_status_for_path_inner(
     project_root: &Path,
 ) -> Result<ProjectIndexStatusView, String> {
-    let Some(repo_root) = resolve_git_worktree_root(project_root) else {
+    let Some(context) = project_index_git_context(project_root) else {
         return Ok(ProjectIndexStatusView::new(
             ProjectIndexStatusState::Skipped,
             "No git worktree detected",
         ));
     };
+    let repo_root = context.repo_root;
     let Some(repo_hash) = detect_repo_hash(&repo_root) else {
         return Ok(ProjectIndexStatusView::new(
             ProjectIndexStatusState::Skipped,
             "No origin remote configured",
         ));
     };
-    let worktree_hash =
-        compute_worktree_hash(&repo_root).map_err(|err| format!("compute worktree hash: {err}"))?;
+    let worktree_root = context
+        .current_worktree_root
+        .or_else(|| first_active_worktree_path(&repo_root))
+        .unwrap_or_else(|| repo_root.clone());
+    let worktree_hash = compute_worktree_hash(&worktree_root)
+        .map_err(|err| format!("compute worktree hash: {err}"))?;
     let runtime_started = Instant::now();
     let report =
         gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
@@ -1163,9 +1211,12 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
         return Ok(());
     }
     let bootstrap_started = Instant::now();
-    let Some(repo_root) = resolve_git_worktree_root(project_root) else {
+    let Some(context) = project_index_git_context(project_root) else {
         return Ok(());
     };
+    let repo_root = context.repo_root;
+    let refresh_project_root =
+        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
     let Some(repo_hash) = detect_repo_hash(&repo_root) else {
         return Ok(());
     };
@@ -1198,7 +1249,7 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     let refresh = RefreshIssuesOptions {
         index_root: index_root.to_path_buf(),
         repo_hash,
-        project_root: repo_root.clone(),
+        project_root: refresh_project_root,
         ttl: Duration::from_secs(15 * 60),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1228,7 +1279,7 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     Ok(())
 }
 
-fn resolve_git_worktree_root(path: &Path) -> Option<PathBuf> {
+fn resolve_current_git_worktree_root(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
@@ -1245,6 +1296,27 @@ fn resolve_git_worktree_root(path: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(canonicalize_path(PathBuf::from(root)))
+}
+
+fn first_active_worktree_path(repo_root: &Path) -> Option<PathBuf> {
+    list_worktree_probe_inputs(repo_root)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|input| input.path)
+}
+
+fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let cwd_worktree = resolve_current_git_worktree_root(&cwd)?;
+    let cwd_repo_root = gwt_git::worktree::main_worktree_root(&cwd_worktree)
+        .ok()
+        .map(canonicalize_path)?;
+    if canonicalize_path(cwd_repo_root) == canonicalize_path(repo_root.to_path_buf()) {
+        Some(cwd_worktree)
+    } else {
+        None
+    }
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1404,6 +1476,107 @@ detached
             .output()
             .expect("git remote add origin");
         assert!(remote.status.success(), "git remote add origin failed");
+    }
+
+    fn run_git_at(path: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_bare_workspace_with_origin(home: &Path) -> (PathBuf, PathBuf) {
+        let bare = home.join("gwt.git");
+        let bootstrap = home.join(".bootstrap");
+        let develop = home.join("develop");
+        std::fs::create_dir_all(home).expect("workspace home");
+        run_git_at(home, &["init", "--bare", bare.to_str().unwrap()]);
+        run_git_at(
+            &bare,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/gwt.git",
+            ],
+        );
+        run_git_at(home, &["clone", bare.to_str().unwrap(), ".bootstrap"]);
+        run_git_at(&bootstrap, &["config", "user.email", "test@example.com"]);
+        run_git_at(&bootstrap, &["config", "user.name", "Test User"]);
+        run_git_at(&bootstrap, &["checkout", "-b", "develop"]);
+        run_git_at(&bootstrap, &["commit", "--allow-empty", "-m", "init"]);
+        run_git_at(&bootstrap, &["push", "origin", "develop"]);
+        run_git_at(
+            &bare,
+            &["worktree", "add", develop.to_str().unwrap(), "develop"],
+        );
+        std::fs::remove_dir_all(&bootstrap).expect("remove bootstrap");
+        (bare, develop)
+    }
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    #[test]
+    fn detect_repo_hash_reads_origin_from_workspace_home_child_bare_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        make_bare_workspace_with_origin(temp.path());
+
+        let hash = detect_repo_hash(temp.path()).expect("repo hash from workspace home");
+
+        assert_eq!(
+            hash.as_str(),
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/gwt.git").as_str()
+        );
+    }
+
+    #[test]
+    fn default_project_index_worktree_root_prefers_process_cwd_worktree_for_workspace_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bare, _develop) = make_bare_workspace_with_origin(temp.path());
+        let active = temp.path().join("work").join("active");
+        std::fs::create_dir_all(active.parent().expect("active parent")).expect("active parent");
+        run_git_at(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/active",
+                active.to_str().unwrap(),
+                "develop",
+            ],
+        );
+        let _cwd = CurrentDirGuard::set(&active);
+
+        let root = default_project_index_worktree_root(temp.path()).expect("default worktree root");
+
+        assert_eq!(
+            canonicalize_path(root),
+            canonicalize_path(active),
+            "workspace home should use the already-running worktree before the first listed worktree"
+        );
     }
 
     #[test]
