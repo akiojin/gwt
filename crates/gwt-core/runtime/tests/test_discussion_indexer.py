@@ -83,6 +83,8 @@ class LoadDiscussionDocumentsTests(unittest.TestCase):
         self.assertEqual(first["status"], "active")
         self.assertEqual(first["topics"], ["workspace", "work", "discussion"])
         self.assertEqual(first["related_specs"], ["2359"])
+        self.assertEqual(first["related_works"], [])
+        self.assertEqual(first["promoted_to"], [])
 
 
 class BuildDiscussionRecordsTests(unittest.TestCase):

@@ -2245,7 +2245,7 @@ def action_index_memory_v2(
 
 
 def _extract_discussion_field(body: str, field: str) -> str:
-    match = re.search(rf"(?m)^{re.escape(field)}:\s*(.*?)\s*$", body)
+    match = re.search(rf"(?m)^{re.escape(field)}:[ \t]*([^\r\n]*)", body)
     return match.group(1).strip() if match else ""
 
 
