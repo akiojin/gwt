@@ -6046,3 +6046,10 @@ Type: lesson
 Context: Index window search can run with the active tab project_root set to the gwt workspace home rather than a concrete git worktree. The workspace home itself has no git origin, while its child bare repo and launched worktree do.
 Learning: Project-index callers must separate repository identity from the searchable/default worktree. Resolve repo hash through the workspace-home child bare repo and prefer the running process cwd worktree for repo-scoped and file searches.
 Future Action: When changing index search or status paths, test both direct worktree roots and workspace-home roots created by gwt-managed layouts before relying on git rev-parse or origin detection.
+
+## 2026-05-23 — Do not assume Workspace update is the current coordination path after Project State migration
+
+Type: lesson
+Context: After implementing durable discussions and Project State storage paths, I still followed stale generated gwt-coordination guidance and ran gwtd workspace update. The user pointed out from Board that Workspace is gone for the current discussion/coordination framing and told me to merge origin/develop to see the current state.
+Learning: Generated local skill text can lag the branch's product terminology. For this work, current-state reporting should be checked against Board and the latest develop/SPEC context; do not treat gwtd workspace update as the default user-facing path when Project State / Work / Discussion / Branch separation is being discussed.
+Future Action: Before posting coordination updates in SPEC-2359 terminology work, merge or inspect origin/develop, read recent Board entries, and prefer Board-only reporting unless the active instructions explicitly require the compatibility gwtd workspace path.
