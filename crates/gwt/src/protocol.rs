@@ -52,6 +52,23 @@ pub enum IndexSearchScope {
     FilesDocs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexSearchMatchMode {
+    #[default]
+    Semantic,
+    AllTerms,
+}
+
+impl IndexSearchMatchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Semantic => "semantic",
+            Self::AllTerms => "all_terms",
+        }
+    }
+}
+
 impl IndexSearchScope {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -85,6 +102,12 @@ pub struct IndexSearchResult {
     pub preview: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_mode: Option<IndexSearchMatchMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_terms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_terms: Vec<String>,
     pub target: IndexSearchTarget,
 }
 
@@ -315,6 +338,8 @@ pub enum FrontendEvent {
         scopes: Vec<IndexSearchScope>,
         #[serde(default)]
         worktree_hash: Option<String>,
+        #[serde(default)]
+        match_mode: IndexSearchMatchMode,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
@@ -1068,6 +1093,8 @@ pub enum BackendEvent {
         query: String,
         request_id: u64,
         results: Vec<IndexSearchResult>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suggestions: Vec<IndexSearchResult>,
     },
     ProjectIndexSearchError {
         id: String,
@@ -1977,9 +2004,9 @@ mod tests {
 
     use super::{
         backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
-        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, IndexSearchResult,
-        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, IndexSearchMatchMode,
+        IndexSearchResult, IndexSearchScope, IndexSearchTarget, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -2464,7 +2491,8 @@ mod tests {
             "query": "Board semantic search",
             "request_id": 42,
             "scopes": ["issues", "specs", "board", "files", "files-docs", "memory", "discussions"],
-            "worktree_hash": "wt-a"
+            "worktree_hash": "wt-a",
+            "match_mode": "all_terms"
         }))
         .expect("deserialize search_project_index");
 
@@ -2475,13 +2503,35 @@ mod tests {
                 query,
                 request_id: 42,
                 scopes,
-                worktree_hash
+                worktree_hash,
+                match_mode
             } if id == "tab-1:index-1"
                 && query == "Board semantic search"
                 && scopes.contains(&IndexSearchScope::Board)
                 && scopes.contains(&IndexSearchScope::Discussions)
                 && scopes.contains(&IndexSearchScope::FilesDocs)
                 && worktree_hash.as_deref() == Some("wt-a")
+                && match_mode == IndexSearchMatchMode::AllTerms
+        ));
+    }
+
+    #[test]
+    fn index_search_request_defaults_to_semantic_match_mode() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "search_project_index",
+            "id": "tab-1:index-1",
+            "query": "Board semantic search",
+            "request_id": 42,
+            "scopes": ["board"]
+        }))
+        .expect("deserialize search_project_index");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::SearchProjectIndex {
+                match_mode: IndexSearchMatchMode::Semantic,
+                ..
+            }
         ));
     }
 
@@ -2497,8 +2547,24 @@ mod tests {
                 subtitle: "status · Codex".to_string(),
                 preview: "Board discussion history".to_string(),
                 distance: Some(0.1234),
+                match_mode: Some(IndexSearchMatchMode::AllTerms),
+                matched_terms: vec!["Board".to_string(), "search".to_string()],
+                missing_terms: Vec::new(),
                 target: IndexSearchTarget::Board {
                     entry_id: "board-1".to_string(),
+                },
+            }],
+            suggestions: vec![IndexSearchResult {
+                scope: IndexSearchScope::Board,
+                title: "Board suggestion".to_string(),
+                subtitle: "status · Codex".to_string(),
+                preview: "Board history".to_string(),
+                distance: Some(0.2234),
+                match_mode: Some(IndexSearchMatchMode::AllTerms),
+                matched_terms: vec!["Board".to_string()],
+                missing_terms: vec!["search".to_string()],
+                target: IndexSearchTarget::Board {
+                    entry_id: "board-2".to_string(),
                 },
             }],
         };
@@ -2506,8 +2572,11 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize event");
         assert_eq!(value["kind"], "project_index_search_results");
         assert_eq!(value["results"][0]["scope"], "board");
+        assert_eq!(value["results"][0]["match_mode"], "all_terms");
+        assert_eq!(value["results"][0]["matched_terms"][0], "Board");
         assert_eq!(value["results"][0]["target"]["kind"], "board");
         assert_eq!(value["results"][0]["target"]["entry_id"], "board-1");
+        assert_eq!(value["suggestions"][0]["missing_terms"][0], "search");
     }
 
     #[test]

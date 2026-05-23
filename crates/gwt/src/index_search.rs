@@ -7,21 +7,28 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    protocol::{IndexSearchResult, IndexSearchScope, IndexSearchTarget},
+    protocol::{IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget},
     worktree_inventory,
 };
 
 const INDEX_SEARCH_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectIndexSearchOutcome {
+    pub results: Vec<IndexSearchResult>,
+    pub suggestions: Vec<IndexSearchResult>,
+}
 
 pub fn search_project_index(
     project_root: &Path,
     query: &str,
     scopes: &[IndexSearchScope],
     selected_worktree_hash: Option<&str>,
-) -> Result<Vec<IndexSearchResult>, String> {
+    match_mode: IndexSearchMatchMode,
+) -> Result<ProjectIndexSearchOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ProjectIndexSearchOutcome::default());
     }
     let index_repo_root = crate::index_worker::resolve_project_index_repo_root(project_root)
         .ok_or_else(|| "project index search requires a git origin remote".to_string())?;
@@ -51,6 +58,7 @@ pub fn search_project_index(
     };
 
     let mut results = Vec::new();
+    let mut suggestions = Vec::new();
     let per_scope_limit = per_scope_limit(effective_scopes.len());
     let mut file_jobs = Vec::new();
     let mut repo_scopes = Vec::new();
@@ -75,9 +83,11 @@ pub fn search_project_index(
             &repo_scopes,
             query,
             per_scope_limit,
+            match_mode,
         )?;
         for scope in repo_scopes {
             append_scope_results(&mut results, scope, &payload, &board_scope);
+            append_scope_suggestions(&mut suggestions, scope, &payload, &board_scope);
         }
     }
     for outcome in run_scope_search_jobs(
@@ -85,14 +95,26 @@ pub fn search_project_index(
         repo_hash.as_str(),
         query,
         per_scope_limit,
+        match_mode,
         run_scope_search,
     )? {
         append_scope_results(&mut results, outcome.scope, &outcome.payload, &board_scope);
+        append_scope_suggestions(
+            &mut suggestions,
+            outcome.scope,
+            &outcome.payload,
+            &board_scope,
+        );
     }
 
     results.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
+    suggestions.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
     results.truncate(INDEX_SEARCH_LIMIT);
-    Ok(results)
+    suggestions.truncate(INDEX_SEARCH_LIMIT);
+    Ok(ProjectIndexSearchOutcome {
+        results,
+        suggestions,
+    })
 }
 
 fn is_file_scope(scope: IndexSearchScope) -> bool {
@@ -123,10 +145,20 @@ fn run_scope_search_jobs<F>(
     repo_hash: &str,
     query: &str,
     limit: usize,
+    match_mode: IndexSearchMatchMode,
     runner: F,
 ) -> Result<Vec<ScopeSearchOutcome>, String>
 where
-    F: Fn(&Path, &str, Option<&str>, IndexSearchScope, &str, usize) -> Result<Value, String> + Sync,
+    F: Fn(
+            &Path,
+            &str,
+            Option<&str>,
+            IndexSearchScope,
+            &str,
+            usize,
+            IndexSearchMatchMode,
+        ) -> Result<Value, String>
+        + Sync,
 {
     thread::scope(|scope| {
         let mut handles = Vec::with_capacity(jobs.len());
@@ -140,6 +172,7 @@ where
                     job.scope,
                     query,
                     limit,
+                    match_mode,
                 )
                 .map(|payload| ScopeSearchOutcome {
                     scope: job.scope,
@@ -251,6 +284,7 @@ fn run_scope_search(
     scope: IndexSearchScope,
     query: &str,
     limit: usize,
+    match_mode: IndexSearchMatchMode,
 ) -> Result<Value, String> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
@@ -261,6 +295,7 @@ fn run_scope_search(
                 scope,
                 query,
                 limit,
+                match_mode,
             ))
             .current_dir(project_root)
             .output()
@@ -281,6 +316,7 @@ fn run_repo_scope_search(
     scopes: &[IndexSearchScope],
     query: &str,
     limit: usize,
+    match_mode: IndexSearchMatchMode,
 ) -> Result<Value, String> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
@@ -290,6 +326,7 @@ fn run_repo_scope_search(
                 scopes,
                 query,
                 limit,
+                match_mode,
             ))
             .current_dir(project_root)
             .output()
@@ -311,6 +348,7 @@ fn scope_search_command_args(
     scope: IndexSearchScope,
     query: &str,
     limit: usize,
+    match_mode: IndexSearchMatchMode,
 ) -> Vec<OsString> {
     let mut args = vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
@@ -324,6 +362,8 @@ fn scope_search_command_args(
         OsString::from(query),
         OsString::from("--n-results"),
         OsString::from(limit.to_string()),
+        OsString::from("--match-mode"),
+        OsString::from(match_mode.as_str()),
         OsString::from("--no-auto-build"),
     ];
     if let Some(hash) = worktree_hash {
@@ -339,6 +379,7 @@ fn repo_scope_search_command_args(
     scopes: &[IndexSearchScope],
     query: &str,
     limit: usize,
+    match_mode: IndexSearchMatchMode,
 ) -> Vec<OsString> {
     vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
@@ -352,6 +393,8 @@ fn repo_scope_search_command_args(
         OsString::from(query),
         OsString::from("--n-results"),
         OsString::from(limit.to_string()),
+        OsString::from("--match-mode"),
+        OsString::from(match_mode.as_str()),
         OsString::from("--scopes"),
         OsString::from(
             scopes
@@ -408,6 +451,37 @@ fn append_scope_results(
     }
 }
 
+fn append_scope_suggestions(
+    out: &mut Vec<IndexSearchResult>,
+    scope: IndexSearchScope,
+    payload: &Value,
+    board_scope: &gwt_core::coordination::BoardAudienceScope,
+) {
+    let Some(suggestions) = payload.get("suggestions") else {
+        return;
+    };
+    let items = suggestions
+        .get(scope.as_str())
+        .or_else(|| suggestions.as_array().map(|_| suggestions))
+        .and_then(Value::as_array);
+    let Some(items) = items else {
+        return;
+    };
+    for item in items {
+        let result = match scope {
+            IndexSearchScope::Issues => issue_result(item),
+            IndexSearchScope::Specs => spec_result(item),
+            IndexSearchScope::Memory => memory_result(item),
+            IndexSearchScope::Discussions => discussion_result(item),
+            IndexSearchScope::Board => board_result(item, board_scope),
+            IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
+        };
+        if let Some(result) = result {
+            out.push(result);
+        }
+    }
+}
+
 fn issue_result(item: &Value) -> Option<IndexSearchResult> {
     let number = value_u64(item.get("number")?)?;
     let title = value_str(item.get("title")).unwrap_or_default();
@@ -417,6 +491,9 @@ fn issue_result(item: &Value) -> Option<IndexSearchResult> {
         subtitle: value_str(item.get("state")).unwrap_or_else(|| "issue".to_string()),
         preview: labels_preview(item),
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Issue { number },
     })
 }
@@ -432,6 +509,9 @@ fn spec_result(item: &Value) -> Option<IndexSearchResult> {
             .unwrap_or_else(|| "spec".to_string()),
         preview: value_str(item.get("matched_section")).unwrap_or_default(),
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Spec { spec_id },
     })
 }
@@ -450,6 +530,9 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
         },
         preview: heading.clone(),
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Memory { heading, date },
     })
 }
@@ -469,6 +552,9 @@ fn discussion_result(item: &Value) -> Option<IndexSearchResult> {
         },
         preview: heading.clone(),
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Discussion { heading, date },
     })
 }
@@ -497,6 +583,9 @@ fn board_result(
         },
         preview: value_str(item.get("body_preview")).unwrap_or_default(),
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Board { entry_id },
     })
 }
@@ -515,8 +604,31 @@ fn file_result(scope: IndexSearchScope, item: &Value) -> Option<IndexSearchResul
         },
         preview: description,
         distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::File { path },
     })
+}
+
+fn item_match_mode(item: &Value) -> Option<IndexSearchMatchMode> {
+    match item.get("match_mode").and_then(Value::as_str) {
+        Some("all_terms") => Some(IndexSearchMatchMode::AllTerms),
+        Some("semantic") => Some(IndexSearchMatchMode::Semantic),
+        _ => None,
+    }
+}
+
+fn value_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value_str(Some(value)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn board_item_visible_for_scope(
@@ -669,10 +781,17 @@ mod tests {
 
     #[test]
     fn empty_index_search_query_returns_no_results_without_runtime() {
-        let results = search_project_index(Path::new("/definitely/not/a/repo"), "   ", &[], None)
-            .expect("empty query should short-circuit");
+        let outcome = search_project_index(
+            Path::new("/definitely/not/a/repo"),
+            "   ",
+            &[],
+            None,
+            IndexSearchMatchMode::Semantic,
+        )
+        .expect("empty query should short-circuit");
 
-        assert!(results.is_empty());
+        assert!(outcome.results.is_empty());
+        assert!(outcome.suggestions.is_empty());
     }
 
     #[test]
@@ -847,6 +966,41 @@ mod tests {
     }
 
     #[test]
+    fn append_scope_suggestions_preserves_match_evidence() {
+        let mut suggestions = Vec::new();
+        let board_scope = BoardAudienceScope::All;
+
+        append_scope_suggestions(
+            &mut suggestions,
+            IndexSearchScope::Issues,
+            &json!({
+                "suggestions": {
+                    "issues": [{
+                        "number": 77,
+                        "title": "Workspace only",
+                        "state": "open",
+                        "labels": ["index"],
+                        "distance": 0.35,
+                        "match_mode": "all_terms",
+                        "matched_terms": ["Workspace"],
+                        "missing_terms": ["置き換え"]
+                    }]
+                }
+            }),
+            &board_scope,
+        );
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].title, "#77 Workspace only");
+        assert_eq!(
+            suggestions[0].match_mode,
+            Some(IndexSearchMatchMode::AllTerms)
+        );
+        assert_eq!(suggestions[0].matched_terms, vec!["Workspace"]);
+        assert_eq!(suggestions[0].missing_terms, vec!["置き換え"]);
+    }
+
+    #[test]
     fn board_visibility_supports_all_broadcast_and_workspace_modes() {
         let broadcast = json!({ "audience": [] });
         let workspace = json!({ "audience": ["workspace-a"] });
@@ -922,11 +1076,17 @@ mod tests {
             IndexSearchScope::Issues,
             "Git",
             50,
+            crate::protocol::IndexSearchMatchMode::AllTerms,
         );
 
         assert!(
             args.iter().any(|arg| arg == "--no-auto-build"),
             "interactive Index search must not block on auto-index rebuilds"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--match-mode" && pair[1] == "all_terms"),
+            "runner args should carry the requested match mode"
         );
     }
 
@@ -944,6 +1104,7 @@ mod tests {
             ],
             "Git",
             12,
+            crate::protocol::IndexSearchMatchMode::AllTerms,
         );
 
         assert!(args.iter().any(|arg| arg == "search-multi"));
@@ -954,6 +1115,11 @@ mod tests {
             "repo-scoped searches should share one runner process"
         );
         assert!(args.iter().any(|arg| arg == "--no-auto-build"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--match-mode" && pair[1] == "all_terms"),
+            "repo-scoped searches should forward match mode to search-multi"
+        );
     }
 
     #[test]
@@ -997,24 +1163,31 @@ mod tests {
             },
         ];
 
-        let results = run_scope_search_jobs(jobs, "repo", "Git", 3, |_, _, _, scope, _, _| {
-            let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
-            peak.fetch_max(active_now, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(120));
-            active.fetch_sub(1, Ordering::SeqCst);
-            let key = match scope {
-                IndexSearchScope::Issues => "issueResults",
-                IndexSearchScope::Specs => "specResults",
-                IndexSearchScope::Board => "boardResults",
-                IndexSearchScope::Discussions => "discussionResults",
-                IndexSearchScope::Memory => "memoryResults",
-                IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
-            };
-            let mut payload = serde_json::Map::new();
-            payload.insert("ok".to_string(), Value::Bool(true));
-            payload.insert(key.to_string(), Value::Array(Vec::new()));
-            Ok(Value::Object(payload))
-        })
+        let results = run_scope_search_jobs(
+            jobs,
+            "repo",
+            "Git",
+            3,
+            IndexSearchMatchMode::Semantic,
+            |_, _, _, scope, _, _, _| {
+                let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(active_now, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(120));
+                active.fetch_sub(1, Ordering::SeqCst);
+                let key = match scope {
+                    IndexSearchScope::Issues => "issueResults",
+                    IndexSearchScope::Specs => "specResults",
+                    IndexSearchScope::Board => "boardResults",
+                    IndexSearchScope::Discussions => "discussionResults",
+                    IndexSearchScope::Memory => "memoryResults",
+                    IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
+                };
+                let mut payload = serde_json::Map::new();
+                payload.insert("ok".to_string(), Value::Bool(true));
+                payload.insert(key.to_string(), Value::Array(Vec::new()));
+                Ok(Value::Object(payload))
+            },
+        )
         .expect("parallel scope search should succeed");
 
         assert_eq!(results.len(), 5);

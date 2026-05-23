@@ -2703,13 +2703,16 @@ def _format_memory_results(
             continue
         seen.add(key)
         formatted.append(
-            {
-                "date": date,
-                "title": title,
-                "heading": meta.get("heading", ""),
-                "chunk_idx": int(meta.get("chunk_idx", 0)),
-                "distance": it.get("distance"),
-            }
+            _attach_match_fields(
+                {
+                    "date": date,
+                    "title": title,
+                    "heading": meta.get("heading", ""),
+                    "chunk_idx": int(meta.get("chunk_idx", 0)),
+                    "distance": it.get("distance"),
+                },
+                it,
+            )
         )
         if len(formatted) >= n_results:
             break
@@ -2731,19 +2734,22 @@ def _format_discussion_results(
             continue
         seen.add(key)
         formatted.append(
-            {
-                "discussion_id": meta.get("discussion_id", it.get("id", "")),
-                "date": date,
-                "title": title,
-                "status": meta.get("status", ""),
-                "topics": _split_csv_meta(meta.get("topics", "")),
-                "related_specs": _split_csv_meta(meta.get("related_specs", "")),
-                "related_works": _split_csv_meta(meta.get("related_works", "")),
-                "promoted_to": _split_csv_meta(meta.get("promoted_to", "")),
-                "heading": meta.get("heading", ""),
-                "chunk_idx": int(meta.get("chunk_idx", 0)),
-                "distance": it.get("distance"),
-            }
+            _attach_match_fields(
+                {
+                    "discussion_id": meta.get("discussion_id", it.get("id", "")),
+                    "date": date,
+                    "title": title,
+                    "status": meta.get("status", ""),
+                    "topics": _split_csv_meta(meta.get("topics", "")),
+                    "related_specs": _split_csv_meta(meta.get("related_specs", "")),
+                    "related_works": _split_csv_meta(meta.get("related_works", "")),
+                    "promoted_to": _split_csv_meta(meta.get("promoted_to", "")),
+                    "heading": meta.get("heading", ""),
+                    "chunk_idx": int(meta.get("chunk_idx", 0)),
+                    "distance": it.get("distance"),
+                },
+                it,
+            )
         )
         if len(formatted) >= n_results:
             break
@@ -3145,6 +3151,88 @@ def action_index_issues_v2(
 # ---------------------------------------------------------------------
 
 
+def _parse_required_terms(query: str) -> List[str]:
+    terms: List[str] = []
+    for match in re.finditer(r'"([^"]+)"|(\S+)', query):
+        term = (match.group(1) if match.group(1) is not None else match.group(2)).strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _item_match_text(item: Dict[str, Any]) -> str:
+    parts: List[str] = [str(item.get("id", "")), str(item.get("document", ""))]
+
+    def collect(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for nested in value:
+                collect(nested)
+            return
+        parts.append(str(value))
+
+    collect(item.get("metadata") or {})
+    return "\n".join(parts).casefold()
+
+
+def _copy_with_match_fields(
+    item: Dict[str, Any],
+    match_mode: str,
+    matched_terms: Sequence[str],
+    missing_terms: Sequence[str],
+) -> Dict[str, Any]:
+    enriched = dict(item)
+    enriched["match_mode"] = match_mode
+    enriched["matched_terms"] = list(matched_terms)
+    enriched["missing_terms"] = list(missing_terms)
+    return enriched
+
+
+def _apply_match_mode(
+    items: List[Dict[str, Any]],
+    query: str,
+    match_mode: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if match_mode != "all_terms":
+        return items, []
+    required_terms = _parse_required_terms(query)
+    if not required_terms:
+        return items, []
+
+    strict: List[Dict[str, Any]] = []
+    suggestions: List[Dict[str, Any]] = []
+    for item in items:
+        haystack = _item_match_text(item)
+        matched = [term for term in required_terms if term.casefold() in haystack]
+        missing = [term for term in required_terms if term.casefold() not in haystack]
+        enriched = _copy_with_match_fields(item, match_mode, matched, missing)
+        if missing:
+            suggestions.append(enriched)
+        else:
+            strict.append(enriched)
+    return strict, suggestions
+
+
+def _attach_match_fields(result: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    if item.get("match_mode"):
+        result["match_mode"] = item.get("match_mode")
+        result["matched_terms"] = list(item.get("matched_terms") or [])
+        result["missing_terms"] = list(item.get("missing_terms") or [])
+    return result
+
+
+def _search_fetch_count(scope: str, n_results: int, match_mode: str) -> int:
+    base = n_results * 5 if scope in ("specs", "memory", "discussions") else n_results
+    if match_mode == "all_terms":
+        return min(max(base, n_results * 5, 50), 200)
+    return base
+
+
 def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
@@ -3153,7 +3241,11 @@ def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[s
     if count == 0:
         return []
     actual_n = min(n_results, count)
-    results = collection.query(query_texts=[query], n_results=actual_n)
+    results = collection.query(
+        query_texts=[query],
+        n_results=actual_n,
+        include=["metadatas", "documents", "distances"],
+    )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
         for idx, doc_id in enumerate(results["ids"][0]):
@@ -3163,6 +3255,7 @@ def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[s
                 {
                     "id": doc_id,
                     "metadata": meta,
+                    "document": results["documents"][0][idx] if results.get("documents") else "",
                     "distance": round(distance, 4) if distance is not None else None,
                 }
             )
@@ -3170,16 +3263,21 @@ def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[s
 
 
 def _format_file_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "path": (it["metadata"] or {}).get("path", it["id"]),
-            "description": (it["metadata"] or {}).get("description", ""),
-            "distance": it["distance"],
-            "fileType": (it["metadata"] or {}).get("file_type", ""),
-            "size": (it["metadata"] or {}).get("size", 0),
-        }
-        for it in items
-    ]
+    formatted = []
+    for it in items:
+        formatted.append(
+            _attach_match_fields(
+                {
+                    "path": (it["metadata"] or {}).get("path", it["id"]),
+                    "description": (it["metadata"] or {}).get("description", ""),
+                    "distance": it["distance"],
+                    "fileType": (it["metadata"] or {}).get("file_type", ""),
+                    "size": (it["metadata"] or {}).get("size", 0),
+                },
+                it,
+            )
+        )
+    return formatted
 
 
 def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3197,15 +3295,18 @@ def _format_spec_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         seen_spec_ids.add(spec_id)
         formatted.append(
-            {
-                "spec_id": spec_id,
-                "title": meta.get("title", ""),
-                "status": meta.get("status", ""),
-                "phase": meta.get("phase", ""),
-                "dir_name": meta.get("dir_name", ""),
-                "distance": it["distance"],
-                "matched_section": meta.get("chunk_heading", ""),
-            }
+            _attach_match_fields(
+                {
+                    "spec_id": spec_id,
+                    "title": meta.get("title", ""),
+                    "status": meta.get("status", ""),
+                    "phase": meta.get("phase", ""),
+                    "dir_name": meta.get("dir_name", ""),
+                    "distance": it["distance"],
+                    "matched_section": meta.get("chunk_heading", ""),
+                },
+                it,
+            )
         )
     return formatted
 
@@ -3217,14 +3318,17 @@ def _format_issue_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         labels_raw = meta.get("labels", "")
         labels = [lb for lb in labels_raw.split(",") if lb] if labels_raw else []
         formatted.append(
-            {
-                "number": meta.get("number", it["id"]),
-                "title": meta.get("title", ""),
-                "url": meta.get("url", ""),
-                "state": meta.get("state", ""),
-                "labels": labels,
-                "distance": it["distance"],
-            }
+            _attach_match_fields(
+                {
+                    "number": meta.get("number", it["id"]),
+                    "title": meta.get("title", ""),
+                    "url": meta.get("url", ""),
+                    "state": meta.get("state", ""),
+                    "labels": labels,
+                    "distance": it["distance"],
+                },
+                it,
+            )
         )
     return formatted
 
@@ -3240,23 +3344,56 @@ def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for it in items:
         meta = it["metadata"] or {}
         formatted.append(
-            {
-                "entry_id": meta.get("entry_id", it["id"]),
-                "kind": meta.get("kind", ""),
-                "author": meta.get("author", ""),
-                "title_summary": meta.get("title_summary", ""),
-                "body_preview": meta.get("body_preview", ""),
-                "created_at": meta.get("created_at", ""),
-                "updated_at": meta.get("updated_at", ""),
-                "origin_branch": meta.get("origin_branch", ""),
-                "origin_session_id": meta.get("origin_session_id", ""),
-                "audience": _split_csv_meta(meta.get("audience", "")),
-                "related_topics": _split_csv_meta(meta.get("related_topics", "")),
-                "related_owners": _split_csv_meta(meta.get("related_owners", "")),
-                "distance": it["distance"],
-            }
+            _attach_match_fields(
+                {
+                    "entry_id": meta.get("entry_id", it["id"]),
+                    "kind": meta.get("kind", ""),
+                    "author": meta.get("author", ""),
+                    "title_summary": meta.get("title_summary", ""),
+                    "body_preview": meta.get("body_preview", ""),
+                    "created_at": meta.get("created_at", ""),
+                    "updated_at": meta.get("updated_at", ""),
+                    "origin_branch": meta.get("origin_branch", ""),
+                    "origin_session_id": meta.get("origin_session_id", ""),
+                    "audience": _split_csv_meta(meta.get("audience", "")),
+                    "related_topics": _split_csv_meta(meta.get("related_topics", "")),
+                    "related_owners": _split_csv_meta(meta.get("related_owners", "")),
+                    "distance": it["distance"],
+                },
+                it,
+            )
         )
     return formatted
+
+
+def _scope_result_key(scope: str) -> str:
+    return {
+        "files": "results",
+        "files-docs": "results",
+        "specs": "specResults",
+        "issues": "issueResults",
+        "memory": "memoryResults",
+        "discussions": "discussionResults",
+        "board": "boardResults",
+    }[scope]
+
+
+def _format_scope_results(
+    scope: str,
+    items: List[Dict[str, Any]],
+    n_results: int,
+) -> List[Dict[str, Any]]:
+    if scope in ("files", "files-docs"):
+        return _format_file_results(items)[:n_results]
+    if scope == "specs":
+        return _format_spec_results(items)[:n_results]
+    if scope == "memory":
+        return _format_memory_results(items, n_results)
+    if scope == "discussions":
+        return _format_discussion_results(items, n_results)
+    if scope == "board":
+        return _format_board_results(items)[:n_results]
+    return _format_issue_results(items)[:n_results]
 
 
 def action_search_v2(
@@ -3268,6 +3405,7 @@ def action_search_v2(
     n_results: int = 10,
     no_auto_build: bool = False,
     db_root: Optional[Path] = None,
+    match_mode: str = "semantic",
 ) -> dict:
     """Unified v2 search dispatcher with auto-build fallback."""
     scope_for_action = {
@@ -3366,24 +3504,19 @@ def action_search_v2(
     with acquire_lock(db_path, exclusive=False):
         client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
         try:
-            # SPECs / Memory are chunked, so a single owner can span many
-            # Chroma records. Over-fetch by 5x then collapse in the formatter.
-            fetch_n = n_results * 5 if scope in ("specs", "memory", "discussions") else n_results
+            fetch_n = _search_fetch_count(scope, n_results, match_mode)
             items = _search_collection_v2(collection, query, fetch_n)
         finally:
             _close_chroma_client(client)
 
-    if scope in ("files", "files-docs"):
-        return {"ok": True, "results": _format_file_results(items)}
-    if scope == "specs":
-        return {"ok": True, "specResults": _format_spec_results(items)[:n_results]}
-    if scope == "memory":
-        return {"ok": True, "memoryResults": _format_memory_results(items, n_results)}
-    if scope == "discussions":
-        return {"ok": True, "discussionResults": _format_discussion_results(items, n_results)}
-    if scope == "board":
-        return {"ok": True, "boardResults": _format_board_results(items)[:n_results]}
-    return {"ok": True, "issueResults": _format_issue_results(items)}
+    strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
+    payload = {
+        "ok": True,
+        _scope_result_key(scope): _format_scope_results(scope, strict_items, n_results),
+    }
+    if match_mode == "all_terms":
+        payload["suggestions"] = _format_scope_results(scope, suggestion_items, n_results)
+    return payload
 
 
 def action_search_multi_v2(
@@ -3394,6 +3527,7 @@ def action_search_multi_v2(
     n_results: int,
     scopes: Sequence[str],
     db_root: Optional[Path] = None,
+    match_mode: str = "semantic",
 ) -> Dict[str, Any]:
     """Search multiple v2 scopes inside one Python process.
 
@@ -3428,12 +3562,15 @@ def action_search_multi_v2(
             n_results=n_results,
             no_auto_build=True,
             db_root=db_root,
+            match_mode=match_mode,
         )
         if not result.get("ok"):
             result["scope"] = scope
             return result
         for key, value in result.items():
-            if key != "ok":
+            if key == "suggestions":
+                payload.setdefault("suggestions", {})[scope] = value
+            elif key != "ok":
                 payload[key] = value
     return payload
 
@@ -3521,6 +3658,7 @@ def parse_args() -> argparse.Namespace:
         choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board"],
     )
     parser.add_argument("--scopes", default="")
+    parser.add_argument("--match-mode", default="semantic", choices=["semantic", "all_terms"])
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
     parser.add_argument("--respect-ttl", dest="respect_ttl", action="store_true")
@@ -3631,6 +3769,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     query=args.query,
                     n_results=args.n_results,
                     scopes=scopes,
+                    match_mode=args.match_mode,
                 )
             )
             return 0
@@ -3656,6 +3795,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     query=args.query,
                     n_results=args.n_results,
                     no_auto_build=args.no_auto_build,
+                    match_mode=args.match_mode,
                 )
             )
             return 0

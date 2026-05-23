@@ -212,6 +212,28 @@ test("Index search UI exposes explicit search controls and readable result scori
   );
 });
 
+test("Index search UI exposes semantic and all-terms match modes", () => {
+  assert.ok(
+    appSource.includes("index-match-mode-list") &&
+      appSource.includes('data-match-mode="semantic"') &&
+      appSource.includes('data-match-mode="all_terms"'),
+    "Index search should expose a Semantic / All terms segmented control",
+  );
+  assert.ok(
+    appSource.includes("match_mode: state.matchMode") &&
+      appSource.includes("matchMode") &&
+      appSource.includes("searchSignature = JSON.stringify({ query, scopes, worktreeHash, matchMode"),
+    "match mode should be sent to the backend and included in the request signature",
+  );
+  assert.ok(
+    appSource.includes("state.suggestions") &&
+      appSource.includes("Semantic suggestions") &&
+      appSource.includes("Matched:") &&
+      appSource.includes("Searching all terms"),
+    "All terms mode should render suggestions separately, show concise matched-term evidence, and use matching loading copy",
+  );
+});
+
 test("Index search clears invalidate any in-flight request immediately", () => {
   assert.ok(
     appSource.includes("function clearProjectIndexSearchState(state)") &&

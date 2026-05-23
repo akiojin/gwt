@@ -53,6 +53,23 @@ gwt-search --memory "query"    # post-mortem memory only
 | `--files` | Files only | `search-files` |
 | `--memory` | Memory only | `search-memory` |
 
+## Match modes
+
+Use the default semantic mode for broad discovery. Use `--match-mode all_terms`
+when the user or task needs FAQ-style precision and every whitespace-separated
+term or quoted phrase must be present in a strict result.
+
+Examples:
+
+```text
+gwt-search --match-mode all_terms "Workspace 置き換え"
+gwt-search --match-mode all_terms "\"Project State\" migration"
+```
+
+In `all_terms` mode, strict results must satisfy every required term. Semantic
+suggestions may still be returned separately, but they must not be treated as
+strict matches.
+
 ## Environment
 
 When the gwt GUI app (WebView built with `wry + tao + axum WebSocket` and

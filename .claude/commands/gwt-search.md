@@ -1,5 +1,5 @@
 ---
-description: Unified semantic search over SPECs, Issues, project source files, and memory
+description: Unified semantic search over SPECs, Issues, project source files, memory, and precision all-terms matching
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -11,7 +11,7 @@ Unified semantic search over SPEC Issues, GitHub Issues, project source files, a
 ## Usage
 
 ```text
-/gwt:gwt-search [query] [--specs] [--issues] [--files] [--memory]
+/gwt:gwt-search [query] [--specs] [--issues] [--files] [--memory] [--match-mode semantic|all_terms]
 ```
 
 ## Steps
@@ -36,4 +36,8 @@ Unified semantic search over SPEC Issues, GitHub Issues, project source files, a
 
 ```text
 /gwt:gwt-search --memory "watcher debounce"
+```
+
+```text
+/gwt:gwt-search --match-mode all_terms "Workspace 置き換え"
 ```

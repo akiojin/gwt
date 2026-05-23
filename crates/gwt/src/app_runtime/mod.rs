@@ -92,6 +92,7 @@ pub struct ProjectIndexSearchRequest<'a> {
     pub(crate) request_id: u64,
     pub(crate) scopes: Vec<gwt::IndexSearchScope>,
     pub(crate) worktree_hash: Option<String>,
+    pub(crate) match_mode: gwt::IndexSearchMatchMode,
 }
 
 struct KnowledgeRefreshTask {
@@ -122,6 +123,7 @@ struct ProjectIndexSearchTask {
     request_id: u64,
     scopes: Vec<gwt::IndexSearchScope>,
     worktree_hash: Option<String>,
+    match_mode: gwt::IndexSearchMatchMode,
 }
 
 pub struct WindowRuntime {
@@ -3145,6 +3147,7 @@ impl AppRuntime {
                 request_id,
                 scopes,
                 worktree_hash,
+                match_mode,
             } => self.search_project_index_events(
                 &client_id,
                 ProjectIndexSearchRequest {
@@ -3153,6 +3156,7 @@ impl AppRuntime {
                     request_id,
                     scopes,
                     worktree_hash,
+                    match_mode,
                 },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -5556,6 +5560,7 @@ impl AppRuntime {
             request_id: request.request_id,
             scopes: request.scopes,
             worktree_hash: request.worktree_hash,
+            match_mode: request.match_mode,
         });
         Vec::new()
     }
@@ -5569,6 +5574,7 @@ impl AppRuntime {
             request_id,
             scopes,
             worktree_hash,
+            match_mode,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
@@ -5577,12 +5583,14 @@ impl AppRuntime {
                 &query,
                 &scopes,
                 worktree_hash.as_deref(),
+                match_mode,
             ) {
-                Ok(results) => BackendEvent::ProjectIndexSearchResults {
+                Ok(outcome) => BackendEvent::ProjectIndexSearchResults {
                     id: id.clone(),
                     query: query.clone(),
                     request_id,
-                    results,
+                    results: outcome.results,
+                    suggestions: outcome.suggestions,
                 },
                 Err(error) => BackendEvent::ProjectIndexSearchError {
                     id: id.clone(),
@@ -14596,6 +14604,7 @@ exit 1
                 gwt::IndexSearchScope::FilesDocs,
             ],
             worktree_hash: Some("worktree-hash".to_string()),
+            match_mode: gwt::IndexSearchMatchMode::AllTerms,
         })
         .expect("project index search user action log");
 
