@@ -61,7 +61,7 @@ test("closeLaunchWizardLocal discards pending guard state before re-render", () 
   // and active flag without invoking onFlush.
   assert.match(
     appSource,
-    /function\s+closeLaunchWizardLocal\(\)\s*\{[\s\S]{0,300}?wizardInteractionGuard\.discard\(\)[\s\S]{0,100}?renderLaunchWizard\(\)/,
+    /function\s+closeLaunchWizardLocal\(\)\s*\{[\s\S]{0,500}?wizardInteractionGuard\.discard\(\)[\s\S]{0,140}?renderLaunchWizard\(\)/,
     "expected closeLaunchWizardLocal() to discard guard before render",
   );
 });
@@ -95,5 +95,92 @@ test("wizardModal releases the guard when Escape is pressed during interaction",
     appSource,
     /wizardModal\.addEventListener\(\s*"keydown"[\s\S]{0,400}?key\s*===\s*"Escape"[\s\S]{0,200}?wizardInteractionGuard\.release\(\)/,
     "expected Escape keydown to release the guard",
+  );
+});
+
+test("wizard chrome actions release any active guard before dispatch", () => {
+  assert.match(
+    appSource,
+    /function\s+releaseWizardInteractionGuardForChromeAction\(\)\s*\{[\s\S]{0,300}?wizardInteractionGuard\.isActive\(\)[\s\S]{0,150}?wizardInteractionGuard\.release\(\)[\s\S]{0,200}?return\s+Boolean\(launchWizard\s*\|\|\s*launchWizardOpenError\)/,
+    "expected a chrome-action helper that releases the guard and reports whether wizard state remains",
+  );
+  assert.match(
+    appSource,
+    /function\s+closeLaunchWizardFromChrome\(\)\s*\{[\s\S]{0,160}?releaseWizardInteractionGuardForChromeAction\(\)/,
+    "expected Cancel/Close to release pending guard state before dispatching",
+  );
+  assert.match(
+    appSource,
+    /wizardBackButton\.addEventListener\(\s*"click"[\s\S]{0,220}?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]{0,300}?kind:\s*"back"/,
+    "expected Back to release pending guard state before dispatching",
+  );
+  assert.match(
+    appSource,
+    /function\s+handleLaunchWizardSubmitFromChrome\(\)[\s\S]{0,260}?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]{0,320}?kind:\s*"submit"/,
+    "expected Submit handler to release pending guard state before dispatching",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(wizardModal\.classList\.contains\("open"\)\)\s*\{[\s\S]{0,260}?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]{0,350}?kind:\s*"cancel"/,
+    "expected Escape-close to release pending guard state before dispatching",
+  );
+});
+
+test("wizard start method actions release guard before dispatch", () => {
+  assert.match(
+    appSource,
+    /const\s+handleStartMethodLaunchAction\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,260}?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]{0,360}?kind:\s*"use_start_method"/,
+    "expected Start methods direct actions to release pending guard state before dispatching",
+  );
+});
+
+test("wizard launch pointer fallback routes submit and start methods", () => {
+  assert.match(
+    appSource,
+    /function\s+handleLaunchWizardSubmitFromChrome\(\)[\s\S]{0,500}?kind:\s*"submit"/,
+    "expected Launch Wizard submit to be centralized for click and pointer fallback",
+  );
+  assert.match(
+    appSource,
+    /wizardSubmitButton\.addEventListener\(\s*"pointerup"[\s\S]{0,420}?handleLaunchWizardSubmitFromChrome\(\)/,
+    "expected Create and Launch pointerup fallback to route through submit handler",
+  );
+  assert.match(
+    appSource,
+    /button\.addEventListener\(\s*"pointerup"[\s\S]{0,420}?handleStartMethodLaunchAction\(\)/,
+    "expected Start method pointerup fallback to route through the same action handler",
+  );
+});
+
+test("wizard launch actions expose local pending feedback", () => {
+  assert.match(
+    appSource,
+    /let\s+launchWizardPendingAction\s*=\s*null/,
+    "expected Launch Wizard to track a local pending action",
+  );
+  assert.match(
+    appSource,
+    /function\s+setLaunchWizardPendingAction\(\s*action[\s\S]{0,500}?launchWizardPendingAction\s*=/,
+    "expected a helper to set Launch Wizard pending state",
+  );
+  assert.match(
+    appSource,
+    /function\s+clearLaunchWizardPendingAction\(\)[\s\S]{0,300}?launchWizardPendingAction\s*=\s*null/,
+    "expected a helper to clear Launch Wizard pending state",
+  );
+  assert.match(
+    appSource,
+    /wizardModal\.classList\.toggle\(\s*"is-launch-pending"[\s\S]{0,220}?wizardDialog\.setAttribute\(\s*"aria-busy"/,
+    "expected modal busy class and aria-busy to mirror pending launch actions",
+  );
+  assert.match(
+    appSource,
+    /wizardSubmitButton\.textContent\s*=\s*isLaunchSubmitPending[\s\S]{0,160}?"Launching\.\.\."/,
+    "expected final launch submit to show an immediate Launching label",
+  );
+  assert.match(
+    appSource,
+    /createNode\(\s*"div",\s*"launch-note launch-pending-note",\s*"Creating agent window\.\.\."/,
+    "expected pending submit to render visible progress copy in the modal",
   );
 });

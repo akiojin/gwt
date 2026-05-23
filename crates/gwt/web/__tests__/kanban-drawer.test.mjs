@@ -67,11 +67,36 @@ test("Drawer Esc / backdrop click closes the surface", () => {
   // The handler may use either `if (event.key !== "Escape") return`
   // (early-return style, which is how the rest of the codebase
   // handles global Esc) or `if (event.key === "Escape")` directly.
-  // Both patterns are acceptable; we just need a keydown handler
-  // that wires Esc to closeKanbanDrawer.
-  assert.match(
-    appSource,
-    /(?:key !== "Escape"[\s\S]{0,2500}?closeKanbanDrawer|key === "Escape"[\s\S]{0,500}?closeKanbanDrawer|kanban-drawer[\s\S]{0,500}?Escape)/,
+  // Both patterns are acceptable; we just need the global Esc handler
+  // to route the open Drawer branch to closeKanbanDrawer.
+  const escapeHandlerIndex = appSource.indexOf(
+    'document.addEventListener("keydown", (event) => {\n        if (event.key !== "Escape") return;',
+  );
+  assert.notEqual(
+    escapeHandlerIndex,
+    -1,
+    "expected a global Escape keydown handler",
+  );
+  const kanbanBranchIndex = appSource.indexOf(
+    'if (kanbanDrawer && kanbanDrawer.dataset.open === "true")',
+    escapeHandlerIndex,
+  );
+  assert.notEqual(
+    kanbanBranchIndex,
+    -1,
+    "expected the Escape handler to inspect Kanban Drawer open state",
+  );
+  const nextBranchIndex = appSource.indexOf(
+    "if (windowListOpen)",
+    kanbanBranchIndex,
+  );
+  const closeIndex = appSource.indexOf(
+    "closeKanbanDrawer();",
+    kanbanBranchIndex,
+  );
+  assert.ok(
+    closeIndex > kanbanBranchIndex
+      && (nextBranchIndex === -1 || closeIndex < nextBranchIndex),
     "expected Esc keydown to close the Kanban Drawer",
   );
 });
