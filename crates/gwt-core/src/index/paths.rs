@@ -17,6 +17,10 @@
 //!     chroma.sqlite3
 //!     .lock
 //!     manifest.json
+//!   discussions/
+//!     chroma.sqlite3
+//!     .lock
+//!     manifest.json
 //!   worktrees/
 //!     <wt-hash>/
 //!       meta.json
@@ -44,6 +48,8 @@ pub enum Scope {
     Specs,
     /// Repo-scoped: post-mortem fix knowledge sourced from `tasks/memory.md`.
     Memory,
+    /// Repo-scoped: discussion knowledge sourced from `tasks/discussions.md`.
+    Discussions,
     /// Worktree-scoped: project source code files.
     FilesCode,
     /// Worktree-scoped: project documentation files.
@@ -61,6 +67,7 @@ impl Scope {
             Scope::Issues => "issues",
             Scope::Specs => "specs",
             Scope::Memory => "memory",
+            Scope::Discussions => "discussions",
             Scope::FilesCode => "files",
             Scope::FilesDocs => "files-docs",
         }
@@ -94,7 +101,10 @@ pub fn gwt_index_db_path(
     worktree: Option<&WorktreeHash>,
     scope: Scope,
 ) -> Result<PathBuf> {
-    if matches!(scope, Scope::Issues | Scope::Specs | Scope::Memory) {
+    if matches!(
+        scope,
+        Scope::Issues | Scope::Specs | Scope::Memory | Scope::Discussions
+    ) {
         return Ok(gwt_index_repo_dir(repo).join(scope.subdir()));
     }
     let wt = worktree.ok_or_else(|| {
@@ -170,5 +180,17 @@ mod tests {
         assert!(!with_wt
             .components()
             .any(|component| component.as_os_str() == "worktrees"));
+    }
+
+    #[test]
+    fn discussions_scope_is_repo_scoped() {
+        let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = compute_worktree_hash(tmp.path()).unwrap();
+        let with_wt = gwt_index_db_path(&repo, Some(&wt), Scope::Discussions).unwrap();
+        let without_wt = gwt_index_db_path(&repo, None, Scope::Discussions).unwrap();
+        assert_eq!(with_wt, without_wt);
+        assert!(with_wt.ends_with(format!("{}/discussions", repo.as_str())));
+        assert!(!Scope::Discussions.requires_worktree());
     }
 }

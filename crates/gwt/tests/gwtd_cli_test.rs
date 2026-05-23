@@ -53,7 +53,7 @@ fn gwtd_index_help_lists_every_rebuild_scope() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("all|issues|specs|memory|board|files|files-docs"),
+        stdout.contains("all|issues|specs|memory|discussions|board|files|files-docs"),
         "index help must list every accepted rebuild scope, got: {stdout}"
     );
 }

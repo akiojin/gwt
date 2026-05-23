@@ -2,7 +2,8 @@
   "schema_version": 1,
   "max_file_size": 1048576,
   "allow_paths": [
-    "tasks/memory.md"
+    "tasks/memory.md",
+    "tasks/discussions.md"
   ],
   "deny_root_prefixes": [
     ".git",

@@ -59,7 +59,7 @@ fn index_path_policy_ignores_global_gitignore_files() {
 }
 
 #[test]
-fn index_path_policy_allowlists_memory_only_under_tasks() {
+fn index_path_policy_allowlists_shared_knowledge_files_only_under_tasks() {
     let dir = tempdir().expect("tempdir");
     let tasks = dir.path().join("tasks");
     fs::create_dir_all(&tasks).expect("create tasks");
@@ -68,6 +68,7 @@ fn index_path_policy_allowlists_memory_only_under_tasks() {
     let matcher = build_project_ignore_matcher(dir.path());
 
     assert!(policy.is_indexable_path(&matcher, dir.path(), &tasks.join("memory.md")));
+    assert!(policy.is_indexable_path(&matcher, dir.path(), &tasks.join("discussions.md")));
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("todo.md")));
     assert!(!policy.is_indexable_path(&matcher, dir.path(), &tasks.join("spec-1939/notes.md")));
 }

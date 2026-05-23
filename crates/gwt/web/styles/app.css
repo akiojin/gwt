@@ -1158,6 +1158,34 @@ body {
   gap: 6px;
 }
 
+.index-match-mode-list {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.index-match-mode-button {
+  min-width: 82px;
+  border: 0;
+  border-right: 1px solid var(--color-border);
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  cursor: pointer;
+}
+
+.index-match-mode-button:last-child {
+  border-right: 0;
+}
+
+.index-match-mode-button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+}
+
 .index-scope-button {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -1300,6 +1328,16 @@ body {
   }
 }
 
+.index-result-group-label {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .index-result-row {
   width: 100%;
   display: grid;
@@ -1319,6 +1357,10 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
+.index-result-row.is-suggestion {
+  background: color-mix(in oklab, var(--color-surface-elevated) 72%, var(--color-surface));
+}
+
 .index-result-scope {
   grid-row: span 2;
   align-self: start;
@@ -1329,10 +1371,15 @@ body {
 }
 
 .index-result-subtitle,
+.index-result-evidence,
 .index-detail-subtitle,
 .index-detail-meta {
   color: var(--color-text-muted);
   font-size: var(--type-xs);
+}
+
+.index-result-evidence {
+  grid-column: 2;
 }
 
 .index-result-detail {

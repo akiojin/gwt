@@ -10,6 +10,7 @@ mod board;
 mod build;
 pub mod daemon;
 mod discuss;
+mod discussion;
 mod env;
 pub mod gwtd_resolver;
 pub mod hook;
@@ -31,6 +32,7 @@ mod workspace;
 use std::io::{self};
 
 pub use board::{BoardCommand, BoardPostCommand};
+pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
@@ -123,35 +125,21 @@ pub struct PrEditCall {
 /// variants and dispatch becomes a nested match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
-    /// `gwtd issue ...` — issue + spec management.
     Issue(IssueCommand),
-    /// `gwtd pr ...` — pull request management.
     Pr(PrCommand),
-    /// `gwtd actions ...` — GitHub Actions log access.
     Actions(ActionsCommand),
-    /// `gwtd board ...` — coordination Board read/post.
     Board(BoardCommand),
-    /// `gwtd hook ...` and `gwtd __internal daemon-hook ...`.
     Hook(HookCommand),
-    /// `gwtd index ...` — local search index.
     Index(IndexCommand),
-    /// `gwtd memory ...` / `gwtd lessons ...` — append reusable project memory.
     Memory(MemoryCommand),
-    /// `gwtd discuss ...` — gwt-discussion exit CLI.
     Discuss(DiscussCommand),
-    /// `gwtd plan ...` — gwt-plan-spec exit CLI.
+    Discussion(DiscussionCommand),
     Plan(PlanCommand),
-    /// `gwtd build ...` — gwt-build-spec exit CLI.
     Build(BuildCommand),
-    /// `gwtd register ...` — gwt-register-spec exit CLI (SPEC-2784).
     Register(RegisterCommand),
-    /// `gwtd update [...]` and `gwtd __internal {apply-update,run-installer} ...`.
     Update(UpdateCommand),
-    /// `gwtd daemon ...` — long-running runtime daemon (SPEC-2077).
     Daemon(DaemonCommand),
-    /// `gwtd workspace ...` — Workspace projection and summary updates.
     Workspace(WorkspaceCommand),
-    /// `gwtd pane ...` — inspect and control live agent panes.
     Pane(PaneCommand),
 }
 
@@ -386,6 +374,7 @@ pub enum IndexScope {
     Issues,
     Specs,
     Memory,
+    Discussions,
     Board,
     Files,
     FilesDocs,
@@ -427,7 +416,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|board|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd discussion update [fields] | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -550,6 +539,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "memory"
                     | "lessons"
                     | "discuss"
+                    | "discussion"
                     | "plan"
                     | "build"
                     | "register"
@@ -591,6 +581,11 @@ pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// Parse an argv slice into a `gwtd memory ...` / `gwtd lessons ...` [`CliCommand`].
 pub fn parse_memory_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     memory::parse(args).map(CliCommand::Memory)
+}
+
+/// Parse an argv slice into a `gwtd discussion ...` [`CliCommand`].
+pub fn parse_discussion_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    discussion::parse(args).map(CliCommand::Discussion)
 }
 
 /// Parse an argv slice into a `gwtd daemon ...` [`CliCommand`] (SPEC-2077).
@@ -748,6 +743,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
+        CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
