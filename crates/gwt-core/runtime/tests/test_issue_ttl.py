@@ -58,6 +58,76 @@ class IssueTtlTests(unittest.TestCase):
             meta = json.loads(meta_path.read_text())
             self.assertIn("last_full_refresh", meta)
             self.assertEqual(meta.get("ttl_minutes"), 15)
+            self.assertRegex(meta.get("source_cache_fingerprint", ""), r"^[0-9a-f]{64}$")
+            self.assertEqual(meta.get("source_document_count"), 1)
+
+    def test_status_reports_source_cache_changed_when_cached_issue_state_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(cache_root, 2867, "Recent Projects", "cache body", ["bug"])
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                result = runner.action_index_issues_v2(
+                    repo_hash="abc1234567890def",
+                    project_root=tmp,
+                    db_root=db_root,
+                    respect_ttl=False,
+                )
+            self.assertTrue(result["ok"], result)
+
+            meta_path = cache_root / "2867" / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            meta["state"] = "closed"
+            meta_path.write_text(json.dumps(meta))
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                status = runner.action_status_v2(
+                    repo_hash="abc1234567890def",
+                    worktree_hash=None,
+                    db_root=db_root,
+                )
+
+            issues = status["status"]["issues"]
+            self.assertFalse(issues["healthy"], issues)
+            self.assertTrue(issues["repair_required"], issues)
+            self.assertEqual(issues["reason"], "source_cache_changed")
+
+    def test_search_issues_rebuilds_after_cached_issue_state_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / "abc1234567890def"
+            self._write_cached_issue(cache_root, 2867, "Recent Projects", "cache body", ["bug"])
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                result = runner.action_index_issues_v2(
+                    repo_hash="abc1234567890def",
+                    project_root=tmp,
+                    db_root=db_root,
+                    respect_ttl=False,
+                )
+            self.assertTrue(result["ok"], result)
+
+            meta_path = cache_root / "2867" / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            meta["state"] = "closed"
+            meta_path.write_text(json.dumps(meta))
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                search = runner.action_search_v2(
+                    action="search-issues",
+                    repo_hash="abc1234567890def",
+                    worktree_hash=None,
+                    project_root=tmp,
+                    query="Recent Projects",
+                    n_results=5,
+                    no_auto_build=False,
+                    db_root=db_root,
+                )
+
+            self.assertTrue(search["ok"], search)
+            self.assertEqual(search["issueResults"][0]["number"], 2867)
+            self.assertEqual(search["issueResults"][0]["state"], "closed")
 
     def test_status_v2_returns_ttl_remaining_seconds(self):
         with tempfile.TemporaryDirectory() as tmp:
