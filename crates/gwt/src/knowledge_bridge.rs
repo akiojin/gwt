@@ -172,7 +172,9 @@ impl SemanticSearchClient for RunnerSemanticSearchClient {
             KnowledgeKind::Spec => "search-specs",
             KnowledgeKind::Pr => return Ok(Vec::new()),
         };
-        let repo_hash = crate::index_worker::detect_repo_hash(repo_path)
+        let search_root = crate::index_worker::resolve_project_index_repo_root(repo_path)
+            .unwrap_or_else(|| repo_path.to_path_buf());
+        let repo_hash = crate::index_worker::detect_repo_hash(&search_root)
             .ok_or_else(|| "semantic search requires a git origin remote".to_string())?;
         gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
         let output =
@@ -183,12 +185,12 @@ impl SemanticSearchClient for RunnerSemanticSearchClient {
                 .arg("--repo-hash")
                 .arg(repo_hash.as_str())
                 .arg("--project-root")
-                .arg(repo_path)
+                .arg(&search_root)
                 .arg("--query")
                 .arg(query)
                 .arg("--n-results")
                 .arg(limit.to_string())
-                .current_dir(repo_path)
+                .current_dir(&search_root)
                 .output()
                 .map_err(|error| format!("run semantic search: {error}"))?;
         if !output.status.success() {
@@ -1007,7 +1009,7 @@ fn load_linked_branches(repo_path: &Path) -> HashMap<u64, Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ffi::OsString, fs};
+    use std::{collections::HashMap, ffi::OsString, fs, path::PathBuf};
 
     use gwt_github::{
         client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
@@ -1059,6 +1061,107 @@ mod tests {
         gwt_core::process::scrub_git_env(&mut remote_cmd);
         let remote = remote_cmd.output().expect("git remote add");
         assert!(remote.status.success(), "git remote add failed");
+    }
+
+    #[cfg(unix)]
+    fn init_workspace_home_with_child_bare(workspace_home: &Path) -> PathBuf {
+        fs::create_dir_all(workspace_home).expect("create workspace home");
+        let bare_repo = workspace_home.join("repo.git");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        assert!(
+            init.status.success(),
+            "git init bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "-C",
+                bare_repo.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/workspace-home.git",
+            ])
+            .output()
+            .expect("git remote add");
+        assert!(
+            remote.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        );
+        bare_repo
+    }
+
+    #[cfg(unix)]
+    fn write_fake_project_index_python_requiring_cwd(
+        expected_cwd: &Path,
+        cwd_log: &Path,
+        project_root_log: &Path,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let legacy_python = PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+            .join(".gwt")
+            .join("runtime")
+            .join("chroma-venv")
+            .join("bin")
+            .join("python3");
+        let script = format!(
+            "#!/bin/sh\n\
+for arg in \"$@\"; do\n\
+  if [ \"$arg\" = \"-c\" ]; then\n\
+    exit 0\n\
+  fi\n\
+done\n\
+case \"$*\" in\n\
+  *\"-m pip\"*) exit 0 ;;\n\
+  *\"--action probe\"*) exit 0 ;;\n\
+esac\n\
+project_root=\"\"\n\
+previous=\"\"\n\
+for arg in \"$@\"; do\n\
+  if [ \"$previous\" = \"--project-root\" ]; then\n\
+    project_root=\"$arg\"\n\
+  fi\n\
+  previous=\"$arg\"\n\
+done\n\
+printf '%s\\n' \"$PWD\" > '{}'\n\
+printf '%s\\n' \"$project_root\" > '{}'\n\
+if [ \"$PWD\" != '{}' ]; then\n\
+  printf '%s\\n' \"wrong cwd: $PWD\" >&2\n\
+  exit 1\n\
+fi\n\
+if [ \"$project_root\" != '{}' ]; then\n\
+  printf '%s\\n' \"wrong project root: $project_root\" >&2\n\
+  exit 1\n\
+fi\n\
+case \"$*\" in\n\
+  *\"--action search-issues\"*)\n\
+    printf '%s\\n' '{{\"ok\":true,\"issueResults\":[{{\"number\":43,\"distance\":0.25}}]}}'\n\
+    exit 0\n\
+    ;;\n\
+esac\n\
+printf '%s\\n' '{{\"ok\":false,\"error\":\"unexpected fake python invocation\"}}'\n\
+exit 1\n",
+            cwd_log.display(),
+            project_root_log.display(),
+            expected_cwd.display(),
+            expected_cwd.display()
+        );
+        let pythons: [PathBuf; 2] = [
+            legacy_python,
+            gwt_core::runtime::project_index_python_path(),
+        ];
+        for python in pythons {
+            fs::create_dir_all(python.parent().expect("fake python parent"))
+                .expect("create fake python dir");
+            fs::write(&python, &script).expect("write fake python");
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake python");
+        }
     }
 
     fn issue_snapshot(
@@ -1489,6 +1592,57 @@ Extra context.
         assert!(
             !marker.exists(),
             "interactive semantic search must not invoke stale remote cache sync"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_semantic_issue_search_uses_child_bare_repo_for_workspace_home() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let workspace_home = home.path().join("workspace");
+        let bare_repo = init_workspace_home_with_child_bare(&workspace_home);
+        let expected_cwd = dunce::canonicalize(&bare_repo).expect("canonical bare repo");
+        let cwd_log = home.path().join("runner-cwd.log");
+        let project_root_log = home.path().join("runner-project-root.log");
+        write_fake_project_index_python_requiring_cwd(&expected_cwd, &cwd_log, &project_root_log);
+
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(&workspace_home)
+            .expect("workspace home cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                43,
+                "Workspace semantic issue",
+                "Search should run from the child bare repo.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue");
+
+        let view = search_knowledge_bridge(
+            &workspace_home,
+            KnowledgeKind::Issue,
+            "workspace semantic",
+            None,
+        )
+        .expect("workspace home semantic search should succeed");
+
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].number, 43);
+        assert_eq!(
+            fs::read_to_string(&cwd_log).expect("read cwd log").trim(),
+            expected_cwd.display().to_string()
+        );
+        assert_eq!(
+            fs::read_to_string(&project_root_log)
+                .expect("read project root log")
+                .trim(),
+            expected_cwd.display().to_string()
         );
     }
 
