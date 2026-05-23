@@ -698,6 +698,12 @@
         return state.matchMode === "all_terms" ? "Searching all terms" : "Searching semantic index";
       }
 
+      function indexSearchPlaceholder(state) {
+        return state.matchMode === "all_terms"
+          ? "All terms required, e.g. Workspace discussion"
+          : "Search by meaning, e.g. workspace lifecycle";
+      }
+
       function scheduleProjectIndexSearch(windowId) {
         const state = ensureIndexSearchState(windowId);
         if (state.searchTimer) {
@@ -814,6 +820,10 @@
         if (runButton) {
           runButton.disabled = !state.query.trim() || state.searching;
           runButton.textContent = state.searching ? "Searching" : "Search";
+        }
+        const input = root.querySelector(".index-search-input");
+        if (input) {
+          input.placeholder = indexSearchPlaceholder(state);
         }
         const fileWorktreeField = root.querySelector(".index-worktree-field");
         if (fileWorktreeField) {
@@ -9639,7 +9649,7 @@
               <section class="index-search-panel" data-index-panel="search">
                 <div class="index-search-toolbar">
                   <form class="index-search-box" role="search">
-                    <input class="index-search-input" type="search" placeholder="Search indexed content" aria-label="Search indexed content" />
+                    <input class="index-search-input" type="search" placeholder="Search by meaning, e.g. workspace lifecycle" aria-label="Search indexed content" />
                     <button class="index-run-button" type="submit">Search</button>
                   </form>
                   <div class="index-filter-bar">

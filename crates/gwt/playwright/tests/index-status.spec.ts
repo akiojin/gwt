@@ -387,7 +387,15 @@ test.describe("Project Index status surface", () => {
 
     await page.goto(APP_URL);
     const { root } = await openIndexSearchPanel(page);
+    await expect(root.locator(".index-search-input")).toHaveAttribute(
+      "placeholder",
+      "Search by meaning, e.g. workspace lifecycle",
+    );
     await root.locator("[data-match-mode='all_terms']").click();
+    await expect(root.locator(".index-search-input")).toHaveAttribute(
+      "placeholder",
+      "All terms required, e.g. Workspace discussion",
+    );
     await root.locator(".index-search-input").fill("Workspace volatile");
     await root.locator(".index-run-button").click();
 
