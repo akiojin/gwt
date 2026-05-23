@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.44.1] - 2026-05-23
+
+### Bug Fixes
+
+- **gui:** Resolve Issue Bridge cwd for workspace home
+- **index:** Refresh issue index from cache changes
+- **launch-wizard:** Enable start with last settings launch
+
+### Documentation
+
+- **memory:** Record launch wizard state-debugging lesson
+
 ## [9.44.0] - 2026-05-23
 
 ### Bug Fixes
