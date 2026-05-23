@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.44.0] - 2026-05-23
+
+### Bug Fixes
+
+- **gui:** Normalize Recent Projects entries to workspace home
+- Parse empty discussion metadata fields
+- Resolve index search from workspace home
+- **launch-wizard:** Gate setup behind start methods
+- **gui:** Show semantic agent role badges
+- **gui:** Keep agent role badge visible
+- **gui:** Stabilize branch rows in narrow windows
+- **launch-wizard:** Filter focus start method sessions
+- Clarify index search placeholders
+- **launch:** Runtime確認のworktree作成を遅延する
+- **test:** Serialize HOME-dependent workspace projection path test
+
+### Documentation
+
+- **skill:** Forbid stopping production gwt in headless-browser-check
+- **memory:** Runtime確認の再発防止を記録する
+
+### Features
+
+- Add durable discussions and project state paths
+- **launch-wizard:** Add start methods
+- **launch-wizard:** Add start methods back button
+- **gui:** Move branch agent actions into rows
+- Add index search all terms mode
+
+### Miscellaneous Tasks
+
+- **memory:** Record spec edit recovery lesson
+- Merge origin/develop into agent badge branch
+- Merge origin/develop into start methods branch
+- **memory:** Record project state coordination correction
+- Merge origin/develop into launch runtime branch
+- Merge latest develop into launch runtime branch
+- Merge origin/develop into index search branch
+
 ## [9.43.0] - 2026-05-21
 
 ### Bug Fixes
