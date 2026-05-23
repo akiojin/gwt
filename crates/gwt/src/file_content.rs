@@ -414,9 +414,9 @@ fn detect_and_decode(bytes: &[u8]) -> Result<(Encoding, String, bool), FileConte
         return Ok((Encoding::Utf8, text.to_owned(), false));
     }
 
-    let mut detector = chardetng::EncodingDetector::new();
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    let detected = detector.guess(None, true);
+    let detected = detector.guess(None, chardetng::Utf8Detection::Allow);
     let supported = supported_encoding(detected).ok_or(FileContentError::BinaryNotText)?;
     let (encoding, text) = decode_with(detected, supported, bytes)?;
     Ok((encoding, text, false))
