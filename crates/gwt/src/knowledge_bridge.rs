@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::issue_cache::{
     issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
-    sync_issue_cache_from_remote, sync_issue_cache_from_remote_if_stale, ISSUE_CACHE_TTL,
+    sync_issue_cache_from_remote_if_stale_with_fingerprint,
+    sync_issue_cache_from_remote_with_fingerprint, ISSUE_CACHE_TTL,
 };
 
 const SPEC_LABEL: &str = "gwt-spec";
@@ -275,12 +276,30 @@ pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<b
         return Ok(false);
     }
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    if force {
-        sync_issue_cache_from_remote(repo_path, &cache_root)?;
-        Ok(true)
+    let outcome = if force {
+        sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
     } else {
-        sync_issue_cache_from_remote_if_stale(repo_path, &cache_root, ISSUE_CACHE_TTL)
+        sync_issue_cache_from_remote_if_stale_with_fingerprint(
+            repo_path,
+            &cache_root,
+            ISSUE_CACHE_TTL,
+        )?
+    };
+    if outcome.source_changed && crate::index_worker::detect_repo_hash(repo_path).is_some() {
+        if let Err(error) = crate::index_worker::default_rebuild_runner(
+            repo_path,
+            crate::index_worker::IndexRebuildScope::Issues,
+            None,
+        ) {
+            tracing::warn!(
+                target: "gwt::knowledge_bridge",
+                project_root = %repo_path.display(),
+                error = %error,
+                "issue cache refresh succeeded but issue index rebuild failed"
+            );
+        }
     }
+    Ok(outcome.refreshed)
 }
 
 pub fn search_knowledge_bridge(

@@ -9,10 +9,7 @@ use std::{
 use gwt_core::{
     index::{
         paths::gwt_index_root,
-        runtime::{
-            reconcile_repo, refresh_issues_if_stale, PythonRunnerSpawner, ReconcileOptions,
-            RefreshIssuesOptions, RunnerSpawner,
-        },
+        runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
@@ -1197,6 +1194,76 @@ fn project_index_status_for_path_inner(
     }
 }
 
+fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
+    let meta_path = index_root
+        .join(repo_hash.as_str())
+        .join("issues")
+        .join("meta.json");
+    let bytes = std::fs::read(meta_path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("source_cache_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn issue_index_needs_rebuild_for_cache(
+    index_root: &Path,
+    repo_hash: &RepoHash,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    let Some(source) = crate::issue_cache::issue_cache_source_fingerprint(cache_root)? else {
+        return Ok(false);
+    };
+    if source.document_count == 0 {
+        return Ok(false);
+    }
+    Ok(
+        read_issue_index_source_fingerprint(index_root, repo_hash).as_deref()
+            != Some(source.fingerprint.as_str()),
+    )
+}
+
+fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
+    repo_root: &Path,
+    refresh_project_root: &Path,
+    index_root: &Path,
+    repo_hash: &RepoHash,
+    spawner: &S,
+) -> Result<(), String> {
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+    match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
+        refresh_project_root,
+        &cache_root,
+        crate::issue_cache::ISSUE_CACHE_TTL,
+    ) {
+        Ok(outcome) => {
+            tracing::info!(
+                target: "gwt::index",
+                project_root = %repo_root.display(),
+                cache_refreshed = outcome.refreshed,
+                source_changed = outcome.source_changed,
+                "project index issue cache refresh checked"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                project_root = %repo_root.display(),
+                error = %error,
+                "project index issue cache refresh failed; continuing with local cache/index"
+            );
+        }
+    }
+
+    if issue_index_needs_rebuild_for_cache(index_root, repo_hash, &cache_root)? {
+        spawner
+            .spawn_index_issues(repo_hash.as_str(), refresh_project_root, false)
+            .map_err(|err| format!("spawn issue index: {err}"))?;
+    }
+    Ok(())
+}
+
 pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     project_root: &Path,
     index_root: &Path,
@@ -1246,29 +1313,20 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
         "project index repository reconciled"
     );
 
-    let refresh = RefreshIssuesOptions {
-        index_root: index_root.to_path_buf(),
-        repo_hash,
-        project_root: refresh_project_root,
-        ttl: Duration::from_secs(15 * 60),
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| err.to_string())?;
     let refresh_started = Instant::now();
-    runtime
-        .block_on(refresh_issues_if_stale(&refresh, spawner))
-        .map(|decision| {
-            tracing::info!(
-                target: "gwt::index",
-                project_root = %repo_root.display(),
-                elapsed_ms = refresh_started.elapsed().as_millis() as u64,
-                decision = ?decision,
-                "project index issue refresh checked"
-            );
-        })
-        .map_err(|err| err.to_string())?;
+    refresh_issue_cache_and_index_for_startup(
+        &repo_root,
+        &refresh_project_root,
+        index_root,
+        &repo_hash,
+        spawner,
+    )?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        elapsed_ms = refresh_started.elapsed().as_millis() as u64,
+        "project index issue source refresh checked"
+    );
     tracing::info!(
         target: "gwt::index",
         project_root = %repo_root.display(),
@@ -2241,6 +2299,48 @@ detached
         assert_eq!(events[0].state, ProjectIndexStatusState::Repairing);
         assert_eq!(events[1].state, ProjectIndexStatusState::Error);
         assert!(events[1].detail.contains("synthetic failure"));
+    }
+
+    #[test]
+    fn issue_index_source_mismatch_requires_startup_rebuild() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_hash =
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/gwt.git");
+        let cache_root = temp.path().join("issue-cache");
+        let snapshot = gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(2867),
+            title: "Recent Projects".to_string(),
+            body: "workspace home".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt_github::IssueState::Closed,
+            updated_at: gwt_github::UpdatedAt::new("2026-05-23T00:00:00Z"),
+            comments: vec![],
+        };
+        gwt_github::Cache::new(cache_root.clone())
+            .write_snapshot(&snapshot)
+            .expect("write cache");
+
+        let index_root = temp.path().join("index");
+        let issues_dir = index_root.join(repo_hash.as_str()).join("issues");
+        std::fs::create_dir_all(&issues_dir).expect("issues dir");
+        std::fs::write(
+            issues_dir.join("meta.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "last_full_refresh": chrono::Utc::now().to_rfc3339(),
+                "ttl_minutes": 15,
+                "source_cache_fingerprint": "stale",
+                "source_document_count": 1,
+            })
+            .to_string(),
+        )
+        .expect("write meta");
+
+        assert!(
+            issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
+                .expect("rebuild decision"),
+            "startup must rebuild issues when source cache fingerprint differs from index meta",
+        );
     }
 
     #[test]
