@@ -387,6 +387,7 @@ fn workspace_projection_serde_round_trip_preserves_new_fields() {
 
 #[test]
 fn workspace_projection_path_is_project_scoped() {
+    let _guard = env_lock();
     let repo_hash = compute_repo_hash("https://github.com/example/project.git");
 
     let path = gwt_workspace_projection_path(&repo_hash);
