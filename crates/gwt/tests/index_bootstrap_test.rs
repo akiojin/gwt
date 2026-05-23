@@ -1,12 +1,13 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use gwt::index_worker::bootstrap_project_index_for_path_with;
 use gwt_core::{
-    index::runtime::RunnerSpawner, repo_hash::detect_repo_hash,
+    index::runtime::RunnerSpawner, paths::gwt_cache_dir, repo_hash::detect_repo_hash,
     worktree_hash::compute_worktree_hash,
 };
 
@@ -35,9 +36,45 @@ impl RunnerSpawner for RecordingSpawner {
     }
 }
 
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[test]
 fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
     let repo = tmp.path().join("repo");
     let wt = tmp.path().join("wt-feature");
     init_git_repo(&repo);
@@ -79,10 +116,24 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
             "schema_version": 1,
             "last_full_refresh": stale.to_rfc3339(),
             "ttl_minutes": 15,
+            "source_cache_fingerprint": "stale",
+            "source_document_count": 1,
         })
         .to_string(),
     )
     .expect("write issues meta");
+    let cache_root = gwt_cache_dir().join("issues").join(repo_hash.as_str());
+    gwt_github::Cache::new(cache_root)
+        .write_snapshot(&gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(2867),
+            title: "Recent Projects cache freshness".to_string(),
+            body: "Closed state should reach Issue search at startup.".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt_github::IssueState::Closed,
+            updated_at: gwt_github::UpdatedAt::new("2026-05-23T00:00:00Z"),
+            comments: vec![],
+        })
+        .expect("write issue cache snapshot");
 
     let spawner = RecordingSpawner::default();
     bootstrap_project_index_for_path_with(&wt, &index_root, &spawner).expect("bootstrap index");
@@ -115,22 +166,30 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
     assert_eq!(
         calls.len(),
         1,
-        "stale issue metadata should kick one refresh"
+        "source cache fingerprint mismatch should kick one issue rebuild"
     );
     assert!(
         calls[0].contains(repo_hash.as_str()),
-        "refresh must target the resolved repo hash, got {:?}",
+        "rebuild must target the resolved repo hash, got {:?}",
         *calls
     );
     assert!(
         call_project_root_matches(&calls[0], &wt),
-        "refresh should use the requested worktree path, got {:?}",
+        "rebuild should use the requested worktree path, got {:?}",
+        *calls
+    );
+    assert!(
+        calls[0].ends_with("|false"),
+        "startup rebuild should bypass index TTL after cache source mismatch, got {:?}",
         *calls
     );
 }
 
 #[test]
 fn bootstrap_preserves_repo_scoped_memory_index_directory() {
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SPEC-2805: memory is repo-scoped at ~/.gwt/index/<repo>/memory/. Bootstrap
     // must not treat it as an orphan worktree dir or as legacy worktree-scoped
     // state, regardless of whether a current worktree exists.

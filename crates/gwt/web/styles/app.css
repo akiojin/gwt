@@ -3492,6 +3492,10 @@ body {
   min-height: 0;
 }
 
+.modal-shell.is-wizard.is-launch-pending {
+  cursor: progress;
+}
+
 .wizard-content-pane {
   min-width: 0;
 }
@@ -3760,6 +3764,13 @@ body {
   opacity: 0.58;
 }
 
+.start-method-button.is-pending {
+  cursor: progress;
+  border-color: var(--color-focus-ring);
+  background: color-mix(in oklab, var(--color-state-active) 10%, var(--color-surface));
+  opacity: 1;
+}
+
 .start-method-head {
   min-width: 0;
   display: flex;
@@ -3802,6 +3813,10 @@ body {
   letter-spacing: var(--tracking-mono);
   color: var(--color-text-muted);
   overflow-wrap: anywhere;
+}
+
+.launch-pending-note {
+  color: var(--color-text-strong);
 }
 
 @media (max-width: 760px) {

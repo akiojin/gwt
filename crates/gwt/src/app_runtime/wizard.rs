@@ -68,8 +68,9 @@ use super::{
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
     workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
-    IssueLaunchWizardPrepared, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
+    OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -976,8 +977,18 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_launch_wizard_action(
         &mut self,
+        action: gwt::LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
+        self.handle_launch_wizard_action_for_client(None, action, bounds)
+    }
+
+    pub(crate) fn handle_launch_wizard_action_for_client(
+        &mut self,
+        client_id: Option<&str>,
         action: gwt::LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
@@ -1108,12 +1119,35 @@ impl AppRuntime {
                 match *config {
                     LaunchWizardLaunchRequest::Agent(config) => {
                         let workspace_resume_context = session.workspace_resume_context.clone();
-                        match self.spawn_agent_window(
-                            &session.tab_id,
-                            *config,
-                            bounds,
-                            workspace_resume_context,
-                        ) {
+                        let launch_feedback_context =
+                            client_id.map(|client_id| LaunchFeedbackContext {
+                                client_id: client_id.to_string(),
+                                title: if session.wizard.wizard_mode
+                                    == gwt::LaunchWizardMode::StartWork
+                                {
+                                    "Start Work".to_string()
+                                } else {
+                                    "Launch Agent".to_string()
+                                },
+                            });
+                        let spawn_result =
+                            if let Some(launch_feedback_context) = launch_feedback_context {
+                                self.spawn_agent_window_with_feedback(
+                                    &session.tab_id,
+                                    *config,
+                                    bounds,
+                                    workspace_resume_context,
+                                    launch_feedback_context,
+                                )
+                            } else {
+                                self.spawn_agent_window(
+                                    &session.tab_id,
+                                    *config,
+                                    bounds,
+                                    workspace_resume_context,
+                                )
+                            };
+                        match spawn_result {
                             Ok(mut events) => {
                                 events.push(self.launch_wizard_state_broadcast(None));
                                 events

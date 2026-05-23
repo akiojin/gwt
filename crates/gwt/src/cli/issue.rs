@@ -239,16 +239,47 @@ pub(super) fn refresh_issue_cache<E: CliEnv>(
     env: &mut E,
     number: IssueNumber,
 ) -> Result<gwt_github::CacheEntry, SpecOpsError> {
+    refresh_issue_cache_with_index_rebuild(env, number, |repo_path| {
+        if crate::index_worker::detect_repo_hash(repo_path).is_none() {
+            return Ok(());
+        }
+        crate::index_worker::default_rebuild_runner(
+            repo_path,
+            crate::index_worker::IndexRebuildScope::Issues,
+            None,
+        )
+    })
+}
+
+pub(super) fn refresh_issue_cache_with_index_rebuild<E, F>(
+    env: &mut E,
+    number: IssueNumber,
+    mut rebuild_issue_index: F,
+) -> Result<gwt_github::CacheEntry, SpecOpsError>
+where
+    E: CliEnv,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
+{
+    let cache_root = env.cache_root();
+    let before = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
+        .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
     let snapshot = match env.client().fetch(number, None)? {
         gwt_github::FetchResult::Updated(snapshot) => snapshot,
         gwt_github::FetchResult::NotModified => {
-            return Cache::new(env.cache_root())
+            return Cache::new(cache_root)
                 .load_entry(number)
                 .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)));
         }
     };
-    let cache = Cache::new(env.cache_root());
+    let cache = Cache::new(cache_root.clone());
     cache.write_snapshot(&snapshot)?;
+    let after = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
+        .map_err(|err| SpecOpsError::from(ApiError::Network(err)))?;
+    if crate::issue_cache::issue_cache_source_changed(&before, &after) {
+        rebuild_issue_index(env.repo_path()).map_err(|err| {
+            SpecOpsError::from(ApiError::Network(format!("rebuild issue index: {err}")))
+        })?;
+    }
     cache
         .load_entry(number)
         .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))
@@ -542,5 +573,30 @@ mod tests {
         std::fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("create cache dir");
         std::fs::write(&cache_path, "{not-json").expect("write invalid json");
         assert!(read_linked_prs_cache(temp.path(), snapshot.number).is_err());
+    }
+
+    #[test]
+    fn explicit_issue_refresh_rebuilds_issue_index_when_cache_source_changes() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut old = sample_issue_snapshot();
+        old.state = IssueState::Open;
+        gwt_github::Cache::new(env.cache_root())
+            .write_snapshot(&old)
+            .expect("write old cache");
+
+        let mut updated = old.clone();
+        updated.state = IssueState::Closed;
+        env.client.seed(updated.clone());
+
+        let mut rebuild_calls = Vec::new();
+        let entry = refresh_issue_cache_with_index_rebuild(&mut env, updated.number, |repo_path| {
+            rebuild_calls.push(repo_path.to_path_buf());
+            Ok(())
+        })
+        .expect("refresh with rebuild");
+
+        assert_eq!(entry.snapshot.state, IssueState::Closed);
+        assert_eq!(rebuild_calls, vec![env.repo_path().to_path_buf()]);
     }
 }

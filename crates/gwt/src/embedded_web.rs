@@ -2711,7 +2711,27 @@ mod tests {
         )
         .expect("valid regex");
         let submit_button = regex::Regex::new(
-            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*if\s*\(\s*launchWizardOpenError\s*\)\s*\{\s*return;\s*\}\s*(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
+            r#"function\s+handleLaunchWizardSubmitFromChrome\(\)\s*\{[\s\S]*?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]*?launchWizardOpenError[\s\S]*?(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);[\s\S]*?(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);\s*\}"#,
+        )
+        .expect("valid regex");
+        let chrome_guard_release = regex::Regex::new(
+            r#"function\s+releaseWizardInteractionGuardForChromeAction\(\)\s*\{[\s\S]*?wizardInteractionGuard\.isActive\(\)[\s\S]*?wizardInteractionGuard\.release\(\)[\s\S]*?return\s+Boolean\(launchWizard\s*\|\|\s*launchWizardOpenError\);"#,
+        )
+        .expect("valid regex");
+        let guarded_submit_button = regex::Regex::new(
+            r#"function\s+handleLaunchWizardSubmitFromChrome\(\)[\s\S]*?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]*?(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);[\s\S]*?(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);"#,
+        )
+        .expect("valid regex");
+        let guarded_start_method_button = regex::Regex::new(
+            r#"const\s+handleStartMethodLaunchAction\s*=\s*\(\)\s*=>\s*\{[\s\S]*?releaseWizardInteractionGuardForChromeAction\(\)[\s\S]*?setLaunchWizardPendingAction\(\{[\s\S]*?kind:\s*"use_start_method"[\s\S]*?(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{[\s\S]*?kind:\s*"use_start_method""#,
+        )
+        .expect("valid regex");
+        let submit_pointer_fallback = regex::Regex::new(
+            r#"wizardSubmitButton\.addEventListener\("pointerup"[\s\S]*?handleLaunchWizardSubmitFromChrome\(\)"#,
+        )
+        .expect("valid regex");
+        let start_method_pointer_fallback = regex::Regex::new(
+            r#"button\.addEventListener\("pointerup"[\s\S]*?handleStartMethodLaunchAction\(\)"#,
         )
         .expect("valid regex");
 
@@ -2752,6 +2772,21 @@ mod tests {
         assert!(
             submit_button.is_match(html),
             "expected submit control to ignore error-only state and flush branch draft before dispatching submit",
+        );
+        assert!(
+            chrome_guard_release.is_match(html)
+                && html.contains("if (!releaseWizardInteractionGuardForChromeAction())")
+                && guarded_submit_button.is_match(html),
+            "expected Launch Wizard chrome actions to release pending interaction guard state before dispatch",
+        );
+        assert!(
+            html.contains("launchWizardPendingAction")
+                && html.contains("is-launch-pending")
+                && html.contains("Creating agent window...")
+                && guarded_start_method_button.is_match(html)
+                && submit_pointer_fallback.is_match(html)
+                && start_method_pointer_fallback.is_match(html),
+            "expected Launch Wizard launch actions to expose local pending feedback and pointer-safe Start method dispatch",
         );
         assert!(
             !html.contains("event.target === wizardModal")

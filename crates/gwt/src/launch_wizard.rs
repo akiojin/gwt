@@ -1836,7 +1836,7 @@ impl LaunchWizardState {
                     return;
                 }
                 self.apply_latest_start_settings();
-                self.launch_path = LaunchWizardLaunchPath::QuickStart;
+                self.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 self.start_method_selected = true;
                 self.finish_launch_request();
             }
@@ -4935,6 +4935,78 @@ mod tests {
             },
             other => panic!("expected start method launch completion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_with_last_settings_runtime_confirmation_stays_enabled_without_quick_start_entry() {
+        let previous = LaunchWizardPreviousProfile {
+            agent_id: "claude".to_string(),
+            model: Some("Default (Opus 4.7)".to_string()),
+            reasoning: Some("max".to_string()),
+            version: Some("latest".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+        };
+        let mut state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260523-1406"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            Some(previous.clone()),
+        );
+        state.mark_runtime_context_unresolved();
+
+        let initial = state.view();
+        assert!(initial.show_start_methods);
+        assert!(initial
+            .start_methods
+            .iter()
+            .any(|method| method.kind == "start_with_last_settings" && method.enabled));
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::StartWithLastSettings,
+        });
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "work/20260523-1406".to_string(),
+            worktree_path: None,
+            quick_start_root: PathBuf::from("/tmp/repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(LaunchWizardPreviousProfiles::from_profile(Some(previous))),
+        });
+
+        let confirmation = state.view();
+        assert_eq!(confirmation.selected_launch_path, "manual_setup");
+        assert!(confirmation.show_runtime_confirmation);
+        assert_eq!(confirmation.primary_action_label, "Create and launch");
+        assert!(confirmation.primary_action_enabled);
+
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(config))
+                if matches!(
+                    config.as_ref(),
+                    LaunchWizardLaunchRequest::Agent(config)
+                        if config.branch.as_deref() == Some("work/20260523-1406")
+                            && config.base_branch.as_deref() == Some("origin/develop")
+                            && config.resume_session_id.is_none()
+                )
+        ));
     }
 
     #[test]

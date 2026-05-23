@@ -344,6 +344,7 @@
       let wizardWasOpen = false;
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
+      let launchWizardPendingAction = null;
       // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders
       // while the user has a native <select> dropdown open. The OS
       // dropdown overlay is anchored to the original DOM node; if
@@ -358,9 +359,11 @@
             return;
           }
           if (deferred.kind === "launch_wizard_state") {
+            clearLaunchWizardPendingAction();
             launchWizard = deferred.wizard;
             launchWizardOpenError = null;
           } else if (deferred.kind === "launch_wizard_open_error") {
+            clearLaunchWizardPendingAction();
             launchWizard = null;
             launchWizardOpenError = {
               title: deferred.title || "Launch Agent",
@@ -7210,6 +7213,7 @@
       let wizardFocusTrapRelease = null;
 
       function closeLaunchWizardLocal() {
+        clearLaunchWizardPendingAction();
         launchWizard = null;
         launchWizardOpenError = null;
         // Issue #2698 PR 1 (B7) — local close wins over any pending
@@ -7219,7 +7223,35 @@
         renderLaunchWizard();
       }
 
+      function releaseWizardInteractionGuardForChromeAction() {
+        if (wizardInteractionGuard.isActive()) {
+          wizardInteractionGuard.release();
+        }
+        return Boolean(launchWizard || launchWizardOpenError);
+      }
+
+      function setLaunchWizardPendingAction(action) {
+        launchWizardPendingAction = action || null;
+        renderLaunchWizard();
+      }
+
+      function clearLaunchWizardPendingAction() {
+        launchWizardPendingAction = null;
+      }
+
+      function syncLaunchWizardPendingChrome(isPending) {
+        wizardModal.classList.toggle("is-launch-pending", isPending);
+        if (wizardDialog) {
+          wizardDialog.classList.toggle("is-launch-pending", isPending);
+          wizardDialog.setAttribute("aria-busy", isPending ? "true" : "false");
+        }
+      }
+
       function closeLaunchWizardFromChrome() {
+        if (!releaseWizardInteractionGuardForChromeAction()) {
+          return;
+        }
+        clearLaunchWizardPendingAction();
         if (launchWizardOpenError) {
           closeLaunchWizardLocal();
           return;
@@ -7227,8 +7259,27 @@
         frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
       }
 
+      function isPrimaryPointerActivation(event) {
+        return !event || event.button === 0 || event.button === undefined;
+      }
+
+      function handleLaunchWizardSubmitFromChrome() {
+        if (
+          !releaseWizardInteractionGuardForChromeAction()
+          || launchWizardOpenError
+          || wizardSubmitButton.disabled
+        ) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        setLaunchWizardPendingAction({ kind: "submit" });
+        frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
+      }
+
       function renderLaunchWizard() {
         if (!launchWizard && !launchWizardOpenError) {
+          clearLaunchWizardPendingAction();
+          syncLaunchWizardPendingChrome(false);
           const wasOpenBeforeClose = wizardModal.classList.contains("open");
           wizardModal.classList.remove("open");
           // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
@@ -7265,6 +7316,9 @@
 
         syncWizardDraftState();
         closeModal();
+        const isLaunchActionPending = Boolean(launchWizardPendingAction);
+        const isLaunchSubmitPending = launchWizardPendingAction?.kind === "submit";
+        syncLaunchWizardPendingChrome(isLaunchActionPending);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
           // Capture trigger BEFORE flipping .open so render-driven focus
@@ -7310,7 +7364,8 @@
         wizardSubmitButton.hidden = false;
         wizardBackButton.hidden = !launchWizard.show_back_button;
         wizardBackButton.disabled = Boolean(
-          launchWizard.is_hydrating
+          isLaunchActionPending
+            || launchWizard.is_hydrating
             || launchWizard.runtime_resolution_pending
             || !launchWizard.show_back_button,
         );
@@ -7321,7 +7376,9 @@
           : `Selected branch · ${
             launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
           }`;
-        wizardSubmitButton.textContent = launchWizard.primary_action_label || (
+        wizardSubmitButton.textContent = isLaunchSubmitPending
+          ? "Launching..."
+          : launchWizard.primary_action_label || (
           launchWizard.is_hydrating
             ? "Loading..."
             : launchWizard.runtime_context_resolved === false
@@ -7331,7 +7388,8 @@
                 : "Launch"
         );
         wizardSubmitButton.disabled = Boolean(
-          launchWizard.is_hydrating
+          isLaunchActionPending
+            || launchWizard.is_hydrating
             || launchWizard.runtime_resolution_pending
             || launchWizard.primary_action_enabled === false,
         );
@@ -7365,7 +7423,10 @@
         const wizardContentPane = createNode("div", "wizard-content-pane");
         const panel = createNode("div", "launch-panel");
         const isRuntimeResolutionPending = Boolean(launchWizard.runtime_resolution_pending);
-        panel.classList.toggle("wizard-disabled", isRuntimeResolutionPending);
+        panel.classList.toggle(
+          "wizard-disabled",
+          isRuntimeResolutionPending || isLaunchActionPending,
+        );
         if (launchWizard.is_hydrating) {
           panel.appendChild(
             createNode(
@@ -7384,6 +7445,15 @@
             ),
           );
         }
+        if (isLaunchSubmitPending) {
+          panel.appendChild(
+            createNode(
+              "div",
+              "launch-note launch-pending-note",
+              "Creating agent window...",
+            ),
+          );
+        }
 
         if (showStartMethods) {
           const section = createLaunchSection(
@@ -7395,9 +7465,19 @@
           for (const method of launchWizard.start_methods || []) {
             const button = createNode("button", "start-method-button");
             button.type = "button";
-            button.disabled = method.enabled === false;
+            const isStartMethodPending =
+              launchWizardPendingAction?.kind === "use_start_method"
+                && launchWizardPendingAction.method === method.kind;
+            button.classList.toggle("is-pending", isStartMethodPending);
+            button.disabled = method.enabled === false || isLaunchActionPending;
             const head = createNode("div", "start-method-head");
-            head.appendChild(createNode("div", "start-method-title", method.label));
+            head.appendChild(
+              createNode(
+                "div",
+                "start-method-title",
+                isStartMethodPending ? "Preparing..." : method.label,
+              ),
+            );
             if (method.badge) {
               head.appendChild(createNode("div", "start-method-badge", method.badge));
             }
@@ -7411,14 +7491,32 @@
             if (detail) {
               button.appendChild(createNode("div", "start-method-detail", detail));
             }
-            button.addEventListener("click", () => {
-              if (button.disabled) {
+            const handleStartMethodLaunchAction = () => {
+              if (
+                !releaseWizardInteractionGuardForChromeAction()
+                || button.disabled
+                || launchWizardPendingAction
+              ) {
                 return;
               }
+              setLaunchWizardPendingAction({
+                kind: "use_start_method",
+                method: method.kind,
+              });
               sendWizardAction({
                 kind: "use_start_method",
                 method: method.kind,
               });
+            };
+            button.addEventListener("pointerup", (event) => {
+              if (!isPrimaryPointerActivation(event)) {
+                return;
+              }
+              event.preventDefault();
+              handleStartMethodLaunchAction();
+            });
+            button.addEventListener("click", () => {
+              handleStartMethodLaunchAction();
             });
             methodList.appendChild(button);
           }
@@ -7773,7 +7871,10 @@
           panel.appendChild(section);
         }
 
-        setLaunchWizardPendingDisabled(panel, isRuntimeResolutionPending);
+        setLaunchWizardPendingDisabled(
+          panel,
+          isRuntimeResolutionPending || isLaunchActionPending,
+        );
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);
         wizardBody.appendChild(wizardMain);
@@ -11887,6 +11988,7 @@
             ) {
               break;
             }
+            clearLaunchWizardPendingAction();
             launchWizard = null;
             launchWizardOpenError = {
               title: event.title || "Launch Agent",
@@ -11911,6 +12013,7 @@
             ) {
               break;
             }
+            clearLaunchWizardPendingAction();
             launchWizard = event.wizard;
             launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
@@ -12678,19 +12781,24 @@
       });
       wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardBackButton.addEventListener("click", () => {
-        if (launchWizardOpenError || wizardBackButton.disabled) {
+        if (
+          !releaseWizardInteractionGuardForChromeAction()
+          || launchWizardOpenError
+          || wizardBackButton.disabled
+        ) {
           return;
         }
         frontendUnits.launchWizardSurface.flushBranchDraft();
         frontendUnits.launchWizardSurface.sendAction({ kind: "back" });
       });
-      wizardSubmitButton.addEventListener("click", () => {
-        if (launchWizardOpenError) {
+      wizardSubmitButton.addEventListener("pointerup", (event) => {
+        if (!isPrimaryPointerActivation(event)) {
           return;
         }
-        frontendUnits.launchWizardSurface.flushBranchDraft();
-        frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
+        event.preventDefault();
+        handleLaunchWizardSubmitFromChrome();
       });
+      wizardSubmitButton.addEventListener("click", handleLaunchWizardSubmitFromChrome);
       // Issue #2698 PR 1 (B7) — interaction-guard wiring for native
       // <select> dropdowns inside the wizard body. We register
       // delegated listeners on `wizardBody` so they survive the
@@ -12811,6 +12919,10 @@
         if (wizardModal.classList.contains("open")) {
           // Wizard cancel is the explicit cancellation path; map Esc to
           // the same action so the modal isn't a keyboard trap.
+          if (!releaseWizardInteractionGuardForChromeAction()) {
+            event.preventDefault();
+            return;
+          }
           if (launchWizardOpenError) {
             closeLaunchWizardLocal();
           } else {

@@ -1956,6 +1956,50 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     return issues
 
 
+def _issue_cache_refresh_meta(repo_hash: str) -> Dict[str, Any]:
+    meta_path = _issue_cache_root(repo_hash) / "refresh-meta.json"
+    if not meta_path.is_file():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+
+
+def _issue_source_fingerprint(issues: Sequence[Dict[str, Any]]) -> str:
+    payload: List[Dict[str, Any]] = []
+    for issue in sorted(issues, key=lambda item: int(item.get("number", 0) or 0)):
+        labels = issue.get("labels", [])
+        if isinstance(labels, str):
+            labels = [labels]
+        payload.append(
+            {
+                "number": int(issue.get("number", 0) or 0),
+                "title": str(issue.get("title", "") or ""),
+                "body": str(issue.get("body", "") or ""),
+                "state": str(issue.get("state", "") or ""),
+                "labels": sorted(label for label in labels if isinstance(label, str)),
+            }
+        )
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
+    issues = _load_cached_issue_documents(repo_hash)
+    refresh_meta = _issue_cache_refresh_meta(repo_hash)
+    return {
+        "fingerprint": _issue_source_fingerprint(issues),
+        "document_count": len(issues),
+        "cache_refresh_at": refresh_meta.get("last_full_refresh"),
+    }
+
+
 def _load_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -3000,6 +3044,7 @@ def _issue_status_v2(
 ) -> Dict[str, Any]:
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     meta = _read_issue_meta(db_path) or {}
+    source = _issue_cache_source_snapshot(repo_hash)
     exists = (db_path / "chroma.sqlite3").exists() or (db_path / META_FILENAME).is_file()
     count_ok, document_count = _scope_document_count(db_path, "issues")
 
@@ -3015,6 +3060,13 @@ def _issue_status_v2(
         reason = "metadata_missing"
         healthy = False
         repair_required = True
+    else:
+        indexed_fingerprint = meta.get("source_cache_fingerprint")
+        current_fingerprint = source.get("fingerprint")
+        if current_fingerprint and indexed_fingerprint != current_fingerprint:
+            reason = "source_cache_changed"
+            healthy = False
+            repair_required = True
 
     status: Dict[str, Any] = {
         "exists": exists,
@@ -3032,6 +3084,15 @@ def _issue_status_v2(
                 "ttl_minutes": meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT),
             }
         )
+        if meta.get("source_cache_fingerprint"):
+            status["source_cache_fingerprint"] = meta.get("source_cache_fingerprint")
+        if "source_document_count" in meta:
+            status["source_document_count"] = meta.get("source_document_count")
+        if meta.get("source_cache_refresh_at"):
+            status["source_cache_refresh_at"] = meta.get("source_cache_refresh_at")
+        if reason == "source_cache_changed":
+            status["current_source_cache_fingerprint"] = source.get("fingerprint")
+            status["current_source_document_count"] = source.get("document_count")
         last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
         if last is not None:
             age = (_now_utc() - last).total_seconds()
@@ -3084,6 +3145,7 @@ def action_index_issues_v2(
     with acquire_lock(db_path, exclusive=True):
         _reset_chroma_store(db_path)
         issues = _load_cached_issue_documents(repo_hash)
+        source = _issue_cache_source_snapshot(repo_hash)
 
         client, collection = _make_chroma_collection_repairing(db_path, V2_ISSUES_COLLECTION)
         try:
@@ -3130,6 +3192,9 @@ def action_index_issues_v2(
                     "last_full_refresh": _now_utc().isoformat(),
                     "ttl_minutes": ttl_minutes,
                     "document_count": len(issues),
+                    "source_cache_fingerprint": source["fingerprint"],
+                    "source_document_count": source["document_count"],
+                    "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
             )
         finally:

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -18,6 +19,7 @@ use gwt_github::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const DETACHED_REPO_CACHE_DIR: &str = "__detached__";
 const SPEC_LABEL: &str = "gwt-spec";
@@ -34,6 +36,30 @@ pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 struct IssueCacheRefreshMeta {
     last_full_refresh: String,
     ttl_minutes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueCacheSourceFingerprint {
+    pub fingerprint: String,
+    pub document_count: usize,
+    pub cache_refresh_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueCacheSyncOutcome {
+    pub refreshed: bool,
+    pub source_changed: bool,
+    pub before: Option<IssueCacheSourceFingerprint>,
+    pub after: Option<IssueCacheSourceFingerprint>,
+}
+
+#[derive(Debug)]
+struct IssueCacheSourceDocument {
+    number: u64,
+    title: String,
+    body: String,
+    state: String,
+    labels: Vec<String>,
 }
 
 pub fn issue_cache_base_root() -> PathBuf {
@@ -60,6 +86,107 @@ pub fn issue_cache_root_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
 
 pub fn issue_cache_root_for_repo_path_or_detached(repo_path: &Path) -> PathBuf {
     issue_cache_root_for_repo_path(repo_path).unwrap_or_else(detached_issue_cache_root)
+}
+
+pub fn issue_cache_source_fingerprint(
+    cache_root: &Path,
+) -> Result<Option<IssueCacheSourceFingerprint>, String> {
+    if !cache_root.is_dir() {
+        return Ok(None);
+    }
+
+    let mut docs = Vec::new();
+    let entries = fs::read_dir(cache_root).map_err(|err| err.to_string())?;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        let Ok(number) = name.parse::<u64>() else {
+            continue;
+        };
+        let issue_dir = entry.path();
+        let meta_path = issue_dir.join("meta.json");
+        if !meta_path.is_file() {
+            continue;
+        }
+        let meta_bytes = match fs::read(&meta_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let meta: Value = match serde_json::from_slice(&meta_bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let body = fs::read_to_string(issue_dir.join("body.md")).unwrap_or_default();
+        let mut labels = match meta.get("labels") {
+            Some(Value::String(label)) => vec![label.clone()],
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        labels.sort();
+        docs.push(IssueCacheSourceDocument {
+            number,
+            title: meta
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            body: body.chars().take(2000).collect(),
+            state: meta
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            labels,
+        });
+    }
+
+    docs.sort_by_key(|doc| doc.number);
+    let document_count = docs.len();
+    let canonical = docs
+        .into_iter()
+        .map(|doc| {
+            let mut map = BTreeMap::new();
+            map.insert("body", Value::String(doc.body));
+            map.insert(
+                "labels",
+                Value::Array(doc.labels.into_iter().map(Value::String).collect()),
+            );
+            map.insert("number", Value::Number(doc.number.into()));
+            map.insert("state", Value::String(doc.state));
+            map.insert("title", Value::String(doc.title));
+            map
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&canonical).map_err(|err| err.to_string())?;
+    let digest = Sha256::digest(&bytes);
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(Some(IssueCacheSourceFingerprint {
+        fingerprint,
+        document_count,
+        cache_refresh_at: read_issue_cache_refresh_meta(cache_root)
+            .map(|meta| meta.last_full_refresh),
+    }))
+}
+
+pub fn issue_cache_source_changed(
+    before: &Option<IssueCacheSourceFingerprint>,
+    after: &Option<IssueCacheSourceFingerprint>,
+) -> bool {
+    before.as_ref().map(|value| &value.fingerprint)
+        != after.as_ref().map(|value| &value.fingerprint)
 }
 
 pub fn sync_issue_cache_from_remote_if_missing(
@@ -91,6 +218,37 @@ pub fn sync_issue_cache_from_remote_if_stale(
     Ok(true)
 }
 
+pub fn sync_issue_cache_from_remote_if_stale_with_fingerprint(
+    repo_path: &Path,
+    cache_root: &Path,
+    ttl: Duration,
+) -> Result<IssueCacheSyncOutcome, String> {
+    let before = issue_cache_source_fingerprint(cache_root)?;
+    let refreshed = sync_issue_cache_from_remote_if_stale(repo_path, cache_root, ttl)?;
+    let after = issue_cache_source_fingerprint(cache_root)?;
+    Ok(IssueCacheSyncOutcome {
+        refreshed,
+        source_changed: refreshed && issue_cache_source_changed(&before, &after),
+        before,
+        after,
+    })
+}
+
+pub fn sync_issue_cache_from_remote_with_fingerprint(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<IssueCacheSyncOutcome, String> {
+    let before = issue_cache_source_fingerprint(cache_root)?;
+    sync_issue_cache_from_remote(repo_path, cache_root)?;
+    let after = issue_cache_source_fingerprint(cache_root)?;
+    Ok(IssueCacheSyncOutcome {
+        refreshed: true,
+        source_changed: issue_cache_source_changed(&before, &after),
+        before,
+        after,
+    })
+}
+
 pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
     let snapshots = fetch_issue_list_snapshots(repo_path)?;
     if snapshots.is_empty() {
@@ -112,6 +270,11 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
     }
     write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
     Ok(())
+}
+
+fn gh_repo_cwd(repo_path: &Path) -> PathBuf {
+    crate::index_worker::resolve_project_index_repo_root(repo_path)
+        .unwrap_or_else(|| repo_path.to_path_buf())
 }
 
 pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
@@ -209,7 +372,7 @@ pub(crate) fn write_issue_labels_via_gh(
         command.arg("--remove-label").arg(label);
     }
     let output = command
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue edit #{issue_number}: {err}"))?;
     if !output.status.success() {
@@ -233,7 +396,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
             "--json",
             "number,title,body,labels,state,url,updatedAt",
         ])
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue list: {err}"))?;
     if !output.status.success() {
@@ -255,7 +418,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
             "--json",
             "number,title,body,labels,state,updatedAt,comments",
         ])
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue view #{number}: {err}", number = number.0))?;
     if !output.status.success() {
@@ -701,6 +864,90 @@ exit 1\n",
         assert_eq!(entry.snapshot.comments[0].id, gwt_github::CommentId(777));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sync_remote_uses_child_bare_repo_cwd_for_workspace_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&workspace_home).expect("create workspace home");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        assert!(
+            init.status.success(),
+            "git init bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "-C",
+                bare_repo.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/workspace-home.git",
+            ])
+            .output()
+            .expect("git remote add");
+        assert!(
+            remote.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        );
+
+        let expected_cwd = dunce::canonicalize(&bare_repo).expect("canonical bare repo");
+        let cwd_log = temp.path().join("gh-cwd.log");
+        let fake_gh = temp.path().join("fake-gh");
+        fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\n\
+printf '%s\\n' \"$PWD\" > '{}'\n\
+if [ \"$PWD\" != '{}' ]; then\n\
+  printf '%s\\n' \"wrong cwd: $PWD\" >&2\n\
+  exit 1\n\
+fi\n\
+if [ \"$1 $2\" = \"issue list\" ]; then\n\
+  printf '%s\\n' '[{{\"number\":43,\"title\":\"Workspace issue\",\"body\":\"Body\",\"labels\":[{{\"name\":\"bug\"}}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-05-23T00:00:00Z\"}}]'\n\
+  exit 0\n\
+fi\n\
+printf '%s\\n' \"unexpected gh invocation $*\" >&2\n\
+exit 1\n",
+                cwd_log.display(),
+                expected_cwd.display()
+            ),
+        )
+        .expect("write fake gh");
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        let result = sync_issue_cache_from_remote(&workspace_home, &cache_root);
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+
+        result.expect("workspace home sync should use child bare repo cwd");
+        assert_eq!(
+            fs::read_to_string(&cwd_log).expect("read cwd log").trim(),
+            expected_cwd.display().to_string()
+        );
+        let entry = Cache::new(cache_root)
+            .load_entry(IssueNumber(43))
+            .expect("cached issue entry should exist");
+        assert_eq!(entry.snapshot.title, "Workspace issue");
+    }
+
     #[test]
     fn issue_cache_refresh_is_stale_tracks_cache_metadata() {
         let temp = tempdir().expect("tempdir");
@@ -729,6 +976,55 @@ exit 1\n",
         assert!(
             issue_cache_refresh_is_stale(&cache_root, ISSUE_CACHE_TTL),
             "expired refresh metadata should mark cache stale",
+        );
+    }
+
+    #[test]
+    fn issue_cache_source_fingerprint_tracks_indexed_issue_fields_only() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        let snapshot = IssueSnapshot {
+            number: IssueNumber(7),
+            title: "Cache freshness".to_string(),
+            body: "body".to_string(),
+            labels: vec!["bug".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-05-23T00:00:00Z"),
+            comments: vec![],
+        };
+        Cache::new(cache_root.clone())
+            .write_snapshot(&snapshot)
+            .expect("write snapshot");
+
+        let initial = issue_cache_source_fingerprint(&cache_root)
+            .expect("initial fingerprint")
+            .expect("source snapshot");
+        assert_eq!(initial.document_count, 1);
+        assert_eq!(
+            initial.fingerprint, "0c31a39b484318da3ec39b51fc5e073334bb3d64bba3886fb0ecff50b400d915",
+            "Rust source fingerprint must match the Python runner metadata algorithm",
+        );
+
+        fs::write(cache_root.join("7").join("linked_prs.json"), "[]").expect("linked prs");
+        let linked_prs = issue_cache_source_fingerprint(&cache_root)
+            .expect("linked prs fingerprint")
+            .expect("source snapshot");
+        assert_eq!(
+            linked_prs.fingerprint, initial.fingerprint,
+            "linked PR cache is not part of the Issue search source",
+        );
+
+        let mut changed = snapshot.clone();
+        changed.state = IssueState::Closed;
+        Cache::new(cache_root.clone())
+            .write_snapshot(&changed)
+            .expect("write changed snapshot");
+        let after_state = issue_cache_source_fingerprint(&cache_root)
+            .expect("changed fingerprint")
+            .expect("source snapshot");
+        assert_ne!(
+            after_state.fingerprint, initial.fingerprint,
+            "indexed Issue state changes must invalidate the Issue search index",
         );
     }
 }
