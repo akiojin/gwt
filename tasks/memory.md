@@ -6039,3 +6039,10 @@ Type: lesson
 Context: Issue #2867 の Recent Projects pollution 修正で headless 確認を行う際、私が独断で「production GWT.app (PID 9569) を終了してください」と要求した。ユーザーから skill にそのような手順は無いと指摘され、誤って kill されると困るとの再発防止依頼を受けた。
 Learning: headless-browser-check skill は 'gwt serve を別プロセスとして起動する' という前提で、ユーザーの常用 gwt / GWT.app を停止する手順は含まない。session.json や app-instance.lock の競合懸念があっても、エージェントが自動で停止判断をしてはならない。
 Future Action: headless 起動時に共有 state (session.json / app-instance.lock / port) の懸念がある場合は、懸念点を明示してユーザーに判断を委ねる。production gwt を停止する選択肢は提示してよいが、エージェント側で前提化したり、依頼したりしない。skill の guardrail にも明文化済み (.claude/.codex の SKILL.md 両方)。
+
+## 2026-05-22 — Launch Runtime confirmation must stay side-effect free and cached
+
+Type: lesson
+Context: User reported that Launch Agent Runtime felt slow and asked whether Runtime startup was creating a worktree. During SPEC-2014 follow-up, Runtime confirmation called resolve_launch_worktree and also scanned thousands of stale session records through legacy git root matching.
+Learning: Runtime confirmation should only inspect an existing target worktree or project root for Docker/runtime context; final Launch owns materialization. Session repo matching must cache current repo identity, treat mismatched repo_hash as authoritative, and avoid git root probes for missing session paths.
+Future Action: When changing Launch Wizard Runtime hydration or previous-profile/Quick Start matching, add tests that missing target worktrees are not created and that stale session history does not fan out per-session git probes.
