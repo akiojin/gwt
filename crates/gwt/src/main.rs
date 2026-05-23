@@ -1946,6 +1946,7 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_launch_feedback_contexts: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),

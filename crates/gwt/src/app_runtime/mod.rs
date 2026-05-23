@@ -2580,6 +2580,12 @@ pub struct LaunchWizardSession {
 }
 
 #[derive(Debug, Clone)]
+pub struct LaunchFeedbackContext {
+    pub(crate) client_id: ClientId,
+    pub(crate) title: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct IssueLaunchWizardPrepared {
     pub(crate) client_id: ClientId,
     pub(crate) id: String,
@@ -2618,6 +2624,7 @@ pub struct AppRuntime {
     pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
+    pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -2715,6 +2722,7 @@ impl AppRuntime {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_launch_feedback_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -3301,7 +3309,7 @@ impl AppRuntime {
                 linked_issue_number,
             } => self.open_active_work_launch_wizard(&client_id, &branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action, bounds } => {
-                self.handle_launch_wizard_action(action, bounds)
+                self.handle_launch_wizard_action_for_client(Some(&client_id), action, bounds)
             }
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
@@ -6137,6 +6145,7 @@ impl AppRuntime {
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
+        let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
         match result {
             Ok((
@@ -6152,14 +6161,25 @@ impl AppRuntime {
                 agent_project_root,
             )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    return self.launch_error_events(window_id, "Window not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Window not found".to_string(),
+                        launch_feedback_context.clone(),
+                    );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
-                    return self
-                        .launch_error_events(window_id, "Project tab not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Project tab not found".to_string(),
+                        launch_feedback_context.clone(),
+                    );
                 };
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
-                    return self.launch_error_events(window_id, "Window not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Window not found".to_string(),
+                        launch_feedback_context.clone(),
+                    );
                 };
                 let tab_id = address.tab_id.clone();
                 let project_root = tab.project_root.clone();
@@ -6306,10 +6326,12 @@ impl AppRuntime {
                         events.extend(Self::status_events(window_id, composed_status, None));
                         events
                     }
-                    Err(error) => self.launch_error_events(window_id, error),
+                    Err(error) => {
+                        self.launch_error_events(window_id, error, launch_feedback_context)
+                    }
                 }
             }
-            Err(error) => self.launch_error_events(window_id, error),
+            Err(error) => self.launch_error_events(window_id, error, launch_feedback_context),
         }
     }
 
@@ -6321,14 +6343,25 @@ impl AppRuntime {
         match result {
             Ok(process_launch) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    return self.launch_error_events(window_id, "Window not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Window not found".to_string(),
+                        None,
+                    );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
-                    return self
-                        .launch_error_events(window_id, "Project tab not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Project tab not found".to_string(),
+                        None,
+                    );
                 };
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
-                    return self.launch_error_events(window_id, "Window not found".to_string());
+                    return self.launch_error_events(
+                        window_id,
+                        "Window not found".to_string(),
+                        None,
+                    );
                 };
                 let geometry = window.geometry.clone();
 
@@ -6365,11 +6398,11 @@ impl AppRuntime {
                     }
                     Err(error) => {
                         emit_agent_launch_stage(stage_id, "error", &error);
-                        self.launch_error_events(window_id, error)
+                        self.launch_error_events(window_id, error, None)
                     }
                 }
             }
-            Err(error) => self.launch_error_events(window_id, error),
+            Err(error) => self.launch_error_events(window_id, error, None),
         }
     }
 
@@ -6561,6 +6594,24 @@ impl AppRuntime {
             config,
             AgentWindowPlacement::Centered(bounds),
             workspace_resume_context,
+            None,
+        )
+    }
+
+    pub(crate) fn spawn_agent_window_with_feedback(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        bounds: WindowGeometry,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: LaunchFeedbackContext,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_placement(
+            tab_id,
+            config,
+            AgentWindowPlacement::Centered(bounds),
+            workspace_resume_context,
+            Some(launch_feedback_context),
         )
     }
 
@@ -6576,6 +6627,7 @@ impl AppRuntime {
             config,
             AgentWindowPlacement::Exact(geometry),
             workspace_resume_context,
+            None,
         )
     }
 
@@ -6585,6 +6637,7 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         placement: AgentWindowPlacement,
         workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Result<Vec<OutboundEvent>, String> {
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
         let tab = self
@@ -6644,6 +6697,10 @@ impl AppRuntime {
         let profile_config_path = self.profile_config_path()?;
         if let Some(context) = workspace_resume_context {
             self.pending_workspace_resume_contexts
+                .insert(window_id.clone(), context);
+        }
+        if let Some(context) = launch_feedback_context {
+            self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }
 
@@ -7616,12 +7673,28 @@ impl AppRuntime {
         tokens.join(" ")
     }
 
-    fn launch_error_events(&mut self, window_id: String, detail: String) -> Vec<OutboundEvent> {
+    fn launch_error_events(
+        &mut self,
+        window_id: String,
+        detail: String,
+        launch_feedback_context: Option<LaunchFeedbackContext>,
+    ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
         if self.tracked_window_exists(&window_id) {
             return self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
         }
-        Self::status_events(window_id, WindowProcessStatus::Error, Some(detail))
+        let mut events =
+            Self::status_events(window_id, WindowProcessStatus::Error, Some(detail.clone()));
+        if let Some(context) = launch_feedback_context {
+            events.push(OutboundEvent::reply(
+                context.client_id,
+                BackendEvent::LaunchWizardOpenError {
+                    title: context.title,
+                    message: detail,
+                },
+            ));
+        }
+        events
     }
 
     fn status_events(
@@ -8867,6 +8940,7 @@ exit 1
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            pending_launch_feedback_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
@@ -9174,6 +9248,43 @@ exit 1
                     linked_issue_kind: None,
                 },
                 Vec::new(),
+                Vec::new(),
+            ),
+            workspace_resume_context: None,
+        }
+    }
+
+    fn sample_ready_agent_launch_wizard_session(
+        tab_id: &str,
+        project_root: &Path,
+    ) -> LaunchWizardSession {
+        LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: "wizard-ready-agent".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: BranchListEntry {
+                        name: "feature/demo".to_string(),
+                        scope: BranchScope::Local,
+                        is_head: false,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        last_commit_date: None,
+                        cleanup_ready: true,
+                        cleanup: BranchCleanupInfo::default(),
+                        resume: gwt::BranchResumeInfo::unavailable(),
+                    },
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(project_root.to_path_buf()),
+                    quick_start_root: project_root.to_path_buf(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                    linked_issue_kind: None,
+                },
+                sample_agent_options(),
                 Vec::new(),
             ),
             workspace_resume_context: None,
@@ -10757,6 +10868,126 @@ exit 1
             event.fields.get("error").map(String::as_str),
             Some("launch failed before process spawn")
         );
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LaunchWizardAction {
+                action: LaunchWizardAction::Submit,
+                bounds: Some(canvas_bounds()),
+            },
+        );
+
+        let workspace = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::WorkspaceState { workspace } => Some(workspace),
+                _ => None,
+            })
+            .expect("workspace state after wizard submit");
+        let agent_window = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == "tab-1")
+            .and_then(|tab| {
+                tab.workspace
+                    .windows
+                    .iter()
+                    .find(|window| window.preset == WindowPreset::Agent)
+            })
+            .expect("agent placeholder window");
+        assert_eq!(agent_window.title, "Codex");
+        assert_eq!(agent_window.agent_id.as_deref(), Some("codex"));
+
+        let launch_status = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalStatus { id, detail, .. }
+                    if detail.as_deref() == Some("Launching...") =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .expect("launching terminal status");
+        assert!(launch_status.ends_with("::agent-1"));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.event,
+                BackendEvent::LaunchWizardState { wizard: None }
+            )
+        }));
+    }
+
+    #[test]
+    fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
+
+        let submit_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LaunchWizardAction {
+                action: LaunchWizardAction::Submit,
+                bounds: Some(canvas_bounds()),
+            },
+        );
+        let window_id = submit_events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalStatus { id, detail, .. }
+                    if detail.as_deref() == Some("Launching...") =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .expect("wizard launch window id");
+        let address = runtime
+            .window_lookup
+            .remove(&window_id)
+            .expect("registered agent window");
+        let tab = runtime.tab_mut(&address.tab_id).expect("tab");
+        assert!(tab.workspace.close_window(&address.raw_id));
+
+        let completion_events =
+            runtime.handle_launch_complete(window_id, Err("Window not found".to_string()));
+
+        assert!(completion_events.iter().any(|event| {
+            matches!(
+                (&event.target, &event.event),
+                (
+                    DispatchTarget::Client(client_id),
+                    BackendEvent::LaunchWizardOpenError { title, message }
+                ) if client_id == "client-1"
+                    && title == "Launch Agent"
+                    && message == "Window not found"
+            )
+        }));
     }
 
     #[test]

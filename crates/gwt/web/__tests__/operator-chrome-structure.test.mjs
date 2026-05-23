@@ -1708,7 +1708,7 @@ test("Launch wizard disables panel controls while runtime resolution is pending"
   );
   assert.match(
     appSource,
-    /panel\.classList\.toggle\("wizard-disabled",\s*isRuntimeResolutionPending\)/,
+    /panel\.classList\.toggle\(\s*"wizard-disabled"[\s\S]{0,180}?isRuntimeResolutionPending\s*\|\|\s*isLaunchActionPending/,
     "expected the launch panel to expose a disabled visual state while pending",
   );
   assert.match(
@@ -1752,6 +1752,24 @@ test("Launch wizard start methods keep disabled and hover states distinct", () =
     inlineStyle,
     /\.start-method-button:disabled/,
     "disabled start method rows should expose a disabled state",
+  );
+});
+
+test("Launch wizard pending launch feedback has stable styling hooks", () => {
+  assert.match(
+    inlineStyle,
+    /\.modal-shell\.is-wizard\.is-launch-pending[\s\S]*?cursor:\s*progress;/,
+    "expected Launch Wizard modal to expose progress cursor while a launch action is pending",
+  );
+  assert.match(
+    inlineStyle,
+    /\.start-method-button\.is-pending[\s\S]*?cursor:\s*progress;/,
+    "expected pending Start method row to expose a progress cursor",
+  );
+  assert.match(
+    inlineStyle,
+    /\.launch-pending-note[\s\S]*?color:\s*var\(--color-text-strong\)/,
+    "expected pending launch copy to be styled as visible modal feedback",
   );
 });
 
