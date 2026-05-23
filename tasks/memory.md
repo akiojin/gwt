@@ -6060,3 +6060,10 @@ Type: lesson
 Context: User reported that Launch Agent Runtime felt slow and asked whether Runtime startup was creating a worktree. During SPEC-2014 follow-up, Runtime confirmation called resolve_launch_worktree and also scanned thousands of stale session records through legacy git root matching.
 Learning: Runtime confirmation should only inspect an existing target worktree or project root for Docker/runtime context; final Launch owns materialization. Session repo matching must cache current repo identity, treat mismatched repo_hash as authoritative, and avoid git root probes for missing session paths.
 Future Action: When changing Launch Wizard Runtime hydration or previous-profile/Quick Start matching, add tests that missing target worktrees are not created and that stale session history does not fan out per-session git probes.
+
+## 2026-05-23 — Launch Wizard click bugs require state inspection before input fallbacks
+
+Type: failure-pattern
+Context: Start Work の Create and Launch が押せない報告で、最初は pointer/click fallback と pending feedback を修正したが、headed Chrome E2E で最終ボタンが disabled=true になっている別原因を確認した。WebSocket state では Start with last settings 後に selected_launch_path=quick_start かつ quick_start_entries=[] で primary_action_enabled=false だった。
+Learning: UI action が効かない不具合は input event loss だけとは限らない。実ブラウザで disabled/aria/state を直接観測し、バックエンド state と照合してから fallback を増やすべき。
+Future Action: Launch Wizard / Start Work のボタン不具合では、headed E2E で実座標クリックを行う前に DOM disabled state と launch_wizard_state payload を保存し、disabled なら状態遷移テストを先に追加する。
