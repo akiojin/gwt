@@ -114,6 +114,11 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
     Ok(())
 }
 
+fn gh_repo_cwd(repo_path: &Path) -> PathBuf {
+    crate::index_worker::resolve_project_index_repo_root(repo_path)
+        .unwrap_or_else(|| repo_path.to_path_buf())
+}
+
 pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(cache_root) else {
         return false;
@@ -209,7 +214,7 @@ pub(crate) fn write_issue_labels_via_gh(
         command.arg("--remove-label").arg(label);
     }
     let output = command
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue edit #{issue_number}: {err}"))?;
     if !output.status.success() {
@@ -233,7 +238,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
             "--json",
             "number,title,body,labels,state,url,updatedAt",
         ])
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue list: {err}"))?;
     if !output.status.success() {
@@ -255,7 +260,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
             "--json",
             "number,title,body,labels,state,updatedAt,comments",
         ])
-        .current_dir(repo_path)
+        .current_dir(gh_repo_cwd(repo_path))
         .output()
         .map_err(|err| format!("gh issue view #{number}: {err}", number = number.0))?;
     if !output.status.success() {
@@ -699,6 +704,90 @@ exit 1\n",
         );
         assert_eq!(entry.snapshot.comments.len(), 1);
         assert_eq!(entry.snapshot.comments[0].id, gwt_github::CommentId(777));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_remote_uses_child_bare_repo_cwd_for_workspace_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = workspace_home.join("repo.git");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&workspace_home).expect("create workspace home");
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        assert!(
+            init.status.success(),
+            "git init bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "-C",
+                bare_repo.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/workspace-home.git",
+            ])
+            .output()
+            .expect("git remote add");
+        assert!(
+            remote.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        );
+
+        let expected_cwd = dunce::canonicalize(&bare_repo).expect("canonical bare repo");
+        let cwd_log = temp.path().join("gh-cwd.log");
+        let fake_gh = temp.path().join("fake-gh");
+        fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\n\
+printf '%s\\n' \"$PWD\" > '{}'\n\
+if [ \"$PWD\" != '{}' ]; then\n\
+  printf '%s\\n' \"wrong cwd: $PWD\" >&2\n\
+  exit 1\n\
+fi\n\
+if [ \"$1 $2\" = \"issue list\" ]; then\n\
+  printf '%s\\n' '[{{\"number\":43,\"title\":\"Workspace issue\",\"body\":\"Body\",\"labels\":[{{\"name\":\"bug\"}}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-05-23T00:00:00Z\"}}]'\n\
+  exit 0\n\
+fi\n\
+printf '%s\\n' \"unexpected gh invocation $*\" >&2\n\
+exit 1\n",
+                cwd_log.display(),
+                expected_cwd.display()
+            ),
+        )
+        .expect("write fake gh");
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        let result = sync_issue_cache_from_remote(&workspace_home, &cache_root);
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+
+        result.expect("workspace home sync should use child bare repo cwd");
+        assert_eq!(
+            fs::read_to_string(&cwd_log).expect("read cwd log").trim(),
+            expected_cwd.display().to_string()
+        );
+        let entry = Cache::new(cache_root)
+            .load_entry(IssueNumber(43))
+            .expect("cached issue entry should exist");
+        assert_eq!(entry.snapshot.title, "Workspace issue");
     }
 
     #[test]

@@ -8239,6 +8239,42 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn init_workspace_home_with_child_bare(workspace_home: &Path) -> PathBuf {
+        fs::create_dir_all(workspace_home).expect("create workspace home");
+        let bare_repo = workspace_home.join("repo.git");
+        let remote = format!(
+            "https://github.com/example/repo-{:x}.git",
+            remote_suffix(workspace_home)
+        );
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare_repo.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+        assert!(
+            init.status.success(),
+            "git init bare failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let remote_add = gwt_core::process::hidden_command("git")
+            .args([
+                "-C",
+                bare_repo.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                remote.as_str(),
+            ])
+            .output()
+            .expect("git remote add");
+        assert!(
+            remote_add.status.success(),
+            "git remote add failed: {}",
+            String::from_utf8_lossy(&remote_add.stderr)
+        );
+        bare_repo
+    }
+
     fn remote_suffix(repo_path: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
 
@@ -8336,12 +8372,16 @@ exit /b 0\r\n",
             fs::write(
                 &fake_gh,
                 r#"#!/bin/sh
-if [ -n "$GWT_FAKE_GH_MARKER" ]; then
-  touch "$GWT_FAKE_GH_MARKER"
-fi
-if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
-  printf '%s\n' 'gh refresh failed' >&2
-  exit 1
+	if [ -n "$GWT_FAKE_GH_MARKER" ]; then
+	  touch "$GWT_FAKE_GH_MARKER"
+	fi
+	if [ -n "$GWT_FAKE_GH_EXPECT_CWD" ] && [ "$(pwd)" != "$GWT_FAKE_GH_EXPECT_CWD" ]; then
+	  printf '%s\n' "wrong cwd: $(pwd)" >&2
+	  exit 1
+	fi
+	if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
+	  printf '%s\n' 'gh refresh failed' >&2
+	  exit 1
 fi
 printf '%s\n' '[{"number":43,"title":"Refreshed issue","body":"Fresh body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-04-20T00:00:00Z"}]'
 exit 0
@@ -14250,6 +14290,85 @@ exit 1
                 )
             })
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_runtime_manual_knowledge_refresh_uses_child_bare_repo_for_workspace_home() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        let workspace_home = temp.path().join("workspace");
+        let bare_repo = init_workspace_home_with_child_bare(&workspace_home);
+        let expected_cwd = dunce::canonicalize(&bare_repo).expect("canonical bare repo");
+        let _expected = ScopedEnvVar::set("GWT_FAKE_GH_EXPECT_CWD", &expected_cwd);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            workspace_home,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(35),
+                selected_number: Some(43),
+                refresh: true,
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "manual refresh must stay asynchronous for workspace homes"
+        );
+        wait_for_recorded_event(
+            "workspace home knowledge refresh dispatch",
+            &events,
+            |events| {
+                events.iter().any(|event| {
+                    matches!(
+                        event,
+                        UserEvent::Dispatch(dispatched)
+                            if dispatched.iter().any(|outbound| {
+                                matches!(
+                                    &outbound.event,
+                                    BackendEvent::KnowledgeEntries {
+                                        id,
+                                        knowledge_kind,
+                                        request_id,
+                                        entries,
+                                        selected_number,
+                                        ..
+                                    } if id == &window_id
+                                        && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                        && *request_id == Some(35)
+                                        && *selected_number == Some(43)
+                                        && entries.len() == 1
+                                        && entries[0].number == 43
+                                )
+                            })
+                    )
+                })
+            },
+        );
     }
 
     #[test]
