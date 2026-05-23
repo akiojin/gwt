@@ -6053,3 +6053,10 @@ Type: lesson
 Context: After implementing durable discussions and Project State storage paths, I still followed stale generated gwt-coordination guidance and ran gwtd workspace update. The user pointed out from Board that Workspace is gone for the current discussion/coordination framing and told me to merge origin/develop to see the current state.
 Learning: Generated local skill text can lag the branch's product terminology. For this work, current-state reporting should be checked against Board and the latest develop/SPEC context; do not treat gwtd workspace update as the default user-facing path when Project State / Work / Discussion / Branch separation is being discussed.
 Future Action: Before posting coordination updates in SPEC-2359 terminology work, merge or inspect origin/develop, read recent Board entries, and prefer Board-only reporting unless the active instructions explicitly require the compatibility gwtd workspace path.
+
+## 2026-05-22 — Launch Runtime confirmation must stay side-effect free and cached
+
+Type: lesson
+Context: User reported that Launch Agent Runtime felt slow and asked whether Runtime startup was creating a worktree. During SPEC-2014 follow-up, Runtime confirmation called resolve_launch_worktree and also scanned thousands of stale session records through legacy git root matching.
+Learning: Runtime confirmation should only inspect an existing target worktree or project root for Docker/runtime context; final Launch owns materialization. Session repo matching must cache current repo identity, treat mismatched repo_hash as authoritative, and avoid git root probes for missing session paths.
+Future Action: When changing Launch Wizard Runtime hydration or previous-profile/Quick Start matching, add tests that missing target worktrees are not created and that stale session history does not fan out per-session git probes.
