@@ -756,6 +756,15 @@ mod tests {
             "generic file drops must not inherit the clipboard image MIME allow-list",
         );
         assert!(
+            html.contains("MAX_TOTAL_FILE_DROP_BYTES")
+                && drop_source.contains("droppedFilesWithinTotalSizeLimit"),
+            "browser file drops must enforce a total payload guard",
+        );
+        assert!(
+            !drop_source.contains("Promise.all("),
+            "browser file drops must not read every dropped file concurrently",
+        );
+        assert!(
             html.contains("terminal.focus();"),
             "expected file drop paths to restore terminal focus after sending",
         );
