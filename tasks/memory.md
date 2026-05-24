@@ -6088,3 +6088,10 @@ Type: lesson
 Context: SPEC-1935 investigation and implementation found that Codex hook discovery path differs by CLI version in gwt-managed worktrees.
 Learning: Codex versions older than 0.131.0-alpha.21 discover <worktree>/.codex/hooks.json; 0.131.0-alpha.21 and newer discover the workspace-home/CODEX_HOME hooks path. Unknown installed versions should use a both-path fallback.
 Future Action: When changing Codex managed hook materialization or trust registration, route path selection through CodexHookDiscoveryMode and verify old, new, and unknown-version cases.
+
+## 2026-05-25 — headless-browser-check must launch fresh serve from the current checkout
+
+Type: lesson
+Context: User clarified that headless-browser-check must not stop production gwt, must not reuse an already-running gwt address, and must server-launch the gwt binary from the launch/current checkout.
+Learning: Manual browser verification can be falsely performed against a stale or production server if an agent reuses a reachable URL or an installed gwt binary. The skill must start a fresh gwt serve process from the current checkout's target/debug/gwt and accept only that process's URL handoff/log.
+Future Action: Before sharing a headless-browser-check URL, capture the launch directory, resolve that same checkout's repository root and target/debug/gwt, start a new gwt serve with a fresh GWT_BROWSER_URL_FILE, verify that fresh URL, and stop only the process launched by the skill when the user is done.
