@@ -9,10 +9,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::settings_local::{
-    codex_event_hook_commands, codex_event_hook_commands_with_bin, write_text_atomically,
+    codex_event_hook_commands, codex_event_hook_commands_with_bin,
+    codex_hooks_path_for_codex_discovery, write_text_atomically,
 };
 
-const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
 const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
 const MANAGED_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
@@ -44,7 +44,7 @@ fn collect_codex_managed_hook_trust_entries_with_expected_bin(
     worktree: &Path,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<Vec<CodexHookTrustEntry>> {
-    let hooks_path = worktree.join(CODEX_HOOKS_PATH);
+    let hooks_path = codex_hooks_path_for_codex_discovery(worktree);
     if !hooks_path.exists() {
         return Ok(Vec::new());
     }
@@ -355,6 +355,45 @@ mod tests {
                 "trusted hash must use Codex sha256 prefix"
             );
         }
+    }
+
+    #[test]
+    fn linked_worktree_trust_entries_use_root_checkout_hook_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+        generate_codex_hooks(&worktree).unwrap();
+        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries(&worktree).unwrap();
+
+        assert_eq!(entries.len(), 5);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.key.starts_with(&root_hooks_path.display().to_string())),
+            "Codex 0.133 linked-worktree trust keys must use root checkout hook path {root_hooks_path:?}; got {entries:?}"
+        );
+        assert!(
+            entries.iter().all(|entry| {
+                !entry
+                    .key
+                    .starts_with(&worktree_hooks_path.display().to_string())
+            }),
+            "worktree-local hook keys are ignored by Codex linked-worktree discovery; got {entries:?}"
+        );
     }
 
     #[test]

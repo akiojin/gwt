@@ -78,17 +78,29 @@ pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
 /// Existing hook files are merged on every refresh: gwt-managed hook entries
 /// are replaced, while user hooks and unrelated top-level settings are kept.
 pub fn generate_codex_hooks(worktree: &Path) -> io::Result<()> {
-    generate_hook_config(worktree, ManagedHookTarget::Codex)
+    let worktree_hooks_path = ManagedHookTarget::Codex.config_path(worktree);
+    generate_hook_config_at_path(&worktree_hooks_path, ManagedHookTarget::Codex)?;
+
+    if let Some(root_checkout_hooks_path) = linked_worktree_codex_hooks_path(worktree) {
+        if root_checkout_hooks_path != worktree_hooks_path {
+            generate_hook_config_at_path(&root_checkout_hooks_path, ManagedHookTarget::Codex)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Result<()> {
     let settings_path = target.config_path(worktree);
+    generate_hook_config_at_path(&settings_path, target)
+}
 
+fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget) -> io::Result<()> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let mut root = read_existing_settings(&settings_path)?;
+    let mut root = read_existing_settings(settings_path)?;
     root.remove("managed_hooks");
     root.remove("user_hooks");
 
@@ -102,7 +114,63 @@ fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Resul
         )),
     );
 
-    write_settings_atomically(&settings_path, &Value::Object(root))
+    write_settings_atomically(settings_path, &Value::Object(root))
+}
+
+pub(crate) fn codex_hooks_path_for_codex_discovery(worktree: &Path) -> PathBuf {
+    linked_worktree_codex_hooks_path(worktree)
+        .unwrap_or_else(|| ManagedHookTarget::Codex.config_path(worktree))
+}
+
+fn linked_worktree_codex_hooks_path(worktree: &Path) -> Option<PathBuf> {
+    let (checkout_root, dot_git) = find_ancestor_git_entry(worktree)?;
+    if dot_git.is_dir() {
+        return None;
+    }
+
+    let git_dir_s = fs::read_to_string(&dot_git).ok()?;
+    let git_dir_rel = git_dir_s.trim().strip_prefix("gitdir:")?.trim();
+    if git_dir_rel.is_empty() {
+        return None;
+    }
+
+    let git_dir_path = resolve_path_against_base(git_dir_rel, &checkout_root);
+    let worktrees_dir = git_dir_path.parent()?;
+    if worktrees_dir.file_name().and_then(|name| name.to_str()) != Some("worktrees") {
+        return None;
+    }
+
+    let common_dir = worktrees_dir.parent()?;
+    let repo_root = common_dir.parent()?;
+    let relative_dir = worktree
+        .strip_prefix(&checkout_root)
+        .unwrap_or(Path::new(""));
+    Some(repo_root.join(relative_dir).join(CODEX_HOOKS_PATH))
+}
+
+fn resolve_path_against_base(path: &str, base: &Path) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut dir = base_dir.to_path_buf();
+
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.exists() {
+            return Some((dir, dot_git));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    None
 }
 
 fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
@@ -1357,6 +1425,42 @@ mod tests {
         assert!(pre_tool_commands
             .iter()
             .any(|command| command.contains(" hook event PreToolUse")));
+    }
+
+    #[test]
+    fn generate_codex_hooks_writes_root_checkout_hooks_for_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+
+        generate_codex_hooks(&worktree).unwrap();
+
+        assert!(
+            worktree.join(".codex/hooks.json").exists(),
+            "legacy worktree-local Codex hooks should still be materialized"
+        );
+        let root_hooks = root_checkout.join(".codex/hooks.json");
+        assert!(
+            root_hooks.exists(),
+            "Codex 0.133 reads linked-worktree hooks from the root checkout: {}",
+            root_hooks.display()
+        );
+        let content = fs::read_to_string(root_hooks).unwrap();
+        assert!(
+            content.contains("hook event SessionStart"),
+            "root checkout hooks must contain generated gwt hooks, got: {content}"
+        );
     }
 
     #[test]
