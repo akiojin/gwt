@@ -6095,3 +6095,10 @@ Type: lesson
 Context: User clarified that headless-browser-check must not stop production gwt, must not reuse an already-running gwt address, and must server-launch the gwt binary from the launch/current checkout.
 Learning: Manual browser verification can be falsely performed against a stale or production server if an agent reuses a reachable URL or an installed gwt binary. The skill must start a fresh gwt serve process from the current checkout's target/debug/gwt and accept only that process's URL handoff/log.
 Future Action: Before sharing a headless-browser-check URL, capture the launch directory, resolve that same checkout's repository root and target/debug/gwt, start a new gwt serve with a fresh GWT_BROWSER_URL_FILE, verify that fresh URL, and stop only the process launched by the skill when the user is done.
+
+## 2026-05-25 — headless-browser-check must use repo-root absolute gwt paths
+
+Type: lesson
+Context: Codex review on PR #2884 pointed out that headless-browser-check resolved the repository root but still showed a relative target/debug/gwt launch command, which fails when the skill is triggered from a subdirectory such as crates/gwt.
+Learning: A skill can say 'current checkout' and still be ambiguous if command examples remain relative to the caller's cwd. For gwt serve handoff checks, the launch command must either cd to the resolved repository root or use an absolute <repo-root>/target/debug/gwt path.
+Future Action: When updating headless-browser-check or similar launch skills, make every executable path in the workflow match the resolved root/checkout contract; test the instructions mentally from a subdirectory as well as from repo root.
