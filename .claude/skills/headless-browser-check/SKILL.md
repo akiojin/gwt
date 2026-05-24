@@ -15,23 +15,25 @@ not use it for CI-only Playwright runs or generic web app servers.
 
 ## Workflow
 
-1. Capture the launch directory:
+1. Capture the launch checkout root:
    - Treat the current working directory at skill start as the launch directory.
    - Resolve the repository root for that same checkout and note the current
      branch.
+   - Run the remaining workflow from that repository root, or use absolute
+     paths prefixed by that repository root.
    - Do not switch to another worktree, reuse another checkout, or use a
      production install for this check.
 2. Resolve the gwt binary:
-   - Use only this launch checkout's `target/debug/gwt`.
-   - Otherwise run `cargo build -p gwt --bin gwt` from this checkout, then use
-     its `target/debug/gwt`.
+   - Use only this launch checkout's `<repo-root>/target/debug/gwt`.
+   - Otherwise run `cargo build -p gwt --bin gwt` from `<repo-root>`, then use
+     `<repo-root>/target/debug/gwt`.
    - If the user explicitly asks to test freshly edited code, build first even
-     when `target/debug/gwt` exists.
+     when `<repo-root>/target/debug/gwt` exists.
    - Never fall back to `/Applications/GWT.app`, `command -v gwt`, another
      worktree's binary, or any installed production gwt binary.
 3. Start headless mode in a long-running exec session:
    - Create a temp URL handoff file and log path under `${TMPDIR:-/tmp}`.
-   - Run `GWT_BROWSER_URL_FILE=<url-file> target/debug/gwt serve 2>&1 | tee <log-file>`.
+   - Run `GWT_BROWSER_URL_FILE=<url-file> <repo-root>/target/debug/gwt serve 2>&1 | tee <log-file>`.
    - Always start a fresh `gwt serve` process for this check, using the binary
      resolved above.
    - Treat this tee log as the startup/stdout log only; ordinary browser UI
