@@ -27,6 +27,103 @@ body {
   position: relative;
 }
 
+/* ============================================================
+   SPEC-2356 Phase 11 — Text-first readable surface primitives.
+
+   gwt is primarily a long-form coding conversation workspace. These
+   primitives define the shared, opaque grammar for readable content
+   blocks while leaving decorative Canvas/backdrop layers outside of the
+   text contract.
+   ============================================================ */
+
+.text-first-content {
+  min-width: 0;
+  color: var(--color-text);
+  background: var(--color-surface);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.text-first-message {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  line-height: 1.6;
+}
+
+.text-first-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.45;
+  letter-spacing: var(--tracking-mono);
+}
+
+.text-first-code {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.text-first-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.5;
+}
+
+.text-first-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+:root[data-theme] .release-notes-content,
+:root[data-theme] .workspace-overview-detail-pane,
+:root[data-theme] .workspace-overview-row,
+:root[data-theme] .workspace-detail-agent,
+:root[data-theme] .workspace-detail-event,
+:root[data-theme] .terminal-overlay,
+:root[data-theme] .file-tree-viewer-body,
+:root[data-theme] .board-panel,
+:root[data-theme] .logs-panel,
+:root[data-theme] .knowledge-panel {
+  min-width: 0;
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 /* Scan-grid backdrop (subtle, behind everything else) */
 body::before {
   content: "";
@@ -156,7 +253,6 @@ body::after {
   border: 1px solid var(--color-focus-ring);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
-  backdrop-filter: blur(8px);
   font-family: var(--font-mono);
   font-size: var(--type-sm);
   letter-spacing: var(--tracking-mono);
@@ -1048,13 +1144,16 @@ body::after {
      static rim remains. */
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));
   box-shadow: 0 0 0 1px var(--agent-color);
-  opacity: 0.82;
 }
 
 [data-agent-state="not_started"] {
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 35%, var(--color-border));
   box-shadow: 0 0 0 1px var(--agent-color);
-  opacity: 0.72;
+}
+
+.workspace-window[data-agent-state="idle"],
+.workspace-window[data-agent-state="not_started"] {
+  opacity: 1;
 }
 
 [data-agent-state="blocked"] {
@@ -1136,7 +1235,6 @@ body::after {
   position: fixed;
   inset: 0;
   background: var(--color-overlay);
-  backdrop-filter: blur(2px);
   z-index: 30;
   opacity: 0;
   pointer-events: none;
@@ -1235,7 +1333,6 @@ body::after {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  backdrop-filter: blur(4px);
   z-index: 40;
   opacity: 0;
   pointer-events: none;
@@ -1328,7 +1425,6 @@ body::after {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  backdrop-filter: blur(4px);
   z-index: 50;
   opacity: 0;
   pointer-events: none;
@@ -2083,7 +2179,6 @@ kbd.op-kbd {
 :root[data-theme] .project-picker,
 :root[data-theme] .project-onboarding {
   background: var(--color-overlay);
-  backdrop-filter: blur(2px);
 }
 :root[data-theme] .project-picker-card,
 :root[data-theme] .project-onboarding-card {
@@ -2150,7 +2245,6 @@ kbd.op-kbd {
   align-items: stretch;
   justify-content: flex-end;
   background: var(--color-overlay);
-  backdrop-filter: blur(2px);
 }
 .modal-backdrop.is-drawer.open {
   display: flex;
