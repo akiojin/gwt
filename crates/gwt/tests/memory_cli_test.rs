@@ -62,12 +62,12 @@ fn memory_add_appends_typed_entry_to_existing_memory_file() {
 }
 
 #[test]
-fn lessons_add_alias_creates_memory_file_without_appending_legacy_stub() {
+fn lessons_add_alias_migrates_legacy_file_and_appends_entry() {
     let repo = tempfile::tempdir().expect("repo");
     let tasks = repo.path().join("tasks");
     fs::create_dir_all(&tasks).expect("create tasks dir");
-    let legacy = "# Moved to tasks/memory.md\n\nlegacy pointer only\n";
-    fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons stub");
+    let legacy = "# Old Lessons\n\n## 2026-04-01 — old entry\n\nSome old content.\n";
+    fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons");
 
     let output = run_gwtd_in(
         repo.path(),
@@ -93,14 +93,101 @@ fn lessons_add_alias_creates_memory_file_without_appending_legacy_stub() {
         String::from_utf8_lossy(&output.stderr)
     );
     let memory = fs::read_to_string(tasks.join("memory.md")).expect("memory created");
-    assert!(memory.contains("# Memory"));
+    assert!(
+        memory.contains("old entry"),
+        "migrated content should be preserved"
+    );
     assert!(memory.contains("## 2026-05-20 — legacy alias writer"));
     assert!(memory.contains("Type: lesson"));
+    assert!(
+        !tasks.join("lessons.md").exists(),
+        "lessons.md should be removed after migration"
+    );
+}
+
+#[test]
+fn memory_add_migrates_legacy_lessons_when_memory_absent() {
+    let repo = tempfile::tempdir().expect("repo");
+    let tasks = repo.path().join("tasks");
+    fs::create_dir_all(&tasks).expect("create tasks dir");
+    let legacy = "# Lessons\n\n## 2026-03-15 — prior knowledge\n\nType: lesson\nContext: old context\nLearning: old learning\nFuture Action: old action\n";
+    fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons");
+
+    let output = run_gwtd_in(
+        repo.path(),
+        &[
+            "memory",
+            "add",
+            "--date",
+            "2026-05-24",
+            "--title",
+            "new entry after migration",
+            "--context",
+            "Testing migration path.",
+            "--learning",
+            "Legacy file should be renamed.",
+            "--future-action",
+            "Verify migration is automatic.",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "memory add should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let memory = fs::read_to_string(tasks.join("memory.md")).expect("read memory");
+    assert!(
+        memory.contains("prior knowledge"),
+        "old entries should be preserved via rename"
+    );
+    assert!(memory.contains("## 2026-05-24 — new entry after migration"));
+    assert!(
+        !tasks.join("lessons.md").exists(),
+        "lessons.md should not exist after migration"
+    );
+}
+
+#[test]
+fn memory_add_skips_migration_when_both_files_exist() {
+    let repo = tempfile::tempdir().expect("repo");
+    let tasks = repo.path().join("tasks");
+    fs::create_dir_all(&tasks).expect("create tasks dir");
+    let legacy = "# Old Lessons\n";
+    let existing = "# Memory\n\n";
+    fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons");
+    fs::write(tasks.join("memory.md"), existing).expect("seed memory");
+
+    let output = run_gwtd_in(
+        repo.path(),
+        &[
+            "memory",
+            "add",
+            "--date",
+            "2026-05-24",
+            "--title",
+            "no migration needed",
+            "--context",
+            "Both files exist.",
+            "--learning",
+            "Migration should be skipped.",
+            "--future-action",
+            "Only append to memory.md.",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "memory add should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         fs::read_to_string(tasks.join("lessons.md")).expect("read legacy"),
         legacy,
-        "legacy lessons stub must not be appended"
+        "lessons.md must not be modified when memory.md already exists"
     );
+    let memory = fs::read_to_string(tasks.join("memory.md")).expect("read memory");
+    assert!(memory.contains("## 2026-05-24 — no migration needed"));
 }
 
 #[test]
