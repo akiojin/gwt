@@ -4687,7 +4687,7 @@ impl AppRuntime {
         let runtime_target = session.runtime_target;
         let limits = ContentLimits::default();
 
-        let mut prepared_files = Vec::with_capacity(files.len());
+        let mut agent_paths = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let token = format!("{}-{index}", image_paste_unique_token());
             let prepared = match prepare_file_attachment(
@@ -4708,23 +4708,16 @@ impl AppRuntime {
                     return Vec::new();
                 }
             };
-            prepared_files.push(prepared);
-        }
-
-        for file in &prepared_files {
-            if let Err(error) = save_file_attachment(file) {
+            if let Err(error) = save_file_attachment(&prepared) {
                 return self.handle_runtime_status(
                     id.to_string(),
                     WindowProcessStatus::Error,
                     Some(error.to_string()),
                 );
             }
+            agent_paths.push(prepared.agent_path);
         }
 
-        let agent_paths = prepared_files
-            .iter()
-            .map(|file| file.agent_path.clone())
-            .collect::<Vec<_>>();
         let prompt = format_file_attachment_prompt(&agent_paths);
         if prompt.is_empty() {
             return Vec::new();
@@ -9474,6 +9467,82 @@ exit 1
         assert_eq!(
             fs::read(files[0].path()).expect("read saved file"),
             b"text-bytes"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_saves_prepared_files_incrementally() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let valid_payload = base64::engine::general_purpose::STANDARD.encode(b"saved-first");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "first.txt",
+                    "mime_type": "text/plain",
+                    "size": 11,
+                    "data_base64": valid_payload
+                },
+                {
+                    "source": "inline",
+                    "filename": "invalid.txt",
+                    "mime_type": "text/plain",
+                    "size": 4,
+                    "data_base64": "not base64"
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(
+            events.is_empty(),
+            "invalid later attachment must not inject a partial prompt",
+        );
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(
+            files.len(),
+            1,
+            "first attachment should be saved before a later file fails",
+        );
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved file"),
+            b"saved-first"
         );
     }
 

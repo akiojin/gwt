@@ -3697,6 +3697,8 @@
         "image/webp",
       ]);
       const MAX_FILE_DROP_BYTES = 10 * 1024 * 1024;
+      const MAX_TOTAL_FILE_DROP_BYTES = 50 * 1024 * 1024;
+      const MAX_FILE_DROP_COUNT = 16;
 
       function findClipboardImagePasteItem(items) {
         for (const item of Array.from(items || [])) {
@@ -3756,6 +3758,35 @@
 
       function droppedFilesWithinSizeLimit(files) {
         return files.every((file) => file.size <= MAX_FILE_DROP_BYTES);
+      }
+
+      function droppedFilesWithinTotalSizeLimit(files) {
+        let totalBytes = 0;
+        for (const file of files) {
+          totalBytes += file.size || 0;
+          if (totalBytes > MAX_TOTAL_FILE_DROP_BYTES) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      function droppedFilesWithinCountLimit(files) {
+        return files.length <= MAX_FILE_DROP_COUNT;
+      }
+
+      async function readDroppedFilesAsAttachments(files) {
+        const attachments = [];
+        for (const file of files) {
+          attachments.push({
+            source: "inline",
+            filename: file.name || "file",
+            mime_type: file.type || null,
+            size: file.size,
+            data_base64: await readDroppedFileAsBase64(file),
+          });
+        }
+        return attachments;
       }
 
       async function readNavigatorClipboardItems() {
@@ -3983,20 +4014,16 @@
           }
           event.preventDefault();
           event.stopPropagation();
-          if (!droppedFilesWithinSizeLimit(files)) {
+          if (
+            !droppedFilesWithinCountLimit(files) ||
+            !droppedFilesWithinSizeLimit(files) ||
+            !droppedFilesWithinTotalSizeLimit(files)
+          ) {
             terminal.focus();
             return;
           }
 
-          void Promise.all(
-            files.map(async (file) => ({
-              source: "inline",
-              filename: file.name || "file",
-              mime_type: file.type || null,
-              size: file.size,
-              data_base64: await readDroppedFileAsBase64(file),
-            })),
-          )
+          void readDroppedFilesAsAttachments(files)
             .then((attachments) => {
               send({
                 kind: "attach_files",
