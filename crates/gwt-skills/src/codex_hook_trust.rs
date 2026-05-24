@@ -130,6 +130,7 @@ pub fn register_codex_managed_hook_trust(
 
     for entry in &trusted_entries {
         let hook_state = ensure_child_table(state_table, &entry.key)?;
+        enable_hook_unless_explicitly_disabled(hook_state);
         hook_state.insert(
             "trusted_hash".to_string(),
             toml::Value::String(entry.trusted_hash.clone()),
@@ -190,6 +191,13 @@ fn ensure_child_table<'a>(
                 format!("Codex config key `{key}` must be a TOML table"),
             )
         })
+}
+
+fn enable_hook_unless_explicitly_disabled(hook_state: &mut toml::Table) {
+    if hook_state.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
+        return;
+    }
+    hook_state.insert("enabled".to_string(), toml::Value::Boolean(true));
 }
 
 fn hook_key(
@@ -538,6 +546,128 @@ enabled = false
                 .get(format!("{}:pre_tool_use:1:0", hooks_path.display()))
                 .is_none(),
             "user hook entry must not be trusted"
+        );
+    }
+
+    #[test]
+    fn registration_enables_generated_managed_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        let config = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        for event_name in [
+            "session_start",
+            "user_prompt_submit",
+            "pre_tool_use",
+            "post_tool_use",
+            "stop",
+        ] {
+            let key = format!("{}:{event_name}:0:0", hooks_path.display());
+            let state = parsed["hooks"]["state"]
+                .get(&key)
+                .unwrap_or_else(|| panic!("missing managed Codex hook state entry: {key}"));
+            assert_eq!(
+                state.get("enabled").and_then(toml::Value::as_bool),
+                Some(true),
+                "managed Codex hook must be enabled: {key}"
+            );
+            assert!(
+                state["trusted_hash"].as_str().is_some(),
+                "managed Codex hook must still carry trusted_hash: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_preserves_explicit_managed_hook_opt_out() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
+        let pre_tool_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
+        let config_path = dir.path().join("codex-config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+[hooks.state."{pre_tool_key}"]
+enabled = false
+"#
+            ),
+        )
+        .unwrap();
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(report.trusted_entries.len(), 5);
+        let config = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        let state = &parsed["hooks"]["state"][&pre_tool_key];
+        assert_eq!(
+            state["enabled"].as_bool(),
+            Some(false),
+            "explicit managed hook opt-out must not be overwritten"
+        );
+        assert!(
+            state["trusted_hash"].as_str().is_some(),
+            "explicitly disabled managed hook should still receive the current trusted hash"
+        );
+    }
+
+    #[test]
+    fn registration_does_not_enable_user_or_modified_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let hooks_path = dir.path().join(".codex/hooks.json");
+        let hooks_content = fs::read_to_string(&hooks_path).unwrap();
+        let mut hooks_json: Value = serde_json::from_str(&hooks_content).unwrap();
+        hooks_json["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "command": "echo user-hook",
+                        "type": "command"
+                    }
+                ]
+            }));
+        hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"] =
+            Value::String("'gwtd' hook event Stop --unexpected".to_string());
+        fs::write(
+            &hooks_path,
+            serde_json::to_string_pretty(&hooks_json).unwrap(),
+        )
+        .unwrap();
+        let hooks_path = fs::canonicalize(&hooks_path).unwrap();
+        let config_path = dir.path().join("codex-config.toml");
+
+        let report = register_codex_managed_hook_trust(dir.path(), &config_path).unwrap();
+
+        assert_eq!(
+            report.trusted_entries.len(),
+            4,
+            "only unchanged generated hooks should be trusted"
+        );
+        let config = fs::read_to_string(&config_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).unwrap();
+        assert!(
+            parsed["hooks"]["state"]
+                .get(format!("{}:pre_tool_use:1:0", hooks_path.display()))
+                .is_none(),
+            "user hook entry must not be enabled or trusted"
+        );
+        assert!(
+            parsed["hooks"]["state"]
+                .get(format!("{}:stop:0:0", hooks_path.display()))
+                .is_none(),
+            "modified generated hook must not be enabled or trusted"
         );
     }
 

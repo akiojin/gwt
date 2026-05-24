@@ -99,4 +99,9 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         config.contains("trusted_hash"),
         "Codex config must receive trusted hashes, got: {config}"
     );
+    assert_eq!(
+        config.matches("enabled = true").count(),
+        5,
+        "Codex config must enable every trusted managed hook, got: {config}"
+    );
 }
