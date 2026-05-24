@@ -95,7 +95,7 @@ async function installKanbanBackend(page, { hideDone, theme }) {
         },
         {
           number: 2359,
-          title: "Workspace Kanban stabilization",
+          title: "Work Kanban stabilization",
           state: "open",
           meta: "Unscheduled backlog",
           labels: ["gwt-spec"],
