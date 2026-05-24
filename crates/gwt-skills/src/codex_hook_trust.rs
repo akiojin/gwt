@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::settings_local::{
     codex_event_hook_commands, codex_event_hook_commands_with_bin,
-    codex_hooks_path_for_codex_discovery, write_text_atomically,
+    codex_hooks_paths_for_codex_discovery, write_text_atomically, CodexHookDiscoveryMode,
 };
 
 const CODEX_DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 600;
@@ -37,20 +37,56 @@ pub struct CodexHookTrustReport {
 pub fn collect_codex_managed_hook_trust_entries(
     worktree: &Path,
 ) -> io::Result<Vec<CodexHookTrustEntry>> {
-    collect_codex_managed_hook_trust_entries_with_expected_bin(worktree, None)
+    collect_codex_managed_hook_trust_entries_for_mode(
+        worktree,
+        CodexHookDiscoveryMode::WorkspaceHome,
+    )
 }
 
+pub fn collect_codex_managed_hook_trust_entries_for_mode(
+    worktree: &Path,
+    mode: CodexHookDiscoveryMode,
+) -> io::Result<Vec<CodexHookTrustEntry>> {
+    collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(worktree, mode, None)
+}
+
+#[cfg(test)]
 fn collect_codex_managed_hook_trust_entries_with_expected_bin(
     worktree: &Path,
     expected_gwt_bin: Option<&str>,
 ) -> io::Result<Vec<CodexHookTrustEntry>> {
-    let hooks_path = codex_hooks_path_for_codex_discovery(worktree);
+    collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
+        worktree,
+        CodexHookDiscoveryMode::WorkspaceHome,
+        expected_gwt_bin,
+    )
+}
+
+fn collect_codex_managed_hook_trust_entries_for_mode_with_expected_bin(
+    worktree: &Path,
+    mode: CodexHookDiscoveryMode,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<Vec<CodexHookTrustEntry>> {
+    let mut entries = Vec::new();
+    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
+        entries.extend(collect_codex_managed_hook_trust_entries_from_path(
+            &hooks_path,
+            expected_gwt_bin,
+        )?);
+    }
+    Ok(entries)
+}
+
+fn collect_codex_managed_hook_trust_entries_from_path(
+    hooks_path: &Path,
+    expected_gwt_bin: Option<&str>,
+) -> io::Result<Vec<CodexHookTrustEntry>> {
     if !hooks_path.exists() {
         return Ok(Vec::new());
     }
 
-    let key_source = fs::canonicalize(&hooks_path)?;
-    let content = fs::read_to_string(&hooks_path)?;
+    let key_source = fs::canonicalize(hooks_path)?;
+    let content = fs::read_to_string(hooks_path)?;
     let root: Value = serde_json::from_str(&content).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -110,7 +146,19 @@ pub fn register_codex_managed_hook_trust(
     worktree: &Path,
     config_path: &Path,
 ) -> io::Result<CodexHookTrustReport> {
-    let trusted_entries = collect_codex_managed_hook_trust_entries(worktree)?;
+    register_codex_managed_hook_trust_for_mode(
+        worktree,
+        config_path,
+        CodexHookDiscoveryMode::WorkspaceHome,
+    )
+}
+
+pub fn register_codex_managed_hook_trust_for_mode(
+    worktree: &Path,
+    config_path: &Path,
+    mode: CodexHookDiscoveryMode,
+) -> io::Result<CodexHookTrustReport> {
+    let trusted_entries = collect_codex_managed_hook_trust_entries_for_mode(worktree, mode)?;
     if trusted_entries.is_empty() {
         return Ok(CodexHookTrustReport {
             config_path: config_path.to_path_buf(),
@@ -294,7 +342,10 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::{generate_codex_hooks, settings_local::codex_event_hook_commands_with_bin};
+    use crate::{
+        generate_codex_hooks, generate_codex_hooks_for_mode,
+        settings_local::codex_event_hook_commands_with_bin, CodexHookDiscoveryMode,
+    };
 
     #[test]
     fn command_hook_hash_matches_codex_for_known_post_tool_use_fixture() {
@@ -375,7 +426,7 @@ mod tests {
         .unwrap();
         generate_codex_hooks(&worktree).unwrap();
         let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
-        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_prefix = worktree.join(".codex/hooks.json").display().to_string();
 
         let entries = collect_codex_managed_hook_trust_entries(&worktree).unwrap();
 
@@ -390,10 +441,79 @@ mod tests {
             entries.iter().all(|entry| {
                 !entry
                     .key
-                    .starts_with(&worktree_hooks_path.display().to_string())
+                    .starts_with(&worktree_hooks_prefix)
             }),
             "worktree-local hook keys are ignored by Codex linked-worktree discovery; got {entries:?}"
         );
+    }
+
+    #[test]
+    fn linked_worktree_trust_entries_can_use_worktree_hook_path_for_older_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal).unwrap();
+        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries_for_mode(
+            &worktree,
+            CodexHookDiscoveryMode::WorktreeLocal,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 5);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.key.starts_with(&worktree_hooks_path.display().to_string())),
+            "Codex < 0.131.0-alpha.21 trust keys must use worktree hook path {worktree_hooks_path:?}; got {entries:?}"
+        );
+    }
+
+    #[test]
+    fn linked_worktree_trust_entries_can_register_both_paths_for_unknown_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
+        let root_hooks_path = fs::canonicalize(root_checkout.join(".codex/hooks.json")).unwrap();
+        let worktree_hooks_path = fs::canonicalize(worktree.join(".codex/hooks.json")).unwrap();
+
+        let entries = collect_codex_managed_hook_trust_entries_for_mode(
+            &worktree,
+            CodexHookDiscoveryMode::Both,
+        )
+        .unwrap();
+
+        assert_eq!(entries.len(), 10);
+        assert!(entries.iter().any(|entry| entry
+            .key
+            .starts_with(&root_hooks_path.display().to_string())));
+        assert!(entries.iter().any(|entry| entry
+            .key
+            .starts_with(&worktree_hooks_path.display().to_string())));
     }
 
     #[test]

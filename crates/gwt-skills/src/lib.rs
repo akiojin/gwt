@@ -18,7 +18,8 @@ pub use codex_home::{
     CodexHomeConfig, DEFAULT_WIRE_API, RESERVED_PROVIDER_IDS,
 };
 pub use codex_hook_trust::{
-    collect_codex_managed_hook_trust_entries, register_codex_managed_hook_trust,
+    collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
+    register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
     CodexHookTrustEntry, CodexHookTrustReport,
 };
 pub use coordination_guidance::{
@@ -36,7 +37,10 @@ pub use hooks::{
 };
 pub use provider_hooks::{generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks};
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use settings_local::{generate_codex_hooks, generate_settings_local};
+pub use settings_local::{
+    generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
+    CodexHookDiscoveryMode,
+};
 
 #[cfg(test)]
 mod tests {

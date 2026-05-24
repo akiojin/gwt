@@ -45,6 +45,32 @@ const MANAGED_EVENT_ORDER: &[&str] = &[
 const CODEX_HOOKS_PATH: &str = ".codex/hooks.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexHookDiscoveryMode {
+    WorktreeLocal,
+    WorkspaceHome,
+    Both,
+}
+
+impl CodexHookDiscoveryMode {
+    pub fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::WorktreeLocal => "worktree-local",
+            Self::WorkspaceHome => "workspace-home",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn from_cli_value(value: &str) -> Option<Self> {
+        match value {
+            "worktree-local" => Some(Self::WorktreeLocal),
+            "workspace-home" => Some(Self::WorkspaceHome),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookShell {
     Posix,
     PowerShell,
@@ -78,15 +104,16 @@ pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
 /// Existing hook files are merged on every refresh: gwt-managed hook entries
 /// are replaced, while user hooks and unrelated top-level settings are kept.
 pub fn generate_codex_hooks(worktree: &Path) -> io::Result<()> {
-    let worktree_hooks_path = ManagedHookTarget::Codex.config_path(worktree);
-    generate_hook_config_at_path(&worktree_hooks_path, ManagedHookTarget::Codex)?;
+    generate_codex_hooks_for_mode(worktree, CodexHookDiscoveryMode::WorkspaceHome)
+}
 
-    if let Some(root_checkout_hooks_path) = linked_worktree_codex_hooks_path(worktree) {
-        if root_checkout_hooks_path != worktree_hooks_path {
-            generate_hook_config_at_path(&root_checkout_hooks_path, ManagedHookTarget::Codex)?;
-        }
+pub fn generate_codex_hooks_for_mode(
+    worktree: &Path,
+    mode: CodexHookDiscoveryMode,
+) -> io::Result<()> {
+    for hooks_path in codex_hooks_paths_for_codex_discovery(worktree, mode) {
+        generate_hook_config_at_path(&hooks_path, ManagedHookTarget::Codex)?;
     }
-
     Ok(())
 }
 
@@ -117,9 +144,25 @@ fn generate_hook_config_at_path(settings_path: &Path, target: ManagedHookTarget)
     write_settings_atomically(settings_path, &Value::Object(root))
 }
 
-pub(crate) fn codex_hooks_path_for_codex_discovery(worktree: &Path) -> PathBuf {
-    linked_worktree_codex_hooks_path(worktree)
-        .unwrap_or_else(|| ManagedHookTarget::Codex.config_path(worktree))
+pub fn codex_hooks_paths_for_codex_discovery(
+    worktree: &Path,
+    mode: CodexHookDiscoveryMode,
+) -> Vec<PathBuf> {
+    let worktree_hooks_path = ManagedHookTarget::Codex.config_path(worktree);
+    let workspace_home_hooks_path =
+        linked_worktree_codex_hooks_path(worktree).unwrap_or_else(|| worktree_hooks_path.clone());
+
+    match mode {
+        CodexHookDiscoveryMode::WorktreeLocal => vec![worktree_hooks_path],
+        CodexHookDiscoveryMode::WorkspaceHome => vec![workspace_home_hooks_path],
+        CodexHookDiscoveryMode::Both => {
+            if worktree_hooks_path == workspace_home_hooks_path {
+                vec![worktree_hooks_path]
+            } else {
+                vec![worktree_hooks_path, workspace_home_hooks_path]
+            }
+        }
+    }
 }
 
 fn linked_worktree_codex_hooks_path(worktree: &Path) -> Option<PathBuf> {
@@ -1447,8 +1490,8 @@ mod tests {
         generate_codex_hooks(&worktree).unwrap();
 
         assert!(
-            worktree.join(".codex/hooks.json").exists(),
-            "legacy worktree-local Codex hooks should still be materialized"
+            !worktree.join(".codex/hooks.json").exists(),
+            "default Codex hook generation should target only the current stable discovery path"
         );
         let root_hooks = root_checkout.join(".codex/hooks.json");
         assert!(
@@ -1461,6 +1504,58 @@ mod tests {
             content.contains("hook event SessionStart"),
             "root checkout hooks must contain generated gwt hooks, got: {content}"
         );
+    }
+
+    #[test]
+    fn generate_codex_hooks_can_target_worktree_local_discovery_for_older_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::WorktreeLocal).unwrap();
+
+        assert!(
+            worktree.join(".codex/hooks.json").exists(),
+            "Codex < 0.131.0-alpha.21 reads linked-worktree hooks from the worktree"
+        );
+        assert!(
+            !root_checkout.join(".codex/hooks.json").exists(),
+            "old Codex mode must not create the workspace-home hook path"
+        );
+    }
+
+    #[test]
+    fn generate_codex_hooks_can_target_both_discovery_paths_for_unknown_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_checkout = dir.path().join("project");
+        let common_git_dir = root_checkout.join("project.git");
+        let worktree = root_checkout.join("work/20260524-0545");
+        fs::create_dir_all(common_git_dir.join("worktrees/20260524-0545")).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                common_git_dir.join("worktrees/20260524-0545").display()
+            ),
+        )
+        .unwrap();
+
+        generate_codex_hooks_for_mode(&worktree, CodexHookDiscoveryMode::Both).unwrap();
+
+        assert!(worktree.join(".codex/hooks.json").exists());
+        assert!(root_checkout.join(".codex/hooks.json").exists());
     }
 
     #[test]

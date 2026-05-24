@@ -377,7 +377,25 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match gwt_skills::register_codex_managed_hook_trust(&project_root, &codex_config_path) {
+            let discovery_mode = match option_value(rest, "--codex-hook-discovery") {
+                Some(value) => match gwt_skills::CodexHookDiscoveryMode::from_cli_value(value) {
+                    Some(mode) => mode,
+                    None => {
+                        let _ = writeln!(
+                            env.stderr(),
+                            "gwtd hook register-codex-managed-hook-trust: invalid --codex-hook-discovery '{}'",
+                            value
+                        );
+                        return Ok(2);
+                    }
+                },
+                None => gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+            };
+            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+                &project_root,
+                &codex_config_path,
+                discovery_mode,
+            ) {
                 Ok(report) => {
                     let _ = writeln!(
                         env.stdout(),

@@ -6081,3 +6081,10 @@ Type: failure-pattern
 Context: Codex 0.133 /hooks showed Installed 0 / Active 0 in gwt-managed linked worktrees even though each worktree had .codex/hooks.json.
 Learning: Codex resolves project hook declarations for linked Git worktrees from the matching root checkout .codex folder, not from hook files stored only in the linked worktree.
 Future Action: When changing Codex managed hook generation or trust registration, test linked worktrees and make generated hooks plus trust keys use the same root-checkout path Codex discovers.
+
+## 2026-05-24 — Codex hook discovery version boundary
+
+Type: lesson
+Context: SPEC-1935 investigation and implementation found that Codex hook discovery path differs by CLI version in gwt-managed worktrees.
+Learning: Codex versions older than 0.131.0-alpha.21 discover <worktree>/.codex/hooks.json; 0.131.0-alpha.21 and newer discover the workspace-home/CODEX_HOME hooks path. Unknown installed versions should use a both-path fallback.
+Future Action: When changing Codex managed hook materialization or trust registration, route path selection through CodexHookDiscoveryMode and verify old, new, and unknown-version cases.

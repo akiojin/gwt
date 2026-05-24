@@ -619,6 +619,7 @@ fn apply_docker_runtime_to_launch_config(
 pub fn register_codex_managed_hook_trust_in_docker(
     worktree: &Path,
     docker_service: Option<&str>,
+    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
 ) -> Result<(), String> {
     let launch = resolve_docker_launch_plan(worktree, docker_service)?;
     let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
@@ -628,7 +629,11 @@ pub fn register_codex_managed_hook_trust_in_docker(
     .into_os_string()
     .into_string()
     .map_err(|_| "host gwtd path is not valid UTF-8".to_string())?;
-    let args = docker_codex_hook_trust_registration_args(&launch.container_cwd, &host_gwt_bin);
+    let args = docker_codex_hook_trust_registration_args(
+        &launch.container_cwd,
+        &host_gwt_bin,
+        codex_hook_discovery_mode,
+    );
     let output = gwt_docker::compose_service_exec_capture_with_files(
         &launch.compose_files,
         &launch.service,
@@ -658,12 +663,14 @@ pub fn register_codex_managed_hook_trust_in_docker(
 fn docker_codex_hook_trust_registration_args(
     container_cwd: &str,
     host_gwt_bin_fallback: &str,
+    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
 ) -> Vec<String> {
     let script = format!(
-        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\nGWT_HOOK_BIN={} exec {} hook register-codex-managed-hook-trust --project-root {} --codex-config \"$codex_home/config.toml\"",
+        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\nGWT_HOOK_BIN={} exec {} hook register-codex-managed-hook-trust --project-root {} --codex-config \"$codex_home/config.toml\" --codex-hook-discovery {}",
         shell_single_quote(host_gwt_bin_fallback),
         shell_single_quote(DOCKER_GWTD_BIN_PATH),
         shell_single_quote(container_cwd),
+        shell_single_quote(codex_hook_discovery_mode.as_cli_value()),
     );
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
@@ -2012,8 +2019,11 @@ mod tests {
 
     #[test]
     fn docker_codex_hook_trust_registration_uses_container_home_and_host_fallback() {
-        let args =
-            docker_codex_hook_trust_registration_args("/workspace/app", "/host/gwt/bin/gwtd");
+        let args = docker_codex_hook_trust_registration_args(
+            "/workspace/app",
+            "/host/gwt/bin/gwtd",
+            gwt_skills::CodexHookDiscoveryMode::Both,
+        );
 
         assert_eq!(args[0], "sh");
         assert_eq!(args[1], "-lc");
@@ -2025,6 +2035,10 @@ mod tests {
         assert!(
             script.contains(r#"--codex-config "$codex_home/config.toml""#),
             "script must pass the derived Codex config path, got: {script}"
+        );
+        assert!(
+            script.contains("--codex-hook-discovery 'both'"),
+            "script must pass the resolved Codex hook discovery mode, got: {script}"
         );
         assert!(
             script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd'"),

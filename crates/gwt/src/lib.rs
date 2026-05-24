@@ -97,6 +97,7 @@ pub use launch_wizard::{
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree,
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
