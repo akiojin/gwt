@@ -6102,3 +6102,10 @@ Type: lesson
 Context: Codex review on PR #2884 pointed out that headless-browser-check resolved the repository root but still showed a relative target/debug/gwt launch command, which fails when the skill is triggered from a subdirectory such as crates/gwt.
 Learning: A skill can say 'current checkout' and still be ambiguous if command examples remain relative to the caller's cwd. For gwt serve handoff checks, the launch command must either cd to the resolved repository root or use an absolute <repo-root>/target/debug/gwt path.
 Future Action: When updating headless-browser-check or similar launch skills, make every executable path in the workflow match the resolved root/checkout contract; test the instructions mentally from a subdirectory as well as from repo root.
+
+## 2026-05-25 — Check review threads after auto-merge
+
+Type: lesson
+Context: During PR #2887, CI passed and auto-merge completed while automated review threads were posted shortly before merge.
+Learning: A PR can be merged before late automated review comments are inspected; merged state does not mean review feedback is clear.
+Future Action: After any auto-merge, run gwtd pr review-threads for the merged PR and address actionable feedback via a follow-up PR when the original PR can no longer be updated.
