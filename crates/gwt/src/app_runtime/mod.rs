@@ -6757,14 +6757,22 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-            refresh_managed_gwt_assets_for_agent(&worktree_path, &config.agent_id)
-                .map_err(|error| error.to_string())?;
+            let codex_hook_discovery_mode = codex_hook_discovery_mode_for_launch_config(&config);
+            refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+                &worktree_path,
+                &config.agent_id,
+                codex_hook_discovery_mode,
+            )
+            .map_err(|error| error.to_string())?;
+            let codex_home = config.env_vars.get("CODEX_HOME").map(PathBuf::from);
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,
                 &worktree_path,
                 &config.agent_id,
                 config.runtime_target,
                 config.docker_service.as_deref(),
+                codex_home.as_deref(),
+                codex_hook_discovery_mode,
             )? {
                 if !report.trusted_entries.is_empty() {
                     proxy.send(UserEvent::LaunchProgress {
@@ -7837,12 +7845,87 @@ fn update_issue_branch_link_with_cache_dir(
         .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
+fn codex_hook_discovery_mode_for_launch_config(
+    config: &gwt_agent::LaunchConfig,
+) -> gwt_skills::CodexHookDiscoveryMode {
+    if config.agent_id != gwt_agent::AgentId::Codex {
+        return gwt_skills::CodexHookDiscoveryMode::WorkspaceHome;
+    }
+    if let Some(mode) =
+        codex_hook_discovery_mode_from_selected_codex_version(config.tool_version.as_deref())
+    {
+        return mode;
+    }
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
+        return gwt_skills::CodexHookDiscoveryMode::Both;
+    }
+    detect_installed_codex_hook_discovery_mode(config)
+        .unwrap_or(gwt_skills::CodexHookDiscoveryMode::Both)
+}
+
+fn codex_hook_discovery_mode_from_selected_codex_version(
+    version: Option<&str>,
+) -> Option<gwt_skills::CodexHookDiscoveryMode> {
+    let version = version?.trim();
+    if version.is_empty() || version == "installed" {
+        return None;
+    }
+    if version == "latest" {
+        return Some(gwt_skills::CodexHookDiscoveryMode::WorkspaceHome);
+    }
+    codex_hook_discovery_mode_from_semver(version)
+}
+
+fn codex_hook_discovery_mode_from_codex_version_output(
+    output: &str,
+) -> Option<gwt_skills::CodexHookDiscoveryMode> {
+    output
+        .split_whitespace()
+        .find_map(codex_hook_discovery_mode_from_semver)
+}
+
+fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexHookDiscoveryMode> {
+    let token = raw
+        .trim()
+        .trim_start_matches('v')
+        .trim_matches(|c| c == ',' || c == ';');
+    let version = semver::Version::parse(token).ok()?;
+    let boundary =
+        semver::Version::parse("0.131.0-alpha.21").expect("valid Codex hook discovery boundary");
+    Some(if version < boundary {
+        gwt_skills::CodexHookDiscoveryMode::WorktreeLocal
+    } else {
+        gwt_skills::CodexHookDiscoveryMode::WorkspaceHome
+    })
+}
+
+fn detect_installed_codex_hook_discovery_mode(
+    config: &gwt_agent::LaunchConfig,
+) -> Option<gwt_skills::CodexHookDiscoveryMode> {
+    let mut command = std::process::Command::new(&config.command);
+    command.arg("--version").envs(&config.env_vars);
+    for key in &config.remove_env {
+        command.env_remove(key);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push(' ');
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    codex_hook_discovery_mode_from_codex_version_output(&text)
+}
+
 fn maybe_register_codex_managed_hook_trust_for_launch(
     profile_config_path: &Path,
     worktree_path: &Path,
     agent_id: &gwt_agent::AgentId,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     docker_service: Option<&str>,
+    codex_home: Option<&Path>,
+    codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
 ) -> Result<Option<gwt_skills::CodexHookTrustReport>, String> {
     if agent_id != &gwt_agent::AgentId::Codex {
         return Ok(None);
@@ -7869,7 +7952,9 @@ fn maybe_register_codex_managed_hook_trust_for_launch(
 
     match runtime_target {
         gwt_agent::LaunchRuntimeTarget::Host => {
-            let Some(codex_config_path) = codex_config_path_for_profile_config(profile_config_path)
+            let Some(codex_config_path) = codex_home
+                .map(|home| home.join("config.toml"))
+                .or_else(|| codex_config_path_for_profile_config(profile_config_path))
             else {
                 tracing::warn!(
                     profile_config = %profile_config_path.display(),
@@ -7877,7 +7962,11 @@ fn maybe_register_codex_managed_hook_trust_for_launch(
                 );
                 return Ok(None);
             };
-            match gwt_skills::register_codex_managed_hook_trust(worktree_path, &codex_config_path) {
+            match gwt_skills::register_codex_managed_hook_trust_for_mode(
+                worktree_path,
+                &codex_config_path,
+                codex_hook_discovery_mode,
+            ) {
                 Ok(report) => Ok(Some(report)),
                 Err(error) => {
                     tracing::warn!(
@@ -7894,6 +7983,7 @@ fn maybe_register_codex_managed_hook_trust_for_launch(
             if let Err(error) = gwt_agent::register_codex_managed_hook_trust_in_docker(
                 worktree_path,
                 docker_service,
+                codex_hook_discovery_mode,
             ) {
                 tracing::warn!(
                     worktree = %worktree_path.display(),
@@ -18289,6 +18379,54 @@ exit 1
     }
 
     #[test]
+    fn codex_hook_discovery_mode_switches_at_codex_0_131_alpha_21() {
+        use gwt_skills::CodexHookDiscoveryMode;
+
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.130.0")),
+            Some(CodexHookDiscoveryMode::WorktreeLocal)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0-alpha.9")),
+            Some(CodexHookDiscoveryMode::WorktreeLocal)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0-alpha.21")),
+            Some(CodexHookDiscoveryMode::WorkspaceHome)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("0.131.0")),
+            Some(CodexHookDiscoveryMode::WorkspaceHome)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("latest")),
+            Some(CodexHookDiscoveryMode::WorkspaceHome)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_selected_codex_version(Some("installed")),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_hook_discovery_mode_extracts_installed_codex_version_output() {
+        use gwt_skills::CodexHookDiscoveryMode;
+
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_codex_version_output("codex-cli 0.133.0\n"),
+            Some(CodexHookDiscoveryMode::WorkspaceHome)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_codex_version_output("codex 0.130.0\n"),
+            Some(CodexHookDiscoveryMode::WorktreeLocal)
+        );
+        assert_eq!(
+            super::codex_hook_discovery_mode_from_codex_version_output("unexpected output\n"),
+            None
+        );
+    }
+
+    #[test]
     fn codex_hook_trust_launch_enabled_registers_host_codex_hooks() {
         let home = tempdir().expect("home tempdir");
         let profile_config_path = home.path().join(".gwt/config.toml");
@@ -18305,6 +18443,8 @@ exit 1
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         )
         .unwrap()
         .expect("enabled host Codex launch should register trust");
@@ -18320,6 +18460,39 @@ exit 1
     }
 
     #[test]
+    fn codex_hook_trust_launch_uses_effective_codex_home_config() {
+        let home = tempdir().expect("home tempdir");
+        let profile_config_path = home.path().join(".gwt/config.toml");
+        let worktree = tempdir().expect("worktree tempdir");
+        let codex_home = tempdir().expect("codex home");
+        gwt_skills::generate_codex_hooks(worktree.path()).unwrap();
+
+        let report = super::maybe_register_codex_managed_hook_trust_for_launch(
+            &profile_config_path,
+            worktree.path(),
+            &gwt_agent::AgentId::Codex,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            None,
+            Some(codex_home.path()),
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
+        )
+        .unwrap()
+        .expect("Codex launch should register trust into the effective CODEX_HOME");
+
+        let codex_home_config = codex_home.path().join("config.toml");
+        assert_eq!(report.config_path, codex_home_config);
+        let config = fs::read_to_string(&codex_home_config).unwrap();
+        assert!(
+            config.contains("trusted_hash"),
+            "effective CODEX_HOME config should contain trusted hashes, got: {config}"
+        );
+        assert!(
+            !home.path().join(".codex/config.toml").exists(),
+            "backend override launches must not write trust state to the profile-derived Codex home"
+        );
+    }
+
+    #[test]
     fn codex_hook_trust_launch_defaults_to_host_codex_registration_and_false_opts_out() {
         let home = tempdir().expect("home tempdir");
         let profile_config_path = home.path().join(".gwt/config.toml");
@@ -18332,6 +18505,8 @@ exit 1
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         )
         .unwrap();
         assert_eq!(
@@ -18352,6 +18527,8 @@ exit 1
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         )
         .unwrap();
         assert!(disabled.is_none());
@@ -18369,6 +18546,8 @@ exit 1
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         )
         .unwrap();
         assert_eq!(
@@ -18385,6 +18564,8 @@ exit 1
             &gwt_agent::AgentId::ClaudeCode,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         )
         .unwrap();
         assert!(claude.is_none());
@@ -18411,6 +18592,8 @@ exit 1
             &gwt_agent::AgentId::Codex,
             gwt_agent::LaunchRuntimeTarget::Host,
             None,
+            None,
+            gwt_skills::CodexHookDiscoveryMode::WorkspaceHome,
         );
 
         assert!(

@@ -2371,18 +2371,147 @@ test("terminal root does not combine full inset with padding overflow (SPEC-2008
   );
 });
 
+test("terminal transcript host paints every xterm layer as an opaque dark body (SPEC-2356 FR-035)", () => {
+  const expectedSelectors = [
+    ".surface-terminal .terminal-root",
+    ".surface-terminal .terminal-root .xterm",
+    ".surface-terminal .terminal-root .xterm-viewport",
+    ".surface-terminal .terminal-root .xterm-screen",
+    ".surface-terminal .terminal-root .xterm-helper-textarea",
+  ];
+
+  for (const selector of expectedSelectors) {
+    const block = cssBlockContaining(inlineStyle, selector);
+    assert.match(
+      block,
+      /background:\s*(?:#0a0d12|var\(\s*--color-canvas-dark\s*\))/i,
+      `${selector} must explicitly paint the Dark Operator terminal background`,
+    );
+    assert.doesNotMatch(
+      block,
+      /transparent|backdrop-filter|opacity:\s*0\.[0-9]/i,
+      `${selector} must not let the Canvas or sibling windows show through text`,
+    );
+  }
+});
+
+test("terminal overlay surfaces are opaque and copyable, not translucent glass (SPEC-2356 FR-033)", () => {
+  for (const selector of [".terminal-overlay", ".terminal-overlay.visible"]) {
+    const block = cssBlockContaining(inlineStyle, selector);
+    assert.doesNotMatch(
+      block,
+      /transparent|backdrop-filter|opacity:\s*0\.[0-9]/i,
+      `${selector} must not use translucent readable backgrounds`,
+    );
+    assert.match(
+      block,
+      /background:\s*(?:#0a0d12|var\(\s*--color-canvas-dark\s*\)|var\(\s*--color-surface(?:-elevated)?\s*\)|color-mix\([^;]+var\(\s*--color-canvas-dark\s*\)[^;]+\))/i,
+      `${selector} must use an opaque terminal/text surface background`,
+    );
+  }
+});
+
+test("agent-state telemetry never makes readable workspace windows translucent (SPEC-2356 FR-033)", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  for (const state of ["idle", "not_started"]) {
+    const selector = `.workspace-window[data-agent-state="${state}"]`;
+    const block = cssBlockContaining(css, selector);
+    assert.match(
+      block,
+      /opacity:\s*1\s*;/,
+      `${selector} must keep the entire window fully opaque; state dimming belongs on non-window telemetry affordances only`,
+    );
+  }
+
+  for (const state of ["idle", "not_started"]) {
+    const block = cssBlockContaining(css, `[data-agent-state="${state}"]`);
+    assert.doesNotMatch(
+      block,
+      /opacity:\s*0\.[0-9]/,
+      `[data-agent-state="${state}"] must not dim every descendant surface by applying opacity to the parent window`,
+    );
+  }
+});
+
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
-  // Logs / File Tree / Branches / Knowledge / Mock / Profile) must
+  // Logs / File Tree / Branches / Knowledge / Workspace / Console / Mock / Profile) must
   // keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|index|workspace|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
     "non-terminal surface bodies must continue to use var(--color-surface)",
   );
+});
+
+test("mountWindowBody clears every known surface class before applying the active surface", () => {
+  const mountBody = appSource.match(
+    /function\s+mountWindowBody\(windowData,\s*element\)\s*\{[\s\S]*?if\s*\(surface\s*===\s*"terminal"\)/,
+  );
+  assert.ok(mountBody, "expected mountWindowBody implementation");
+  for (const surfaceClass of [
+    "surface-terminal",
+    "surface-file-tree",
+    "surface-branches",
+    "surface-board",
+    "surface-logs",
+    "surface-knowledge",
+    "surface-index",
+    "surface-workspace",
+    "surface-profile",
+    "surface-console",
+    "surface-mock",
+  ]) {
+    assert.match(
+      mountBody[0],
+      new RegExp(`"${surfaceClass}"`),
+      `mountWindowBody must remove stale ${surfaceClass} classes before adding the active surface`,
+    );
+  }
+});
+
+test("every readable non-terminal surface participates in the opaque window chrome grammar", () => {
+  for (const surface of [
+    "file-tree",
+    "branches",
+    "board",
+    "logs",
+    "knowledge",
+    "index",
+    "workspace",
+    "profile",
+    "console",
+    "mock",
+  ]) {
+    assert.match(
+      inlineStyle,
+      new RegExp(`\\.workspace-window\\.surface-${surface}\\b`),
+      `${surface} window shell must opt into the shared opaque surface background`,
+    );
+    assert.match(
+      inlineStyle,
+      new RegExp(`\\.surface-${surface}\\s+\\.titlebar\\b`),
+      `${surface} titlebar must use the shared opaque titlebar rule`,
+    );
+    assert.match(
+      inlineStyle,
+      new RegExp(`\\.surface-${surface}\\s+\\.window-body\\b`),
+      `${surface} body must use the shared opaque body rule`,
+    );
+    assert.match(
+      inlineStyle,
+      new RegExp(`\\.surface-${surface}\\s+\\.status-chip\\b`),
+      `${surface} status chip text must use the shared readable chrome rule`,
+    );
+    assert.match(
+      inlineStyle,
+      new RegExp(`\\.surface-${surface}\\s+\\.icon-button\\b`),
+      `${surface} icon button text must use the shared readable chrome rule`,
+    );
+  }
 });
 
 test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
@@ -2441,3 +2570,11 @@ test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
       `aria-label "${label}" must not contain 'Workspace'`);
   }
 });
+
+function cssBlockContaining(css, selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(?:^|\\n)([^{}]*${escaped}[^{}]*)\\{([^}]*)\\}`, "m");
+  const match = css.match(regex);
+  assert.ok(match, `missing CSS rule containing selector: ${selector}`);
+  return match[2];
+}
