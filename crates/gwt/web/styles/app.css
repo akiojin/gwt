@@ -1102,6 +1102,7 @@ body {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  font-family: var(--font-body);
 }
 
 .index-search-root {
