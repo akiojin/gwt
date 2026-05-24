@@ -131,10 +131,24 @@ pub fn run<E: CliEnv>(
     }
 }
 
+/// Renames `tasks/lessons.md` to `tasks/memory.md` when `memory.md` does not
+/// yet exist. Idempotent — returns `Ok(true)` only when a rename happened.
+pub fn migrate_legacy_lessons_file(repo_root: &Path) -> std::io::Result<bool> {
+    let tasks_dir = repo_root.join("tasks");
+    let memory_path = tasks_dir.join("memory.md");
+    let lessons_path = tasks_dir.join("lessons.md");
+    if memory_path.exists() || !lessons_path.exists() {
+        return Ok(false);
+    }
+    fs::rename(&lessons_path, &memory_path)?;
+    Ok(true)
+}
+
 fn append_memory_entry(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Result<PathBuf> {
     let tasks_dir = repo_root.join("tasks");
     fs::create_dir_all(&tasks_dir)?;
     let path = tasks_dir.join("memory.md");
+    migrate_legacy_lessons_file(repo_root)?;
     ensure_memory_file(&path)?;
 
     let date = add

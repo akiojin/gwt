@@ -17,7 +17,7 @@ pub mod hook;
 pub(crate) mod index;
 mod issue;
 mod issue_spec;
-mod memory;
+pub(crate) mod memory;
 mod pane;
 mod plan;
 mod pr;
