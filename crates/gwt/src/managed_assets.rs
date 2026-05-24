@@ -18,6 +18,7 @@ use gwt_skills::{
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    crate::cli::memory::migrate_legacy_lessons_file(worktree).ok();
     materialize_managed_gwt_assets_for_targets(worktree, &ManagedAssetTarget::ALL)?;
     update_git_exclude(worktree).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
