@@ -41,7 +41,7 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue, "unassigned agents should have a dedicated queue");
   assert.match(queue.textContent, /Unassigned agents/);
-  assert.match(queue.textContent, /No Workspace selected/);
+  assert.match(queue.textContent, /No Work selected/);
   assert.match(queue.textContent, /Codex/);
   assert.equal(
     queue.querySelectorAll(".workspace-overview-agent-row").length,
@@ -70,7 +70,7 @@ test("Workspace detail renders structured body sections without preformatted dum
     "Summary",
     "Agents",
     "Lifecycle",
-    "Workspace Context",
+    "Work Context",
     "Coordination",
   ]);
 

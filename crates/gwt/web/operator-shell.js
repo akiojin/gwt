@@ -652,13 +652,13 @@ function createActionRegistry(doc) {
 
   const seed = [
     { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
-    { id: "open-git", label: "Focus Git surface", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
+    { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
     { id: "start-work", label: "Start Work", hint: "Project", group: "Workflow", handler: dispatch("start-work") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "spawn-agent", label: "Start Work", group: "Spawn", handler: dispatch("start-work") },
-    { id: "open-branches", label: "Open Branches surface", group: "Spawn", handler: dispatch("open-branches") },
+    { id: "open-branches", label: "Open Work", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
     { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },

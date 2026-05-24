@@ -10,6 +10,7 @@ export function createWorkspaceKanbanSurface({
   windowMap,
   workspaceWindowById,
   openWorkspaceResumePicker,
+  branchesSurface,
 }) {
   const workspaceStateMap = new Map();
 
@@ -70,14 +71,14 @@ export function createWorkspaceKanbanSurface({
   function workspaceTitle(entry) {
     return compactText(
       entry?.title || entry?.intent || entry?.summary || entry?.owner,
-      "Workspace",
+      "Work",
     );
   }
 
   function eventTitle(event) {
     return compactText(
       event?.title || event?.summary || event?.kind || event?.board_entry_id,
-      "Workspace event",
+      "Work event",
     );
   }
 
@@ -204,7 +205,7 @@ export function createWorkspaceKanbanSurface({
     row.appendChild(copy);
     row.addEventListener("click", () => {
       state.selectedId = item.id;
-      renderWorkspaceOverviewWindow(windowId);
+      renderWorkspaceOverviewWindow(windowId, true);
     });
     return row;
   }
@@ -234,7 +235,7 @@ export function createWorkspaceKanbanSurface({
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
-      appendMetaText(meta, "No Workspace selected");
+      appendMetaText(meta, "No Work selected");
       appendMetaText(meta, agentStatusLabel?.(agent.status_category));
       appendMetaText(meta, agent.branch);
       row.appendChild(meta);
@@ -275,20 +276,53 @@ export function createWorkspaceKanbanSurface({
       container.appendChild(createNode("div", "workspace-overview-empty", "No assigned agents"));
       return;
     }
+    const liveStatuses = new Set(["active", "blocked", "idle", "running"]);
+    const live = agents.filter((a) => liveStatuses.has(String(a.status_category || "").toLowerCase()));
+    const terminated = agents.length - live.length;
+
+    if (live.length === 0) {
+      const msg = terminated > 0
+        ? `No active agents (${terminated} completed)`
+        : "No assigned agents";
+      container.appendChild(createNode("div", "workspace-overview-empty", msg));
+      return;
+    }
+
+    const INITIAL_LIMIT = 5;
     const list = createNode("div", "workspace-detail-agent-list");
-    for (const agent of agents) {
-      const row = createNode("article", "workspace-detail-agent");
-      row.dataset.status = String(agent.status_category || "idle").toLowerCase();
-      row.appendChild(
-        createNode("div", "workspace-detail-agent-name", agent.display_name || agent.agent_id || "Agent"),
-      );
-      const meta = createNode("div", "workspace-detail-agent-meta");
-      appendMetaText(meta, agentStatusLabel?.(agent.status_category));
-      appendMetaText(meta, agent.title_summary || agent.current_focus);
-      row.appendChild(meta);
-      list.appendChild(row);
+    const visible = live.slice(0, INITIAL_LIMIT);
+    const hidden = live.slice(INITIAL_LIMIT);
+    for (const agent of visible) {
+      list.appendChild(renderAgentRow(agent));
     }
     container.appendChild(list);
+    if (hidden.length > 0) {
+      const more = createNode("button", "workspace-detail-more", `${hidden.length} more agents`);
+      more.type = "button";
+      more.addEventListener("click", () => {
+        for (const agent of hidden) {
+          list.appendChild(renderAgentRow(agent));
+        }
+        more.remove();
+      });
+      container.appendChild(more);
+    }
+    if (terminated > 0) {
+      container.appendChild(createNode("div", "workspace-overview-empty", `${terminated} completed agents`));
+    }
+  }
+
+  function renderAgentRow(agent) {
+    const row = createNode("article", "workspace-detail-agent");
+    row.dataset.status = String(agent.status_category || "idle").toLowerCase();
+    row.appendChild(
+      createNode("div", "workspace-detail-agent-name", agent.display_name || agent.agent_id || "Agent"),
+    );
+    const meta = createNode("div", "workspace-detail-agent-meta");
+    appendMetaText(meta, agentStatusLabel?.(agent.status_category));
+    appendMetaText(meta, agent.title_summary || agent.current_focus);
+    row.appendChild(meta);
+    return row;
   }
 
   function appendEvents(container, events) {
@@ -296,8 +330,28 @@ export function createWorkspaceKanbanSurface({
       container.appendChild(createNode("div", "workspace-overview-empty", "No lifecycle events"));
       return;
     }
+    const INITIAL_LIMIT = 5;
     const list = createNode("ol", "workspace-detail-event-list");
-    for (const event of events) {
+    const visible = events.slice(0, INITIAL_LIMIT);
+    const hidden = events.slice(INITIAL_LIMIT);
+    for (const event of visible) {
+      appendEventItem(list, event);
+    }
+    container.appendChild(list);
+    if (hidden.length > 0) {
+      const more = createNode("button", "workspace-detail-more", `${hidden.length} more events`);
+      more.type = "button";
+      more.addEventListener("click", () => {
+        for (const event of hidden) {
+          appendEventItem(list, event);
+        }
+        more.remove();
+      });
+      container.appendChild(more);
+    }
+  }
+
+  function appendEventItem(list, event) {
       const item = createNode("li", "workspace-detail-event");
       const title = createNode("div", "workspace-detail-event-title", eventTitle(event));
       const meta = createNode("div", "workspace-detail-event-meta");
@@ -310,8 +364,6 @@ export function createWorkspaceKanbanSurface({
       }
       item.appendChild(meta);
       list.appendChild(item);
-    }
-    container.appendChild(list);
   }
 
   function resumeWorkspace(workspace) {
@@ -328,7 +380,7 @@ export function createWorkspaceKanbanSurface({
   function renderWorkspaceDetail(container, workspace) {
     container.innerHTML = "";
     if (!workspace) {
-      const empty = createNode("div", "workspace-overview-empty", "No Workspaces");
+      const empty = createNode("div", "workspace-overview-empty", "No Work");
       container.appendChild(empty);
       return;
     }
@@ -384,7 +436,7 @@ export function createWorkspaceKanbanSurface({
       }),
     );
     container.appendChild(
-      detailSection("Workspace Context", (body) => {
+      detailSection("Work Context", (body) => {
         appendDefinitionList(body, [
           ["Owner", workspace.owner],
           ["Branch", workspace.branch],
@@ -412,29 +464,33 @@ export function createWorkspaceKanbanSurface({
     );
   }
 
-  function renderWorkspaceOverviewWindow(windowId) {
+  function renderWorkspaceOverviewWindow(windowId, force) {
     const element = windowMap.get(windowId);
     if (!element) return;
     const root = element.querySelector(".workspace-overview-root");
     if (!root) return;
 
     const projection = getActiveWorkProjection();
+    const signature = JSON.stringify(projection);
+    const state = ensureState(windowId);
+    if (!force && state._lastSignature === signature) return;
+    state._lastSignature = signature;
+
     const workspaces = workspacesFromProjection(projection);
     const unassignedAgents = unassignedAgentsFromProjection(projection);
-    const state = ensureState(windowId);
     const selected = selectedWorkspace(state, workspaces);
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
       status.textContent = projection
-        ? `${workspaces.length} Workspaces · ${unassignedAgents.length} unassigned agents`
-        : "No Workspace projection";
+        ? `${workspaces.length} Work · ${unassignedAgents.length} unassigned agents`
+        : "No Work projection";
     }
 
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
     if (workspaces.length === 0) {
-      list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
+      list.appendChild(createNode("div", "workspace-overview-empty", "No Work"));
     } else {
       for (const workspace of workspaces) {
         list.appendChild(renderWorkspaceRow(windowId, state, workspace));
@@ -448,36 +504,151 @@ export function createWorkspaceKanbanSurface({
     renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected);
   }
 
+  function mountWorkSurface(parent) {
+    const root = createNode("div", "workspace-overview-root");
+
+    const toolbar = createNode("div", "workspace-toolbar is-stacked workspace-overview-toolbar");
+    const toolbarMain = createNode("div", "workspace-toolbar-main");
+    toolbarMain.appendChild(createNode("div", "knowledge-heading", "Work"));
+    toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
+    toolbar.appendChild(toolbarMain);
+
+    const toolbarActions = createNode("div", "workspace-toolbar-actions");
+    const tabGroup = createNode("div", "workspace-tab-group");
+    const workTab = createNode("button", "workspace-tab is-active", "Work");
+    workTab.type = "button";
+    workTab.dataset.workTab = "work";
+    const branchTab = createNode("button", "workspace-tab", "Git Branches");
+    branchTab.type = "button";
+    branchTab.dataset.workTab = "branches";
+    tabGroup.appendChild(workTab);
+    tabGroup.appendChild(branchTab);
+    toolbarActions.appendChild(tabGroup);
+
+    const refreshBtn = createNode("button", "icon-button", "↻");
+    refreshBtn.dataset.action = "refresh-workspace-overview";
+    refreshBtn.setAttribute("aria-label", "Refresh Work");
+    toolbarActions.appendChild(refreshBtn);
+    toolbar.appendChild(toolbarActions);
+    root.appendChild(toolbar);
+
+    const workShell = createNode("div", "workspace-overview-shell");
+    workShell.dataset.workSection = "work";
+    const listPane = createNode("aside", "workspace-overview-list-pane");
+    listPane.setAttribute("aria-label", "Work list");
+    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Work"));
+    const listBox = createNode("div", "workspace-overview-list");
+    listBox.setAttribute("role", "listbox");
+    listPane.appendChild(listBox);
+    const queueSlot = createNode("div");
+    queueSlot.dataset.role = "workspace-agent-queue-slot";
+    listPane.appendChild(queueSlot);
+    workShell.appendChild(listPane);
+    const detailPane = createNode("main", "workspace-overview-detail-pane");
+    detailPane.setAttribute("aria-label", "Work detail");
+    workShell.appendChild(detailPane);
+    root.appendChild(workShell);
+
+    const branchShell = createNode("div", "workspace-branches-shell");
+    branchShell.dataset.workSection = "branches";
+    branchShell.hidden = true;
+    const branchRoot = createNode("div", "branch-list-root");
+    const branchToolbar = createNode("div", "branch-toolbar workspace-toolbar is-stacked");
+    const branchToolbarMain = createNode("div", "branch-toolbar-main workspace-toolbar-main");
+    branchToolbarMain.appendChild(createNode("div", "branch-heading", "Git Branches"));
+    const filterGroup = createNode("div", "branch-filter-group");
+    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
+      const btn = createNode("button", "branch-filter-button", label);
+      btn.type = "button";
+      btn.dataset.branchFilter = filter;
+      filterGroup.appendChild(btn);
+    }
+    branchToolbarMain.appendChild(filterGroup);
+    branchToolbar.appendChild(branchToolbarMain);
+    const branchToolbarActions = createNode("div", "branch-toolbar-actions workspace-toolbar-actions");
+    const selectionActions = createNode("div", "branch-selection-actions");
+    const cleanupBtn = createNode("button", "wizard-button branch-cleanup-trigger", "Clean Up");
+    cleanupBtn.type = "button";
+    cleanupBtn.dataset.action = "open-branch-cleanup";
+    selectionActions.appendChild(cleanupBtn);
+    branchToolbarActions.appendChild(selectionActions);
+    const branchRefreshBtn = createNode("button", "icon-button", "↻");
+    branchRefreshBtn.dataset.action = "refresh-branches";
+    branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
+    branchToolbarActions.appendChild(branchRefreshBtn);
+    branchToolbar.appendChild(branchToolbarActions);
+    branchRoot.appendChild(branchToolbar);
+    const branchNotice = createNode("div", "branch-notice");
+    branchNotice.hidden = true;
+    branchRoot.appendChild(branchNotice);
+    const branchScroll = createNode("div", "branch-scroll workspace-scroll");
+    branchScroll.appendChild(createNode("div", "branch-list"));
+    branchRoot.appendChild(branchScroll);
+    branchShell.appendChild(branchRoot);
+    root.appendChild(branchShell);
+
+    parent.appendChild(root);
+    return root;
+  }
+
   function mount(parent, windowData, { focusWindowLocally, sendFocus } = {}) {
-    parent.innerHTML = `
-      <div class="workspace-overview-root">
-        <div class="workspace-toolbar is-stacked workspace-overview-toolbar">
-          <div class="workspace-toolbar-main">
-            <div class="knowledge-heading">Workspace Overview</div>
-            <div class="knowledge-status workspace-overview-status-line"></div>
-          </div>
-          <div class="workspace-toolbar-actions">
-            <button class="icon-button" data-action="refresh-workspace-overview" aria-label="Refresh Workspace Overview">↻</button>
-          </div>
-        </div>
-        <div class="workspace-overview-shell">
-          <aside class="workspace-overview-list-pane" aria-label="Workspace list">
-            <div class="workspace-overview-section-label">Workspaces</div>
-            <div class="workspace-overview-list" role="listbox"></div>
-            <div data-role="workspace-agent-queue-slot"></div>
-          </aside>
-          <main class="workspace-overview-detail-pane" aria-label="Workspace detail"></main>
-        </div>
-      </div>
-    `;
+    parent.textContent = "";
+    mountWorkSurface(parent);
+
     parent.addEventListener("mousedown", () => {
       focusWindowLocally?.(windowData.id);
       sendFocus?.(windowData.id);
     });
+
+    for (const tab of parent.querySelectorAll("[data-work-tab]")) {
+      tab.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const target = tab.dataset.workTab;
+        for (const t of parent.querySelectorAll("[data-work-tab]")) {
+          t.classList.toggle("is-active", t.dataset.workTab === target);
+        }
+        for (const section of parent.querySelectorAll("[data-work-section]")) {
+          section.hidden = section.dataset.workSection !== target;
+        }
+        if (target === "branches" && branchesSurface) {
+          const state = branchesSurface.ensureBranchListState(windowData.id);
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            branchesSurface.requestBranches(windowData.id);
+          }
+          branchesSurface.renderBranches(windowData.id);
+        }
+      });
+    }
+
+    if (branchesSurface) {
+      const branchRefresh = parent.querySelector("[data-action='refresh-branches']");
+      branchRefresh?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const state = branchesSurface.ensureBranchListState(windowData.id);
+        state.error = "";
+        state.notice = "";
+        branchesSurface.requestBranches(windowData.id);
+        branchesSurface.renderBranches(windowData.id);
+      });
+      for (const button of parent.querySelectorAll("[data-branch-filter]")) {
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const state = branchesSurface.ensureBranchListState(windowData.id);
+          state.filter = button.dataset.branchFilter;
+          branchesSurface.renderBranches(windowData.id);
+        });
+      }
+      parent.querySelector("[data-action='open-branch-cleanup']")
+        ?.addEventListener("click", (event) => {
+          event.stopPropagation();
+          branchesSurface.openBranchCleanupModal(windowData.id);
+        });
+    }
+
     const refresh = parent.querySelector("[data-action='refresh-workspace-overview']");
     refresh?.addEventListener("click", (event) => {
       event.stopPropagation();
-      renderWorkspaceOverviewWindow(windowData.id);
+      renderWorkspaceOverviewWindow(windowData.id, true);
     });
     renderWorkspaceOverviewWindow(windowData.id);
   }

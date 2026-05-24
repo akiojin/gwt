@@ -526,7 +526,7 @@
           return "file-tree";
         }
         if (preset === "branches") {
-          return "branches";
+          return "workspace";
         }
         if (preset === "profile") {
           return "profile";
@@ -703,8 +703,8 @@
 
       function indexSearchPlaceholder(state) {
         return state.matchMode === "all_terms"
-          ? "All terms required, e.g. Workspace discussion"
-          : "Search by meaning, e.g. workspace lifecycle";
+          ? "All terms required, e.g. Work discussion"
+          : "Search by meaning, e.g. work lifecycle";
       }
 
       function scheduleProjectIndexSearch(windowId) {
@@ -1096,8 +1096,8 @@
         uiTraceWiring.registerPalette(window.__operatorShell.palette);
         window.__operatorShell.palette.register({
           id: "workspace-projection-prune-dry-run",
-          label: "Workspace: Prune Stale Projections (dry-run)",
-          group: "Workspace",
+          label: "Work: Prune Stale Projections (dry-run)",
+          group: "Work",
           handler: () => {
             send({
               kind: "workspace_projection_prune",
@@ -1108,12 +1108,12 @@
         });
         window.__operatorShell.palette.register({
           id: "workspace-projection-prune-apply",
-          label: "Workspace: Prune Stale Projections (apply)",
-          group: "Workspace",
+          label: "Work: Prune Stale Projections (apply)",
+          group: "Work",
           handler: () => {
             if (
               window.confirm(
-                "Apply Workspace projection prune now? Archived entries past their grace period will be physically removed.",
+                "Apply Work projection prune now? Archived entries past their grace period will be physically removed.",
               )
             ) {
               send({
@@ -1664,7 +1664,7 @@
           logs: "Logs",
           issue: "Issue",
           spec: "SPEC",
-          workspace: "Workspace",
+          workspace: "Work",
           board: "Board",
           pr: "PR",
         };
@@ -2382,7 +2382,7 @@
             upstream: candidate.remote_delete_available
               ? `origin/${candidate.branch}`
               : null,
-            merge_target: { kind: "workspace", reference: "Workspace complete" },
+            merge_target: { kind: "workspace", reference: "Work complete" },
             execution_branch: candidate.branch,
             risks: [],
           },
@@ -4262,7 +4262,7 @@
             return {
               heading: "Recent Events",
               rows: [
-                ["Workspace", "synced"],
+                ["Work", "synced"],
                 ["Transport", "connected"],
                 ["Canvas", "ready"],
               ],
@@ -4305,7 +4305,7 @@
             };
           default:
             return {
-              heading: "Workspace",
+              heading: "Work",
               rows: [
                 ["Canvas", "ready"],
                 ["Windows", "floating"],
@@ -4531,7 +4531,7 @@
           bodyContainer.appendChild(
             makeEl("div", {
               className: "worktree-picker-empty",
-              text: "No worktrees available. Use Start Work to create a workspace.",
+              text: "No worktrees available. Use Start Work to create a new work.",
             }),
           );
         } else {
@@ -5834,6 +5834,12 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        branchesSurface: {
+          ensureBranchListState: (...a) => ensureBranchListState(...a),
+          requestBranches: (...a) => requestBranches(...a),
+          renderBranches: (...a) => renderBranches(...a),
+          openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
+        },
       });
 
       function boardTimestampLabel(value) {
@@ -6821,7 +6827,7 @@
               state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
                 : state.audienceFilter === "workspace"
-                  ? "No posts in this Workspace."
+                  ? "No posts in this Work."
                 : "No coordination entries yet.",
             ),
           );
@@ -7345,7 +7351,7 @@
           }
           wizardMeta.textContent =
             launchWizardOpenError.title === "Start Work"
-              ? "Workspace launch"
+              ? "Work launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = false;
@@ -7372,9 +7378,9 @@
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
-          ? "Workspace launch"
+          ? "Work launch"
           : `Selected branch · ${
-            launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
+            launchWizard.selected_branch_name || launchWizard.branch_name || "Work"
           }`;
         wizardSubmitButton.textContent = isLaunchSubmitPending
           ? "Launching..."
@@ -10425,7 +10431,7 @@
         const help = document.createElement("p");
         help.className = "settings-help";
         help.textContent =
-          "Used for narrative outputs (Workspace summaries and Board post bodies). " +
+          "Used for narrative outputs (Work summaries and Board post bodies). " +
           "Settings UI text and gwtd subcommands stay English.";
         section.appendChild(help);
 
@@ -11179,7 +11185,7 @@
             const modeLabel =
               event.mode === "dry_run" ? "dry-run" : "applied";
             window.alert(
-              `Workspace Projection Prune (${modeLabel})\n` +
+              `Work Projection Prune (${modeLabel})\n` +
                 `  archived: ${event.archived}\n` +
                 `  deleted: ${event.deleted}\n` +
                 `  skipped: ${event.skipped}`,
@@ -11188,7 +11194,7 @@
           }
           case "workspace_projection_prune_error":
             window.alert(
-              `Workspace Projection Prune error: ${event.message}`,
+              `Work Projection Prune error: ${event.message}`,
             );
             break;
           case "ui_trace_saved":
@@ -13076,13 +13082,13 @@
             focusOrSpawnPreset("board");
             return;
           case "open-git":
-            focusOrSpawnPreset("branches");
+            focusOrSpawnPreset("workspace");
             return;
           case "open-logs":
             focusOrSpawnPreset("logs");
             return;
           case "open-branches":
-            focusOrSpawnPreset("branches");
+            focusOrSpawnPreset("workspace");
             return;
           case "open-files":
             focusOrSpawnPreset("file_tree");

@@ -680,14 +680,13 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
   );
 });
 
-test("Branches remains a branch browser, not a planning workspace", () => {
+test("Branches preset is removed — branch browsing is part of the Work surface", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
-  assert.ok(branchPreset, "expected Branches preset to remain available");
-  assert.match(branchPreset.textContent, /Browse repository branches and launch agents/);
+  assert.equal(branchPreset, null, "Branches preset button must not exist — use Work surface");
   assert.doesNotMatch(
     `${html}\n${appSource}`,
     /Planning Session|Workspace card/i,
-    "Branches should not render Planning Session or Workspace-card concepts",
+    "Work surface should not render Planning Session or Workspace-card concepts",
   );
 });
 
@@ -811,7 +810,6 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
 test("Sidebar Quick rows expose aria-keyshortcuts and kbd badges", () => {
   for (const [cmd, key] of [
     ["open-board", "B"],
-    ["open-git", "G"],
     ["open-logs", "L"],
   ]) {
     const button = document.querySelector(`.op-layer[data-cmd="${cmd}"]`);
@@ -2411,4 +2409,35 @@ test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing de
     /background:\s*transparent/,
     ".op-layer must clear background so the sidebar surface shows through",
   );
+});
+
+// --- SPEC-2359 Work Unification (US-49): Workspace → Work/Works labels ---
+
+test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
+  const sidebarLabel = document.querySelector("#op-workspace-overview-entry .op-layer__label");
+  assert.ok(sidebarLabel, "expected sidebar overview entry to exist");
+  assert.equal(sidebarLabel.textContent.trim(), "Work");
+  assert.doesNotMatch(sidebarLabel.textContent, /Workspace/i);
+
+  const sidebarAria = document.querySelector("#op-workspace-overview-entry");
+  assert.equal(sidebarAria.getAttribute("aria-label"), "Work");
+
+  const presetSection = document.querySelector(".preset-section-label");
+  if (presetSection && /workspace/i.test(presetSection.textContent)) {
+    assert.fail("preset section label must not contain 'Workspace'");
+  }
+
+  const presetButtons = document.querySelectorAll(".preset-button strong");
+  for (const btn of presetButtons) {
+    assert.doesNotMatch(btn.textContent, /^Workspace$/i,
+      `preset button "${btn.textContent}" must not say 'Workspace'`);
+  }
+
+  const resumePicker = document.querySelector("[aria-label]");
+  const allAriaLabels = Array.from(document.querySelectorAll("[aria-label]"))
+    .map((el) => el.getAttribute("aria-label"));
+  for (const label of allAriaLabels) {
+    assert.doesNotMatch(label, /Workspace/,
+      `aria-label "${label}" must not contain 'Workspace'`);
+  }
 });

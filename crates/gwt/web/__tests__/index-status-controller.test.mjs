@@ -234,8 +234,8 @@ test("Index search UI exposes semantic and all-terms match modes", () => {
   );
   assert.ok(
     appSource.includes("function indexSearchPlaceholder(state)") &&
-      appSource.includes("Search by meaning, e.g. workspace lifecycle") &&
-      appSource.includes("All terms required, e.g. Workspace discussion") &&
+      appSource.includes("Search by meaning, e.g. work lifecycle") &&
+      appSource.includes("All terms required, e.g. Work discussion") &&
       appSource.includes("input.placeholder = indexSearchPlaceholder(state);"),
     "Index search placeholder should explain the active Semantic / All terms mode",
   );

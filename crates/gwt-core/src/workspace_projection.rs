@@ -322,7 +322,7 @@ impl WorkspaceProjection {
         Self {
             id: Uuid::new_v4().to_string(),
             project_root: project_root.into(),
-            title: "Workspace".to_string(),
+            title: "Work".to_string(),
             status_category: WorkspaceStatusCategory::Unknown,
             status_text: "No active work".to_string(),
             summary: None,
@@ -1129,11 +1129,45 @@ pub fn mark_workspace_agent_stopped(
 
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| GwtError::Other(format!("workspace projection json: {error}"))),
+        Ok(bytes) => {
+            let mut projection: WorkspaceProjection = serde_json::from_slice(&bytes)
+                .map_err(|error| {
+                    GwtError::Other(format!("workspace projection json: {error}"))
+                })?;
+            migrate_workspace_to_work_terminology(&mut projection);
+            Ok(Some(projection))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn migrate_workspace_to_work_terminology(projection: &mut WorkspaceProjection) {
+    projection.title = replace_workspace_with_work(&projection.title);
+}
+
+fn replace_workspace_with_work(s: &str) -> String {
+    if s.eq_ignore_ascii_case("workspace") {
+        return "Work".to_string();
+    }
+    let lower = s.to_lowercase();
+    if lower.contains("workspace") {
+        let mut result = String::with_capacity(s.len());
+        let mut remaining = s;
+        while let Some(pos) = remaining.to_lowercase().find("workspace") {
+            result.push_str(&remaining[..pos]);
+            let original_case = &remaining[pos..pos + "workspace".len()];
+            if original_case.chars().next().is_some_and(|c| c.is_uppercase()) {
+                result.push_str("Work");
+            } else {
+                result.push_str("work");
+            }
+            remaining = &remaining[pos + "workspace".len()..];
+        }
+        result.push_str(remaining);
+        result
+    } else {
+        s.to_string()
     }
 }
 
@@ -1148,9 +1182,16 @@ pub fn load_workspace_work_items_from_path(
     path: &Path,
 ) -> Result<Option<WorkspaceWorkItemsProjection>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}"))),
+        Ok(bytes) => {
+            let mut items: WorkspaceWorkItemsProjection =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    GwtError::Other(format!("workspace work items json: {error}"))
+                })?;
+            for item in &mut items.work_items {
+                item.title = replace_workspace_with_work(&item.title);
+            }
+            Ok(Some(items))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -1730,7 +1771,7 @@ fn synthesize_workspace_work_item_from_legacy(
                     .or_else(|| non_empty_clone(entry.summary.as_deref()))
             })
         })
-        .unwrap_or_else(|| "Workspace history".to_string());
+        .unwrap_or_else(|| "Work history".to_string());
     let status_category = projection
         .map(WorkspaceProjection::effective_status_category)
         .or_else(|| last_entry.and_then(|entry| entry.status_category))
@@ -2853,7 +2894,7 @@ mod tests {
         assert_eq!(projection.work_items.len(), 1);
         let item = &projection.work_items[0];
         assert_eq!(item.id, "workitem-workspace-history");
-        assert_eq!(item.title, "Workspace WorkItem history");
+        assert_eq!(item.title, "Work WorkItem history");
         assert_eq!(
             item.intent.as_deref(),
             Some("Group duplicate Workspace work under one WorkItem")
@@ -2949,7 +2990,7 @@ mod tests {
         assert_eq!(synthesized.work_items.len(), 1);
         let item = &synthesized.work_items[0];
         assert_eq!(item.id, "workspace-current");
-        assert_eq!(item.title, "Workspace WorkItem history");
+        assert_eq!(item.title, "Work WorkItem history");
         assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
         assert_eq!(item.owner.as_deref(), Some("SPEC-2359"));
         assert_eq!(item.board_refs, vec!["board-legacy-1".to_string()]);
