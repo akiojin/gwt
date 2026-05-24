@@ -6067,3 +6067,10 @@ Type: failure-pattern
 Context: Start Work の Create and Launch が押せない報告で、最初は pointer/click fallback と pending feedback を修正したが、headed Chrome E2E で最終ボタンが disabled=true になっている別原因を確認した。WebSocket state では Start with last settings 後に selected_launch_path=quick_start かつ quick_start_entries=[] で primary_action_enabled=false だった。
 Learning: UI action が効かない不具合は input event loss だけとは限らない。実ブラウザで disabled/aria/state を直接観測し、バックエンド state と照合してから fallback を増やすべき。
 Future Action: Launch Wizard / Start Work のボタン不具合では、headed E2E で実座標クリックを行う前に DOM disabled state と launch_wizard_state payload を保存し、disabled なら状態遷移テストを先に追加する。
+
+## 2026-05-25 — include_str web assets require touch embedded_web.rs to rebuild
+
+Type: lesson
+Context: SPEC-2359 Work Unification で web ファイル (index.html, app.js, workspace-kanban-surface.js) を変更したが cargo build がキャッシュを使い、旧バイナリが serve された
+Learning: include_str! で埋め込まれた web assets は Rust ソースファイルの変更として検出されない。web ファイルを変更した後は touch crates/gwt/src/embedded_web.rs を実行してから cargo build する必要がある
+Future Action: web ファイル変更後は必ず touch crates/gwt/src/embedded_web.rs してからビルドする
