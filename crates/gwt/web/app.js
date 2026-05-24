@@ -9236,6 +9236,8 @@
           "surface-knowledge",
           "surface-index",
           "surface-workspace",
+          "surface-profile",
+          "surface-console",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);

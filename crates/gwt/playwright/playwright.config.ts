@@ -1,5 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const chromiumChannel = process.env.GWT_PLAYWRIGHT_CHROMIUM_CHANNEL;
+const desktopChrome = chromiumChannel
+  ? { ...devices["Desktop Chrome"], channel: chromiumChannel }
+  : devices["Desktop Chrome"];
+
 // SPEC-2356 Operator Design System — Visual regression baseline.
 // Tests render the embedded gwt frontend and snapshot per surface × theme.
 export default defineConfig({
@@ -26,11 +31,11 @@ export default defineConfig({
   projects: [
     {
       name: "chromium-dark",
-      use: { ...devices["Desktop Chrome"], colorScheme: "dark" },
+      use: { ...desktopChrome, colorScheme: "dark" },
     },
     {
       name: "chromium-light",
-      use: { ...devices["Desktop Chrome"], colorScheme: "light" },
+      use: { ...desktopChrome, colorScheme: "light" },
     },
   ],
 });
