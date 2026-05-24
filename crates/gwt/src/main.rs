@@ -785,6 +785,11 @@ enum UserEvent {
         client_id: ClientId,
         event: FrontendEvent,
     },
+    NativeFileDrop {
+        paths: Vec<String>,
+        x: i32,
+        y: i32,
+    },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
     },
@@ -1430,6 +1435,30 @@ mod tests {
         assert!(
             main_source.contains("if let Some((_, webview)) = webview_surface.as_ref()"),
             "ReloadWebView dispatch must destructure webview_surface as a (Window, WebView) tuple"
+        );
+    }
+
+    #[test]
+    fn native_webview_file_drop_dispatches_frontend_custom_event() {
+        let main_source = include_str!("main.rs");
+        let drag_handler = [".with_drag_drop", "_handler"].concat();
+        let wry_drop = ["wry::DragDropEvent::", "Drop"].concat();
+        let native_event = ["UserEvent::Native", "FileDrop"].concat();
+        let frontend_event = ["gwt:native", "-file-drop"].concat();
+        let custom_event = ["window.dispatchEvent(new ", "CustomEvent"].concat();
+
+        assert!(
+            main_source.contains(drag_handler.as_str()),
+            "native WebView bootstrap must install Wry file drag/drop handling",
+        );
+        assert!(
+            main_source.contains(wry_drop.as_str()) && main_source.contains(native_event.as_str()),
+            "Wry drop events must cross into the tao event loop before evaluating frontend JS",
+        );
+        assert!(
+            main_source.contains(frontend_event.as_str())
+                && main_source.contains(custom_event.as_str()),
+            "native file drops must dispatch the frontend custom event with paths and pointer coordinates",
         );
     }
 
@@ -6225,7 +6254,25 @@ fn main() -> wry::Result<()> {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let builder = builder.with_window_icon(window_icon);
         let window = builder.build(&event_loop).expect("window");
-        let builder = WebViewBuilder::new().with_url(front_door.webview_url);
+        let native_file_drop_proxy = proxy.clone();
+        let builder = WebViewBuilder::new()
+            .with_url(front_door.webview_url)
+            .with_drag_drop_handler(move |event| {
+                if let wry::DragDropEvent::Drop { paths, position } = event {
+                    let paths = paths
+                        .into_iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    if !paths.is_empty() {
+                        let _ = native_file_drop_proxy.send_event(UserEvent::NativeFileDrop {
+                            paths,
+                            x: position.0,
+                            y: position.1,
+                        });
+                    }
+                }
+                true
+            });
 
         #[cfg(any(
             target_os = "windows",
@@ -6368,6 +6415,25 @@ fn main() -> wry::Result<()> {
                         proxy.clone(),
                         app.active_project_root().map(Path::to_path_buf),
                     );
+                }
+            }
+            Event::UserEvent(UserEvent::NativeFileDrop { paths, x, y }) => {
+                if let Some((_, webview)) = webview_surface.as_ref() {
+                    let detail = serde_json::json!({
+                        "paths": paths,
+                        "x": x,
+                        "y": y,
+                    });
+                    let script = format!(
+                        "window.dispatchEvent(new CustomEvent('gwt:native-file-drop', {{ detail: {} }}));",
+                        detail
+                    );
+                    if let Err(error) = webview.evaluate_script(&script) {
+                        tracing::debug!(
+                            error = %error,
+                            "failed to dispatch native file drop to frontend"
+                        );
+                    }
                 }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
