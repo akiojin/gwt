@@ -15,15 +15,25 @@ not use it for CI-only Playwright runs or generic web app servers.
 
 ## Workflow
 
-1. Start from the repository root and note the current branch.
+1. Capture the launch directory:
+   - Treat the current working directory at skill start as the launch directory.
+   - Resolve the repository root for that same checkout and note the current
+     branch.
+   - Do not switch to another worktree, reuse another checkout, or use a
+     production install for this check.
 2. Resolve the gwt binary:
-   - Prefer `target/debug/gwt` when it exists.
-   - Otherwise run `cargo build -p gwt --bin gwt`, then use `target/debug/gwt`.
+   - Use only this launch checkout's `target/debug/gwt`.
+   - Otherwise run `cargo build -p gwt --bin gwt` from this checkout, then use
+     its `target/debug/gwt`.
    - If the user explicitly asks to test freshly edited code, build first even
      when `target/debug/gwt` exists.
+   - Never fall back to `/Applications/GWT.app`, `command -v gwt`, another
+     worktree's binary, or any installed production gwt binary.
 3. Start headless mode in a long-running exec session:
    - Create a temp URL handoff file and log path under `${TMPDIR:-/tmp}`.
    - Run `GWT_BROWSER_URL_FILE=<url-file> target/debug/gwt serve 2>&1 | tee <log-file>`.
+   - Always start a fresh `gwt serve` process for this check, using the binary
+     resolved above.
    - Treat this tee log as the startup/stdout log only; ordinary browser UI
      actions may not appear there.
    - Use default auto-open behavior unless the user asks not to open a browser.
@@ -31,6 +41,7 @@ not use it for CI-only Playwright runs or generic web app servers.
 4. Wait for readiness:
    - Read the URL from `GWT_BROWSER_URL_FILE` first.
    - Fall back to the log line `gwt browser URL: <url>`.
+   - Accept only the URL produced by the fresh process launched in step 3.
    - Verify the URL with `curl -fsS -I <url>` or an equivalent HTTP 200 check.
 5. Do not manually open the URL after a normal startup. `gwt serve` opens the
    browser by default, and running an additional platform opener will create a
@@ -68,6 +79,10 @@ not use it for CI-only Playwright runs or generic web app servers.
   the user required that exact port.
 - Keep user-facing status messages concise and in Japanese. Keep command names
   and log identifiers as-is.
+- **Never reuse an already-running gwt address** from an existing browser tab,
+  previous log, GUI status bar, `~/.gwt/session.json`, structured logs, or a
+  reachable old server. A successful HTTP check only proves the server is
+  reachable; it does not prove the URL belongs to the checkout under test.
 - **Never stop, kill, or ask the user to quit the user's production gwt /
   `GWT.app` instance** (`/Applications/GWT.app`, any locally installed gwt
   GUI, or any long-running `gwt` process the user did not launch in this
