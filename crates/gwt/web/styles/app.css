@@ -263,10 +263,9 @@ body {
   letter-spacing: var(--tracking-mono);
   padding: 8px 12px;
   border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--color-surface) 85%, transparent);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   color: var(--color-text-muted);
-  backdrop-filter: blur(12px);
 }
 
 .connection-dot {
@@ -572,6 +571,8 @@ body {
   min-height: 260px;
   border-radius: var(--radius-md);
   overflow: hidden;
+  background: var(--color-surface);
+  color: var(--color-text);
   border: 1px solid var(--color-border-strong);
   box-shadow: var(--shadow-2);
 }
@@ -601,7 +602,7 @@ body {
 .workspace-window.surface-terminal {
   /* Terminal chrome follows the app theme; xterm content stays on the
      Dark Operator palette for terminal readability. */
-  background: var(--color-canvas);
+  background: var(--color-surface);
 }
 
 .workspace-window.surface-file-tree,
@@ -611,6 +612,7 @@ body {
 .workspace-window.surface-mock,
 .workspace-window.surface-workspace,
 .workspace-window.surface-knowledge,
+.workspace-window.surface-index,
 .workspace-window.surface-profile,
 .workspace-window.surface-console {
   background: var(--color-surface);
@@ -640,6 +642,8 @@ body {
 .surface-logs .titlebar,
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
+.surface-index .titlebar,
+.surface-workspace .titlebar,
 .surface-profile .titlebar,
 .surface-console .titlebar {
   background: var(--color-surface-elevated);
@@ -682,7 +686,7 @@ body {
   padding: 2px 7px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  background: color-mix(in oklab, var(--color-surface-elevated) 86%, transparent);
+  background: var(--color-surface-elevated);
   color: var(--color-text-muted);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -705,8 +709,9 @@ body {
   flex-shrink: 0;
   gap: 6px;
   padding: 4px 8px;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
+  background: var(--color-surface-elevated);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
@@ -725,6 +730,10 @@ body {
 .surface-board .status-chip,
 .surface-logs .status-chip,
 .surface-knowledge .status-chip,
+.surface-index .status-chip,
+.surface-workspace .status-chip,
+.surface-profile .status-chip,
+.surface-console .status-chip,
 .surface-mock .status-chip {
   color: var(--color-text);
 }
@@ -772,7 +781,7 @@ body {
   height: 24px;
   border: none;
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
+  background: var(--color-surface-elevated);
   color: var(--color-text);
   cursor: pointer;
 }
@@ -786,12 +795,16 @@ body {
 .surface-board .icon-button,
 .surface-logs .icon-button,
 .surface-knowledge .icon-button,
+.surface-index .icon-button,
+.surface-workspace .icon-button,
+.surface-profile .icon-button,
+.surface-console .icon-button,
 .surface-mock .icon-button {
   color: var(--color-text);
 }
 
 .icon-button:hover {
-  background: color-mix(in oklab, var(--color-text-muted) 28%, transparent);
+  background: color-mix(in oklab, var(--color-text-muted) 28%, var(--color-surface-elevated));
 }
 
 .window-body {
@@ -817,7 +830,7 @@ body {
   outline: 2px solid var(--color-state-active);
   outline-offset: 3px;
   box-shadow:
-    0 0 0 5px color-mix(in oklab, var(--color-state-active) 20%, transparent),
+    0 0 0 5px color-mix(in oklab, var(--color-state-active) 20%, var(--color-surface)),
     var(--shadow-window);
 }
 
@@ -834,7 +847,7 @@ body {
   height: 3px;
   border-radius: 999px;
   background: var(--color-state-active);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, var(--color-surface));
 }
 
 .window-tab-strip {
@@ -878,9 +891,9 @@ body {
   max-width: 180px;
   height: 24px;
   padding: 0 9px;
-  border: 1px solid transparent;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  background: transparent;
+  background: var(--color-surface);
   color: var(--color-text-muted);
   font-size: var(--type-xs);
   white-space: nowrap;
@@ -893,9 +906,9 @@ body {
   width: 22px;
   height: 24px;
   margin-left: -2px;
-  border: 1px solid transparent;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  background: transparent;
+  background: var(--color-surface);
   color: var(--color-text-muted);
   cursor: pointer;
 }
@@ -911,7 +924,7 @@ body {
 }
 
 .window-tab-close:hover {
-  background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+  background: color-mix(in oklab, var(--color-text-muted) 18%, var(--color-surface-elevated));
   color: var(--color-text);
 }
 
@@ -929,6 +942,7 @@ body {
    overall theme; this override is scoped to the body only. */
 .surface-terminal .window-body {
   background: #0a0d12;
+  color: #e8eaed;
 }
 
 .surface-file-tree .window-body,
@@ -937,6 +951,8 @@ body {
 .surface-logs .window-body,
 .surface-knowledge .window-body,
 .surface-index .window-body,
+.surface-workspace .window-body,
+.surface-console .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
@@ -947,6 +963,17 @@ body {
   inset: 8px 10px 10px;
   padding: 0;
   overflow: hidden;
+  background: #0a0d12;
+  color: #e8eaed;
+}
+
+.surface-terminal .terminal-root,
+.surface-terminal .terminal-root .xterm,
+.surface-terminal .terminal-root .xterm-viewport,
+.surface-terminal .terminal-root .xterm-screen,
+.surface-terminal .terminal-root .xterm-helper-textarea {
+  background: #0a0d12;
+  color: #e8eaed;
 }
 
 .terminal-overlay {
@@ -954,8 +981,8 @@ body {
   inset: 12px;
   padding: 10px 12px;
   border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--color-canvas) 82%, transparent);
-  color: var(--color-text);
+  background: #0a0d12;
+  color: #e8eaed;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
@@ -971,7 +998,7 @@ body {
   align-items: stretch;
   justify-content: flex-start;
   gap: 8px;
-  background: color-mix(in oklab, var(--color-canvas) 95%, transparent);
+  background: #0a0d12;
   pointer-events: auto;
   user-select: text;
 }
@@ -1006,7 +1033,7 @@ body {
   height: 26px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  background: color-mix(in oklab, var(--color-state-active) 18%, #0a0d12);
   color: var(--color-text-strong);
   cursor: pointer;
   font-family: var(--font-mono);
@@ -1017,7 +1044,7 @@ body {
 }
 
 .overlay-copy-button:hover:not(:disabled) {
-  background: color-mix(in oklab, var(--color-state-active) 28%, transparent);
+  background: color-mix(in oklab, var(--color-state-active) 28%, #0a0d12);
 }
 
 .overlay-copy-button:disabled {
@@ -3182,7 +3209,6 @@ body {
   align-items: center;
   justify-content: center;
   background: var(--color-overlay);
-  backdrop-filter: blur(2px);
   z-index: 1000;
 }
 
@@ -3932,7 +3958,6 @@ body {
   justify-content: center;
   padding: 24px;
   background: var(--color-overlay);
-  backdrop-filter: blur(2px);
   z-index: 1200;
 }
 

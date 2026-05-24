@@ -59,11 +59,73 @@ test("Release Notes uses shared global window chrome instead of a custom fixed o
   );
 });
 
+test("Text-first UI primitives define shared readable content formatting", () => {
+  const primitives = [
+    [".text-first-content", /font-family:\s*var\(--font-body\)/, /line-height:\s*1\.[5-9]/],
+    [".text-first-message", /background:\s*var\(--color-surface(?:-elevated)?\)/, /border:\s*1px solid var\(--color-border\)/],
+    [".text-first-meta", /font-family:\s*var\(--font-mono\)/, /color:\s*var\(--color-text-muted\)/],
+    [".text-first-code", /font-family:\s*var\(--font-mono\)/, /background:\s*var\(--color-surface(?:-elevated)?\)/],
+    [".text-first-state", /background:\s*var\(--color-surface(?:-elevated)?\)/, /border:\s*1px solid var\(--color-border\)/],
+    [".text-first-scroll", /overflow:\s*auto/, /min-height:\s*0/],
+  ];
+
+  for (const [selector, first, second] of primitives) {
+    const block = ruleFor(componentsCss, selector);
+    assert.match(block, first, `${selector} is missing the primary text-first contract`);
+    assert.match(block, second, `${selector} is missing the secondary text-first contract`);
+    assert.doesNotMatch(
+      block,
+      /font-family:\s*var\(--font-display\)|font-stretch:\s*75%|backdrop-filter|transparent|opacity:\s*0\.[0-9]/,
+      `${selector} must stay body/mono, opaque, and non-decorative`,
+    );
+  }
+});
+
+test("Core readable surfaces opt into the text-first app-wide format bridge", () => {
+  const combinedCss = `${appCss}\n${componentsCss}`;
+  const bridge = blockContaining(combinedCss, ".release-notes-content", ".workspace-overview-detail-pane");
+
+  for (const selector of [
+    ".release-notes-content",
+    ".workspace-overview-detail-pane",
+    ".workspace-overview-row",
+    ".workspace-detail-agent",
+    ".workspace-detail-event",
+    ".terminal-overlay",
+    ".file-tree-viewer-body",
+    ".board-panel",
+    ".logs-panel",
+    ".knowledge-panel",
+  ]) {
+    assert.match(bridge, selectorRegex(selector), `text-first bridge must include ${selector}`);
+  }
+  assert.match(bridge, /font-family:\s*var\(--font-body\)/);
+  assert.match(bridge, /line-height:\s*1\.[5-9]/);
+  assert.doesNotMatch(
+    bridge,
+    /font-family:\s*var\(--font-display\)|font-stretch:\s*75%|backdrop-filter|transparent|opacity:\s*0\.[0-9]/,
+    "text-first bridge must not use display typography or translucent readable backgrounds",
+  );
+});
+
 function ruleFor(css, selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
   assert.ok(match, `missing CSS rule: ${selector}`);
   return match[1];
+}
+
+function selectorRegex(selector) {
+  return new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+function blockContaining(css, ...selectors) {
+  const blocks = blocksFor(css, /[^{]+\{/);
+  const match = blocks
+    .split("\n/* block */\n")
+    .find((block) => selectors.every((selector) => selectorRegex(selector).test(block)));
+  assert.ok(match, `missing CSS bridge block containing selectors: ${selectors.join(", ")}`);
+  return match;
 }
 
 function blocksFor(css, selectorRegex) {
@@ -83,5 +145,5 @@ function blocksFor(css, selectorRegex) {
     }
     blocks.push(css.slice(start, i));
   }
-  return blocks.join("\n");
+  return blocks.join("\n/* block */\n");
 }
