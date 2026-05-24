@@ -1131,9 +1131,7 @@ pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<Workspa
     match fs::read(path) {
         Ok(bytes) => {
             let mut projection: WorkspaceProjection = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                    GwtError::Other(format!("workspace projection json: {error}"))
-                })?;
+                .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
             migrate_workspace_to_work_terminology(&mut projection);
             Ok(Some(projection))
         }
@@ -1157,7 +1155,11 @@ fn replace_workspace_with_work(s: &str) -> String {
         while let Some(pos) = remaining.to_lowercase().find("workspace") {
             result.push_str(&remaining[..pos]);
             let original_case = &remaining[pos..pos + "workspace".len()];
-            if original_case.chars().next().is_some_and(|c| c.is_uppercase()) {
+            if original_case
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_uppercase())
+            {
                 result.push_str("Work");
             } else {
                 result.push_str("work");
@@ -1183,10 +1185,8 @@ pub fn load_workspace_work_items_from_path(
 ) -> Result<Option<WorkspaceWorkItemsProjection>> {
     match fs::read(path) {
         Ok(bytes) => {
-            let mut items: WorkspaceWorkItemsProjection =
-                serde_json::from_slice(&bytes).map_err(|error| {
-                    GwtError::Other(format!("workspace work items json: {error}"))
-                })?;
+            let mut items: WorkspaceWorkItemsProjection = serde_json::from_slice(&bytes)
+                .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
             for item in &mut items.work_items {
                 item.title = replace_workspace_with_work(&item.title);
             }
