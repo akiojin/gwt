@@ -6116,3 +6116,17 @@ Type: lesson
 Context: During PR #2887, CI passed and auto-merge completed while automated review threads were posted shortly before merge.
 Learning: A PR can be merged before late automated review comments are inspected; merged state does not mean review feedback is clear.
 Future Action: After any auto-merge, run gwtd pr review-threads for the merged PR and address actionable feedback via a follow-up PR when the original PR can no longer be updated.
+
+## 2026-05-25 — Normalize Windows child-process paths at launch boundaries
+
+Type: lesson
+Context: Start Work / Launch Agent on Windows can leak PowerShell provider-qualified or verbatim paths like Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\... into cwd and GWT_PROJECT_ROOT.
+Learning: Normalize child-process cwd/env at worktree discovery, launch config, GUI/shell launch, Docker host path planning, and PTY spawn boundaries; preserve resolve_launch_worktree_request direct-call no-op semantics unless a SPEC changes that contract.
+Future Action: Before changing Windows launch cwd/env handling, add RED tests for provider-qualified and verbatim paths, then verify both focused launch tests and the full Rust matrix.
+
+## 2026-05-25 — Recurring Windows Start Work launch failure needs regression memory
+
+Type: lesson
+Context: Windows Start Work / Launch Agent failed to start again after a previous similar launch failure. This occurrence involved PowerShell provider-qualified or verbatim cwd values such as Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\... causing Claude Code to error and Codex to fall back to C:\Windows.
+Learning: Treat Windows agent launch failures as recurring regression candidates, not one-off environment issues. The cwd, GWT_PROJECT_ROOT, worktree discovery path, and PTY spawn cwd must all be inspected for Windows-specific provider/verbatim path forms before declaring the launch path healthy.
+Future Action: When a Windows Start Work / Launch Agent failure is reported, first search memory for this recurrence, then add focused RED tests for provider-qualified/verbatim cwd normalization across launch config, env, worktree parsing, and PTY spawn before fixing.

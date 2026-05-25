@@ -7018,10 +7018,15 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Configuring workspace...".to_string(),
             });
-            let worktree_path = config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&project_root));
+            let worktree_path = gwt_core::paths::normalize_windows_child_process_path(
+                &config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(&project_root)),
+            );
+            if config.working_dir.is_some() {
+                config.working_dir = Some(worktree_path.clone());
+            }
             gwt_agent::LaunchEnvironment::from_active_profile(
                 &profile_config_path,
                 config.runtime_target,

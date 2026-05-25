@@ -159,12 +159,18 @@ where
     } = deps;
 
     resolve_launch_worktree(repo_path, &mut config)?;
+    normalize_launch_config_working_dir(&mut config);
     apply_docker_runtime_to_launch_config(repo_path, &mut config)?;
 
-    let worktree_path = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree_path = normalize_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
+    if config.working_dir.is_some() {
+        config.working_dir = Some(worktree_path.clone());
+    }
     let launch_env = match config.runtime_target {
         LaunchRuntimeTarget::Host => {
             LaunchEnvironment::from_base_env(crate::environment::host_process_env())
@@ -241,6 +247,31 @@ where
     })
 }
 
+fn normalize_child_process_path(path: &Path) -> PathBuf {
+    gwt_core::paths::normalize_windows_child_process_path(path)
+}
+
+fn normalize_launch_config_working_dir(config: &mut LaunchConfig) {
+    if let Some(dir) = config.working_dir.as_ref() {
+        let normalized = normalize_child_process_path(dir);
+        config.working_dir = Some(normalized.clone());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            normalized.display().to_string(),
+        );
+    }
+}
+
+fn set_worktree_launch_path(
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+    path: &Path,
+) {
+    let path = normalize_child_process_path(path);
+    *working_dir = Some(path.clone());
+    env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
+}
+
 pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
     let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
@@ -263,7 +294,9 @@ pub fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> R
         config.base_branch.as_deref(),
         &mut config.working_dir,
         &mut config.env_vars,
-    )
+    )?;
+    normalize_launch_config_working_dir(config);
+    Ok(())
 }
 
 pub fn resolve_launch_worktree_request(
@@ -297,11 +330,7 @@ pub fn resolve_launch_worktree_request(
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
     if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-        *working_dir = Some(existing_worktree.clone());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            existing_worktree.display().to_string(),
-        );
+        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
         return Ok(());
     }
     if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
@@ -310,11 +339,7 @@ pub fn resolve_launch_worktree_request(
             .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
         worktrees = manager.list().map_err(|err| err.to_string())?;
         if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-            *working_dir = Some(existing_worktree.clone());
-            env_vars.insert(
-                "GWT_PROJECT_ROOT".to_string(),
-                existing_worktree.display().to_string(),
-            );
+            set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
             return Ok(());
         }
     }
@@ -390,11 +415,7 @@ pub fn resolve_launch_worktree_request(
             .map_err(|err| err.to_string())?;
     }
 
-    *working_dir = Some(worktree_path.clone());
-    env_vars.insert(
-        "GWT_PROJECT_ROOT".to_string(),
-        worktree_path.display().to_string(),
-    );
+    set_worktree_launch_path(working_dir, env_vars, &worktree_path);
     Ok(())
 }
 
@@ -593,10 +614,12 @@ fn apply_docker_runtime_to_launch_config(
         return Ok(());
     }
 
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree = normalize_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     let mut launch = launch;
@@ -621,7 +644,8 @@ pub fn register_codex_managed_hook_trust_in_docker(
     docker_service: Option<&str>,
     codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
 ) -> Result<(), String> {
-    let launch = resolve_docker_launch_plan(worktree, docker_service)?;
+    let worktree = normalize_child_process_path(worktree);
+    let launch = resolve_docker_launch_plan(&worktree, docker_service)?;
     let current_exe = std::env::current_exe().map_err(|err| format!("current_exe: {err}"))?;
     let host_gwt_bin = resolve_generated_hook_gwt_bin_with_lookup(&current_exe, |command| {
         which::which(command).ok()
@@ -687,10 +711,12 @@ fn finalize_docker_agent_launch_config(
         return Ok(());
     }
 
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree = normalize_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     let runtime_program = PackageRunnerProgram {
         executable: config.command.clone(),

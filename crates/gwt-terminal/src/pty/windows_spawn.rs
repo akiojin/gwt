@@ -16,6 +16,9 @@ const CMD_WRAPPER_EXPRESSION_ENV: &str = "GWT_WINDOWS_CMD_WRAPPER_EXPRESSION";
 
 pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
     config.command = normalize_command_token(&config.command);
+    if let Some(cwd) = config.cwd.as_ref() {
+        config.cwd = Some(gwt_core::paths::normalize_windows_child_process_path(cwd));
+    }
 
     let resolved = resolve_spawn_target(&config.command, &config.env, &config.remove_env)
         .unwrap_or_else(|| WindowsSpawnTarget {
@@ -512,6 +515,26 @@ mod tests {
             remove_env: Vec::new(),
             cwd: None,
         })
+    }
+
+    #[test]
+    fn strips_windows_verbatim_cwd_before_spawn() {
+        let normalized = normalize_spawn_config(SpawnConfig {
+            command: "cmd.exe".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: Some(PathBuf::from(
+                r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919",
+            )),
+        });
+
+        assert_eq!(
+            normalized.cwd,
+            Some(PathBuf::from(r"E:\gwt\work\20260525-0919"))
+        );
     }
 
     #[test]
