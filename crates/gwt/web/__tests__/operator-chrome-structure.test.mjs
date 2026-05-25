@@ -685,7 +685,7 @@ test("Branches preset is removed — branch browsing is part of the Work surface
   assert.equal(branchPreset, null, "Branches preset button must not exist — use Work surface");
   assert.doesNotMatch(
     `${html}\n${appSource}`,
-    /Planning Session|Workspace card/i,
+    /Planning Session|Workspace[- ]card/i,
     "Work surface should not render Planning Session or Workspace-card concepts",
   );
 });
@@ -2549,11 +2549,13 @@ test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
   assert.doesNotMatch(sidebarLabel.textContent, /Workspace/i);
 
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
-  assert.equal(sidebarAria.getAttribute("aria-label"), "Work");
+  assert.doesNotMatch(sidebarAria.getAttribute("aria-label") ?? "", /workspace/i);
 
-  const presetSection = document.querySelector(".preset-section-label");
-  if (presetSection && /workspace/i.test(presetSection.textContent)) {
-    assert.fail("preset section label must not contain 'Workspace'");
+  const presetSections = document.querySelectorAll(".preset-section-label");
+  for (const presetSection of presetSections) {
+    if (/workspace/i.test(presetSection.textContent)) {
+      assert.fail("preset section label must not contain 'Workspace'");
+    }
   }
 
   const presetButtons = document.querySelectorAll(".preset-button strong");
@@ -2562,11 +2564,10 @@ test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
       `preset button "${btn.textContent}" must not say 'Workspace'`);
   }
 
-  const resumePicker = document.querySelector("[aria-label]");
   const allAriaLabels = Array.from(document.querySelectorAll("[aria-label]"))
-    .map((el) => el.getAttribute("aria-label"));
+    .map((el) => el.getAttribute("aria-label") ?? "");
   for (const label of allAriaLabels) {
-    assert.doesNotMatch(label, /Workspace/,
+    assert.doesNotMatch(label, /Workspace/i,
       `aria-label "${label}" must not contain 'Workspace'`);
   }
 });

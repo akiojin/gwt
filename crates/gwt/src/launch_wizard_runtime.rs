@@ -49,7 +49,7 @@ impl AppRuntime {
         {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
+                message: "Window is not a Work surface".to_string(),
             })];
         }
 

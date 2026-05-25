@@ -473,7 +473,7 @@ export function createWorkspaceKanbanSurface({
     const projection = getActiveWorkProjection();
     const signature = JSON.stringify(projection);
     const state = ensureState(windowId);
-    if (!force && state._lastSignature === signature) return;
+    if (!force && state._lastSignature !== undefined && state._lastSignature === signature) return;
     state._lastSignature = signature;
 
     const workspaces = workspacesFromProjection(projection);

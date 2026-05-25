@@ -13201,6 +13201,7 @@
       }
 
       function focusOrSpawnPreset(preset) {
+        if (preset === "branches") preset = "workspace";
         const allWindows = activeWorkspace().windows || [];
         const existing = allWindows.find(
           (w) => w.preset === preset && !w.minimized,

@@ -1141,35 +1141,14 @@ pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<Workspa
 }
 
 fn migrate_workspace_to_work_terminology(projection: &mut WorkspaceProjection) {
-    projection.title = replace_workspace_with_work(&projection.title);
-}
-
-fn replace_workspace_with_work(s: &str) -> String {
-    if s.eq_ignore_ascii_case("workspace") {
-        return "Work".to_string();
-    }
-    let lower = s.to_lowercase();
-    if lower.contains("workspace") {
-        let mut result = String::with_capacity(s.len());
-        let mut remaining = s;
-        while let Some(pos) = remaining.to_lowercase().find("workspace") {
-            result.push_str(&remaining[..pos]);
-            let original_case = &remaining[pos..pos + "workspace".len()];
-            if original_case
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_uppercase())
-            {
-                result.push_str("Work");
-            } else {
-                result.push_str("work");
-            }
-            remaining = &remaining[pos + "workspace".len()..];
-        }
-        result.push_str(remaining);
-        result
-    } else {
-        s.to_string()
+    if projection.title == "Workspace" {
+        projection.title = "Work".to_string();
+    } else if projection.title.starts_with("Workspace ") {
+        let suffix = &projection.title["Workspace ".len()..];
+        projection.title = format!("Work {suffix}");
+    } else if projection.title.ends_with(" workspace") {
+        let prefix = &projection.title[..projection.title.len() - " workspace".len()];
+        projection.title = format!("{prefix} work");
     }
 }
 
@@ -1188,7 +1167,15 @@ pub fn load_workspace_work_items_from_path(
             let mut items: WorkspaceWorkItemsProjection = serde_json::from_slice(&bytes)
                 .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
             for item in &mut items.work_items {
-                item.title = replace_workspace_with_work(&item.title);
+                if item.title == "Workspace" {
+                    item.title = "Work".to_string();
+                } else if item.title.starts_with("Workspace ") {
+                    let suffix = &item.title["Workspace ".len()..];
+                    item.title = format!("Work {suffix}");
+                } else if item.title.ends_with(" workspace") {
+                    let prefix = &item.title[..item.title.len() - " workspace".len()];
+                    item.title = format!("{prefix} work");
+                }
             }
             Ok(Some(items))
         }

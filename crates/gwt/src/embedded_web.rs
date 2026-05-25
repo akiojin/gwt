@@ -3445,6 +3445,11 @@ mod tests {
                 "expected JS `presetSurface()` to return `\"{expected}\"` for the corresponding preset cluster",
             );
         }
+
+        assert!(
+            js.contains("preset === \"branches\"") && js.contains("return \"workspace\";"),
+            "expected JS `presetSurface()` to route branches preset to workspace surface",
+        );
     }
 
     /// SPEC-2008 FR-035: every existing modal must mount through the shared
