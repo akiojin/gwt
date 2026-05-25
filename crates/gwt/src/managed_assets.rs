@@ -10,15 +10,20 @@ use crate::cli::gwtd_resolver::{
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_agent::AgentId;
 use gwt_skills::{
-    distribute_to_worktree_for_targets, generate_codex_hooks,
+    distribute_to_worktree_for_targets, generate_codex_hooks_for_mode,
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
     generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
-    ManagedAssetTarget,
+    CodexHookDiscoveryMode, ManagedAssetTarget,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
-    materialize_managed_gwt_assets_for_targets(worktree, &ManagedAssetTarget::ALL)?;
+    crate::cli::memory::migrate_legacy_lessons_file(worktree).ok();
+    materialize_managed_gwt_assets_for_targets(
+        worktree,
+        &ManagedAssetTarget::ALL,
+        CodexHookDiscoveryMode::WorkspaceHome,
+    )?;
     update_git_exclude(worktree).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
     })?;
@@ -26,10 +31,22 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
 }
 
 pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId) -> io::Result<()> {
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+        worktree,
+        agent_id,
+        CodexHookDiscoveryMode::WorkspaceHome,
+    )
+}
+
+pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+    worktree: &Path,
+    agent_id: &AgentId,
+    codex_hook_discovery_mode: CodexHookDiscoveryMode,
+) -> io::Result<()> {
     let targets = managed_targets_for_agent(agent_id)
         .into_iter()
         .collect::<Vec<_>>();
-    materialize_managed_gwt_assets_for_targets(worktree, &targets)?;
+    materialize_managed_gwt_assets_for_targets(worktree, &targets, codex_hook_discovery_mode)?;
     let exclude_targets = detect_existing_managed_asset_targets(worktree);
     update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -39,7 +56,11 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
 
 pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
     let targets = detect_existing_managed_asset_targets(worktree);
-    materialize_managed_gwt_assets_for_targets(worktree, &targets)?;
+    materialize_managed_gwt_assets_for_targets(
+        worktree,
+        &targets,
+        CodexHookDiscoveryMode::WorkspaceHome,
+    )?;
     update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
     })?;
@@ -49,6 +70,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
 fn materialize_managed_gwt_assets_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
+    codex_hook_discovery_mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
     distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
@@ -70,7 +92,7 @@ fn materialize_managed_gwt_assets_for_targets(
         })?;
     }
     if targets.contains(&ManagedAssetTarget::Codex) {
-        generate_codex_hooks(worktree).map_err(|error| {
+        generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
             io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
         })?;
         generate_coordination_guidance_for_codex(worktree).map_err(|error| {

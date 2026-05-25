@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.45.0] - 2026-05-25
+
+### Bug Fixes
+
+- Enable trusted Codex managed hooks
+- Materialize Codex hooks for linked worktrees
+- Codex hook discoveryをバージョン別に切り替える
+- **ui:** Keep canvas windows opaque
+- **gui:** Bound file drop attachment memory
+
+### Documentation
+
+- Record Codex hook verification lesson
+
+### Features
+
+- Support file drag and drop attachments
+- **memory:** Auto-migrate tasks/lessons.md to tasks/memory.md
+
+### Miscellaneous Tasks
+
+- **skill:** Harden headless browser check launch rules
+- **skill:** Use root path for headless gwt launch
+- Merge origin develop
+- Record auto-merge review lesson
+
 ## [9.44.1] - 2026-05-23
 
 ### Bug Fixes

@@ -97,6 +97,7 @@ pub use launch_wizard::{
 };
 pub use managed_assets::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree,
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -124,13 +125,14 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
-    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileContentErrorKind,
-    FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
-    GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
-    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
-    WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
+    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FileAttachment,
+    FileContentErrorKind, FileContentMode, FileContentSaveErrorKind, FocusCycleDirection,
+    FrontendEvent, GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult,
+    IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
+    WorkspaceHistoryEventView, WorkspaceHistoryView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
+    WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;
