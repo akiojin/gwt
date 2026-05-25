@@ -158,6 +158,20 @@ pub enum WorkspaceResumeSource {
     Journal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum FileAttachment {
+    NativePath {
+        path: String,
+    },
+    Inline {
+        filename: String,
+        mime_type: Option<String>,
+        size: u64,
+        data_base64: String,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -244,6 +258,10 @@ pub enum FrontendEvent {
         data_base64: String,
         mime_type: String,
         filename: Option<String>,
+    },
+    AttachFiles {
+        id: String,
+        files: Vec<FileAttachment>,
     },
     LoadFileTree {
         id: String,
@@ -2748,6 +2766,74 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::PasteImage { filename: None, .. }),
             "clipboard images may not have a source filename"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_file_attachment_paths() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": "/Users/me/report.pdf"
+                }
+            ]
+        }))
+        .expect("deserialize file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles { id, files }
+                    if id == "tab-1::agent-1"
+                        && matches!(
+                            files.as_slice(),
+                            [super::FileAttachment::NativePath { path }]
+                                if path == "/Users/me/report.pdf"
+                        )
+            ),
+            "native file drops must expose terminal id and host path"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_inline_file_attachments() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "notes.txt",
+                    "mime_type": "text/plain",
+                    "size": 11,
+                    "data_base64": "aGVsbG8gd29ybGQ="
+                }
+            ]
+        }))
+        .expect("deserialize inline file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles { id, files }
+                    if id == "tab-1::agent-1"
+                        && matches!(
+                            files.as_slice(),
+                            [super::FileAttachment::Inline {
+                                filename,
+                                mime_type: Some(mime_type),
+                                size,
+                                data_base64,
+                            }] if filename == "notes.txt"
+                                && mime_type == "text/plain"
+                                && *size == 11
+                                && data_base64 == "aGVsbG8gd29ybGQ="
+                        )
+            ),
+            "browser file drops must expose inline file metadata and bytes"
         );
     }
 

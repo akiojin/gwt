@@ -719,6 +719,78 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_file_drop_sends_attach_files_event() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function installTerminalFileDropHandlers"),
+            "expected terminal file drop handler bootstrap in embedded html",
+        );
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"dragover\"")
+                && html.contains("terminalRoot.addEventListener(\"drop\""),
+            "expected dragover/drop listeners to be scoped to the terminal root",
+        );
+        assert!(
+            html.contains("event.dataTransfer?.files")
+                && html.contains("readDroppedFileAsBase64")
+                && html.contains("MAX_FILE_DROP_BYTES"),
+            "expected browser file drops to read arbitrary files with a size guard",
+        );
+        assert!(
+            html.contains("kind: \"attach_files\"")
+                && html.contains("source: \"inline\"")
+                && html.contains("data_base64"),
+            "expected browser file drops to send inline attach_files payloads",
+        );
+        let drop_start = html
+            .find("function installTerminalFileDropHandlers")
+            .expect("file drop handler source");
+        let drop_end = html[drop_start..]
+            .find("function installTerminalContextMenuHandlers")
+            .expect("next terminal handler source")
+            + drop_start;
+        let drop_source = &html[drop_start..drop_end];
+        assert!(
+            !drop_source.contains("SUPPORTED_IMAGE_PASTE_MIME_TYPES"),
+            "generic file drops must not inherit the clipboard image MIME allow-list",
+        );
+        assert!(
+            html.contains("MAX_TOTAL_FILE_DROP_BYTES")
+                && drop_source.contains("droppedFilesWithinTotalSizeLimit"),
+            "browser file drops must enforce a total payload guard",
+        );
+        assert!(
+            !drop_source.contains("Promise.all("),
+            "browser file drops must not read every dropped file concurrently",
+        );
+        assert!(
+            html.contains("terminal.focus();"),
+            "expected file drop paths to restore terminal focus after sending",
+        );
+    }
+
+    #[test]
+    fn embedded_web_native_file_drop_maps_pointer_to_terminal() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("window.addEventListener(\"gwt:native-file-drop\""),
+            "expected native WebView file drops to be bridged through a frontend custom event",
+        );
+        assert!(
+            html.contains("document.elementFromPoint")
+                && html.contains(".terminal-root")
+                && html.contains(".workspace-window"),
+            "expected native drops to map the WebView pointer to the terminal under it",
+        );
+        assert!(
+            html.contains("source: \"native_path\"") && html.contains("kind: \"attach_files\""),
+            "expected native drops to send native_path attach_files payloads",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_context_menu_pastes_text_and_images() {
         let html = frontend_bundle_source();
         let context_menu_source = terminal_context_menu_js();

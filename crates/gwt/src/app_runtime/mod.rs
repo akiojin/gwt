@@ -847,7 +847,8 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
-        | FrontendEvent::PasteImage { .. } => return None,
+        | FrontendEvent::PasteImage { .. }
+        | FrontendEvent::AttachFiles { .. } => return None,
     };
     Some(log)
 }
@@ -952,7 +953,49 @@ impl std::fmt::Display for ImagePasteError {
 
 const IMAGE_PASTE_RELATIVE_DIR: &str = ".gwt/paste-images";
 const IMAGE_PASTE_PROMPT_PREFIX: &str = "Image file: ";
+const FILE_ATTACHMENT_RELATIVE_DIR: &str = ".gwt/drop-files";
 static IMAGE_PASTE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedFileAttachment {
+    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) storage_path: Option<PathBuf>,
+    pub(crate) agent_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileAttachmentError {
+    EmptyPath,
+    InvalidBase64(String),
+    SizeMismatch { declared: u64, actual: u64 },
+    TooLarge { size: u64, limit: u64 },
+    NotAFile(String),
+    ReadFailed(String),
+    WriteFailed(String),
+}
+
+impl std::fmt::Display for FileAttachmentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyPath => formatter.write_str("file attachment path is empty"),
+            Self::InvalidBase64(error) => {
+                write!(formatter, "invalid file attachment payload: {error}")
+            }
+            Self::SizeMismatch { declared, actual } => write!(
+                formatter,
+                "file attachment size mismatch: declared {declared}, decoded {actual}"
+            ),
+            Self::TooLarge { size, limit } => {
+                write!(formatter, "file attachment is too large: {size} > {limit}")
+            }
+            Self::NotAFile(path) => write!(formatter, "file attachment is not a file: {path}"),
+            Self::ReadFailed(error) => write!(formatter, "failed to read file attachment: {error}"),
+            Self::WriteFailed(error) => {
+                write!(formatter, "failed to save file attachment: {error}")
+            }
+        }
+    }
+}
 
 fn image_extension_for_mime(mime_type: &str) -> Option<&'static str> {
     match mime_type.trim().to_ascii_lowercase().as_str() {
@@ -987,6 +1030,32 @@ fn sanitize_image_paste_stem(filename: Option<&str>) -> String {
     }
 }
 
+fn sanitize_file_attachment_name(filename: &str) -> String {
+    let raw_name = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("file");
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for character in raw_name.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() || character == '.' || character == '_' {
+            sanitized.push(character);
+            previous_dash = false;
+        } else if !previous_dash {
+            sanitized.push('-');
+            previous_dash = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches(['-', '.', '_']);
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "file".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
 fn join_agent_visible_path(agent_project_root: &str, relative_path: &str) -> String {
     let root = agent_project_root.trim();
     if root.is_empty() {
@@ -1000,6 +1069,136 @@ fn join_agent_visible_path(agent_project_root: &str, relative_path: &str) -> Str
         )
     } else {
         format!("{}/{}", root.trim_end_matches('/'), relative_path)
+    }
+}
+
+fn attachment_storage_paths(
+    worktree_path: &Path,
+    agent_project_root: &str,
+    unique_token: &str,
+    filename: &str,
+) -> (PathBuf, String) {
+    let sanitized = sanitize_file_attachment_name(filename);
+    let file_name = format!("{unique_token}-{sanitized}");
+    let storage_path = worktree_path
+        .join(".gwt")
+        .join("drop-files")
+        .join(&file_name);
+    let relative_path = format!("{FILE_ATTACHMENT_RELATIVE_DIR}/{file_name}");
+    let agent_path = join_agent_visible_path(agent_project_root, &relative_path);
+    (storage_path, agent_path)
+}
+
+fn validate_file_attachment_size(size: u64, limit: u64) -> Result<(), FileAttachmentError> {
+    if size > limit {
+        return Err(FileAttachmentError::TooLarge { size, limit });
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_file_attachment(
+    worktree_path: &Path,
+    agent_project_root: &str,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    file: &gwt::FileAttachment,
+    unique_token: &str,
+    limits: ContentLimits,
+) -> Result<PreparedFileAttachment, FileAttachmentError> {
+    match file {
+        gwt::FileAttachment::NativePath { path } => {
+            let path = path.trim();
+            if path.is_empty() {
+                return Err(FileAttachmentError::EmptyPath);
+            }
+            let source = PathBuf::from(path);
+            let metadata = std::fs::metadata(&source)
+                .map_err(|error| FileAttachmentError::ReadFailed(error.to_string()))?;
+            if !metadata.is_file() {
+                return Err(FileAttachmentError::NotAFile(path.to_string()));
+            }
+            if runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                return Ok(PreparedFileAttachment {
+                    bytes: None,
+                    storage_path: None,
+                    agent_path: source.display().to_string(),
+                });
+            }
+            validate_file_attachment_size(metadata.len(), limits.binary_chunk_max_bytes)?;
+            let bytes = std::fs::read(&source)
+                .map_err(|error| FileAttachmentError::ReadFailed(error.to_string()))?;
+            let filename = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+            let (storage_path, agent_path) =
+                attachment_storage_paths(worktree_path, agent_project_root, unique_token, filename);
+            Ok(PreparedFileAttachment {
+                bytes: Some(bytes),
+                storage_path: Some(storage_path),
+                agent_path,
+            })
+        }
+        gwt::FileAttachment::Inline {
+            filename,
+            size,
+            data_base64,
+            ..
+        } => {
+            validate_file_attachment_size(*size, limits.binary_chunk_max_bytes)?;
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                data_base64.trim(),
+            )
+            .map_err(|error| FileAttachmentError::InvalidBase64(error.to_string()))?;
+            let actual = bytes.len() as u64;
+            if actual != *size {
+                return Err(FileAttachmentError::SizeMismatch {
+                    declared: *size,
+                    actual,
+                });
+            }
+            let (storage_path, agent_path) =
+                attachment_storage_paths(worktree_path, agent_project_root, unique_token, filename);
+            Ok(PreparedFileAttachment {
+                bytes: Some(bytes),
+                storage_path: Some(storage_path),
+                agent_path,
+            })
+        }
+    }
+}
+
+fn save_file_attachment(file: &PreparedFileAttachment) -> Result<(), FileAttachmentError> {
+    let Some(storage_path) = file.storage_path.as_ref() else {
+        return Ok(());
+    };
+    let Some(bytes) = file.bytes.as_ref() else {
+        return Ok(());
+    };
+    write_attachment_bytes(storage_path, bytes).map_err(FileAttachmentError::WriteFailed)
+}
+
+fn quote_file_attachment_path(path: &str) -> String {
+    let escaped = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
+pub(crate) fn format_file_attachment_prompt(paths: &[String]) -> String {
+    match paths {
+        [] => String::new(),
+        [path] => format!("File: {}", quote_file_attachment_path(path)),
+        _ => format!(
+            "Files: [{}]",
+            paths
+                .iter()
+                .map(|path| quote_file_attachment_path(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -1052,16 +1251,16 @@ fn image_paste_unique_token() -> String {
     format!("{millis}-{sequence}")
 }
 
-fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
-    let Some(parent) = image.storage_path.parent() else {
-        return Err(ImagePasteError::WriteFailed(
-            "pasted image path has no parent directory".to_string(),
-        ));
+fn write_attachment_bytes(storage_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let Some(parent) = storage_path.parent() else {
+        return Err("attachment path has no parent directory".to_string());
     };
-    std::fs::create_dir_all(parent)
-        .map_err(|error| ImagePasteError::WriteFailed(error.to_string()))?;
-    std::fs::write(&image.storage_path, &image.bytes)
-        .map_err(|error| ImagePasteError::WriteFailed(error.to_string()))
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    std::fs::write(storage_path, bytes).map_err(|error| error.to_string())
+}
+
+fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
+    write_attachment_bytes(&image.storage_path, &image.bytes).map_err(ImagePasteError::WriteFailed)
 }
 
 #[derive(Debug, Clone)]
@@ -3046,6 +3245,7 @@ impl AppRuntime {
                 mime_type,
                 filename,
             } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
+            FrontendEvent::AttachFiles { id, files } => self.attach_files_events(&id, files),
             FrontendEvent::LoadFileTree { id, path } => {
                 let path = path.unwrap_or_default();
                 vec![OutboundEvent::reply(
@@ -4456,6 +4656,79 @@ impl AppRuntime {
             "saved pasted image"
         );
         self.terminal_input_events(id, &image.prompt_text)
+    }
+
+    pub(crate) fn attach_files_events(
+        &mut self,
+        id: &str,
+        files: Vec<gwt::FileAttachment>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            tracing::debug!(window_id = %id, "file attachment dropped: window not found");
+            return Vec::new();
+        };
+        if self.tab(&address.tab_id).is_none() {
+            tracing::debug!(window_id = %id, "file attachment dropped: project tab not found");
+            return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(id) else {
+            tracing::debug!(
+                window_id = %id,
+                "file attachment dropped: active agent session not found"
+            );
+            return Vec::new();
+        };
+        if files.is_empty() {
+            tracing::debug!(window_id = %id, "file attachment dropped: empty selection");
+            return Vec::new();
+        }
+        let worktree_path = session.worktree_path.clone();
+        let agent_project_root = session.agent_project_root.clone();
+        let runtime_target = session.runtime_target;
+        let limits = ContentLimits::default();
+
+        let mut agent_paths = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let token = format!("{}-{index}", image_paste_unique_token());
+            let prepared = match prepare_file_attachment(
+                &worktree_path,
+                &agent_project_root,
+                runtime_target,
+                file,
+                &token,
+                limits,
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::debug!(
+                        window_id = %id,
+                        error = %error,
+                        "file attachment dropped"
+                    );
+                    return Vec::new();
+                }
+            };
+            if let Err(error) = save_file_attachment(&prepared) {
+                return self.handle_runtime_status(
+                    id.to_string(),
+                    WindowProcessStatus::Error,
+                    Some(error.to_string()),
+                );
+            }
+            agent_paths.push(prepared.agent_path);
+        }
+
+        let prompt = format_file_attachment_prompt(&agent_paths);
+        if prompt.is_empty() {
+            return Vec::new();
+        }
+        tracing::debug!(
+            window_id = %id,
+            runtime_target = ?runtime_target,
+            count = agent_paths.len(),
+            "prepared file attachments"
+        );
+        self.terminal_input_events(id, &prompt)
     }
 
     pub(crate) fn load_file_tree_event(&self, id: &str, path: &str) -> BackendEvent {
@@ -8215,9 +8488,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
-        BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
-        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, UiTracePayload,
-        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits, FrontendEvent,
+        LaunchWizardAction, LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView,
+        ProjectKind, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
+        WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -8963,6 +9237,354 @@ exit 1
         assert!(
             !worktree.join(".gwt").join("paste-images").exists(),
             "non-agent terminal paste must not create image files"
+        );
+    }
+
+    #[test]
+    fn file_attachment_prepare_uses_host_native_path_reference() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let source = temp.path().join("report.pdf");
+        fs::write(&source, b"host-pdf").expect("write source file");
+
+        let prepared = super::prepare_file_attachment(
+            &worktree,
+            &worktree.display().to_string(),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &gwt::FileAttachment::NativePath {
+                path: source.display().to_string(),
+            },
+            "20260524-attach",
+            ContentLimits::default(),
+        )
+        .expect("prepare host native path attachment");
+
+        assert_eq!(prepared.bytes, None);
+        assert_eq!(prepared.storage_path, None);
+        assert_eq!(prepared.agent_path, source.display().to_string());
+        assert_eq!(
+            super::format_file_attachment_prompt(&[prepared.agent_path]),
+            format!("File: \"{}\"", source.display())
+        );
+    }
+
+    #[test]
+    fn file_attachment_prepare_copies_inline_file_under_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"notes-bytes");
+
+        let prepared = super::prepare_file_attachment(
+            &worktree,
+            &worktree.display().to_string(),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &gwt::FileAttachment::Inline {
+                filename: "../Notes 2026.txt".to_string(),
+                mime_type: Some("application/octet-stream".to_string()),
+                size: 11,
+                data_base64: payload,
+            },
+            "20260524-inline",
+            ContentLimits::default(),
+        )
+        .expect("prepare inline file attachment");
+
+        let expected_path = worktree
+            .join(".gwt")
+            .join("drop-files")
+            .join("20260524-inline-notes-2026.txt");
+        assert_eq!(prepared.bytes.as_deref(), Some(&b"notes-bytes"[..]));
+        assert_eq!(
+            prepared.storage_path.as_deref(),
+            Some(expected_path.as_path())
+        );
+        assert_eq!(prepared.agent_path, expected_path.display().to_string());
+    }
+
+    #[test]
+    fn file_attachment_prepare_copies_native_file_for_docker_agent_path() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let source = temp.path().join("Data Set.bin");
+        fs::write(&source, b"docker-bytes").expect("write source file");
+
+        let prepared = super::prepare_file_attachment(
+            &worktree,
+            "/workspace/project",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            &gwt::FileAttachment::NativePath {
+                path: source.display().to_string(),
+            },
+            "20260524-docker",
+            ContentLimits::default(),
+        )
+        .expect("prepare docker native file attachment");
+
+        assert_eq!(prepared.bytes.as_deref(), Some(&b"docker-bytes"[..]));
+        assert_eq!(
+            prepared.storage_path.as_deref(),
+            Some(
+                worktree
+                    .join(".gwt")
+                    .join("drop-files")
+                    .join("20260524-docker-data-set.bin")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            prepared.agent_path,
+            "/workspace/project/.gwt/drop-files/20260524-docker-data-set.bin"
+        );
+    }
+
+    #[test]
+    fn file_attachment_prepare_rejects_invalid_items() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"too-large");
+        let limits = ContentLimits {
+            text_max_bytes: 16,
+            binary_chunk_max_bytes: 3,
+        };
+
+        let too_large = super::prepare_file_attachment(
+            &worktree,
+            "/workspace/project",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &gwt::FileAttachment::Inline {
+                filename: "large.dat".to_string(),
+                mime_type: None,
+                size: 9,
+                data_base64: payload,
+            },
+            "20260524-large",
+            limits,
+        );
+        assert!(matches!(
+            too_large,
+            Err(super::FileAttachmentError::TooLarge { size: 9, limit: 3 })
+        ));
+
+        let directory = super::prepare_file_attachment(
+            &worktree,
+            "/workspace/project",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &gwt::FileAttachment::NativePath {
+                path: temp.path().display().to_string(),
+            },
+            "20260524-dir",
+            ContentLimits::default(),
+        );
+        assert!(matches!(
+            directory,
+            Err(super::FileAttachmentError::NotAFile(path)) if path == temp.path().display().to_string()
+        ));
+    }
+
+    #[test]
+    fn file_attachment_prompt_formats_single_and_multiple_paths_without_newlines() {
+        let single = super::format_file_attachment_prompt(&["/tmp/a\"b\nc.txt".to_string()]);
+        assert_eq!(single, "File: \"/tmp/a\\\"b\\nc.txt\"");
+        assert!(
+            !single.contains('\n'),
+            "single-file prompt must never inject a newline"
+        );
+
+        let multiple = super::format_file_attachment_prompt(&[
+            "/tmp/a.txt".to_string(),
+            "C:\\tmp\\b\r.txt".to_string(),
+        ]);
+        assert_eq!(
+            multiple,
+            "Files: [\"/tmp/a.txt\", \"C:\\\\tmp\\\\b\\r.txt\"]"
+        );
+        assert!(
+            !multiple.contains('\r') && !multiple.contains('\n'),
+            "multi-file prompt must stay on one terminal input line"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_saves_inline_file_under_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"text-bytes");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "notes.txt",
+                    "mime_type": "text/plain",
+                    "size": 10,
+                    "data_base64": payload
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(files.len(), 1, "expected one saved dropped file");
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved file"),
+            b"text-bytes"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_saves_prepared_files_incrementally() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let valid_payload = base64::engine::general_purpose::STANDARD.encode(b"saved-first");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "first.txt",
+                    "mime_type": "text/plain",
+                    "size": 11,
+                    "data_base64": valid_payload
+                },
+                {
+                    "source": "inline",
+                    "filename": "invalid.txt",
+                    "mime_type": "text/plain",
+                    "size": 4,
+                    "data_base64": "not base64"
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(
+            events.is_empty(),
+            "invalid later attachment must not inject a partial prompt",
+        );
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(
+            files.len(),
+            1,
+            "first attachment should be saved before a later file fails",
+        );
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved file"),
+            b"saved-first"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_ignores_non_agent_terminal_window() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "shell-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"ignored");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "ignored.txt",
+                    "mime_type": "text/plain",
+                    "size": 7,
+                    "data_base64": payload
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        assert!(
+            !worktree.join(".gwt").join("drop-files").exists(),
+            "non-agent terminal file drop must not create files"
         );
     }
 

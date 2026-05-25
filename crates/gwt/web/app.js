@@ -3696,6 +3696,9 @@
         "image/jpeg",
         "image/webp",
       ]);
+      const MAX_FILE_DROP_BYTES = 10 * 1024 * 1024;
+      const MAX_TOTAL_FILE_DROP_BYTES = 50 * 1024 * 1024;
+      const MAX_FILE_DROP_COUNT = 16;
 
       function findClipboardImagePasteItem(items) {
         for (const item of Array.from(items || [])) {
@@ -3718,7 +3721,7 @@
           return null;
         }
         const payload = dataUrl.slice(commaIndex + 1);
-        return payload || null;
+        return payload;
       }
 
       function readClipboardImageAsBase64(file) {
@@ -3732,6 +3735,58 @@
           });
           reader.readAsDataURL(file);
         });
+      }
+
+      function readDroppedFileAsBase64(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => {
+            const payload = dataUrlBase64Payload(reader.result);
+            resolve(payload === null ? "" : payload);
+          });
+          reader.addEventListener("error", () => {
+            reject(reader.error || new Error("Failed to read dropped file"));
+          });
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function dataTransferHasFiles(dataTransfer) {
+        const types = Array.from(dataTransfer?.types || []);
+        return types.includes("Files") || Boolean(dataTransfer?.files?.length);
+      }
+
+      function droppedFilesWithinSizeLimit(files) {
+        return files.every((file) => file.size <= MAX_FILE_DROP_BYTES);
+      }
+
+      function droppedFilesWithinTotalSizeLimit(files) {
+        let totalBytes = 0;
+        for (const file of files) {
+          totalBytes += file.size || 0;
+          if (totalBytes > MAX_TOTAL_FILE_DROP_BYTES) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      function droppedFilesWithinCountLimit(files) {
+        return files.length <= MAX_FILE_DROP_COUNT;
+      }
+
+      async function readDroppedFilesAsAttachments(files) {
+        const attachments = [];
+        for (const file of files) {
+          attachments.push({
+            source: "inline",
+            filename: file.name || "file",
+            mime_type: file.type || null,
+            size: file.size,
+            data_base64: await readDroppedFileAsBase64(file),
+          });
+        }
+        return attachments;
       }
 
       async function readNavigatorClipboardItems() {
@@ -3942,6 +3997,54 @@
         };
       }
 
+      function installTerminalFileDropHandlers(windowId, terminalRoot, terminal) {
+        const handleDragOver = (event) => {
+          if (!dataTransferHasFiles(event.dataTransfer)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "copy";
+        };
+
+        const handleDrop = (event) => {
+          const files = Array.from(event.dataTransfer?.files || []);
+          if (files.length === 0) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (
+            !droppedFilesWithinCountLimit(files) ||
+            !droppedFilesWithinSizeLimit(files) ||
+            !droppedFilesWithinTotalSizeLimit(files)
+          ) {
+            terminal.focus();
+            return;
+          }
+
+          void readDroppedFilesAsAttachments(files)
+            .then((attachments) => {
+              send({
+                kind: "attach_files",
+                id: windowId,
+                files: attachments,
+              });
+            })
+            .catch(() => {})
+            .finally(() => {
+              terminal.focus();
+            });
+        };
+
+        terminalRoot.addEventListener("dragover", handleDragOver, true);
+        terminalRoot.addEventListener("drop", handleDrop, true);
+        return () => {
+          terminalRoot.removeEventListener("dragover", handleDragOver, true);
+          terminalRoot.removeEventListener("drop", handleDrop, true);
+        };
+      }
+
       function installTerminalContextMenuHandlers(windowId, terminalRoot, terminal) {
         const controller = createTerminalContextMenuController({
           document,
@@ -3976,6 +4079,45 @@
         return () => {
           viewportScrollDisposable.dispose();
         };
+      }
+
+      function terminalWindowIdFromPoint(x, y) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          return null;
+        }
+        const target = document.elementFromPoint(x, y);
+        const terminalRoot = target?.closest?.(".terminal-root");
+        const windowElement = terminalRoot?.closest?.(".workspace-window");
+        const windowId = windowElement?.dataset?.id || null;
+        if (!windowId || !terminalMap.has(windowId)) {
+          return null;
+        }
+        return windowId;
+      }
+
+      function installNativeFileDropBridge() {
+        window.addEventListener("gwt:native-file-drop", (event) => {
+          const detail = event.detail || {};
+          const paths = Array.isArray(detail.paths)
+            ? detail.paths.filter((path) => typeof path === "string" && path.length > 0)
+            : [];
+          if (paths.length === 0) {
+            return;
+          }
+          const windowId = terminalWindowIdFromPoint(Number(detail.x), Number(detail.y));
+          if (!windowId) {
+            return;
+          }
+          send({
+            kind: "attach_files",
+            id: windowId,
+            files: paths.map((path) => ({
+              source: "native_path",
+              path,
+            })),
+          });
+          terminalMap.get(windowId)?.terminal.focus();
+        });
       }
 
       // SPEC-2356 — xterm content stays on the Dark Operator palette even when
@@ -4027,6 +4169,11 @@
           terminalContainer,
           terminal,
         );
+        const fileDropCleanup = installTerminalFileDropHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const contextMenuCleanup = installTerminalContextMenuHandlers(
           windowId,
           terminalContainer,
@@ -4041,6 +4188,7 @@
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
+          fileDropCleanup();
           contextMenuCleanup();
           wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
@@ -12672,6 +12820,7 @@
       }
 
       installCanvasWheelRouting();
+      installNativeFileDropBridge();
 
       window.addEventListener(
         "keydown",
