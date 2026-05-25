@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.45.1] - 2026-05-25
+
+### Bug Fixes
+
+- Focus cycleで最大化中の切替元を復元する
+
 ## [9.45.0] - 2026-05-25
 
 ### Bug Fixes
