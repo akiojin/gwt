@@ -108,11 +108,22 @@ impl AppRuntime {
         direction: FocusCycleDirection,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
-        let Some(tab) = self.active_tab_mut() else {
+        let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
-        if tab.workspace.cycle_focus(direction, bounds).is_none() {
+        let focused = {
+            let Some(tab) = self.tab_mut(&tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.cycle_focus(direction, bounds)
+        };
+        if focused.is_none() {
             return Vec::new();
+        }
+        if let Some(tab) = self.tab(&tab_id) {
+            for window in &tab.workspace.persisted().windows {
+                self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
+            }
         }
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]

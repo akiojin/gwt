@@ -222,7 +222,16 @@ impl WorkspaceState {
             FocusCycleDirection::Forward => (pos + 1) % eligible.len(),
             FocusCycleDirection::Backward => (pos + eligible.len() - 1) % eligible.len(),
         };
+        let current_id = self.persisted.windows[current_idx].id.clone();
         let next_id = self.persisted.windows[eligible[next_pos]].id.clone();
+        if self
+            .persisted
+            .windows
+            .get(current_idx)
+            .is_some_and(|window| window.maximized)
+        {
+            let _ = self.restore_window(&current_id);
+        }
         let _ = self.activate_window_tab(&next_id);
         self.center_window(&next_id, bounds);
         Some(next_id)
@@ -1370,6 +1379,83 @@ mod tests {
                 .expect("claude")
                 .tab_group_active
         );
+    }
+
+    #[test]
+    fn cycling_focus_restores_maximized_source_before_activating_next_window() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 800.0,
+        };
+        let codex_original = workspace.window("codex-1").expect("codex").geometry.clone();
+        let claude = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("codex-1", bounds.clone()));
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Forward, bounds.clone())
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        let codex = workspace.window("codex-1").expect("codex");
+        assert_eq!(codex.geometry, codex_original);
+        assert!(!codex.maximized);
+        assert_eq!(codex.pre_maximize_geometry, None);
+        assert!(
+            workspace.window("claude-1").expect("claude").z_index > codex.z_index,
+            "next window must end as topmost after source restore"
+        );
+        assert_eq!(
+            workspace.persisted().viewport.x,
+            bounds.width / 2.0 - (claude.x + claude.width / 2.0)
+        );
+        assert_eq!(
+            workspace.persisted().viewport.y,
+            bounds.height / 2.0 - (claude.y + claude.height / 2.0)
+        );
+    }
+
+    #[test]
+    fn cycling_focus_restores_maximized_group_before_activating_hidden_tab() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        let bounds = arrange_bounds();
+        let original = workspace.window("codex-1").expect("codex").geometry.clone();
+
+        assert!(workspace.maximize_window("codex-1", bounds.clone()));
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Forward, bounds)
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        assert_eq!(codex.geometry, original);
+        assert_eq!(claude.geometry, original);
+        assert!(!codex.maximized);
+        assert!(!claude.maximized);
+        assert!(claude.tab_group_active);
+        assert!(!codex.tab_group_active);
+    }
+
+    #[test]
+    fn cycling_focus_keeps_single_maximized_window_maximized() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let window = workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        assert!(workspace.maximize_window(&window.id, arrange_bounds()));
+
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Forward, arrange_bounds())
+            .expect("focused window");
+
+        assert_eq!(focused, window.id);
+        assert!(workspace.window(&window.id).expect("window").maximized);
     }
 
     #[test]
