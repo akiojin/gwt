@@ -5109,12 +5109,12 @@ impl AppRuntime {
             )];
         };
 
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Workspace {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a branches list".to_string(),
+                    message: "Window is not a Work surface".to_string(),
                 },
             )];
         }
@@ -6017,7 +6017,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a branches list".to_string(),
+                    message: "Window is not a Work surface".to_string(),
                 },
             )];
         }
@@ -12433,7 +12433,7 @@ exit 1
         gwt_core::workspace_projection::update_workspace_projection_with_journal(
             &repo,
             gwt_core::workspace_projection::WorkspaceProjectionUpdate {
-                title: Some("Workspace Overview".to_string()),
+                title: Some("Work".to_string()),
                 status_category: Some(
                     gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
                 ),
@@ -12553,7 +12553,7 @@ exit 1
     ) -> gwt_core::workspace_projection::WorkspaceProjection {
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
-        projection.title = "Workspace with Resume candidate".to_string();
+        projection.title = "Work with Resume candidate".to_string();
         projection.status_category =
             gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
         projection
@@ -16284,7 +16284,7 @@ exit 1
                 display_name: "Codex".to_string(),
                 status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
                 current_focus: Some("Investigate Workspace materialization".to_string()),
-                title_summary: Some("Workspace materialization".to_string()),
+                title_summary: Some("Work materialization".to_string()),
                 worktree_path: None,
                 branch: Some("work/unassigned".to_string()),
                 last_board_entry_id: None,
@@ -16307,7 +16307,7 @@ exit 1
             vec!["workspace-materialization".to_string()],
             vec!["2359".to_string()],
         )
-        .with_title_summary("Workspace materialization")
+        .with_title_summary("Work materialization")
         .with_origin_session_id("session-unassigned");
 
         runtime.record_workspace_board_milestone_event("tab-1", &repo, &entry);

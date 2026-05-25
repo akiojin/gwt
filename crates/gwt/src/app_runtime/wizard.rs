@@ -115,7 +115,7 @@ impl AppRuntime {
         };
 
         if window.preset != WindowPreset::Branches {
-            return launch_agent_open_error(client_id, "Window is not a branches list");
+            return launch_agent_open_error(client_id, "Window is not a Work surface");
         }
         // SPEC-1934 US-7 / FR-034
         if tab.migration_pending {
@@ -627,7 +627,7 @@ impl AppRuntime {
             return branch_error("Window not found".to_string());
         };
         if window.preset != WindowPreset::Branches {
-            return branch_error("Window is not a branches list".to_string());
+            return branch_error("Window is not a Work surface".to_string());
         }
         if tab.kind != gwt::ProjectKind::Git {
             return branch_error("Resume requires a Git project".to_string());

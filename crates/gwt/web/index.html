@@ -160,20 +160,15 @@
               <span class="op-layer__label">Start Work</span>
               <kbd class="op-layer__kbd">GO</kbd>
             </button>
-            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Workspace overview">
+            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Work">
               <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Workspace Overview</span>
+              <span class="op-layer__label">Work</span>
               <kbd class="op-layer__kbd">INFO</kbd>
             </button>
             <button class="op-layer" type="button" data-cmd="open-board" aria-label="Open Board (Cmd+B)" aria-keyshortcuts="Meta+B">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Board</span>
               <kbd class="op-layer__kbd">⌘ B</kbd>
-            </button>
-            <button class="op-layer" type="button" data-cmd="open-git" aria-label="Open Git (Cmd+G)" aria-keyshortcuts="Meta+G">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Git</span>
-              <kbd class="op-layer__kbd">⌘ G</kbd>
             </button>
             <button class="op-layer" type="button" data-cmd="open-logs" aria-label="Open Logs (Cmd+L)" aria-keyshortcuts="Meta+L">
               <span class="op-layer__indicator"></span>
@@ -326,8 +321,8 @@
             <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
           </div>
           <div class="op-status-strip__cell">
-            <span class="op-status-strip__label">BR</span>
-            <span class="op-status-strip__value" id="op-strip-branches" aria-label="Branches">—</span>
+            <span class="op-status-strip__label">WK</span>
+            <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
           <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__label">T</span>
@@ -409,7 +404,7 @@
               <kbd class="op-kbd">⌘ B</kbd>
             </div>
             <div class="op-hotkey-card__row">
-              <span>Git surface</span>
+              <span>Work surface</span>
               <kbd class="op-kbd">⌘ G</kbd>
             </div>
             <div class="op-hotkey-card__row">
@@ -440,15 +435,11 @@
         >
           <h2 id="preset-modal-title">Add window</h2>
           <div class="preset-section">
-            <div class="preset-section-label">Workspace</div>
+            <div class="preset-section-label">Work</div>
             <div class="preset-list">
               <button class="preset-button" data-preset="file_tree">
                 <strong>File Tree</strong>
                 <span>Browse repository files in a read-only tree</span>
-              </button>
-              <button class="preset-button" data-preset="branches">
-                <strong>Branches</strong>
-                <span>Browse repository branches and launch agents</span>
               </button>
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
@@ -475,8 +466,8 @@
                 <span>Open the SPEC surface</span>
               </button>
               <button class="preset-button" data-preset="workspace">
-                <strong>Workspace</strong>
-                <span>Open the Workspace Kanban</span>
+                <strong>Work</strong>
+                <span>Open the Work overview</span>
               </button>
               <button class="preset-button" data-preset="board">
                 <strong>Board</strong>
@@ -647,7 +638,7 @@
           class="modal-shell workspace-resume-picker-shell"
           role="dialog"
           aria-modal="true"
-          aria-label="Workspace Resume Picker"
+          aria-label="Work Resume Picker"
           tabindex="-1"
         ></div>
       </div>

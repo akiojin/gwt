@@ -2765,9 +2765,8 @@ mod tests {
             "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
         );
         assert!(
-            html.contains(r#"data-preset="branches""#)
-                && html.contains("Browse repository branches and launch agents"),
-            "expected Add window modal to keep the Branches launch-agent path visible",
+            !html.contains(r#"data-preset="branches""#),
+            "expected Add window modal to not have a standalone Branches preset — branch browsing is part of the Work surface",
         );
     }
 
@@ -2889,7 +2888,7 @@ mod tests {
         );
         assert!(
             html.contains("launchWizard.show_branch_controls !== false")
-                && html.contains("Workspace launch"),
+                && html.contains("Work launch"),
             "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
         );
         assert!(
@@ -2994,7 +2993,6 @@ mod tests {
         assert!(
             html.contains("Open a project")
                 && html.contains("Restore previous workspaces or choose a new folder.")
-                && html.contains("Browse repository branches and launch agents")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),
@@ -3423,7 +3421,9 @@ mod tests {
         let pairs: &[(WindowSurface, &str)] = &[
             (WindowSurface::Terminal, "terminal"),
             (WindowSurface::FileTree, "file-tree"),
-            (WindowSurface::Branches, "branches"),
+            // Branches now redirects to the workspace surface in JS;
+            // the enum variant is kept for backend compatibility but
+            // no longer needs its own JS return path.
             (WindowSurface::Profile, "profile"),
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),
@@ -3445,6 +3445,11 @@ mod tests {
                 "expected JS `presetSurface()` to return `\"{expected}\"` for the corresponding preset cluster",
             );
         }
+
+        assert!(
+            js.contains("preset === \"branches\"") && js.contains("return \"workspace\";"),
+            "expected JS `presetSurface()` to route branches preset to workspace surface",
+        );
     }
 
     /// SPEC-2008 FR-035: every existing modal must mount through the shared
