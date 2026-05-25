@@ -36,6 +36,42 @@ fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.is_empty())
 }
 
+/// Normalize host filesystem paths before passing them to child processes.
+///
+/// Windows APIs and PowerShell can surface provider-qualified or verbatim
+/// paths such as `Microsoft.PowerShell.Core\FileSystem::\\?\C:\repo`.
+/// Those forms are valid in some Windows APIs but confuse shells and agent
+/// CLIs when used as cwd or `GWT_PROJECT_ROOT`. Non-prefixed paths are
+/// returned unchanged.
+pub fn normalize_windows_child_process_path(path: &Path) -> PathBuf {
+    let Some(value) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let normalized = normalize_windows_child_process_path_text(value);
+    if normalized == value {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(normalized)
+    }
+}
+
+/// Normalize a path string with the same rules as
+/// [`normalize_windows_child_process_path`].
+pub fn normalize_windows_child_process_path_text(value: &str) -> String {
+    const POWERSHELL_FILE_SYSTEM_PROVIDER_PREFIX: &str = r"Microsoft.PowerShell.Core\FileSystem::";
+
+    let value = value
+        .strip_prefix(POWERSHELL_FILE_SYSTEM_PROVIDER_PREFIX)
+        .unwrap_or(value);
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    value.to_string()
+}
+
 /// Return the path to the global config file (`~/.gwt/config.toml`).
 pub fn gwt_config_path() -> PathBuf {
     gwt_home().join("config.toml")
@@ -321,6 +357,56 @@ mod tests {
 
         assert_eq!(userprofile_home, override_profile);
         assert_eq!(fallback_home, fallback);
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_strips_drive_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path(Path::new(r"\\?\E:\gwt\work\20260525-0919")),
+            PathBuf::from(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_strips_unc_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path(Path::new(r"\\?\UNC\server\share\work")),
+            PathBuf::from(r"\\server\share\work")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_strips_powershell_provider_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path(Path::new(
+                r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919"
+            )),
+            PathBuf::from(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_preserves_regular_paths() {
+        assert_eq!(
+            normalize_windows_child_process_path(Path::new("/tmp/gwt/work")),
+            PathBuf::from("/tmp/gwt/work")
+        );
+        assert_eq!(
+            normalize_windows_child_process_path(Path::new(r"E:\gwt\work")),
+            PathBuf::from(r"E:\gwt\work")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_windows_child_process_path_preserves_non_utf8_unix_paths() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let bytes = b"/tmp/gwt-\xFF-work";
+        let path = Path::new(OsStr::from_bytes(bytes));
+        let normalized = normalize_windows_child_process_path(path);
+
+        assert_eq!(normalized.as_os_str().as_bytes(), bytes);
     }
 
     #[test]

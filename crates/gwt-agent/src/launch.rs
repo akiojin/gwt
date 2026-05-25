@@ -344,7 +344,8 @@ impl AgentLaunchBuilder {
     }
 
     pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.working_dir = Some(dir.into());
+        let dir = dir.into();
+        self.working_dir = Some(gwt_core::paths::normalize_windows_child_process_path(&dir));
         self
     }
 
@@ -455,7 +456,11 @@ impl AgentLaunchBuilder {
     }
 
     /// Build the final `LaunchConfig`.
-    pub fn build(self) -> LaunchConfig {
+    pub fn build(mut self) -> LaunchConfig {
+        self.working_dir = self
+            .working_dir
+            .as_ref()
+            .map(|dir| gwt_core::paths::normalize_windows_child_process_path(dir));
         let mut env_vars = HashMap::new();
         let skip_permissions = self.skip_permissions
             || matches!(
@@ -992,6 +997,22 @@ mod tests {
         assert_eq!(
             config.env_vars.get("GWT_PROJECT_ROOT"),
             Some(&"/tmp/project".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_launch_paths_builder_normalizes_working_dir_and_project_root() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir(r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919")
+            .build();
+
+        assert_eq!(
+            config.working_dir,
+            Some(PathBuf::from(r"E:\gwt\work\20260525-0919"))
+        );
+        assert_eq!(
+            config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(r"E:\gwt\work\20260525-0919")
         );
     }
 

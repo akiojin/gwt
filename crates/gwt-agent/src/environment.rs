@@ -237,9 +237,11 @@ impl LaunchEnvironment {
 
     /// Set the project root as a launch-derived override.
     pub fn with_project_root(mut self, project_root: impl AsRef<Path>) -> Self {
+        let project_root =
+            gwt_core::paths::normalize_windows_child_process_path(project_root.as_ref());
         self.override_env.insert(
             GWT_PROJECT_ROOT_ENV.to_string(),
-            project_root.as_ref().display().to_string(),
+            project_root.display().to_string(),
         );
         self
     }
@@ -533,6 +535,32 @@ mod tests {
                 "NO_COLOR".to_string(),
                 "SECRET".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn windows_launch_paths_project_root_strips_provider_and_verbatim_prefixes() {
+        let (env, _) = LaunchEnvironment::empty()
+            .with_project_root(
+                r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919",
+            )
+            .into_parts();
+
+        assert_eq!(
+            env.get(GWT_PROJECT_ROOT_ENV).map(String::as_str),
+            Some(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[test]
+    fn windows_launch_paths_project_root_strips_unc_verbatim_prefix() {
+        let (env, _) = LaunchEnvironment::empty()
+            .with_project_root(r"\\?\UNC\server\share\work")
+            .into_parts();
+
+        assert_eq!(
+            env.get(GWT_PROJECT_ROOT_ENV).map(String::as_str),
+            Some(r"\\server\share\work")
         );
     }
 

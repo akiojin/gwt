@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.46.1] - 2026-05-25
+
+### Bug Fixes
+
+- **launch:** Normalize Windows host cwd paths
+- **paths:** Preserve non-utf8 cwd bytes
+
+### Documentation
+
+- **memory:** Record recurring Windows launch failure
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into work branch
+
 ## [9.46.0] - 2026-05-25
 
 ### Bug Fixes

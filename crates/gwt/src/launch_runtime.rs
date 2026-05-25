@@ -1,5 +1,41 @@
 use super::*;
 
+fn normalize_child_process_path(path: &Path) -> PathBuf {
+    gwt_core::paths::normalize_windows_child_process_path(path)
+}
+
+fn normalize_launch_config_working_dir(config: &mut gwt_agent::LaunchConfig) {
+    if let Some(dir) = config.working_dir.as_ref() {
+        let normalized = normalize_child_process_path(dir);
+        config.working_dir = Some(normalized.clone());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            normalized.display().to_string(),
+        );
+    }
+}
+
+fn normalize_shell_launch_config_working_dir(config: &mut ShellLaunchConfig) {
+    if let Some(dir) = config.working_dir.as_ref() {
+        let normalized = normalize_child_process_path(dir);
+        config.working_dir = Some(normalized.clone());
+        config.env_vars.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            normalized.display().to_string(),
+        );
+    }
+}
+
+fn set_worktree_launch_path(
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+    path: &Path,
+) {
+    let path = normalize_child_process_path(path);
+    *working_dir = Some(path.clone());
+    env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
+}
+
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
@@ -31,11 +67,7 @@ pub fn resolve_launch_worktree_request(
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
     let mut worktrees = manager.list().map_err(|err| err.to_string())?;
     if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-        *working_dir = Some(existing_worktree.clone());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            existing_worktree.display().to_string(),
-        );
+        set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
         return Ok(());
     }
     if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
@@ -44,11 +76,7 @@ pub fn resolve_launch_worktree_request(
             .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
         worktrees = manager.list().map_err(|err| err.to_string())?;
         if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
-            *working_dir = Some(existing_worktree.clone());
-            env_vars.insert(
-                "GWT_PROJECT_ROOT".to_string(),
-                existing_worktree.display().to_string(),
-            );
+            set_worktree_launch_path(working_dir, env_vars, &existing_worktree);
             return Ok(());
         }
     }
@@ -135,11 +163,7 @@ pub fn resolve_launch_worktree_request(
             .map_err(|err| err.to_string())?;
     }
 
-    *working_dir = Some(worktree_path.clone());
-    env_vars.insert(
-        "GWT_PROJECT_ROOT".to_string(),
-        worktree_path.display().to_string(),
-    );
+    set_worktree_launch_path(working_dir, env_vars, &worktree_path);
     Ok(())
 }
 
@@ -162,6 +186,7 @@ pub fn resolve_launch_worktree(
         &mut config.env_vars,
     )?;
     config.base_branch = base_branch;
+    normalize_launch_config_working_dir(config);
     Ok(())
 }
 
@@ -178,6 +203,7 @@ pub fn resolve_shell_launch_worktree(
         &mut config.env_vars,
     )?;
     config.base_branch = base_branch;
+    normalize_shell_launch_config_working_dir(config);
     Ok(())
 }
 
@@ -185,10 +211,15 @@ pub fn build_shell_process_launch(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
 ) -> Result<ProcessLaunch, String> {
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree = normalize_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
+    if config.working_dir.is_some() {
+        config.working_dir = Some(worktree.clone());
+    }
     let base_env = if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
         gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
     } else {
@@ -809,6 +840,35 @@ mod tests {
         assert_eq!(
             entries,
             vec![PathBuf::from("/Applications/GWT.app/Contents/MacOS")],
+        );
+    }
+
+    #[test]
+    fn build_shell_process_launch_normalizes_windows_host_cwd() {
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(PathBuf::from(
+                r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919",
+            )),
+            branch: None,
+            base_branch: None,
+            display_name: "Shell".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: Some(gwt_agent::WindowsShellKind::CommandPrompt),
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+        };
+
+        let launch = build_shell_process_launch(Path::new("/tmp/fallback"), &mut config)
+            .expect("shell launch");
+
+        let expected = PathBuf::from(r"E:\gwt\work\20260525-0919");
+        assert_eq!(config.working_dir, Some(expected.clone()));
+        assert_eq!(launch.cwd, Some(expected));
+        assert_eq!(
+            launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(r"E:\gwt\work\20260525-0919")
         );
     }
 
