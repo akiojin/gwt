@@ -6130,3 +6130,10 @@ Type: lesson
 Context: Windows Start Work / Launch Agent failed to start again after a previous similar launch failure. This occurrence involved PowerShell provider-qualified or verbatim cwd values such as Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\... causing Claude Code to error and Codex to fall back to C:\Windows.
 Learning: Treat Windows agent launch failures as recurring regression candidates, not one-off environment issues. The cwd, GWT_PROJECT_ROOT, worktree discovery path, and PTY spawn cwd must all be inspected for Windows-specific provider/verbatim path forms before declaring the launch path healthy.
 Future Action: When a Windows Start Work / Launch Agent failure is reported, first search memory for this recurrence, then add focused RED tests for provider-qualified/verbatim cwd normalization across launch config, env, worktree parsing, and PTY spawn before fixing.
+
+## 2026-05-25 — Preserve non-UTF8 paths when normalizing Windows launch cwd
+
+Type: lesson
+Context: PR #2894 review found that normalize_windows_child_process_path used Path::to_string_lossy(), which can replace valid Unix non-UTF8 path bytes with the UTF-8 replacement sequence when the shared helper is called broadly at launch/worktree boundaries.
+Learning: Windows-specific path normalization helpers must not lossy-convert Path values. Only rewrite when Path::to_str() succeeds and a known Windows provider/verbatim prefix is present; otherwise return the original PathBuf to preserve platform path bytes.
+Future Action: Before broadening any Path normalization helper, add Unix non-UTF8 byte-preservation tests alongside the Windows prefix tests, then verify the helper returns unchanged PathBuf for non-UTF8 and no-op inputs.
