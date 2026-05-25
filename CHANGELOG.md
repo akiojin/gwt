@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.46.0] - 2026-05-25
+
+### Bug Fixes
+
+- **gui:** Add font-family to Work detail pane CSS
+- **gui:** Address PR review feedback for Work Unification
+
+### Documentation
+
+- **memory:** Record include_str web assets rebuild lesson
+
+### Features
+
+- **gui:** Unify Workspace to Work terminology and integrate Branches into Work surface
+
+### Miscellaneous Tasks
+
+- Apply rustfmt formatting
+- **ci:** Remove flaky visual regression workflow
+- **ci:** Remove visual-regression references from release asset tests
+
+### Testing
+
+- Update kanban visual test data Workspace to Work
+
 
 ## [9.45.1] - 2026-05-25
 
