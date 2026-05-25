@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gwt_core::{GwtError, Result};
+use gwt_core::{paths::normalize_windows_child_process_path, GwtError, Result};
 use serde::{Deserialize, Serialize};
 
 const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -722,7 +722,8 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
 
     if !output.status.success() {
         if let Some(bare_child) = first_child_bare_repository(repo_path) {
-            return Ok(std::fs::canonicalize(&bare_child).unwrap_or(bare_child));
+            let bare_child = std::fs::canonicalize(&bare_child).unwrap_or(bare_child);
+            return Ok(normalize_windows_child_process_path(&bare_child));
         }
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(GwtError::Git(format!(
@@ -738,15 +739,16 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
     }
 
     if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
-        return common_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+        let repo_root = common_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
             GwtError::Git(format!(
                 "git common dir has no parent repository: {}",
                 common_dir.display()
             ))
-        });
+        })?;
+        return Ok(normalize_windows_child_process_path(&repo_root));
     }
 
-    Ok(common_dir)
+    Ok(normalize_windows_child_process_path(&common_dir))
 }
 
 fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
@@ -783,22 +785,9 @@ pub fn sibling_worktree_path(repo_path: &Path, branch: &str) -> PathBuf {
 }
 
 fn path_arg_for_git(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        let raw = path.to_string_lossy();
-        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{rest}");
-        }
-        if let Some(rest) = raw.strip_prefix(r"\\?\") {
-            return rest.to_string();
-        }
-        raw.into_owned()
-    }
-
-    #[cfg(not(windows))]
-    {
-        path.to_string_lossy().into_owned()
-    }
+    normalize_windows_child_process_path(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
@@ -822,7 +811,7 @@ fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
                 locked = false;
                 prunable = false;
             }
-            path = Some(PathBuf::from(p));
+            path = Some(normalize_windows_child_process_path(Path::new(p)));
         } else if let Some(b) = line.strip_prefix("branch ") {
             // Strip refs/heads/ prefix
             branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
@@ -1003,6 +992,24 @@ mod tests {
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
         assert!(!entries[0].locked);
         assert!(!entries[0].prunable);
+    }
+
+    #[test]
+    fn parse_porcelain_strips_windows_verbatim_prefixes() {
+        let output = "\
+worktree \\\\?\\E:\\gwt\\work\\20260525-0919
+branch refs/heads/work/20260525-0919
+
+worktree \\\\?\\UNC\\server\\share\\work
+branch refs/heads/work/unc
+";
+        let entries = parse_porcelain_output(output);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from(r"E:\gwt\work\20260525-0919"));
+        assert_eq!(entries[0].branch.as_deref(), Some("work/20260525-0919"));
+        assert_eq!(entries[1].path, PathBuf::from(r"\\server\share\work"));
+        assert_eq!(entries[1].branch.as_deref(), Some("work/unc"));
     }
 
     #[test]

@@ -85,10 +85,12 @@ pub fn apply_docker_runtime_to_launch_config(
         return Ok(());
     }
 
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree = gwt_core::paths::normalize_windows_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_gwt_binary_setup(&launch)?;
@@ -113,10 +115,12 @@ pub fn finalize_docker_agent_launch_config(
         return Ok(());
     }
 
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
+    let worktree = gwt_core::paths::normalize_windows_child_process_path(
+        &config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| repo_path.to_path_buf()),
+    );
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     let runtime_program = PackageRunnerProgram {
         executable: config.command.clone(),

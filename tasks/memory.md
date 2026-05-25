@@ -6109,3 +6109,10 @@ Type: lesson
 Context: During PR #2887, CI passed and auto-merge completed while automated review threads were posted shortly before merge.
 Learning: A PR can be merged before late automated review comments are inspected; merged state does not mean review feedback is clear.
 Future Action: After any auto-merge, run gwtd pr review-threads for the merged PR and address actionable feedback via a follow-up PR when the original PR can no longer be updated.
+
+## 2026-05-25 — Normalize Windows child-process paths at launch boundaries
+
+Type: lesson
+Context: Start Work / Launch Agent on Windows can leak PowerShell provider-qualified or verbatim paths like Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\... into cwd and GWT_PROJECT_ROOT.
+Learning: Normalize child-process cwd/env at worktree discovery, launch config, GUI/shell launch, Docker host path planning, and PTY spawn boundaries; preserve resolve_launch_worktree_request direct-call no-op semantics unless a SPEC changes that contract.
+Future Action: Before changing Windows launch cwd/env handling, add RED tests for provider-qualified and verbatim paths, then verify both focused launch tests and the full Rust matrix.
