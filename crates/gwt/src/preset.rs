@@ -100,7 +100,7 @@ impl WindowPreset {
             Self::Logs => "Logs",
             Self::Issue => "Issue",
             Self::Spec => "SPEC",
-            Self::Workspace => "Workspace",
+            Self::Workspace => "Work",
             Self::Index => "Index",
             Self::Board => "Board",
             Self::Pr => "PR",
@@ -122,7 +122,7 @@ impl WindowPreset {
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
             Self::Spec => "Placeholder SPEC surface",
-            Self::Workspace => "Workspace lifecycle Kanban",
+            Self::Workspace => "Work overview",
             Self::Index => "Search indexed project knowledge",
             Self::Board => "Placeholder board surface",
             Self::Pr => "Placeholder PR surface",
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(WindowPreset::ALL.len(), 15);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
-        assert_eq!(WindowPreset::Workspace.title(), "Workspace");
+        assert_eq!(WindowPreset::Workspace.title(), "Work");
         assert_eq!(WindowPreset::Index.title(), "Index");
         assert_eq!(WindowPreset::Pr.title(), "PR");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");

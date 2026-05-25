@@ -44,10 +44,12 @@ impl AppRuntime {
             })];
         };
 
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches
+            && window.preset != WindowPreset::Workspace
+        {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
+                message: "Window is not a Work surface".to_string(),
             })];
         }
 

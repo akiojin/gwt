@@ -1360,7 +1360,7 @@ mod tests {
         let saved = load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
-        assert_eq!(saved.title, "Workspace coordination");
+        assert_eq!(saved.title, "Work coordination");
         assert_eq!(saved.status_category, WorkspaceStatusCategory::Blocked);
         assert_eq!(saved.owner.as_deref(), Some("SPEC-2359"));
     }
@@ -1468,7 +1468,7 @@ mod tests {
             .expect("workspace history");
         assert_eq!(items.work_items.len(), 1);
         assert_eq!(items.work_items[0].id, workspace_id);
-        assert_eq!(items.work_items[0].title, "Workspace history");
+        assert_eq!(items.work_items[0].title, "Work history");
     }
 
     /// SPEC-2359 Phase U-6 (FR-131, FR-134, FR-135, FR-136): a workspace
@@ -1574,7 +1574,7 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("workspace-existing"), "{out}");
-        assert!(out.contains("Workspace history"), "{out}");
+        assert!(out.contains("Work history"), "{out}");
         assert!(out.contains("score="), "{out}");
     }
 
@@ -1789,7 +1789,7 @@ mod tests {
             .expect("load workspace history")
             .expect("workspace history");
         assert_eq!(items.work_items.len(), 1);
-        assert_eq!(items.work_items[0].title, "Workspace materialization");
+        assert_eq!(items.work_items[0].title, "Work materialization");
         assert_eq!(items.work_items[0].owner.as_deref(), Some("SPEC-2359"));
     }
 

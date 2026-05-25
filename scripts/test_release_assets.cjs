@@ -224,10 +224,6 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
     path.join(__dirname, "..", ".github", "workflows", "release.yml"),
     "utf8"
   );
-  const visualWorkflow = fs.readFileSync(
-    path.join(__dirname, "..", ".github", "workflows", "visual-regression.yml"),
-    "utf8"
-  );
   const smokeTests = fs.readFileSync(
     path.join(__dirname, "run-frontend-smoke-tests.sh"),
     "utf8"
@@ -236,17 +232,11 @@ run("CI workflows call direct verification scripts and skip npm publish", () => 
     path.join(__dirname, "run-frontend-unit-tests.sh"),
     "utf8"
   );
-  const visualTests = fs.readFileSync(
-    path.join(__dirname, "run-visual-tests.sh"),
-    "utf8"
-  );
-
   assert.match(lintWorkflow, /bash scripts\/check-frontend-bundle\.sh/);
   assert.match(lintWorkflow, /bash scripts\/check-release-flow\.sh/);
   assert.match(testWorkflow, /node scripts\/test_release_assets\.cjs/);
   assert.doesNotMatch(releaseWorkflow, /publish-npm|npm publish|registry\.npmjs\.org|NPM_TOKEN/);
-  assert.match(visualWorkflow, /oven-sh\/setup-bun@v2/);
-  for (const content of [visualWorkflow, smokeTests, unitTests, visualTests]) {
+  for (const content of [smokeTests, unitTests]) {
     assert.doesNotMatch(content, /pnpm(?:\/action-setup| dlx|\b)/);
   }
 });

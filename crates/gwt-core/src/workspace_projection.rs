@@ -322,7 +322,7 @@ impl WorkspaceProjection {
         Self {
             id: Uuid::new_v4().to_string(),
             project_root: project_root.into(),
-            title: "Workspace".to_string(),
+            title: "Work".to_string(),
             status_category: WorkspaceStatusCategory::Unknown,
             status_text: "No active work".to_string(),
             summary: None,
@@ -1129,11 +1129,26 @@ pub fn mark_workspace_agent_stopped(
 
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| GwtError::Other(format!("workspace projection json: {error}"))),
+        Ok(bytes) => {
+            let mut projection: WorkspaceProjection = serde_json::from_slice(&bytes)
+                .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
+            migrate_workspace_to_work_terminology(&mut projection);
+            Ok(Some(projection))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn migrate_workspace_to_work_terminology(projection: &mut WorkspaceProjection) {
+    if projection.title == "Workspace" {
+        projection.title = "Work".to_string();
+    } else if projection.title.starts_with("Workspace ") {
+        let suffix = &projection.title["Workspace ".len()..];
+        projection.title = format!("Work {suffix}");
+    } else if projection.title.ends_with(" workspace") {
+        let prefix = &projection.title[..projection.title.len() - " workspace".len()];
+        projection.title = format!("{prefix} work");
     }
 }
 
@@ -1148,9 +1163,22 @@ pub fn load_workspace_work_items_from_path(
     path: &Path,
 ) -> Result<Option<WorkspaceWorkItemsProjection>> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| GwtError::Other(format!("workspace work items json: {error}"))),
+        Ok(bytes) => {
+            let mut items: WorkspaceWorkItemsProjection = serde_json::from_slice(&bytes)
+                .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+            for item in &mut items.work_items {
+                if item.title == "Workspace" {
+                    item.title = "Work".to_string();
+                } else if item.title.starts_with("Workspace ") {
+                    let suffix = &item.title["Workspace ".len()..];
+                    item.title = format!("Work {suffix}");
+                } else if item.title.ends_with(" workspace") {
+                    let prefix = &item.title[..item.title.len() - " workspace".len()];
+                    item.title = format!("{prefix} work");
+                }
+            }
+            Ok(Some(items))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -1730,7 +1758,7 @@ fn synthesize_workspace_work_item_from_legacy(
                     .or_else(|| non_empty_clone(entry.summary.as_deref()))
             })
         })
-        .unwrap_or_else(|| "Workspace history".to_string());
+        .unwrap_or_else(|| "Work history".to_string());
     let status_category = projection
         .map(WorkspaceProjection::effective_status_category)
         .or_else(|| last_entry.and_then(|entry| entry.status_category))
@@ -2853,7 +2881,7 @@ mod tests {
         assert_eq!(projection.work_items.len(), 1);
         let item = &projection.work_items[0];
         assert_eq!(item.id, "workitem-workspace-history");
-        assert_eq!(item.title, "Workspace WorkItem history");
+        assert_eq!(item.title, "Work WorkItem history");
         assert_eq!(
             item.intent.as_deref(),
             Some("Group duplicate Workspace work under one WorkItem")
@@ -2949,7 +2977,7 @@ mod tests {
         assert_eq!(synthesized.work_items.len(), 1);
         let item = &synthesized.work_items[0];
         assert_eq!(item.id, "workspace-current");
-        assert_eq!(item.title, "Workspace WorkItem history");
+        assert_eq!(item.title, "Work WorkItem history");
         assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
         assert_eq!(item.owner.as_deref(), Some("SPEC-2359"));
         assert_eq!(item.board_refs, vec!["board-legacy-1".to_string()]);
