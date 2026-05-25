@@ -44,9 +44,15 @@ fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
 /// CLIs when used as cwd or `GWT_PROJECT_ROOT`. Non-prefixed paths are
 /// returned unchanged.
 pub fn normalize_windows_child_process_path(path: &Path) -> PathBuf {
-    PathBuf::from(normalize_windows_child_process_path_text(
-        &path.to_string_lossy(),
-    ))
+    let Some(value) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let normalized = normalize_windows_child_process_path_text(value);
+    if normalized == value {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(normalized)
+    }
 }
 
 /// Normalize a path string with the same rules as
@@ -389,6 +395,18 @@ mod tests {
             normalize_windows_child_process_path(Path::new(r"E:\gwt\work")),
             PathBuf::from(r"E:\gwt\work")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_windows_child_process_path_preserves_non_utf8_unix_paths() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let bytes = b"/tmp/gwt-\xFF-work";
+        let path = Path::new(OsStr::from_bytes(bytes));
+        let normalized = normalize_windows_child_process_path(path);
+
+        assert_eq!(normalized.as_os_str().as_bytes(), bytes);
     }
 
     #[test]
