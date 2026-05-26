@@ -283,6 +283,9 @@ impl AppRuntime {
         }
 
         let project_root = tab.project_root.clone();
+        if let Some(window_id) = self.live_agent_window_for_work(&tab_id, Some(branch_name), None) {
+            return self.focus_existing_live_work_agent_events(&window_id, None);
+        }
         match self.open_launch_wizard_for_branch(
             &tab_id,
             &project_root,
@@ -340,13 +343,8 @@ impl AppRuntime {
         // legacy `ProjectOpenError` broadcast, which the frontend renders only
         // on the project picker overlay and is therefore invisible while a
         // project tab is already open.
-        let error_event = |message: &str| {
-            vec![launch_wizard_open_error(
-                client_id,
-                "Resume Workspace",
-                message,
-            )]
-        };
+        let error_event =
+            |message: &str| vec![launch_wizard_open_error(client_id, "Resume Work", message)];
 
         let Some(tab_id) = self.active_tab_id.clone() else {
             return error_event("Open a project before resuming work");
@@ -355,7 +353,7 @@ impl AppRuntime {
             return error_event("Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return error_event("Resume Workspace requires a Git project");
+            return error_event("Resume Work requires a Git project");
         }
         // SPEC-1934 US-7 / FR-034
         if tab.migration_pending {
@@ -391,7 +389,7 @@ impl AppRuntime {
                     .as_ref()
                     .map(workspace_resume_context_from_projection)
                     .unwrap_or_else(|| WorkspaceResumeContext {
-                        title: Some(format!("{tab_title} workspace")),
+                        title: Some(format!("{tab_title} Work")),
                         owner: None,
                         summary: None,
                         next_action: None,
@@ -400,7 +398,7 @@ impl AppRuntime {
             }
             gwt::WorkspaceResumeSource::Journal => {
                 let Some(journal_id) = journal_id else {
-                    return error_event("Workspace journal id is required");
+                    return error_event("Work journal id is required");
                 };
                 let Ok(entries) =
                     gwt_core::workspace_projection::load_recent_workspace_journal_entries(
@@ -408,10 +406,10 @@ impl AppRuntime {
                         WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
                     )
                 else {
-                    return error_event("Workspace journal could not be loaded");
+                    return error_event("Work journal could not be loaded");
                 };
                 let Some(entry) = entries.into_iter().find(|entry| entry.id == journal_id) else {
-                    return error_event("Workspace journal entry not found");
+                    return error_event("Work journal entry not found");
                 };
                 (
                     workspace_resume_branch_from_journal_project_root(
@@ -429,6 +427,11 @@ impl AppRuntime {
             .filter(|branch| !branch.trim().is_empty())
         {
             if workspace_resume_branch_exists(&project_root, &branch_name) {
+                if let Some(window_id) =
+                    self.live_agent_window_for_work(&tab_id, Some(&branch_name), None)
+                {
+                    return self.focus_existing_live_work_agent_events(&window_id, None);
+                }
                 let linked_issue_number =
                     workspace_resume_owner_issue_number(context.owner.as_deref());
                 return match self.open_launch_wizard_for_branch_with_context(
@@ -501,15 +504,13 @@ impl AppRuntime {
             );
         }
 
-        // Reject double-spawn: if this session id is already live in this
-        // tab, surface a visible error so the picker can keep its modal
-        // open and the user can pick a different entry.
-        if self
+        if let Some(window_id) = self
             .active_agent_sessions
-            .values()
-            .any(|session| session.session_id == session_id && session.tab_id == tab_id)
+            .iter()
+            .find(|(_, session)| session.session_id == session_id && session.tab_id == tab_id)
+            .map(|(window_id, _)| window_id.clone())
         {
-            return reply_error("That agent is already running".to_string());
+            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
         }
 
         let sessions_dir = self.sessions_dir.clone();
@@ -523,6 +524,13 @@ impl AppRuntime {
                 );
             }
         };
+        if let Some(window_id) = self.live_agent_window_for_work(
+            &tab_id,
+            (!session.branch.trim().is_empty()).then_some(session.branch.as_str()),
+            Some(session.worktree_path.as_path()),
+        ) {
+            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+        }
 
         // Build a fresh LaunchConfig from the persisted Session and add the
         // resume_session_id only when the agent CLI captured a previous
@@ -641,6 +649,11 @@ impl AppRuntime {
         let tab_id = address.tab_id.clone();
         let project_root = tab.project_root.clone();
         let normalized_branch_name = normalize_branch_name(branch_name);
+        if let Some(window_id) =
+            self.live_agent_window_for_work(&tab_id, Some(&normalized_branch_name), None)
+        {
+            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds.clone()));
+        }
         let Some(session) =
             self.latest_resumable_branch_session(&project_root, &normalized_branch_name)
         else {
@@ -1284,7 +1297,7 @@ impl AppRuntime {
         let title = format!(
             "{} · {}",
             config.display_name,
-            config.branch.as_ref().unwrap_or(&"workspace".to_string())
+            config.branch.as_ref().unwrap_or(&"work".to_string())
         );
         let window = tab
             .workspace

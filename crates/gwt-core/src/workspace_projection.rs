@@ -6,6 +6,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
     paths::{
         gwt_project_dir_for_repo_path, gwt_workspace_journal_path_for_repo_path,
         gwt_workspace_projection_path_for_repo_path, gwt_workspace_work_events_path_for_repo_path,
-        gwt_workspace_work_items_path_for_repo_path,
+        gwt_workspace_work_items_path_for_repo_path, project_scope_hash,
     },
 };
 
@@ -37,6 +38,84 @@ pub enum WorkspaceAgentAffiliationStatus {
 
 fn default_workspace_agent_affiliation_status() -> WorkspaceAgentAffiliationStatus {
     WorkspaceAgentAffiliationStatus::Assigned
+}
+
+pub fn canonical_work_id(
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+) -> Option<String> {
+    let branch = branch.map(str::trim).filter(|value| !value.is_empty());
+    let (slug_source, identity_kind, identity_value) = if let Some(branch) = branch {
+        let identity = canonical_work_branch_identity(branch);
+        (identity.clone(), "branch", identity)
+    } else {
+        let worktree_path = worktree_path?;
+        let identity = canonical_worktree_identity(worktree_path);
+        if identity.trim().is_empty() {
+            return None;
+        }
+        let slug_source = worktree_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("worktree");
+        (slug_source.to_string(), "worktree", identity)
+    };
+
+    let project_hash = project_scope_hash(project_root);
+    let mut hasher = Sha256::new();
+    hasher.update(project_hash.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity_kind.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity_value.as_bytes());
+    let digest = hasher.finalize();
+    let hex_full = hex::encode(digest);
+    Some(format!(
+        "work-{}-{}",
+        canonical_work_slug(&slug_source),
+        &hex_full[..8]
+    ))
+}
+
+fn canonical_work_branch_identity(branch: &str) -> String {
+    if let Some(name) = branch.strip_prefix("refs/remotes/") {
+        return name.strip_prefix("origin/").unwrap_or(name).to_string();
+    }
+    branch.strip_prefix("origin/").unwrap_or(branch).to_string()
+}
+
+fn canonical_worktree_identity(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn canonical_work_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "work".to_string()
+    } else {
+        slug
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4408,5 +4487,48 @@ mod tests {
             "first Done timestamp must be preserved on idempotent Done re-apply"
         );
         assert_eq!(item.updated_at, t2, "updated_at should still advance");
+    }
+
+    #[test]
+    fn canonical_work_id_is_stable_for_branch_and_uses_readable_slug() {
+        let repo = Path::new("/tmp/gwt/repo");
+
+        let first = super::canonical_work_id(repo, Some("work/20260526-0043"), None)
+            .expect("branch-derived work id");
+        let second = super::canonical_work_id(repo, Some("work/20260526-0043"), None)
+            .expect("branch-derived work id");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("work-work-20260526-0043-"));
+        assert_eq!(first.rsplit('-').next().expect("hash").len(), 8);
+    }
+
+    #[test]
+    fn canonical_work_id_changes_when_branch_or_project_changes() {
+        let repo_a = Path::new("/tmp/gwt/repo-a");
+        let repo_b = Path::new("/tmp/gwt/repo-b");
+
+        let work_a = super::canonical_work_id(repo_a, Some("work/a"), None).expect("work a");
+        let work_b = super::canonical_work_id(repo_a, Some("work/b"), None).expect("work b");
+        let same_branch_other_project =
+            super::canonical_work_id(repo_b, Some("work/a"), None).expect("work a in repo b");
+
+        assert_ne!(work_a, work_b);
+        assert_ne!(work_a, same_branch_other_project);
+    }
+
+    #[test]
+    fn canonical_work_id_normalizes_remote_branch_names() {
+        let repo = Path::new("/tmp/gwt/repo");
+
+        let local = super::canonical_work_id(repo, Some("feature/gui"), None).expect("local id");
+        let remote =
+            super::canonical_work_id(repo, Some("origin/feature/gui"), None).expect("remote id");
+        let ref_remote =
+            super::canonical_work_id(repo, Some("refs/remotes/origin/feature/gui"), None)
+                .expect("remote ref id");
+
+        assert_eq!(local, remote);
+        assert_eq!(local, ref_remote);
     }
 }
