@@ -142,17 +142,19 @@ export function createWorkspaceKanbanSurface({
     if (activeWorks.length > 0) {
       return activeWorks.map((item) => normalizeWorkspaceItem(item, projection));
     }
-    const sourceItems = Array.isArray(projection.workspaces)
-      ? projection.workspaces
-      : Array.isArray(projection.work_items)
-        ? projection.work_items
-        : [];
+    const sourceItems = Array.isArray(projection.works)
+      ? projection.works
+      : Array.isArray(projection.workspaces)
+        ? projection.workspaces
+        : Array.isArray(projection.work_items)
+          ? projection.work_items
+          : [];
     if (sourceItems.length > 0) {
       return sourceItems.map((item) => normalizeWorkspaceItem(item, projection));
     }
 
     const current = normalizeWorkspaceItem(projection, {
-      id: projection.id || "__current_workspace__",
+      id: projection.id || "__current_work__",
       title: projection.title || activeWorkspace()?.title,
     });
     const journalEntries = Array.isArray(projection.journal_entries)

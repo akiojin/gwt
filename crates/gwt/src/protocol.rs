@@ -945,8 +945,8 @@ pub struct ActiveWorkProjectionView {
     pub pr_created_at: Option<String>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
-    #[serde(default, alias = "work_items")]
-    pub workspaces: Vec<WorkspaceHistoryView>,
+    #[serde(default, alias = "workspaces", alias = "work_items")]
+    pub works: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     #[serde(default)]
     pub active_work_count: usize,
@@ -2395,7 +2395,7 @@ mod tests {
                     agent_current_focus: Some("Run launch tests".to_string()),
                     agent_title_summary: Some("Launch tests".to_string()),
                 }],
-                workspaces: Vec::new(),
+                works: Vec::new(),
                 cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
                     branch: "work/20260504-1200".to_string(),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
@@ -2455,8 +2455,10 @@ mod tests {
                 .pointer("/projection/agents/0/display_name")
                 .and_then(Value::as_str),
             Some("Codex"),
-            "active work projection must expose per-agent summaries for Workspace UI"
+            "active work projection must expose per-agent summaries for Work UI"
         );
+        assert!(value.pointer("/projection/works").is_some());
+        assert!(value.pointer("/projection/workspaces").is_none());
         assert_eq!(
             value
                 .pointer("/projection/agents/0/last_board_entry_id")
@@ -2490,14 +2492,14 @@ mod tests {
                 .pointer("/projection/journal_entries/0/summary")
                 .and_then(Value::as_str),
             Some("Launching from Project Bar"),
-            "Workspace Overview should receive recent summary journal entries without replaying Board history"
+            "Work Overview should receive recent summary journal entries without replaying Board history"
         );
         assert_eq!(
             value
                 .pointer("/projection/cleanup_candidate/default_delete_remote")
                 .and_then(Value::as_bool),
             Some(false),
-            "Workspace cleanup must default to local-only deletion"
+            "Work cleanup must default to local-only deletion"
         );
     }
 

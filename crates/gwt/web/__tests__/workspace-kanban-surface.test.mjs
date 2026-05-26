@@ -254,7 +254,7 @@ function sampleProjection() {
         board_entry_id: "board-claim-1",
       },
     ],
-    workspaces: [
+    works: [
       {
         id: "workspace-current",
         title: "Release Notes cleanup",

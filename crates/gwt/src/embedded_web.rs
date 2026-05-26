@@ -2992,7 +2992,7 @@ mod tests {
 
         assert!(
             html.contains("Open a project")
-                && html.contains("Restore previous workspaces or choose a new folder.")
+                && html.contains("Restore previous work or choose a new folder.")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),

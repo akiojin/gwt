@@ -9236,7 +9236,7 @@
           case "remote_tracking_without_local":
             return "Remote-tracking branch without a local counterpart";
           case "non_workspace_branch":
-            return "Only gwt-managed workspaces can be cleaned up";
+            return "Only gwt-managed work can be cleaned up";
           default:
             return "This branch cannot be cleaned up";
         }
@@ -9797,7 +9797,7 @@
                 <div class="workspace-toolbar-actions">
                   <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
-                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Workspace</button>
+                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Work</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>

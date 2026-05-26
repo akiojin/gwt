@@ -556,8 +556,8 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   );
   assert.match(
     workspaceOverviewSource,
-    /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
-    "expected Workspace Overview to render Workspace entries from active_work_projection",
+    /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.works[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
+    "expected Work Overview to render Work entries from active_work_projection",
   );
   // SPEC-2359 US-42 — Resume action now opens the Workspace Resume
   // Picker via `list_resumable_agents` instead of the legacy
