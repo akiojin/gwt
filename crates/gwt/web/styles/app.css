@@ -1578,6 +1578,7 @@ body {
 }
 
 .workspace-branches-shell .branch-list-root {
+  position: static;
   display: flex;
   flex-direction: column;
   flex: 1;

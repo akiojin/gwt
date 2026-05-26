@@ -127,6 +127,41 @@ test("Workspace resume action asks backend for resumable agents", () => {
   assert.equal(sent[0].workspace_id, "workspace-current");
 });
 
+test("Tab switcher remains visible after switching to Git Branches", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const tabs = fixture.body.querySelectorAll("[data-work-tab]");
+  assert.equal(tabs.length, 2, "should have Work and Git Branches tabs");
+
+  const branchTab = fixture.body.querySelector("[data-work-tab='branches']");
+  branchTab.click();
+
+  const workSection = fixture.body.querySelector("[data-work-section='work']");
+  const branchSection = fixture.body.querySelector("[data-work-section='branches']");
+  assert.equal(workSection.hidden, true, "work section should be hidden");
+  assert.equal(branchSection.hidden, false, "branches section should be visible");
+
+  const tabGroupAfter = fixture.body.querySelector(".workspace-tab-group");
+  assert.ok(tabGroupAfter, "tab group should still exist in DOM");
+  assert.equal(tabGroupAfter.hidden, false, "tab group should not be hidden");
+
+  const workTabAfter = fixture.body.querySelector("[data-work-tab='work']");
+  assert.ok(workTabAfter, "Work tab should remain accessible");
+  assert.equal(workTabAfter.classList.contains("is-active"), false);
+  assert.equal(branchTab.classList.contains("is-active"), true);
+
+  workTabAfter.click();
+  assert.equal(workSection.hidden, false, "work section should reappear");
+  assert.equal(branchSection.hidden, true, "branches section should hide");
+  assert.equal(workTabAfter.classList.contains("is-active"), true);
+});
+
 test("Workspace refresh action rerenders locally without inventing a protocol event", () => {
   const fixture = createFixture();
   const sent = [];
