@@ -6172,3 +6172,10 @@ Type: lesson
 Context: リリース作業中に tasks/memory.md の stash pop コンフリクトを解消する際、git status で M (modified/tracked) と表示されていたファイルを「バージョン管理対象外のローカルファイル」と誤認し、--theirs で一方的に上書きした
 Learning: git status の M は tracked file の変更を示す。?? が untracked。ファイルがバージョン管理対象かどうかは git status の表記で判断でき、思い込みで判断してはならない
 Future Action: stash pop コンフリクト解消時は、必ず両側の差分を確認し、tracked file であれば両方の変更を保持するマージを行う。一方的に --theirs / --ours で上書きしない
+
+## 2026-05-26 — Work preset missing in Phase F wizard refactor
+
+Type: lesson
+Context: Work画面のGit BranchesタブからLaunch/Resumeすると Window is not a Work surface エラー。wizard.rsのopen_launch_wizardとresume_branch_latest_agent_eventsがWindowPreset::Branchesのみ許可していた。レガシーのlaunch_wizard_runtime.rsはBranches+Work両方許可。
+Learning: app_runtime Phase F リファクタで旧コード(launch_wizard_runtime.rs)からの移植時にプリセット条件を狭くしたリグレッション。mod.rs:5420のload_branches_eventsは正しく両方許可していたので、同一ファイル内にパターンの不整合があった。
+Future Action: wizard.rsのプリセットチェック変更時はmod.rsの同種チェック(load_branches_events等)と一貫性を確認する。Work surface embedded branches パターンでは WindowPreset::Work も許可が必要。

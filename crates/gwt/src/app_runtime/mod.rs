@@ -11982,6 +11982,79 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "work-1",
+            repo,
+            WindowPreset::Work,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "work-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: window_id,
+                branch_name: "main".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        assert!(
+            runtime.launch_wizard.is_some(),
+            "Launch wizard should open from a Work window preset"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(&event.event, BackendEvent::LaunchWizardOpenError { .. })),
+            "Work preset must not be rejected as 'not a Work surface'"
+        );
+    }
+
+    #[test]
+    fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "work-1",
+            repo,
+            WindowPreset::Work,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "work-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeBranchLatestAgent {
+                id: window_id,
+                branch_name: "main".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let has_surface_error = events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::BranchError { message, .. }
+                    if message == "Window is not a Work surface"
+            )
+        });
+        assert!(
+            !has_surface_error,
+            "Work preset must not be rejected as 'not a Work surface'"
+        );
+    }
+
+    #[test]
     fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
         // SPEC-2359 / Issue #2757: Resume クリックで `resume_workspace_events`
         // が早期 return / Start Work fallback 失敗を起こした場合、frontend で

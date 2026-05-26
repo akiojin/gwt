@@ -114,7 +114,7 @@ impl AppRuntime {
             return launch_agent_open_error(client_id, "Window not found");
         };
 
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
             return launch_agent_open_error(client_id, "Window is not a Work surface");
         }
         // SPEC-1934 US-7 / FR-034
@@ -646,7 +646,7 @@ impl AppRuntime {
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return branch_error("Window not found".to_string());
         };
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
             return branch_error("Window is not a Work surface".to_string());
         }
         if tab.kind != gwt::ProjectKind::Git {
