@@ -104,7 +104,11 @@ export function createSocketReceiveDispatcher({
           threw: true,
           error_name: error && error.name,
         });
-        throw error;
+        console.warn(
+          "[ws-dispatcher] receive threw for %s — continuing with remaining events",
+          event && event.kind,
+          error,
+        );
       }
       cursor += 1;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {

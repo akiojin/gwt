@@ -6137,3 +6137,10 @@ Type: lesson
 Context: PR #2894 review found that normalize_windows_child_process_path used Path::to_string_lossy(), which can replace valid Unix non-UTF8 path bytes with the UTF-8 replacement sequence when the shared helper is called broadly at launch/worktree boundaries.
 Learning: Windows-specific path normalization helpers must not lossy-convert Path values. Only rewrite when Path::to_str() succeeds and a known Windows provider/verbatim prefix is present; otherwise return the original PathBuf to preserve platform path bytes.
 Future Action: Before broadening any Path normalization helper, add Unix non-UTF8 byte-preservation tests alongside the Windows prefix tests, then verify the helper returns unchanged PathBuf for non-UTF8 and no-op inputs.
+
+## 2026-05-26 — Separate Launch Wizard runtime detection root from target worktree materialization
+
+Type: lesson
+Context: SPEC-2014 managed workspace parent bug: Start Work opened at /Users/akiojin/Workbench/gwt while Docker files lived in nested develop checkout, so Runtime target selection was hidden.
+Learning: Runtime confirmation must first prefer an existing target worktree, but when the target worktree does not exist it should use an existing checkout such as develop/main for Docker context detection without resolving or creating the target worktree.
+Future Action: When touching Launch Wizard runtime context, add tests for workspace parent roots and assert the target worktree remains absent until the final launch/materialization step.
