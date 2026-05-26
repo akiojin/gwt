@@ -610,7 +610,7 @@ body {
 .workspace-window.surface-board,
 .workspace-window.surface-logs,
 .workspace-window.surface-mock,
-.workspace-window.surface-workspace,
+.workspace-window.surface-work,
 .workspace-window.surface-knowledge,
 .workspace-window.surface-index,
 .workspace-window.surface-profile,
@@ -643,7 +643,7 @@ body {
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
 .surface-index .titlebar,
-.surface-workspace .titlebar,
+.surface-work .titlebar,
 .surface-profile .titlebar,
 .surface-console .titlebar {
   background: var(--color-surface-elevated);
@@ -731,7 +731,7 @@ body {
 .surface-logs .status-chip,
 .surface-knowledge .status-chip,
 .surface-index .status-chip,
-.surface-workspace .status-chip,
+.surface-work .status-chip,
 .surface-profile .status-chip,
 .surface-console .status-chip,
 .surface-mock .status-chip {
@@ -796,7 +796,7 @@ body {
 .surface-logs .icon-button,
 .surface-knowledge .icon-button,
 .surface-index .icon-button,
-.surface-workspace .icon-button,
+.surface-work .icon-button,
 .surface-profile .icon-button,
 .surface-console .icon-button,
 .surface-mock .icon-button {
@@ -951,7 +951,7 @@ body {
 .surface-logs .window-body,
 .surface-knowledge .window-body,
 .surface-index .window-body,
-.surface-workspace .window-body,
+.surface-work .window-body,
 .surface-console .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
@@ -1578,6 +1578,7 @@ body {
 }
 
 .workspace-branches-shell .branch-list-root {
+  position: static;
   display: flex;
   flex-direction: column;
   flex: 1;

@@ -3429,7 +3429,7 @@ mod tests {
             (WindowSurface::Logs, "logs"),
             (WindowSurface::Knowledge, "knowledge"),
             (WindowSurface::Index, "index"),
-            (WindowSurface::Workspace, "workspace"),
+            (WindowSurface::Work, "work"),
             (WindowSurface::Mock, "mock"),
         ];
 
@@ -3447,8 +3447,8 @@ mod tests {
         }
 
         assert!(
-            js.contains("preset === \"branches\"") && js.contains("return \"workspace\";"),
-            "expected JS `presetSurface()` to route branches preset to workspace surface",
+            js.contains("preset === \"branches\"") && js.contains("return \"work\";"),
+            "expected JS `presetSurface()` to route branches preset to work surface",
         );
     }
 

@@ -5386,7 +5386,7 @@ impl AppRuntime {
             )];
         };
 
-        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Workspace {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BranchError {
