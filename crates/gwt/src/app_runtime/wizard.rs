@@ -1174,7 +1174,7 @@ impl AppRuntime {
                             };
                         match spawn_result {
                             Ok(mut events) => {
-                                events.push(self.launch_wizard_state_broadcast(None));
+                                events.insert(0, self.launch_wizard_state_broadcast(None));
                                 events
                             }
                             Err(error) => {
@@ -1194,7 +1194,7 @@ impl AppRuntime {
                     LaunchWizardLaunchRequest::Shell(config) => {
                         match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
                             Ok(mut events) => {
-                                events.push(self.launch_wizard_state_broadcast(None));
+                                events.insert(0, self.launch_wizard_state_broadcast(None));
                                 events
                             }
                             Err(error) => {
