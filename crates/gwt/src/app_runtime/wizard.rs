@@ -1257,17 +1257,44 @@ fn launch_runtime_context_paths(
     project_root: &Path,
     branch_name: &str,
 ) -> (PathBuf, Option<PathBuf>) {
-    if let Some(worktree_path) = existing_launch_worktree_path(project_root, branch_name) {
+    let worktrees = launch_runtime_worktrees(project_root);
+    if let Some(worktree_path) = worktrees
+        .as_deref()
+        .and_then(|worktrees| usable_worktree_path_for_branch(worktrees, branch_name))
+    {
         return (worktree_path.clone(), Some(worktree_path));
+    }
+    if project_root_is_git_worktree(project_root) {
+        return (project_root.to_path_buf(), None);
+    }
+    if let Some(default_worktree_path) = worktrees
+        .as_deref()
+        .and_then(default_runtime_detection_worktree_path)
+    {
+        return (default_worktree_path, None);
     }
     (project_root.to_path_buf(), None)
 }
 
-fn existing_launch_worktree_path(project_root: &Path, branch_name: &str) -> Option<PathBuf> {
+fn launch_runtime_worktrees(project_root: &Path) -> Option<Vec<gwt_git::WorktreeInfo>> {
     let main_repo_path = gwt_git::worktree::main_worktree_root(project_root).ok()?;
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let worktrees = manager.list().ok()?;
-    usable_worktree_path_for_branch(&worktrees, branch_name)
+    gwt_git::WorktreeManager::new(&main_repo_path).list().ok()
+}
+
+fn project_root_is_git_worktree(project_root: &Path) -> bool {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(project_root)
+        .output();
+    output.is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
+}
+
+fn default_runtime_detection_worktree_path(worktrees: &[gwt_git::WorktreeInfo]) -> Option<PathBuf> {
+    ["develop", "main"]
+        .iter()
+        .find_map(|branch| usable_worktree_path_for_branch(worktrees, branch))
 }
 
 impl AppRuntime {

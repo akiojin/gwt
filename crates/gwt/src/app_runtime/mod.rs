@@ -9694,6 +9694,42 @@ exit 1
         panic!("timed out waiting for {label}: {snapshot:?}");
     }
 
+    fn resolve_launch_wizard_runtime_confirmation(
+        runtime: &mut AppRuntime,
+        recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+        label: &str,
+    ) {
+        let events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+        assert_eq!(events.len(), 1);
+        let pending_view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(pending_view.runtime_resolution_pending);
+        assert!(!pending_view.runtime_context_resolved);
+
+        wait_for_recorded_event(label, recorded_events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        });
+        let resolved_event = {
+            let mut events = recorded_events.lock().expect("event log");
+            events
+                .iter()
+                .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+                .map(|index| events.remove(index))
+                .expect("runtime resolved event")
+        };
+        let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+            unreachable!("matched above")
+        };
+        let resolved_events = runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+        assert_eq!(resolved_events.len(), 1);
+    }
+
     fn wait_for_path(label: &str, path: &Path) {
         for _ in 0..800 {
             if path.exists() {
@@ -9906,6 +9942,41 @@ exit 1
         run_git(repo, &["config", "user.email", "codex@example.com"]);
         run_git(repo, &["remote", "set-head", "origin", "-a"]);
         origin
+    }
+
+    fn init_managed_workspace_with_develop_worktree(workspace_home: &Path) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(workspace_home).expect("create workspace home");
+        let seed = workspace_home.join(".seed");
+        let bare_repo = workspace_home.join("repo.git");
+        let develop_worktree = workspace_home.join("develop");
+
+        fs::create_dir_all(&seed).expect("create seed");
+        run_git(&seed, &["init", "-q", "-b", "develop"]);
+        run_git(&seed, &["config", "user.name", "Codex"]);
+        run_git(&seed, &["config", "user.email", "codex@example.com"]);
+        fs::write(seed.join("README.md"), "repo\n").expect("seed readme");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-qm", "init"]);
+        run_git_with_paths(&["clone", "--bare"], &[&seed, &bare_repo]);
+
+        let develop_arg = develop_worktree.to_string_lossy().to_string();
+        let output = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q", &develop_arg, "develop"])
+            .current_dir(&bare_repo)
+            .output()
+            .expect("git worktree add develop");
+        assert!(
+            output.status.success(),
+            "git worktree add develop failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        run_git(&develop_worktree, &["config", "user.name", "Codex"]);
+        run_git(
+            &develop_worktree,
+            &["config", "user.email", "codex@example.com"],
+        );
+
+        (bare_repo, develop_worktree)
     }
 
     fn append_workspace_resume_journal(
@@ -10943,6 +11014,126 @@ exit 1
         assert!(view.show_runtime_target);
         assert_eq!(view.selected_runtime_target, "docker");
         assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn app_runtime_start_work_parent_root_uses_develop_checkout_for_docker_context() {
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace");
+        let (bare_repo, develop_worktree) =
+            init_managed_workspace_with_develop_worktree(&workspace_home);
+        fs::write(
+            develop_worktree.join("docker-compose.yml"),
+            "services:\n  gwt:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            workspace_home.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_start_work_for_project("tab-1", &workspace_home)
+            .expect("open start work");
+        let branch_name = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .context
+            .normalized_branch_name
+            .clone();
+        let expected_worktree = gwt_git::worktree::sibling_worktree_path(&bare_repo, &branch_name);
+        assert!(
+            !expected_worktree.exists(),
+            "fixture branch worktree should start absent"
+        );
+
+        resolve_launch_wizard_runtime_confirmation(
+            &mut runtime,
+            &recorded_events,
+            "start work parent root docker context",
+        );
+
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(
+            wizard.context.worktree_path.is_none(),
+            "Runtime confirmation must not resolve a missing target worktree"
+        );
+        assert!(
+            !expected_worktree.exists(),
+            "Runtime confirmation must not create {expected_worktree:?}"
+        );
+        let view = wizard.view();
+        assert!(!view.runtime_resolution_pending);
+        assert!(view.runtime_context_resolved);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn app_runtime_start_work_parent_root_preserves_saved_host_while_showing_runtime_target() {
+        let temp = tempdir().expect("tempdir");
+        let workspace_home = temp.path().join("workspace");
+        let (_bare_repo, develop_worktree) =
+            init_managed_workspace_with_develop_worktree(&workspace_home);
+        fs::write(
+            develop_worktree.join("docker-compose.yml"),
+            "services:\n  gwt:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let mut session =
+            gwt_agent::Session::new(&develop_worktree, "develop", gwt_agent::AgentId::Codex);
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+        session.docker_service = None;
+        session.save(&sessions_dir).expect("save session");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            workspace_home.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_start_work_for_project("tab-1", &workspace_home)
+            .expect("open start work");
+        resolve_launch_wizard_runtime_confirmation(
+            &mut runtime,
+            &recorded_events,
+            "start work parent root saved host",
+        );
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("wizard")
+            .wizard
+            .view();
+        assert!(view.runtime_context_resolved);
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(view.selected_docker_service.is_none());
+        assert_eq!(
+            view.docker_service_options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gwt"]
+        );
     }
 
     #[test]
