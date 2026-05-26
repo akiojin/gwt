@@ -2562,9 +2562,9 @@ mod tests {
     fn embedded_web_active_work_uses_short_title_summary_before_long_focus_detail() {
         let html = frontend_bundle_source();
         let active_work_block = html
-            .split("function renderActiveWorkOverview()")
+            .split("function renderActiveWorkAgentCard(agent)")
             .nth(1)
-            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .and_then(|tail| tail.split("function formatActiveWorkLifecycleLabel").next())
             .expect("active work render block");
 
         assert!(
@@ -2992,7 +2992,7 @@ mod tests {
 
         assert!(
             html.contains("Open a project")
-                && html.contains("Restore previous workspaces or choose a new folder.")
+                && html.contains("Restore previous work or choose a new folder.")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),

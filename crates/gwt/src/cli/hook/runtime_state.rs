@@ -55,7 +55,7 @@ pub fn status_for_event(event: &str) -> Option<&'static str> {
 /// to `path`. On success, no `.tmp-*` siblings remain.
 pub fn write_for_event(path: &Path, event: &str) -> Result<(), HookError> {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let session = current_session_from_env(&sessions_dir)?;
+    let session = current_session_from_env(&sessions_dir);
     let pending_discussion = session.as_ref().and_then(|session| {
         pending_discussion_for_session(&sessions_dir, &session.id)
             .ok()
@@ -105,22 +105,26 @@ fn pending_discussion_for_session(
     load_pending_resume(&session.worktree_path)
 }
 
-fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> {
-    let Some(session_id) = GwtSessionId::from_env() else {
-        return Ok(None);
-    };
+fn current_session_from_env(sessions_dir: &Path) -> Option<Session> {
+    let session_id = GwtSessionId::from_env()?;
     current_session_for_id(sessions_dir, &session_id)
 }
 
-fn current_session_for_id(
-    sessions_dir: &Path,
-    gwt_session_id: &GwtSessionId,
-) -> io::Result<Option<Session>> {
+fn current_session_for_id(sessions_dir: &Path, gwt_session_id: &GwtSessionId) -> Option<Session> {
     let path = sessions_dir.join(format!("{}.toml", gwt_session_id.as_str()));
     if !path.exists() {
-        return Ok(None);
+        return None;
     }
-    Session::load_and_migrate(&path).map(Some)
+    match Session::load_and_migrate(&path) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            eprintln!(
+                "gwtd hook runtime-state: failed to load session metadata {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn sync_agent_session_id(
@@ -197,7 +201,7 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let session = current_session_for_id(&sessions_dir, &gwt_session_id)?;
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
@@ -240,7 +244,7 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     };
     let runtime_path = PathBuf::from(runtime_path);
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
-    let session = current_session_for_id(&sessions_dir, &gwt_session_id)?;
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     if session.is_some() {
         persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)?;
     }
@@ -422,6 +426,29 @@ mod tests {
         assert_eq!(status_for_event("PreToolUse"), Some("Running"));
         assert_eq!(status_for_event("PostToolUse"), Some("Running"));
         assert_eq!(status_for_event("Stop"), Some("Idle"));
+    }
+
+    #[test]
+    fn handle_with_input_ignores_corrupt_session_metadata() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("session-corrupt.toml"), "odex\"").unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+        let mut env = EnvGuard::new();
+        env.set(GWT_SESSION_ID_ENV, "session-corrupt");
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        handle_with_input("PostToolUse", "{}").expect("corrupt metadata must not fail the hook");
+
+        let raw = std::fs::read_to_string(&runtime_path).unwrap();
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Running");
+        assert_eq!(state.source_event, "PostToolUse");
     }
 
     #[test]
