@@ -155,6 +155,11 @@ test("frontend handles active work projection as status-strip telemetry", () => 
     /activeWorkProjection[\s\S]+applyTelemetryCounts/,
     "expected active work projection to feed Operator telemetry",
   );
+  assert.match(
+    appSource,
+    /counts\.branches[\s\S]+activeWorks\.length/,
+    "expected Status Strip Work telemetry to count active Works, not only branch-list rows",
+  );
 });
 
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
@@ -186,21 +191,26 @@ test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
 test("Workspace sidebar exposes active work and per-agent overview", () => {
   assert.ok(
     document.querySelector("#op-active-work"),
-    "expected Workspace shell to expose an active work overview region",
+    "expected Workspace shell to expose an Active Works overview region",
   );
   assert.ok(
     document.querySelector("#op-active-work-agents"),
-    "expected Workspace shell to expose a per-agent list region",
+    "expected Workspace shell to expose a per-Work list region",
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkFocusableAgents\(activeWorkProjection\)/,
-    "expected frontend to render focusable per-agent projection data, not only aggregate counters",
+    /function\s+activeWorkItemsFromProjection\(\)[\s\S]+active_works/,
+    "expected frontend to render plural active_works data, not only a single aggregate projection",
   );
   assert.match(
     appSource,
-    /op-agent-card[\s\S]+last_board_entry_id/,
-    "expected agent cards to preserve board linkage for handoff/debugging",
+    /op-work-card[\s\S]+renderActiveWorkAgentCard\(agent\)/,
+    "expected Active Works rows to render their live Agent cards",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderActiveWorkAgentCard\(agent\)[\s\S]+op-agent-card[\s\S]+last_board_entry_id/,
+    "expected Active Works rows to preserve agent board linkage for handoff/debugging",
   );
 });
 
@@ -211,8 +221,8 @@ test("Workspace sidebar keeps Quick before the expanding active work list", () =
   );
   assert.deepEqual(
     headings.slice(0, 3),
-    ["Layers", "Quick", "Active Work"],
-    "Quick must stay above Active Work so agent cards do not push it off-screen",
+    ["Layers", "Quick", "Active Works"],
+    "Quick must stay above Active Works so Work cards do not push it off-screen",
   );
 });
 
@@ -417,7 +427,7 @@ test("Active Work title prefers concrete work context over Start Work workflow l
   );
   assert.match(
     appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(activeWorkProjection,\s*agents\)\)/,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(work,\s*work\.agents\)\)/,
     "expected Active Work summary title to use the display-title helper",
   );
   assert.doesNotMatch(
@@ -430,7 +440,7 @@ test("Active Work title prefers concrete work context over Start Work workflow l
 test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
-    /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
+    /function\s+activeWorkFocusableAgents\(work\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
     "expected Active Work cards to be filtered against live workspace windows",
   );
   assert.match(
@@ -445,7 +455,7 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
   assert.match(
     appSource,
-    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    /if\s*\(workCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
     "expected no focusable Agent windows to remove the Active Work sidebar section",
   );
   assert.match(

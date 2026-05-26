@@ -1667,6 +1667,8 @@ fn active_work_projection_from_saved_with_journal(
             .cmp(&right.display_name)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
+    let active_works = active_work_items_from_projection(&projection, &agents, &workspaces);
+    let active_work_count = active_works.len();
 
     gwt::ActiveWorkProjectionView {
         id: projection.id,
@@ -1688,6 +1690,8 @@ fn active_work_projection_from_saved_with_journal(
         journal_entries,
         workspaces,
         cleanup_candidate,
+        active_work_count,
+        active_works,
         agents,
         unassigned_agents,
     }
@@ -1717,9 +1721,160 @@ fn empty_active_work_projection_view(
         journal_entries: Vec::new(),
         workspaces: Vec::new(),
         cleanup_candidate: None,
+        active_work_count: 0,
+        active_works: Vec::new(),
         agents: Vec::new(),
         unassigned_agents: Vec::new(),
     }
+}
+
+fn active_work_items_from_projection(
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    agents: &[gwt::ActiveWorkAgentView],
+    workspaces: &[gwt::WorkspaceHistoryView],
+) -> Vec<gwt::ActiveWorkItemView> {
+    let mut grouped: Vec<(String, Vec<gwt::ActiveWorkAgentView>)> = Vec::new();
+    for agent in agents {
+        let work_id = agent
+            .workspace_id
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| projection.id.clone());
+        if let Some((_, group_agents)) = grouped.iter_mut().find(|(id, _)| id == &work_id) {
+            group_agents.push(agent.clone());
+        } else {
+            grouped.push((work_id, vec![agent.clone()]));
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(work_id, agents)| {
+            let history = workspaces.iter().find(|item| item.id == work_id);
+            let container = history.and_then(|item| item.execution_containers.first());
+            let is_current_projection = work_id == projection.id;
+            let active_agents = agents
+                .iter()
+                .filter(|agent| agent.status_category == "active")
+                .count();
+            let blocked_agents = agents
+                .iter()
+                .filter(|agent| agent.status_category == "blocked")
+                .count();
+            let status_category = if blocked_agents > 0 {
+                "blocked".to_string()
+            } else if active_agents > 0 {
+                "active".to_string()
+            } else if let Some(history) = history {
+                history.status_category.clone()
+            } else {
+                workspace_status_category_wire(projection.effective_status_category()).to_string()
+            };
+            let status_text = if is_current_projection {
+                projection.status_text.clone()
+            } else {
+                history
+                    .and_then(|item| item.summary.clone().or_else(|| item.intent.clone()))
+                    .unwrap_or_else(|| {
+                        if blocked_agents > 0 {
+                            format!("{blocked_agents} blocked agents")
+                        } else if active_agents == 1 {
+                            "1 active agent".to_string()
+                        } else {
+                            format!("{} active agents", agents.len())
+                        }
+                    })
+            };
+            let first_agent = agents.first();
+
+            gwt::ActiveWorkItemView {
+                id: work_id.clone(),
+                title: history
+                    .map(|item| item.title.clone())
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| is_current_projection.then(|| projection.title.clone()))
+                    .or_else(|| first_agent.and_then(|agent| agent.title_summary.clone()))
+                    .or_else(|| first_agent.and_then(|agent| agent.current_focus.clone()))
+                    .unwrap_or(work_id),
+                status_category,
+                status_text,
+                summary: history
+                    .and_then(|item| item.summary.clone().or_else(|| item.intent.clone()))
+                    .or_else(|| {
+                        is_current_projection
+                            .then(|| projection.summary.clone())
+                            .flatten()
+                    }),
+                owner: history.and_then(|item| item.owner.clone()).or_else(|| {
+                    is_current_projection
+                        .then(|| projection.owner.clone())
+                        .flatten()
+                }),
+                next_action: if is_current_projection {
+                    projection.next_action.clone()
+                } else {
+                    None
+                },
+                active_agents,
+                blocked_agents,
+                branch: if is_current_projection {
+                    projection
+                        .git_details
+                        .as_ref()
+                        .and_then(|details| details.branch.clone())
+                } else {
+                    container
+                        .and_then(|value| value.branch.clone())
+                        .or_else(|| first_agent.and_then(|agent| agent.branch.clone()))
+                },
+                worktree_path: if is_current_projection {
+                    projection.git_details.as_ref().and_then(|details| {
+                        details
+                            .worktree_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                    })
+                } else {
+                    container
+                        .and_then(|value| value.worktree_path.clone())
+                        .or_else(|| first_agent.and_then(|agent| agent.worktree_path.clone()))
+                },
+                pr_number: if is_current_projection {
+                    projection
+                        .git_details
+                        .as_ref()
+                        .and_then(|details| details.pr_number)
+                } else {
+                    container.and_then(|value| value.pr_number)
+                },
+                pr_url: if is_current_projection {
+                    projection
+                        .git_details
+                        .as_ref()
+                        .and_then(|details| details.pr_url.clone())
+                } else {
+                    container.and_then(|value| value.pr_url.clone())
+                },
+                pr_state: if is_current_projection {
+                    projection
+                        .git_details
+                        .as_ref()
+                        .and_then(|details| details.pr_state.clone())
+                } else {
+                    container.and_then(|value| value.pr_state.clone())
+                },
+                board_refs: if is_current_projection {
+                    projection.board_refs.clone()
+                } else {
+                    history
+                        .map(|item| item.board_refs.clone())
+                        .unwrap_or_default()
+                },
+                agents,
+            }
+        })
+        .collect()
 }
 
 fn active_work_cleanup_candidate_view_from_candidate(
@@ -4139,6 +4294,28 @@ impl AppRuntime {
                 .cmp(&right.display_name)
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
+        let active_works = vec![gwt::ActiveWorkItemView {
+            id: tab_id.to_string(),
+            title: format!("{} workspace", tab.title),
+            status_category: "active".to_string(),
+            status_text: if active_agents == 1 {
+                "1 active agent".to_string()
+            } else {
+                format!("{active_agents} active agents")
+            },
+            summary: None,
+            owner: None,
+            next_action: Some("Check Board for latest updates".to_string()),
+            active_agents,
+            blocked_agents: 0,
+            branch: Some(first.branch_name.clone()),
+            worktree_path: Some(first.worktree_path.display().to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: agents.clone(),
+        }];
         Some(gwt::ActiveWorkProjectionView {
             id: tab_id.to_string(),
             title: format!("{} workspace", tab.title),
@@ -4163,6 +4340,8 @@ impl AppRuntime {
             journal_entries: Vec::new(),
             workspaces: Vec::new(),
             cleanup_candidate: None,
+            active_work_count: active_works.len(),
+            active_works,
             agents,
             unassigned_agents: Vec::new(),
         })
@@ -12155,6 +12334,146 @@ exit 1
                 && projection.unassigned_agents.len() == 2
                 && projection.branch.is_none()
         )));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_groups_live_assigned_agents_by_work_id() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push({
+            let mut agent = workspace_agent_summary_for_test("session-a", Some("work-a"));
+            agent.window_id = Some("tab-1::agent-a".to_string());
+            agent.title_summary = Some("Parser cleanup".to_string());
+            agent
+        });
+        projection.agents.push({
+            let mut agent = workspace_agent_summary_for_test("session-b", Some("work-b"));
+            agent.window_id = Some("tab-1::agent-b".to_string());
+            agent.title_summary = Some("UI polish".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        for (window_id, session_id) in [
+            ("tab-1::agent-a", "session-a"),
+            ("tab-1::agent-b", "session-b"),
+        ] {
+            let mut session = sample_active_agent_session("tab-1", window_id);
+            session.session_id = session_id.to_string();
+            session.window_id = window_id.to_string();
+            runtime
+                .active_agent_sessions
+                .insert(window_id.to_string(), session);
+        }
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_work_count, 2);
+        assert_eq!(view.active_works.len(), 2);
+        assert_eq!(view.active_works[0].agents.len(), 1);
+        assert_eq!(view.active_works[1].agents.len(), 1);
+        assert!(view.active_works.iter().any(|work| work.id == "work-a"
+            && work
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-a")));
+        assert!(view.active_works.iter().any(|work| work.id == "work-b"
+            && work
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-b")));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_groups_multiple_agents_in_one_work_row() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        for (session_id, window_id) in [
+            ("session-a", "tab-1::agent-a"),
+            ("session-b", "tab-1::agent-b"),
+        ] {
+            let mut agent = workspace_agent_summary_for_test(session_id, Some("work-shared"));
+            agent.window_id = Some(window_id.to_string());
+            projection.agents.push(agent);
+        }
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        for (window_id, session_id) in [
+            ("tab-1::agent-a", "session-a"),
+            ("tab-1::agent-b", "session-b"),
+        ] {
+            let mut session = sample_active_agent_session("tab-1", window_id);
+            session.session_id = session_id.to_string();
+            session.window_id = window_id.to_string();
+            runtime
+                .active_agent_sessions
+                .insert(window_id.to_string(), session);
+        }
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_work_count, 1);
+        assert_eq!(view.active_works.len(), 1);
+        assert_eq!(view.active_works[0].id, "work-shared");
+        assert_eq!(view.active_works[0].agents.len(), 2);
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_keeps_unassigned_agents_out_of_active_works() {
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.register_unassigned_agent({
+            let mut agent = workspace_agent_summary_for_test("session-unassigned", None);
+            agent.window_id = Some("tab-1::agent-unassigned".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut session = sample_active_agent_session("tab-1", "tab-1::agent-unassigned");
+        session.session_id = "session-unassigned".to_string();
+        runtime
+            .active_agent_sessions
+            .insert(session.window_id.clone(), session);
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_work_count, 0);
+        assert!(view.active_works.is_empty());
+        assert_eq!(view.unassigned_agents.len(), 1);
     }
 
     #[test]

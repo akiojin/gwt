@@ -907,6 +907,26 @@ pub struct ActiveWorkCleanupCandidateView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkItemView {
+    pub id: String,
+    pub title: String,
+    pub status_category: String,
+    pub status_text: String,
+    pub summary: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub active_agents: usize,
+    pub blocked_agents: usize,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<String>,
+    pub board_refs: Vec<String>,
+    pub agents: Vec<ActiveWorkAgentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
@@ -928,6 +948,10 @@ pub struct ActiveWorkProjectionView {
     #[serde(default, alias = "work_items")]
     pub workspaces: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
+    #[serde(default)]
+    pub active_work_count: usize,
+    #[serde(default)]
+    pub active_works: Vec<ActiveWorkItemView>,
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
@@ -2379,6 +2403,25 @@ mod tests {
                     default_delete_remote: false,
                     remote_delete_available: true,
                 }),
+                active_work_count: 1,
+                active_works: vec![super::ActiveWorkItemView {
+                    id: "work-1".to_string(),
+                    title: "Implement Start Work".to_string(),
+                    status_category: "active".to_string(),
+                    status_text: "Launching from Project Bar".to_string(),
+                    summary: Some("Launching from Project Bar".to_string()),
+                    owner: Some("SPEC-2359".to_string()),
+                    next_action: Some("Run launch tests".to_string()),
+                    active_agents: 1,
+                    blocked_agents: 0,
+                    branch: Some("work/20260504-1200".to_string()),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    pr_number: Some(2538),
+                    pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
+                    pr_state: Some("OPEN".to_string()),
+                    board_refs: vec!["board-1".to_string()],
+                    agents: Vec::new(),
+                }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
