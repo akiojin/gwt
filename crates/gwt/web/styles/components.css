@@ -686,13 +686,15 @@ body::after {
 }
 
 .op-work-summary,
+.op-work-card,
 .op-agent-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
 }
 
-.op-work-summary {
+.op-work-summary,
+.op-work-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -767,6 +769,23 @@ body::after {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+.op-work-card[data-state="blocked"] {
+  border-color: var(--color-state-blocked);
+}
+
+.op-work-card[data-state="active"] {
+  border-color: var(--color-state-active);
+}
+
+.op-work-card[data-state="idle"] {
+  border-color: color-mix(in oklab, var(--color-state-idle) 55%, var(--color-border));
+}
+
+.op-work-card[data-state="done"] {
+  border-color: color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  opacity: 0.82;
 }
 
 .op-agent-card {

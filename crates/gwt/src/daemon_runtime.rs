@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
@@ -93,7 +93,7 @@ pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
         Some(event),
         runtime_state::status_for_event(event).map(str::to_string),
         None,
-        current_session_from_env()?,
+        current_session_from_env(),
         parse_hook_event_best_effort(input),
     ));
     Ok(())
@@ -109,7 +109,7 @@ pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
         Some("Stop"),
         Some("Running".to_string()),
         Some("blocked-stop".to_string()),
-        current_session_from_env()?,
+        current_session_from_env(),
         parse_hook_event_best_effort(input),
     ));
     Ok(())
@@ -122,7 +122,7 @@ pub fn handle_coordination_event(event: &str, input: &str) -> Result<(), HookErr
         Some(event),
         None,
         Some(format!("coordination:{event}")),
-        current_session_from_env()?,
+        current_session_from_env(),
         parse_hook_event_best_effort(input),
     ));
     Ok(())
@@ -135,7 +135,7 @@ pub fn handle_forward(input: &str) -> Result<(), HookError> {
         None,
         None,
         None,
-        current_session_from_env()?,
+        current_session_from_env(),
         parse_hook_event_best_effort(input),
     ));
     Ok(())
@@ -243,17 +243,24 @@ fn parse_hook_event_best_effort(input: &str) -> Option<RawHookEvent> {
     RawHookEvent::read_from_str(input).ok().flatten()
 }
 
-fn current_session_from_env() -> io::Result<Option<Session>> {
-    let Some(session_id) = std::env::var_os(GWT_SESSION_ID_ENV) else {
-        return Ok(None);
-    };
+fn current_session_from_env() -> Option<Session> {
+    let session_id = std::env::var_os(GWT_SESSION_ID_ENV)?;
     let sessions_dir =
         session_dir_from_runtime_path_env().unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
     let path = sessions_dir.join(format!("{}.toml", session_id.to_string_lossy()));
     if !path.exists() {
-        return Ok(None);
+        return None;
     }
-    Session::load_and_migrate(&path).map(Some)
+    match Session::load_and_migrate(&path) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            eprintln!(
+                "gwtd hook live event: failed to load session metadata {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn session_dir_from_runtime_path_env() -> Option<PathBuf> {
@@ -268,6 +275,44 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn loopback_target_rejects_remote_hosts() {
@@ -288,5 +333,25 @@ mod tests {
         };
 
         target.validate().expect("loopback target");
+    }
+
+    #[test]
+    fn forward_hook_ignores_corrupt_session_metadata() {
+        let _env_lock = env_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(sessions_dir.join("session-1.toml"), "odex\"")
+            .expect("corrupt session file");
+        let runtime_path = sessions_dir
+            .join("runtime")
+            .join("42")
+            .join("session-1.json");
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-1");
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(GWT_HOOK_FORWARD_TOKEN_ENV);
+
+        handle_forward("{}").expect("forward hook remains fail-open");
     }
 }

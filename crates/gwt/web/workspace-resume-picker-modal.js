@@ -96,7 +96,7 @@ export function renderWorkspaceResumePicker({
   modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) dialogEl.removeChild(dialogEl.firstChild);
 
-  dialogEl.appendChild(createNode("h2", "workspace-resume-picker-title", "Resume Workspace"));
+  dialogEl.appendChild(createNode("h2", "workspace-resume-picker-title", "Resume Work"));
   dialogEl.appendChild(
     createNode(
       "p",
@@ -111,7 +111,7 @@ export function renderWorkspaceResumePicker({
       createNode(
         "div",
         "workspace-resume-picker-empty",
-        "No resumable agents for this Workspace.",
+        "No resumable agents for this Work.",
       ),
     );
   } else {

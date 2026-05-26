@@ -155,6 +155,11 @@ test("frontend handles active work projection as status-strip telemetry", () => 
     /activeWorkProjection[\s\S]+applyTelemetryCounts/,
     "expected active work projection to feed Operator telemetry",
   );
+  assert.match(
+    appSource,
+    /counts\.branches[\s\S]+activeWorks\.length/,
+    "expected Status Strip Work telemetry to count active Works, not only branch-list rows",
+  );
 });
 
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
@@ -186,21 +191,26 @@ test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
 test("Workspace sidebar exposes active work and per-agent overview", () => {
   assert.ok(
     document.querySelector("#op-active-work"),
-    "expected Workspace shell to expose an active work overview region",
+    "expected Workspace shell to expose an Active Works overview region",
   );
   assert.ok(
     document.querySelector("#op-active-work-agents"),
-    "expected Workspace shell to expose a per-agent list region",
+    "expected Workspace shell to expose a per-Work list region",
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkFocusableAgents\(activeWorkProjection\)/,
-    "expected frontend to render focusable per-agent projection data, not only aggregate counters",
+    /function\s+activeWorkItemsFromProjection\(\)[\s\S]+active_works/,
+    "expected frontend to render plural active_works data, not only a single aggregate projection",
   );
   assert.match(
     appSource,
-    /op-agent-card[\s\S]+last_board_entry_id/,
-    "expected agent cards to preserve board linkage for handoff/debugging",
+    /op-work-card[\s\S]+renderActiveWorkAgentCard\(agent\)/,
+    "expected Active Works rows to render their live Agent cards",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderActiveWorkAgentCard\(agent\)[\s\S]+op-agent-card[\s\S]+last_board_entry_id/,
+    "expected Active Works rows to preserve agent board linkage for handoff/debugging",
   );
 });
 
@@ -211,8 +221,8 @@ test("Workspace sidebar keeps Quick before the expanding active work list", () =
   );
   assert.deepEqual(
     headings.slice(0, 3),
-    ["Layers", "Quick", "Active Work"],
-    "Quick must stay above Active Work so agent cards do not push it off-screen",
+    ["Layers", "Quick", "Active Works"],
+    "Quick must stay above Active Works so Work cards do not push it off-screen",
   );
 });
 
@@ -417,7 +427,7 @@ test("Active Work title prefers concrete work context over Start Work workflow l
   );
   assert.match(
     appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(activeWorkProjection,\s*agents\)\)/,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(work,\s*work\.agents\)\)/,
     "expected Active Work summary title to use the display-title helper",
   );
   assert.doesNotMatch(
@@ -430,7 +440,7 @@ test("Active Work title prefers concrete work context over Start Work workflow l
 test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
-    /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
+    /function\s+activeWorkFocusableAgents\(work\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
     "expected Active Work cards to be filtered against live workspace windows",
   );
   assert.match(
@@ -445,7 +455,7 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
   assert.match(
     appSource,
-    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    /if\s*\(workCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
     "expected no focusable Agent windows to remove the Active Work sidebar section",
   );
   assert.match(
@@ -509,8 +519,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("workspace"\)/,
-    "expected Workspace Overview to open the Workspace window instead of a drawer",
+    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("work"\)/,
+    "expected Workspace Overview to open the Work window instead of a drawer",
   );
   assert.match(
     appSource,
@@ -531,8 +541,8 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   );
   assert.match(
     appSource,
-    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"workspace"[\s\S]+return\s+"workspace"/,
-    "expected Workspace to be a first-class window surface",
+    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"work"[\s\S]+return\s+"work"/,
+    "expected Work to be a first-class window surface",
   );
   assert.match(
     workspaceOverviewSource,
@@ -546,8 +556,8 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   );
   assert.match(
     workspaceOverviewSource,
-    /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
-    "expected Workspace Overview to render Workspace entries from active_work_projection",
+    /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.works[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
+    "expected Work Overview to render Work entries from active_work_projection",
   );
   // SPEC-2359 US-42 — Resume action now opens the Workspace Resume
   // Picker via `list_resumable_agents` instead of the legacy
@@ -598,16 +608,11 @@ test("Workspace Overview legacy drawer scaffold is retired", () => {
   );
 });
 
-test("non-agent surface presets open maximized from command focus paths", () => {
+test("no surface presets auto-maximize — uniform 720×420 floating windows", () => {
   assert.match(
     appSource,
-    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)[\s\S]+file_tree[\s\S]+branches[\s\S]+settings[\s\S]+profile[\s\S]+logs[\s\S]+issue[\s\S]+spec[\s\S]+workspace[\s\S]+board[\s\S]+pr/,
-    "expected frontend focus/spawn path to identify every non-agent surface preset as auto-maximized",
-  );
-  assert.match(
-    appSource,
-    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedSurfacePreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
-    "expected focusOrSpawnPreset to send viewport bounds when focusing existing non-agent surfaces",
+    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)\s*\{[^}]*return\s+false/,
+    "expected isAutoMaximizedSurfacePreset to always return false (auto-maximize abolished)",
   );
 });
 
@@ -1061,9 +1066,10 @@ test("xterm content stays on the dark Operator palette across app theme changes"
 
 test("xterm developer readability defaults use larger font metrics", () => {
   assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
-  assert.ok(
-    terminalOptionNumber("lineHeight") >= 1.3,
-    "xterm lineHeight must be at least 1.30 to avoid cramped SS.mov output",
+  assert.match(
+    appSource,
+    /lineHeight:\s*isBlinkBrowser\(\)\s*\?\s*1\.3[0-9]*\s*:\s*1\.3/,
+    "xterm lineHeight must be at least 1.30 for both Blink and WebKit paths (Issue #2903)",
   );
 });
 
@@ -2460,7 +2466,7 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-logs",
     "surface-knowledge",
     "surface-index",
-    "surface-workspace",
+    "surface-work",
     "surface-profile",
     "surface-console",
     "surface-mock",
@@ -2481,7 +2487,7 @@ test("every readable non-terminal surface participates in the opaque window chro
     "logs",
     "knowledge",
     "index",
-    "workspace",
+    "work",
     "profile",
     "console",
     "mock",

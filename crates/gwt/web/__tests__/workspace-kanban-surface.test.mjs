@@ -40,13 +40,87 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
 
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue, "unassigned agents should have a dedicated queue");
-  assert.match(queue.textContent, /Unassigned agents/);
+  assert.match(queue.textContent, /Unassigned Agents/);
   assert.match(queue.textContent, /No Work selected/);
   assert.match(queue.textContent, /Codex/);
   assert.equal(
     queue.querySelectorAll(".workspace-overview-agent-row").length,
     1,
   );
+});
+
+test("Workspace Overview renders Active Works from active_works and keeps Unassigned Agents separate", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "legacy-current",
+    title: "Legacy current projection",
+    status_category: "active",
+    active_work_count: 2,
+    active_works: [
+      {
+        id: "work-parser",
+        title: "Parser cleanup",
+        status_category: "active",
+        summary: "Parser Work summary",
+        owner: "SPEC-2359",
+        agents: [
+          {
+            session_id: "agent-parser",
+            display_name: "Codex",
+            status_category: "active",
+            title_summary: "Parser cleanup",
+          },
+        ],
+      },
+      {
+        id: "work-ui",
+        title: "UI polish",
+        status_category: "blocked",
+        blocked_agents: 1,
+        agents: [
+          {
+            session_id: "agent-ui",
+            display_name: "Claude Code",
+            status_category: "blocked",
+            title_summary: "UI polish",
+          },
+        ],
+      },
+    ],
+    unassigned_agents: [
+      {
+        session_id: "agent-unassigned",
+        display_name: "Codex",
+        status_category: "active",
+        affiliation_status: "unassigned",
+      },
+    ],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.match(fixture.body.textContent, /Active Works/);
+  assert.match(fixture.body.textContent, /Unassigned Agents/);
+  assert.match(
+    fixture.body.querySelector(".workspace-overview-status-line").textContent,
+    /2 Active Works · 1 Unassigned Agents/,
+  );
+  const rows = Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  );
+  assert.deepEqual(
+    rows.map((row) => row.dataset.workspaceId),
+    ["work-parser", "work-ui"],
+  );
+  assert.match(rows[0].textContent, /Parser cleanup/);
+  assert.match(rows[1].textContent, /UI polish/);
+  const queue = fixture.body.querySelector(".workspace-agent-queue");
+  assert.ok(queue);
+  assert.equal(queue.querySelectorAll(".workspace-overview-agent-row").length, 1);
+  assert.match(queue.textContent, /No Work selected/);
 });
 
 test("Workspace detail renders structured body sections without preformatted dumps", () => {
@@ -127,6 +201,41 @@ test("Workspace resume action asks backend for resumable agents", () => {
   assert.equal(sent[0].workspace_id, "workspace-current");
 });
 
+test("Tab switcher remains visible after switching to Git Branches", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, sampleProjection());
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const tabs = fixture.body.querySelectorAll("[data-work-tab]");
+  assert.equal(tabs.length, 2, "should have Work and Git Branches tabs");
+
+  const branchTab = fixture.body.querySelector("[data-work-tab='branches']");
+  branchTab.click();
+
+  const workSection = fixture.body.querySelector("[data-work-section='work']");
+  const branchSection = fixture.body.querySelector("[data-work-section='branches']");
+  assert.equal(workSection.hidden, true, "work section should be hidden");
+  assert.equal(branchSection.hidden, false, "branches section should be visible");
+
+  const tabGroupAfter = fixture.body.querySelector(".workspace-tab-group");
+  assert.ok(tabGroupAfter, "tab group should still exist in DOM");
+  assert.equal(tabGroupAfter.hidden, false, "tab group should not be hidden");
+
+  const workTabAfter = fixture.body.querySelector("[data-work-tab='work']");
+  assert.ok(workTabAfter, "Work tab should remain accessible");
+  assert.equal(workTabAfter.classList.contains("is-active"), false);
+  assert.equal(branchTab.classList.contains("is-active"), true);
+
+  workTabAfter.click();
+  assert.equal(workSection.hidden, false, "work section should reappear");
+  assert.equal(branchSection.hidden, true, "branches section should hide");
+  assert.equal(workTabAfter.classList.contains("is-active"), true);
+});
+
 test("Workspace refresh action rerenders locally without inventing a protocol event", () => {
   const fixture = createFixture();
   const sent = [];
@@ -180,7 +289,7 @@ function sampleProjection() {
         board_entry_id: "board-claim-1",
       },
     ],
-    workspaces: [
+    works: [
       {
         id: "workspace-current",
         title: "Release Notes cleanup",

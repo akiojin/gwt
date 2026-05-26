@@ -6137,3 +6137,38 @@ Type: lesson
 Context: PR #2894 review found that normalize_windows_child_process_path used Path::to_string_lossy(), which can replace valid Unix non-UTF8 path bytes with the UTF-8 replacement sequence when the shared helper is called broadly at launch/worktree boundaries.
 Learning: Windows-specific path normalization helpers must not lossy-convert Path values. Only rewrite when Path::to_str() succeeds and a known Windows provider/verbatim prefix is present; otherwise return the original PathBuf to preserve platform path bytes.
 Future Action: Before broadening any Path normalization helper, add Unix non-UTF8 byte-preservation tests alongside the Windows prefix tests, then verify the helper returns unchanged PathBuf for non-UTF8 and no-op inputs.
+
+## 2026-05-26 — Separate Launch Wizard runtime detection root from target worktree materialization
+
+Type: lesson
+Context: SPEC-2014 managed workspace parent bug: Start Work opened at /Users/akiojin/Workbench/gwt while Docker files lived in nested develop checkout, so Runtime target selection was hidden.
+Learning: Runtime confirmation must first prefer an existing target worktree, but when the target worktree does not exist it should use an existing checkout such as develop/main for Docker context detection without resolving or creating the target worktree.
+Future Action: When touching Launch Wizard runtime context, add tests for workspace parent roots and assert the target worktree remains absent until the final launch/materialization step.
+
+## 2026-05-26 — session.json project_root が非 git ディレクトリを指すと workspace.json ハッシュ不一致で空 workspace が読み込まれる
+
+Type: lesson
+Context: gwt serve 検証時、session.json の gwt タブが /Users/akiojin/Workbench/gwt（bare repo 親ディレクトリ、git リポジトリではない）を指していたため、detect_repo_hash が失敗し compute_path_hash（パスベース b19aac38305901f5）にフォールバック。実際の workspace.json は remote URL ベースハッシュ 99a8660247f5bc49 に保存されており、空の workspace が読み込まれてウィンドウが 0 件になった。
+Learning: project_scope_hash は (1) origin URL ベースと (2) パスベースの 2 種類のハッシュを返す。session.json の project_root が git リポジトリでない場合、パスベースにフォールバックし、production app が書いた workspace.json と別ファイルを読む。
+Future Action: ウィンドウ復元テスト時は session.json の project_root が実際の git ワーキングツリーを指しているか確認する。非 git ディレクトリ → パスハッシュフォールバック問題は別 Issue として登録する。
+
+## 2026-05-25 — 既存ブランチの実装確認は git log --all で先に行う
+
+Type: lesson
+Context: SPEC-2359 Phase W (Workspace → Work) を develop で実装し始めたが、work/20260524-0442 ブランチで既に完全に実装済み (PR #2885) だった
+Learning: 新しい作業を始める前に git log --all --oneline --grep でキーワード検索し、他ブランチで既に実装されていないか確認する。SPEC の tasks が unchecked でも、別の worktree/agent が実装済みの可能性がある
+Future Action: 実装着手前に git log --all --grep と gh pr list で既存実装・オープン PR を確認する preflight を必ず行う
+
+## 2026-05-25 — visual regression workflow 削除後の required check 残骸
+
+Type: lesson
+Context: v9.46.0 リリースで visual-regression.yml を削除したが、main branch protection の required status checks に Operator Design System (Playwright) が残っていたため PR が BLOCKED になった
+Learning: CI workflow を削除する際は、対応する branch protection required status checks も同時に削除する必要がある
+Future Action: workflow ファイルを削除する commit を含むリリースでは、branch protection required checks の棚卸しを行う
+
+## 2026-05-25 — git status の M (tracked modified) を untracked と誤認しない
+
+Type: lesson
+Context: リリース作業中に tasks/memory.md の stash pop コンフリクトを解消する際、git status で M (modified/tracked) と表示されていたファイルを「バージョン管理対象外のローカルファイル」と誤認し、--theirs で一方的に上書きした
+Learning: git status の M は tracked file の変更を示す。?? が untracked。ファイルがバージョン管理対象かどうかは git status の表記で判断でき、思い込みで判断してはならない
+Future Action: stash pop コンフリクト解消時は、必ず両側の差分を確認し、tracked file であれば両方の変更を保持するマージを行う。一方的に --theirs / --ours で上書きしない

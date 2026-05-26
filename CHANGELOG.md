@@ -1,6 +1,32 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.47.0] - 2026-05-26
+
+### Bug Fixes
+
+- **ui:** Keep tab switcher visible when switching to Git Branches view
+- **gui:** Persist agent windows in workspace.json for restore on restart
+- **gui:** Coalesce browser resize events and adjust Blink lineHeight (#2903)
+- **launch:** Detect docker runtime from managed workspace root
+- **launch:** Prevent wizard close event starvation under load
+- Ignore stopped windows when resuming agents
+
+### Features
+
+- Support multiple active works
+- Align active work identity and agent cardinality
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into launch runtime fix
+- Resolve memory.md conflict from develop merge
+- Resolve memory.md conflict from develop merge
+
+### Refactor
+
+- **gui:** Unify window size to 720×420 and rename Workspace enum to Work
+
 ## [9.46.1] - 2026-05-25
 
 ### Bug Fixes

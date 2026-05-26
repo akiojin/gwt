@@ -98,6 +98,8 @@ pub struct PersistedWindowState {
     /// Marks the visible tab inside a tab group. Ignored for ungrouped windows.
     #[serde(default)]
     pub tab_group_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,6 +196,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 agent_color: None,
                 tab_group_id: None,
                 tab_group_active: false,
+                session_id: None,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -219,6 +222,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 agent_color: None,
                 tab_group_id: None,
                 tab_group_active: false,
+                session_id: None,
             },
         ],
         next_z_index: 3,
@@ -559,6 +563,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -584,6 +589,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
             ],
             next_z_index: 6,
@@ -692,6 +698,92 @@ mod tests {
     }
 
     #[test]
+    fn persisted_window_state_round_trips_session_id() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.session_id = Some("sess-abc-123".to_string());
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"session_id\""),
+            "session_id must persist for auto-resume deduplication"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed.session_id.as_deref(), Some("sess-abc-123"));
+    }
+
+    #[test]
+    fn persisted_window_state_omits_session_id_when_none() {
+        let window = default_workspace_state().windows.remove(0);
+        assert!(window.session_id.is_none());
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            !json.contains("session_id"),
+            "session_id must be omitted when None to keep legacy payloads clean"
+        );
+    }
+
+    #[test]
+    fn persisted_window_state_defaults_missing_session_id() {
+        let json = r#"{
+  "id": "agent-1",
+  "title": "Agent",
+  "preset": "agent",
+  "geometry": { "x": 0.0, "y": 0.0, "width": 720.0, "height": 420.0 },
+  "z_index": 1,
+  "status": "running",
+  "persist": true
+}"#;
+        let parsed: PersistedWindowState = serde_json::from_str(json).expect("parse legacy");
+        assert!(
+            parsed.session_id.is_none(),
+            "legacy payloads without session_id must default to None"
+        );
+    }
+
+    #[test]
+    fn pause_process_windows_for_restore_pauses_agent_windows() {
+        let mut state = PersistedWorkspaceState {
+            viewport: default_canvas_viewport(),
+            windows: vec![PersistedWindowState {
+                id: "agent-1".to_string(),
+                title: "Agent".to_string(),
+                preset: WindowPreset::Agent,
+                geometry: WindowGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 720.0,
+                    height: 420.0,
+                },
+                geometry_revision: 0,
+                z_index: 1,
+                status: WindowProcessStatus::Running,
+                minimized: false,
+                maximized: false,
+                pre_maximize_geometry: None,
+                persist: true,
+                purpose_title: None,
+                dynamic_title: None,
+                dynamic_title_detail: None,
+                agent_id: Some("claude".into()),
+                agent_color: None,
+                tab_group_id: None,
+                tab_group_active: false,
+                session_id: Some("sess-1".into()),
+            }],
+            next_z_index: 2,
+        };
+
+        pause_process_windows_for_restore(&mut state);
+        assert_eq!(
+            state.windows[0].status,
+            WindowState::Stopped,
+            "Agent windows must be paused on restore"
+        );
+    }
+
+    #[test]
     fn persisted_window_state_defaults_missing_geometry_revision() {
         let json = r#"{
   "id": "terminal-1",
@@ -769,6 +861,7 @@ mod tests {
             agent_color: Some(AgentColor::Yellow),
             tab_group_id: None,
             tab_group_active: false,
+            session_id: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -840,6 +933,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -865,6 +959,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
             ],
             next_z_index: 3,
@@ -1075,6 +1170,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -1100,6 +1196,7 @@ mod tests {
                     agent_color: None,
                     tab_group_id: None,
                     tab_group_active: false,
+                    session_id: None,
                 },
             ],
             next_z_index: 3,

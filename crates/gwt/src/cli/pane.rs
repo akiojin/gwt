@@ -445,6 +445,7 @@ mod tests {
             agent_color: None,
             tab_group_id: None,
             tab_group_active: false,
+            session_id: None,
         }
     }
 

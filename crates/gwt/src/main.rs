@@ -1272,6 +1272,7 @@ mod tests {
             agent_color: None,
             tab_group_id: None,
             tab_group_active: false,
+            session_id: None,
         }
     }
 
@@ -2441,14 +2442,14 @@ mod tests {
             .raw_id
             .clone();
         assert!(
-            runtime
+            !runtime
                 .tab("tab-1")
                 .expect("tab")
                 .workspace
                 .window(&file_tree_raw_id)
                 .expect("window")
                 .maximized,
-            "non-agent windows should be maximized on create"
+            "windows should not be auto-maximized on create"
         );
 
         assert_eq!(
@@ -2563,7 +2564,7 @@ mod tests {
                 .window(&board_raw_id)
                 .expect("board window")
                 .maximized,
-            "pre-existing Board windows can be restored from normal floating persistence",
+            "Board windows should not auto-maximize",
         );
         assert_eq!(
             runtime
@@ -2572,14 +2573,14 @@ mod tests {
             1
         );
         assert!(
-            runtime
+            !runtime
                 .tab("tab-1")
                 .expect("tab")
                 .workspace
                 .window(&board_raw_id)
                 .expect("board window")
                 .maximized,
-            "focusing a Board window with viewport bounds should maximize it",
+            "focusing a window should not auto-maximize it",
         );
 
         let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
@@ -2603,7 +2604,7 @@ mod tests {
                 .window(&shell_raw_id)
                 .expect("shell window")
                 .maximized,
-            "agent-capable terminal windows should keep their normal floating size",
+            "shell windows should keep their normal floating size",
         );
 
         for preset in [
@@ -2614,7 +2615,7 @@ mod tests {
             WindowPreset::Logs,
             WindowPreset::Issue,
             WindowPreset::Spec,
-            WindowPreset::Workspace,
+            WindowPreset::Work,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -2635,11 +2636,9 @@ mod tests {
                 .workspace
                 .window(&raw_id)
                 .expect("window");
-            assert!(window.maximized, "{id} should open maximized");
-            assert_eq!(window.geometry.x, 24.0);
-            assert_eq!(window.geometry.y, 24.0);
-            assert_eq!(window.geometry.width, 1352.0);
-            assert_eq!(window.geometry.height, 852.0);
+            assert!(!window.maximized, "{id} should not be auto-maximized");
+            assert_eq!(window.geometry.width, 720.0);
+            assert_eq!(window.geometry.height, 420.0);
         }
     }
 
