@@ -507,7 +507,19 @@ impl AppRuntime {
         if let Some(window_id) = self
             .active_agent_sessions
             .iter()
-            .find(|(_, session)| session.session_id == session_id && session.tab_id == tab_id)
+            .find(|(window_id, session)| {
+                session.session_id == session_id
+                    && session.tab_id == tab_id
+                    && self.window_lookup.contains_key(window_id.as_str())
+                    && self
+                        .window_status(window_id.as_str())
+                        .is_some_and(|status| {
+                            !matches!(
+                                status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                        })
+            })
             .map(|(window_id, _)| window_id.clone())
         {
             return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));

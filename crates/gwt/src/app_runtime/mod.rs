@@ -13379,6 +13379,48 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo,
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let mut session = sample_active_agent_session("tab-1", &window_id);
+        session.session_id = "stopped-session".to_string();
+        session.window_id = window_id.clone();
+        runtime.active_agent_sessions.insert(window_id, session);
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspaceAgent {
+                session_id: "stopped-session".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let event = events
+            .first()
+            .expect("ResumeWorkspaceAgent should proceed past stopped window");
+        assert!(matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { session_id, message }
+                if session_id == "stopped-session" && !message.is_empty()
+        ));
+    }
+
+    #[test]
     fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
