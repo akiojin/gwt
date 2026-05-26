@@ -526,7 +526,7 @@
           return "file-tree";
         }
         if (preset === "branches") {
-          return "workspace";
+          return "work";
         }
         if (preset === "profile") {
           return "profile";
@@ -543,8 +543,8 @@
         if (preset === "index") {
           return "index";
         }
-        if (preset === "workspace") {
-          return "workspace";
+        if (preset === "work" || preset === "workspace") {
+          return "work";
         }
         if (preset === "console") {
           return "console";
@@ -2370,7 +2370,7 @@
       }
 
       function openWorkspaceOverview() {
-        focusOrSpawnPreset("workspace");
+        focusOrSpawnPreset("work");
       }
 
       function workspaceCleanupEntry(candidate) {
@@ -9389,7 +9389,7 @@
           "surface-logs",
           "surface-knowledge",
           "surface-index",
-          "surface-workspace",
+          "surface-work",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -9868,7 +9868,7 @@
           return;
         }
 
-        if (surface === "workspace") {
+        if (surface === "work") {
           workspaceOverviewSurface.mount(body, windowData, {
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
@@ -13184,24 +13184,12 @@
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
-      function isAutoMaximizedSurfacePreset(preset) {
-        return (
-          preset === "file_tree" ||
-          preset === "branches" ||
-          preset === "settings" ||
-          preset === "profile" ||
-          preset === "logs" ||
-          preset === "issue" ||
-          preset === "spec" ||
-          preset === "index" ||
-          preset === "workspace" ||
-          preset === "board" ||
-          preset === "pr"
-        );
+      function isAutoMaximizedSurfacePreset(_preset) {
+        return false;
       }
 
       function focusOrSpawnPreset(preset) {
-        if (preset === "branches") preset = "workspace";
+        if (preset === "branches") preset = "work";
         const allWindows = activeWorkspace().windows || [];
         const existing = allWindows.find(
           (w) => w.preset === preset && !w.minimized,
@@ -13234,13 +13222,13 @@
             focusOrSpawnPreset("board");
             return;
           case "open-git":
-            focusOrSpawnPreset("workspace");
+            focusOrSpawnPreset("work");
             return;
           case "open-logs":
             focusOrSpawnPreset("logs");
             return;
           case "open-branches":
-            focusOrSpawnPreset("workspace");
+            focusOrSpawnPreset("work");
             return;
           case "open-files":
             focusOrSpawnPreset("file_tree");

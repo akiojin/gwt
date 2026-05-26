@@ -20,7 +20,8 @@ pub enum WindowPreset {
     Logs,
     Issue,
     Spec,
-    Workspace,
+    #[serde(alias = "workspace")]
+    Work,
     Index,
     Board,
     Pr,
@@ -40,7 +41,7 @@ pub enum WindowSurface {
     Logs,
     Knowledge,
     Index,
-    Workspace,
+    Work,
     Console,
     Mock,
 }
@@ -60,7 +61,7 @@ impl WindowSurface {
             Self::Logs => "logs",
             Self::Knowledge => "knowledge",
             Self::Index => "index",
-            Self::Workspace => "workspace",
+            Self::Work => "work",
             Self::Console => "console",
             Self::Mock => "mock",
         }
@@ -79,7 +80,7 @@ impl WindowPreset {
         WindowPreset::Logs,
         WindowPreset::Issue,
         WindowPreset::Spec,
-        WindowPreset::Workspace,
+        WindowPreset::Work,
         WindowPreset::Index,
         WindowPreset::Board,
         WindowPreset::Pr,
@@ -100,7 +101,7 @@ impl WindowPreset {
             Self::Logs => "Logs",
             Self::Issue => "Issue",
             Self::Spec => "SPEC",
-            Self::Workspace => "Work",
+            Self::Work => "Work",
             Self::Index => "Index",
             Self::Board => "Board",
             Self::Pr => "PR",
@@ -122,7 +123,7 @@ impl WindowPreset {
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
             Self::Spec => "Placeholder SPEC surface",
-            Self::Workspace => "Work overview",
+            Self::Work => "Work overview",
             Self::Index => "Search indexed project knowledge",
             Self::Board => "Placeholder board surface",
             Self::Pr => "Placeholder PR surface",
@@ -144,7 +145,7 @@ impl WindowPreset {
             Self::Logs => "logs",
             Self::Issue => "issue",
             Self::Spec => "spec",
-            Self::Workspace => "workspace",
+            Self::Work => "work",
             Self::Index => "index",
             Self::Board => "board",
             Self::Pr => "pr",
@@ -162,7 +163,7 @@ impl WindowPreset {
             Self::Logs => WindowSurface::Logs,
             Self::Board => WindowSurface::Board,
             Self::Issue | Self::Spec | Self::Pr => WindowSurface::Knowledge,
-            Self::Workspace => WindowSurface::Workspace,
+            Self::Work => WindowSurface::Work,
             Self::Index => WindowSurface::Index,
             Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
@@ -174,22 +175,13 @@ impl WindowPreset {
     }
 
     pub fn default_size(self) -> (f64, f64) {
-        match self.surface() {
-            WindowSurface::Terminal => (720.0, 420.0),
-            WindowSurface::FileTree => (420.0, 520.0),
-            WindowSurface::Branches => (520.0, 420.0),
-            WindowSurface::Knowledge => (560.0, 420.0),
-            WindowSurface::Index => (760.0, 520.0),
-            WindowSurface::Workspace => (1040.0, 680.0),
-            WindowSurface::Profile | WindowSurface::Logs => (560.0, 420.0),
-            WindowSurface::Board => (520.0, 480.0),
-            WindowSurface::Console => (720.0, 420.0),
-            WindowSurface::Mock => (420.0, 300.0),
-        }
+        let _ = self;
+        (720.0, 420.0)
     }
 
     pub fn opens_maximized_by_default(self) -> bool {
-        !self.requires_process() && !self.is_removed_legacy()
+        let _ = self;
+        false
     }
 
     pub fn command_name(self) -> Option<&'static str> {
@@ -206,7 +198,7 @@ impl WindowPreset {
             | Self::Logs
             | Self::Issue
             | Self::Spec
-            | Self::Workspace
+            | Self::Work
             | Self::Index
             | Self::Board
             | Self::Pr
@@ -352,7 +344,7 @@ where
         | WindowPreset::Logs
         | WindowPreset::Issue
         | WindowPreset::Spec
-        | WindowPreset::Workspace
+        | WindowPreset::Work
         | WindowPreset::Index
         | WindowPreset::Board
         | WindowPreset::Pr
@@ -478,11 +470,11 @@ mod tests {
         assert_eq!(WindowPreset::ALL.len(), 15);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
-        assert_eq!(WindowPreset::Workspace.title(), "Work");
+        assert_eq!(WindowPreset::Work.title(), "Work");
         assert_eq!(WindowPreset::Index.title(), "Index");
         assert_eq!(WindowPreset::Pr.title(), "PR");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
-        assert_eq!(WindowPreset::Workspace.id_prefix(), "workspace");
+        assert_eq!(WindowPreset::Work.id_prefix(), "work");
         assert_eq!(WindowPreset::Index.id_prefix(), "index");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
         assert_eq!(WindowPreset::Profile.surface(), WindowSurface::Profile);
@@ -490,43 +482,19 @@ mod tests {
         assert_eq!(WindowPreset::Logs.surface(), WindowSurface::Logs);
         assert_eq!(WindowPreset::Issue.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
-        assert_eq!(WindowPreset::Workspace.surface(), WindowSurface::Workspace);
+        assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
         assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
-        assert_eq!(WindowPreset::Logs.default_size(), (560.0, 420.0));
-        assert_eq!(WindowPreset::Shell.default_size(), (720.0, 420.0));
-        assert_eq!(WindowPreset::FileTree.default_size(), (420.0, 520.0));
-        assert_eq!(WindowPreset::Branches.default_size(), (520.0, 420.0));
-        for preset in [
-            WindowPreset::FileTree,
-            WindowPreset::Branches,
-            WindowPreset::Settings,
-            WindowPreset::Profile,
-            WindowPreset::Logs,
-            WindowPreset::Issue,
-            WindowPreset::Spec,
-            WindowPreset::Workspace,
-            WindowPreset::Index,
-            WindowPreset::Board,
-            WindowPreset::Pr,
-            WindowPreset::Console,
-        ] {
-            assert!(
-                preset.opens_maximized_by_default(),
-                "{preset:?} should open maximized by default",
+        for preset in WindowPreset::ALL {
+            assert_eq!(
+                preset.default_size(),
+                (720.0, 420.0),
+                "{preset:?} should have uniform 720×420 default size",
             );
-        }
-        for preset in [
-            WindowPreset::Shell,
-            WindowPreset::Claude,
-            WindowPreset::Codex,
-            WindowPreset::Agent,
-            WindowPreset::Memo,
-        ] {
             assert!(
                 !preset.opens_maximized_by_default(),
-                "{preset:?} should keep normal floating geometry by default",
+                "{preset:?} should not open maximized by default",
             );
         }
         assert_eq!(WindowPreset::Shell.command_name(), None);
@@ -592,8 +560,8 @@ mod tests {
             assert!(!preset.subtitle().is_empty());
 
             let (width, height) = preset.default_size();
-            assert!(width >= 420.0);
-            assert!(height >= 300.0);
+            assert_eq!(width, 720.0);
+            assert_eq!(height, 420.0);
 
             match preset {
                 WindowPreset::Shell => {
@@ -644,8 +612,8 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::Workspace => {
-                    assert_eq!(preset.surface(), WindowSurface::Workspace);
+                WindowPreset::Work => {
+                    assert_eq!(preset.surface(), WindowSurface::Work);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }

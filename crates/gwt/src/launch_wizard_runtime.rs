@@ -45,7 +45,7 @@ impl AppRuntime {
         };
 
         if window.preset != WindowPreset::Branches
-            && window.preset != WindowPreset::Workspace
+            && window.preset != WindowPreset::Work
         {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
