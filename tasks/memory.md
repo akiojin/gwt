@@ -6151,3 +6151,10 @@ Type: lesson
 Context: gwt serve 検証時、session.json の gwt タブが /Users/akiojin/Workbench/gwt（bare repo 親ディレクトリ、git リポジトリではない）を指していたため、detect_repo_hash が失敗し compute_path_hash（パスベース b19aac38305901f5）にフォールバック。実際の workspace.json は remote URL ベースハッシュ 99a8660247f5bc49 に保存されており、空の workspace が読み込まれてウィンドウが 0 件になった。
 Learning: project_scope_hash は (1) origin URL ベースと (2) パスベースの 2 種類のハッシュを返す。session.json の project_root が git リポジトリでない場合、パスベースにフォールバックし、production app が書いた workspace.json と別ファイルを読む。
 Future Action: ウィンドウ復元テスト時は session.json の project_root が実際の git ワーキングツリーを指しているか確認する。非 git ディレクトリ → パスハッシュフォールバック問題は別 Issue として登録する。
+
+## 2026-05-26 — Work preset missing in Phase F wizard refactor
+
+Type: lesson
+Context: Work画面のGit BranchesタブからLaunch/Resumeすると Window is not a Work surface エラー。wizard.rsのopen_launch_wizardとresume_branch_latest_agent_eventsがWindowPreset::Branchesのみ許可していた。レガシーのlaunch_wizard_runtime.rsはBranches+Work両方許可。
+Learning: app_runtime Phase F リファクタで旧コード(launch_wizard_runtime.rs)からの移植時にプリセット条件を狭くしたリグレッション。mod.rs:5420のload_branches_eventsは正しく両方許可していたので、同一ファイル内にパターンの不整合があった。
+Future Action: wizard.rsのプリセットチェック変更時はmod.rsの同種チェック(load_branches_events等)と一貫性を確認する。Work surface embedded branches パターンでは WindowPreset::Work も許可が必要。
