@@ -126,8 +126,13 @@ export function mentionsForBoardSubmit(state) {
 export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
   const audience = normalizedBoardWorkspaceAudience(entry);
   if (audience.length === 0) return true;
-  const workspaceId = String(currentWorkspaceId || "").trim();
-  return Boolean(workspaceId) && audience.includes(workspaceId);
+  const workspaceIds = Array.isArray(currentWorkspaceId)
+    ? currentWorkspaceId
+    : [currentWorkspaceId];
+  return workspaceIds
+    .map((workspaceId) => String(workspaceId || "").trim())
+    .filter(Boolean)
+    .some((workspaceId) => audience.includes(workspaceId));
 }
 
 export function boardEntryVisibleForWorkspace(entry, workspaceId) {
