@@ -404,6 +404,81 @@ test("elementHasLayoutBox blocks 0-size containers (Issue #2832 / SPEC-2008 Phas
   assert.equal(elementHasLayoutBox({}), true);
 });
 
+test("attachHostResizeReflow coalesces rapid resize events via requestAnimationFrame (Issue #2903)", () => {
+  const window = fixtureWindow();
+  let rafCallback = null;
+  let rafIdCounter = 1;
+  let cancelledIds = [];
+  window.requestAnimationFrame = (cb) => {
+    rafCallback = cb;
+    return rafIdCounter++;
+  };
+  window.cancelAnimationFrame = (id) => {
+    cancelledIds.push(id);
+    rafCallback = null;
+  };
+
+  const fitCalls = [];
+  const beforeFanCalls = [];
+
+  const dispose = attachHostResizeReflow({
+    window,
+    terminalIds: () => ["wtA", "wtB"],
+    canRefreshViewport: (id) => id !== "wtB",
+    fitTerminal: (id, persist) => fitCalls.push([id, persist]),
+    beforeFan: () => beforeFanCalls.push("flushed"),
+  });
+
+  // Fire 5 rapid resize events (simulates Chrome maximize animation).
+  for (let i = 0; i < 5; i++) {
+    window.dispatchEvent(new window.Event("resize"));
+  }
+
+  // Nothing should have executed synchronously — all deferred to rAF.
+  assert.equal(fitCalls.length, 0, "fitTerminal must not fire synchronously when rAF is available");
+  assert.equal(beforeFanCalls.length, 0, "beforeFan must not fire synchronously when rAF is available");
+
+  // 4 intermediate rAFs should have been cancelled (5 events, only last survives).
+  assert.equal(cancelledIds.length, 4, "previous rAF frames must be cancelled on rapid resize");
+
+  // Flush the single surviving rAF callback.
+  assert.ok(rafCallback, "a rAF must be scheduled after the last resize");
+  rafCallback();
+
+  // Only one fan-out should have run.
+  assert.deepEqual(beforeFanCalls, ["flushed"], "beforeFan must fire exactly once");
+  assert.deepEqual(fitCalls, [["wtA", true]], "fitTerminal must fire once per visible terminal");
+
+  dispose();
+});
+
+test("attachHostResizeReflow dispose cancels pending rAF (Issue #2903)", () => {
+  const window = fixtureWindow();
+  let rafCallback = null;
+  let cancelCount = 0;
+  window.requestAnimationFrame = (cb) => { rafCallback = cb; return 99; };
+  window.cancelAnimationFrame = () => { cancelCount++; rafCallback = null; };
+
+  const fitCalls = [];
+  const dispose = attachHostResizeReflow({
+    window,
+    terminalIds: () => ["wtA"],
+    canRefreshViewport: () => true,
+    fitTerminal: (id, persist) => fitCalls.push([id, persist]),
+  });
+
+  window.dispatchEvent(new window.Event("resize"));
+  assert.ok(rafCallback, "rAF must be scheduled");
+
+  // Dispose before rAF fires.
+  dispose();
+  assert.equal(cancelCount, 1, "dispose must cancel pending rAF");
+
+  // Even if someone flushes an old callback ref, listener is removed.
+  window.dispatchEvent(new window.Event("resize"));
+  assert.equal(fitCalls.length, 0, "no fits after dispose");
+});
+
 test("app.js wires the reflow controller for resize, transition, and predicate", () => {
   // Source-string contract retained per the memory — limited to wiring
   // detection so a future refactor that drops the import / call surfaces
@@ -478,5 +553,19 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /HANDSHAKE_RETRY_LIMIT/,
     "handshake retry must be capped by HANDSHAKE_RETRY_LIMIT",
+  );
+
+  // Issue #2903 — browser lineHeight parity: app.js must detect Blink
+  // browsers and adjust xterm lineHeight so the agent terminal line spacing
+  // matches the native WebView rendering.
+  assert.match(
+    appSource,
+    /isBlinkBrowser\b/,
+    "app.js must define isBlinkBrowser helper for engine-specific lineHeight",
+  );
+  assert.match(
+    appSource,
+    /lineHeight:\s*isBlinkBrowser/,
+    "createTerminalRuntime must use isBlinkBrowser to select lineHeight",
   );
 });

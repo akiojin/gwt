@@ -72,10 +72,10 @@ test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101
   assert.match(appSource, /state\.audienceFilter\s*===\s*"workspace"/);
 });
 
-test("Board surface wires Workspace projection's primary assigned agent into currentWorkspaceId (SPEC-2359 FR-098)", () => {
-  assert.match(appSource, /deriveCurrentProjectWorkspaceId/);
+test("Board surface wires all active Work ids into currentWorkspaceIds (SPEC-2359 FR-098)", () => {
+  assert.match(appSource, /deriveCurrentProjectWorkspaceIds/);
   assert.match(appSource, /refreshBoardCurrentWorkspaceId/);
-  assert.match(appSource, /affiliation_status[\s\S]{0,60}assigned/);
+  assert.match(appSource, /active_works[\s\S]{0,220}map/);
   assert.match(appSource, /currentWorkspaceId:\s*currentProjectWorkspaceId/);
 });
 
@@ -178,6 +178,16 @@ test("entryVisibleForWorkspace treats absent or empty audience as broadcast (FR-
   assert.equal(entryVisibleForWorkspace(scopedAB, "ws-3"), false);
   assert.equal(entryVisibleForWorkspace(scopedOther, "ws-1"), false);
   assert.equal(entryVisibleForWorkspace(scopedAB, null), false);
+});
+
+test("entryVisibleForWorkspace accepts multiple active Work ids", () => {
+  const scopedA = { id: "a", audience: ["work-a"] };
+  const scopedB = { id: "b", audience: ["work-b"] };
+  const scopedOther = { id: "other", audience: ["work-c"] };
+
+  assert.equal(entryVisibleForWorkspace(scopedA, ["work-a", "work-b"]), true);
+  assert.equal(entryVisibleForWorkspace(scopedB, ["work-a", "work-b"]), true);
+  assert.equal(entryVisibleForWorkspace(scopedOther, ["work-a", "work-b"]), false);
 });
 
 test("visibleBoardEntries 'workspace' filter scopes by current workspace audience plus broadcast (FR-098)", () => {

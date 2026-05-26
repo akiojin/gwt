@@ -136,17 +136,25 @@ export function createWorkspaceKanbanSurface({
 
   function workspacesFromProjection(projection) {
     if (!projection) return [];
-    const sourceItems = Array.isArray(projection.workspaces)
-      ? projection.workspaces
-      : Array.isArray(projection.work_items)
-        ? projection.work_items
-        : [];
+    const activeWorks = Array.isArray(projection.active_works)
+      ? projection.active_works
+      : [];
+    if (activeWorks.length > 0) {
+      return activeWorks.map((item) => normalizeWorkspaceItem(item, projection));
+    }
+    const sourceItems = Array.isArray(projection.works)
+      ? projection.works
+      : Array.isArray(projection.workspaces)
+        ? projection.workspaces
+        : Array.isArray(projection.work_items)
+          ? projection.work_items
+          : [];
     if (sourceItems.length > 0) {
       return sourceItems.map((item) => normalizeWorkspaceItem(item, projection));
     }
 
     const current = normalizeWorkspaceItem(projection, {
-      id: projection.id || "__current_workspace__",
+      id: projection.id || "__current_work__",
       title: projection.title || activeWorkspace()?.title,
     });
     const journalEntries = Array.isArray(projection.journal_entries)
@@ -214,11 +222,11 @@ export function createWorkspaceKanbanSurface({
     const section = createNode("section", "workspace-agent-queue");
     section.dataset.role = "unassigned-agents";
     section.appendChild(
-      createNode("div", "workspace-overview-section-label", "Unassigned agents"),
+      createNode("div", "workspace-overview-section-label", "Unassigned Agents"),
     );
     if (agents.length === 0) {
       section.appendChild(
-        createNode("div", "workspace-overview-empty", "No unassigned agents"),
+        createNode("div", "workspace-overview-empty", "No Unassigned Agents"),
       );
       container.appendChild(section);
       return;
@@ -483,7 +491,7 @@ export function createWorkspaceKanbanSurface({
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
       status.textContent = projection
-        ? `${workspaces.length} Work · ${unassignedAgents.length} unassigned agents`
+        ? `${workspaces.length} Active Works · ${unassignedAgents.length} Unassigned Agents`
         : "No Work projection";
     }
 
@@ -536,7 +544,7 @@ export function createWorkspaceKanbanSurface({
     workShell.dataset.workSection = "work";
     const listPane = createNode("aside", "workspace-overview-list-pane");
     listPane.setAttribute("aria-label", "Work list");
-    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Work"));
+    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Active Works"));
     const listBox = createNode("div", "workspace-overview-list");
     listBox.setAttribute("role", "listbox");
     listPane.appendChild(listBox);

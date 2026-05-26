@@ -2267,8 +2267,8 @@
             const tab = activeProjectTab();
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
-            const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
-            if (nextWorkspaceId !== currentProjectWorkspaceId) {
+            const nextWorkspaceId = deriveCurrentProjectWorkspaceIds(tab?.workspace || {});
+            if (JSON.stringify(nextWorkspaceId) !== JSON.stringify(currentProjectWorkspaceId)) {
               currentProjectWorkspaceId = nextWorkspaceId;
               refreshBoardCurrentWorkspaceId();
             }
@@ -3063,15 +3063,35 @@
           counts.agents += 1;
         }
         if (activeWorkProjection) {
-          const category = activeWorkProjection.status_category || "unknown";
-          const activeAgents = Number(activeWorkProjection.active_agents || 0);
-          const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
-          if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
-          if (category === "idle") counts.idle = Math.max(counts.idle, 1);
-          if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
-          if (category === "done") counts.done = Math.max(counts.done, 1);
-          counts.blocked = Math.max(counts.blocked, blockedAgents);
-          counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
+          const activeWorks = activeWorkItemsFromProjection();
+          if (activeWorks.length > 0) {
+            const activeAgents = activeWorks.reduce(
+              (total, work) => total + Number(work.active_agents || 0),
+              0,
+            );
+            const blockedAgents = activeWorks.reduce(
+              (total, work) => total + Number(work.blocked_agents || 0),
+              0,
+            );
+            const totalAgents = activeWorks.reduce(
+              (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
+              0,
+            );
+            counts.active = Math.max(counts.active, activeAgents || activeWorks.length);
+            counts.blocked = Math.max(counts.blocked, blockedAgents);
+            counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
+            counts.branches = Math.max(Number(counts.branches || 0), activeWorks.length);
+          } else {
+            const category = activeWorkProjection.status_category || "unknown";
+            const activeAgents = Number(activeWorkProjection.active_agents || 0);
+            const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
+            if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
+            if (category === "idle") counts.idle = Math.max(counts.idle, 1);
+            if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
+            if (category === "done") counts.done = Math.max(counts.done, 1);
+            counts.blocked = Math.max(counts.blocked, blockedAgents);
+            counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
+          }
         }
         try {
           window.__operatorShell.applyTelemetryCounts(counts);
@@ -3080,8 +3100,8 @@
         }
       }
 
-      function activeWorkFocusableAgents(projection) {
-        const agents = Array.isArray(projection?.agents) ? projection.agents : [];
+      function activeWorkFocusableAgents(work) {
+        const agents = Array.isArray(work?.agents) ? work.agents : [];
         return agents.filter((agent) => {
           if (!agent?.window_id) return false;
           const windowData = workspaceWindowById(agent.window_id);
@@ -3089,6 +3109,21 @@
           const status = runtimeStateForWindow(windowData);
           return status !== "stopped" && status !== "exited" && status !== "error";
         });
+      }
+
+      function activeWorkItemsFromProjection() {
+        if (!activeWorkProjection) return [];
+        const source = Array.isArray(activeWorkProjection.active_works)
+          ? activeWorkProjection.active_works
+          : [];
+        if (source.length > 0) {
+          return source
+            .map((work) => ({ ...work, agents: activeWorkFocusableAgents(work) }))
+            .filter((work) => work.agents.length > 0);
+        }
+        const agents = activeWorkFocusableAgents(activeWorkProjection);
+        if (agents.length === 0) return [];
+        return [{ ...activeWorkProjection, agents }];
       }
 
       function activeWorkDisplayTitle(projection, agents) {
@@ -3107,6 +3142,67 @@
           return title;
         }
         return "Active Work";
+      }
+
+      function renderActiveWorkAgentCard(agent) {
+        const state = String(agent.status_category || "unknown").toLowerCase();
+        const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
+        const coordinationLabel = coordinationKindLabel(coordinationKind);
+        const card = createNode("article", "op-agent-card");
+        card.dataset.state = state;
+        if (coordinationKind) card.dataset.kind = coordinationKind;
+        if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
+
+        const head = createNode("div", "op-agent-head");
+        head.appendChild(
+          createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
+        );
+        const chips = createNode("div", "op-agent-chips");
+        if (coordinationLabel) {
+          chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
+        }
+        chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
+        head.appendChild(chips);
+        card.appendChild(head);
+
+        const agentMeta = createNode("div", "op-agent-meta");
+        appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
+        card.appendChild(agentMeta);
+
+        if (agent.coordination_scope) {
+          card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
+        }
+
+        const agentFocusText = agent.title_summary || agent.current_focus;
+        if (agentFocusText) {
+          const focusText = coordinationLabel
+            ? `${coordinationLabel}: ${agentFocusText}`
+            : agentFocusText;
+          const agentFocus = createNode("div", "op-agent-focus", focusText);
+          if (agent.current_focus && agent.current_focus !== agentFocusText) {
+            agentFocus.title = agent.current_focus;
+          }
+          card.appendChild(agentFocus);
+        }
+
+        const agentActions = createNode("div", "op-agent-actions");
+        const focusButton = createNode("button", "op-agent-action", "Focus");
+        focusButton.type = "button";
+        focusButton.addEventListener("click", () => {
+          focusActiveWorkAgentWindow(agent);
+        });
+        agentActions.appendChild(focusButton);
+        if (agent.last_board_entry_id) {
+          const boardButton = createNode("button", "op-agent-action", "Open Entry");
+          boardButton.type = "button";
+          boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
+          agentActions.appendChild(boardButton);
+        }
+        if (agentActions.childNodes.length > 0) {
+          card.appendChild(agentActions);
+        }
+
+        return card;
       }
 
       // SPEC-2359 Phase U-7 (FR-148): human-readable label for the Phase
@@ -3264,11 +3360,12 @@
           return;
         }
 
-        const agents = activeWorkFocusableAgents(activeWorkProjection);
-        const agentCount = agents.length;
-        if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
+        const works = activeWorkItemsFromProjection();
+        const workCount = works.length;
+        const agentCount = works.reduce((total, work) => total + work.agents.length, 0);
+        if (activeWorkCount) activeWorkCount.textContent = String(workCount);
 
-        if (agentCount === 0) {
+        if (workCount === 0) {
           setActiveWorkSectionVisible(false);
           return;
         }
@@ -3276,10 +3373,14 @@
         setActiveWorkSectionVisible(true);
 
         activeWorkSummary.appendChild(
-          createNode("div", "op-work-title", activeWorkDisplayTitle(activeWorkProjection, agents)),
+          createNode(
+            "div",
+            "op-work-title",
+            `${workCount} Active Work${workCount === 1 ? "" : "s"}`,
+          ),
         );
         const meta = createNode("div", "op-work-meta");
-        appendMeta(meta, activeWorkProjection.owner);
+        appendMeta(meta, `${agentCount} assigned Agent${agentCount === 1 ? "" : "s"}`);
         const activePr = createWorkspacePrMeta(activeWorkProjection);
         if (activePr) meta.appendChild(activePr);
         // SPEC-2359 Phase U-7 (FR-148, FR-149): render the Phase U-6
@@ -3317,89 +3418,68 @@
         }
         activeWorkSummary.appendChild(statusNode);
 
-        const actions = createNode("div", "op-work-actions");
-        if (activeWorkProjection.branch) {
-          const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
-          addAgent.type = "button";
-          addAgent.addEventListener("click", () => {
-            send({
-              kind: "open_active_work_launch_wizard",
-              branch_name: activeWorkProjection.branch,
-              linked_issue_number: projectionIssueNumber(activeWorkProjection),
-            });
-          });
-          actions.appendChild(addAgent);
-        }
-        const boardRefs = activeWorkProjection.board_refs || [];
-        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
-        if (latestBoardRef) {
-          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
-          openBoard.type = "button";
-          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
-          actions.appendChild(openBoard);
-        }
-        if (actions.childNodes.length > 0) {
-          activeWorkSummary.appendChild(actions);
-        }
-
-        for (const agent of agents) {
-          const state = String(agent.status_category || "unknown").toLowerCase();
-          const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
-          const coordinationLabel = coordinationKindLabel(coordinationKind);
-          const card = createNode("article", "op-agent-card");
+        for (const work of works) {
+          const state = String(work.status_category || "unknown").toLowerCase();
+          const card = createNode("article", "op-work-card");
           card.dataset.state = state;
-          if (coordinationKind) card.dataset.kind = coordinationKind;
-          if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
-
-          const head = createNode("div", "op-agent-head");
-          head.appendChild(
-            createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
+          card.appendChild(
+            createNode("div", "op-work-title", activeWorkDisplayTitle(work, work.agents)),
           );
-          const chips = createNode("div", "op-agent-chips");
-          if (coordinationLabel) {
-            chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
-          }
-          chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
-          head.appendChild(chips);
-          card.appendChild(head);
 
-          const agentMeta = createNode("div", "op-agent-meta");
-          appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
-          card.appendChild(agentMeta);
+          const workMeta = createNode("div", "op-work-meta");
+          appendMeta(workMeta, work.owner);
+          appendMeta(workMeta, `${work.agents.length} Agent${work.agents.length === 1 ? "" : "s"}`);
+          const workPr = createWorkspacePrMeta(work);
+          if (workPr) workMeta.appendChild(workPr);
+          const lifecycleStage = work.lifecycle_stage;
+          if (lifecycleStage) {
+            const chip = createNode(
+              "span",
+              `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
+              formatActiveWorkLifecycleLabel(lifecycleStage),
+            );
+            workMeta.appendChild(chip);
+          }
+          card.appendChild(workMeta);
 
-          if (agent.coordination_scope) {
-            card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
+          const workBlockedReason =
+            typeof work.blocked_reason === "string" ? work.blocked_reason.trim() : "";
+          const workStatusBody =
+            workBlockedReason || work.next_action || work.status_text || work.summary || "Work is active";
+          const workStatus = createNode("div", "op-work-status", workStatusBody);
+          if (workBlockedReason) workStatus.classList.add("op-work-status--blocked");
+          card.appendChild(workStatus);
+
+          const actions = createNode("div", "op-work-actions");
+          if (work.branch) {
+            const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
+            addAgent.type = "button";
+            addAgent.addEventListener("click", () => {
+              send({
+                kind: "open_active_work_launch_wizard",
+                branch_name: work.branch,
+                linked_issue_number: projectionIssueNumber(work),
+              });
+            });
+            actions.appendChild(addAgent);
+          }
+          const boardRefs = work.board_refs || [];
+          const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+          if (latestBoardRef) {
+            const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
+            openBoard.type = "button";
+            openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
+            actions.appendChild(openBoard);
+          }
+          if (actions.childNodes.length > 0) {
+            card.appendChild(actions);
           }
 
-          const agentFocusText = agent.title_summary || agent.current_focus;
-          if (agentFocusText) {
-            const focusText = coordinationLabel
-              ? `${coordinationLabel}: ${agentFocusText}`
-              : agentFocusText;
-            const agentFocus = createNode("div", "op-agent-focus", focusText);
-            if (agent.current_focus && agent.current_focus !== agentFocusText) {
-              agentFocus.title = agent.current_focus;
-            }
-            card.appendChild(agentFocus);
+          const agentList = createNode("div", "op-agent-list");
+          for (const agent of work.agents) {
+            agentList.appendChild(renderActiveWorkAgentCard(agent));
           }
-
-          const agentActions = createNode("div", "op-agent-actions");
-          const focusButton = createNode("button", "op-agent-action", "Focus");
-          focusButton.type = "button";
-          focusButton.addEventListener("click", () => {
-            focusActiveWorkAgentWindow(agent);
-          });
-          agentActions.appendChild(focusButton);
-          if (agent.last_board_entry_id) {
-            const boardButton = createNode("button", "op-agent-action", "Open Entry");
-            boardButton.type = "button";
-            boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
-            agentActions.appendChild(boardButton);
-          }
-          if (agentActions.childNodes.length > 0) {
-            card.appendChild(agentActions);
-          }
-
+          card.appendChild(agentList);
           activeWorkAgents.appendChild(card);
         }
       }
@@ -3675,6 +3755,11 @@
       function isMacPlatform() {
         const platform = navigator.userAgentData?.platform || navigator.platform || "";
         return /mac|iphone|ipad|ipod/i.test(platform);
+      }
+
+      function isBlinkBrowser() {
+        const ua = navigator.userAgent || "";
+        return /Chrome\//.test(ua);
       }
 
       function isTerminalCopyShortcut(event) {
@@ -4157,7 +4242,7 @@
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 14,
-          lineHeight: 1.3,
+          lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
@@ -5600,24 +5685,38 @@
         return boardStateMap.get(windowId);
       }
 
-      // SPEC-2359 FR-098/101: track the project's "primary" assigned
-      // workspace id for the Board Workspace filter. Picks the first
-      // assigned agent's workspace_id from the workspace state event.
-      // When no agent in the project is assigned (all Unassigned), the
-      // filter degrades to broadcast-only via FR-103. Multi-workspace
-      // selection UX is a follow-up.
-      let currentProjectWorkspaceId = null;
-      function deriveCurrentProjectWorkspaceId(workspaceState) {
+      // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
+      // the Board Work filter. Broadcast entries remain visible everywhere;
+      // scoped entries match when their audience includes any active Work id.
+      let currentProjectWorkspaceId = [];
+      function uniqueWorkIds(values) {
+        const ids = [];
+        for (const value of values || []) {
+          const id = String(value || "").trim();
+          if (id && !ids.includes(id)) ids.push(id);
+        }
+        return ids;
+      }
+      function deriveCurrentProjectWorkspaceIds(workspaceState) {
+        const activeWorkIds = Array.isArray(activeWorkProjection?.active_works)
+          ? activeWorkProjection.active_works.map((work) => work?.id)
+          : [];
+        if (activeWorkIds.length > 0) {
+          return uniqueWorkIds(activeWorkIds);
+        }
         const agents = workspaceState?.workspace?.agents
           || workspaceState?.agents
           || [];
-        const assigned = agents.find(
-          (agent) =>
-            String(agent?.affiliation_status || "").toLowerCase() === "assigned"
-            && typeof agent?.workspace_id === "string"
-            && agent.workspace_id.length > 0,
+        return uniqueWorkIds(
+          agents
+            .filter(
+              (agent) =>
+                String(agent?.affiliation_status || "").toLowerCase() === "assigned"
+                && typeof agent?.workspace_id === "string"
+                && agent.workspace_id.length > 0,
+            )
+            .map((agent) => agent.workspace_id),
         );
-        return assigned ? assigned.workspace_id : null;
       }
       function refreshBoardCurrentWorkspaceId() {
         for (const state of boardStateMap.values()) {
@@ -6876,10 +6975,7 @@
           state.focusEntryId = pendingBoardEntryFocusId;
           state.pendingFocusScroll = true;
         }
-        state.currentWorkspaceId =
-          activeWorkProjection && (activeWorkProjection.agents || []).length > 0
-            ? activeWorkProjection.id || ""
-            : "";
+        state.currentWorkspaceId = currentProjectWorkspaceId;
 
         const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
@@ -9145,7 +9241,7 @@
           case "remote_tracking_without_local":
             return "Remote-tracking branch without a local counterpart";
           case "non_workspace_branch":
-            return "Only gwt-managed workspaces can be cleaned up";
+            return "Only gwt-managed work can be cleaned up";
           default:
             return "This branch cannot be cleaned up";
         }
@@ -9706,7 +9802,7 @@
                 <div class="workspace-toolbar-actions">
                   <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
-                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Workspace</button>
+                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Work</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -11363,6 +11459,10 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
+            currentProjectWorkspaceId = deriveCurrentProjectWorkspaceIds(
+              activeWorkspace() || {},
+            );
+            refreshBoardCurrentWorkspaceId();
             renderActiveWorkOverview();
             workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
