@@ -3757,6 +3757,11 @@
         return /mac|iphone|ipad|ipod/i.test(platform);
       }
 
+      function isBlinkBrowser() {
+        const ua = navigator.userAgent || "";
+        return /Chrome\//.test(ua);
+      }
+
       function isTerminalCopyShortcut(event) {
         if (isMacPlatform()) {
           return false;
@@ -4237,7 +4242,7 @@
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 14,
-          lineHeight: 1.3,
+          lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();

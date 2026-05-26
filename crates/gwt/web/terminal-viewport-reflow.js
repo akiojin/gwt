@@ -23,7 +23,10 @@ export function attachHostResizeReflow({
   if (!window || typeof window.addEventListener !== "function") {
     throw new TypeError("attachHostResizeReflow requires a DOM window");
   }
-  const handler = () => {
+  const hasRaf = typeof window.requestAnimationFrame === "function";
+  let rafId = null;
+  const run = () => {
+    rafId = null;
     if (typeof beforeFan === "function") beforeFan();
     for (const windowId of terminalIds()) {
       if (typeof canRefreshViewport === "function" && !canRefreshViewport(windowId)) {
@@ -32,8 +35,19 @@ export function attachHostResizeReflow({
       fitTerminal(windowId, true);
     }
   };
+  const handler = () => {
+    if (hasRaf) {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(run);
+    } else {
+      run();
+    }
+  };
   window.addEventListener("resize", handler);
-  return () => window.removeEventListener("resize", handler);
+  return () => {
+    if (rafId !== null && hasRaf) window.cancelAnimationFrame(rafId);
+    window.removeEventListener("resize", handler);
+  };
 }
 
 /**
