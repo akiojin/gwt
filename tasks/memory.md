@@ -6144,3 +6144,10 @@ Type: lesson
 Context: SPEC-2014 managed workspace parent bug: Start Work opened at /Users/akiojin/Workbench/gwt while Docker files lived in nested develop checkout, so Runtime target selection was hidden.
 Learning: Runtime confirmation must first prefer an existing target worktree, but when the target worktree does not exist it should use an existing checkout such as develop/main for Docker context detection without resolving or creating the target worktree.
 Future Action: When touching Launch Wizard runtime context, add tests for workspace parent roots and assert the target worktree remains absent until the final launch/materialization step.
+
+## 2026-05-26 — session.json project_root が非 git ディレクトリを指すと workspace.json ハッシュ不一致で空 workspace が読み込まれる
+
+Type: lesson
+Context: gwt serve 検証時、session.json の gwt タブが /Users/akiojin/Workbench/gwt（bare repo 親ディレクトリ、git リポジトリではない）を指していたため、detect_repo_hash が失敗し compute_path_hash（パスベース b19aac38305901f5）にフォールバック。実際の workspace.json は remote URL ベースハッシュ 99a8660247f5bc49 に保存されており、空の workspace が読み込まれてウィンドウが 0 件になった。
+Learning: project_scope_hash は (1) origin URL ベースと (2) パスベースの 2 種類のハッシュを返す。session.json の project_root が git リポジトリでない場合、パスベースにフォールバックし、production app が書いた workspace.json と別ファイルを読む。
+Future Action: ウィンドウ復元テスト時は session.json の project_root が実際の git ワーキングツリーを指しているか確認する。非 git ディレクトリ → パスハッシュフォールバック問題は別 Issue として登録する。

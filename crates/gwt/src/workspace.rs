@@ -67,6 +67,19 @@ impl WorkspaceState {
         true
     }
 
+    pub fn set_session_id(&mut self, id: &str, session_id: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.session_id = session_id;
+        true
+    }
+
     pub fn set_purpose_title(&mut self, id: &str, title: Option<String>) -> bool {
         let Some(window) = self
             .persisted
@@ -333,6 +346,7 @@ impl WorkspaceState {
             agent_color: None,
             tab_group_id: None,
             tab_group_active: false,
+            session_id: None,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -1023,6 +1037,7 @@ mod tests {
                 agent_color: None,
                 tab_group_id: None,
                 tab_group_active: false,
+                session_id: None,
             }],
             next_z_index: 2,
         });
