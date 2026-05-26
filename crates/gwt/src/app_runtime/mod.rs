@@ -3075,7 +3075,13 @@ impl AppRuntime {
                 .keys()
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
-            let geometry = startup_auto_resume_window_geometry(index, total, bounds.clone());
+            let stale_geometry = self.remove_stale_paused_agent_window(
+                &pending_session.tab_id,
+                &pending_session.session.id,
+            );
+            let geometry = stale_geometry.unwrap_or_else(|| {
+                startup_auto_resume_window_geometry(index, total, bounds.clone())
+            });
             match self.spawn_agent_window_at_geometry(
                 &pending_session.tab_id,
                 config,
@@ -3103,6 +3109,31 @@ impl AppRuntime {
             }
         }
         events
+    }
+
+    fn remove_stale_paused_agent_window(
+        &mut self,
+        tab_id: &str,
+        session_id: &str,
+    ) -> Option<WindowGeometry> {
+        let tab = self.tab_mut(tab_id)?;
+        let stale = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|w| {
+                w.preset == WindowPreset::Agent
+                    && w.status == WindowProcessStatus::Stopped
+                    && w.session_id.as_deref() == Some(session_id)
+            })
+            .map(|w| (w.id.clone(), w.geometry.clone()));
+        let (raw_id, geometry) = stale?;
+        tab.workspace.close_window(&raw_id);
+        let combined = combined_window_id(tab_id, &raw_id);
+        self.window_lookup.remove(&combined);
+        self.window_details.remove(&combined);
+        Some(geometry)
     }
 
     fn auto_resume_tab_id_for_session(&self, session: &gwt_agent::Session) -> Option<String> {
@@ -6478,6 +6509,11 @@ impl AppRuntime {
                     &session_id_for_restore,
                     true,
                 );
+                if let Some(tab) = self.tab_mut(&tab_id) {
+                    let _ = tab
+                        .workspace
+                        .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
+                }
                 if let Some(source_session_id) = auto_resume_source_session_id {
                     mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
                 }
@@ -6933,11 +6969,11 @@ impl AppRuntime {
         let window = match placement {
             AgentWindowPlacement::Centered(bounds) => {
                 tab.workspace
-                    .add_window_with_title(WindowPreset::Agent, title, false, bounds)
+                    .add_window_with_title(WindowPreset::Agent, title, true, bounds)
             }
             AgentWindowPlacement::Exact(geometry) => tab
                 .workspace
-                .add_window_at_geometry_with_title(WindowPreset::Agent, title, false, geometry),
+                .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
         };
         if let Some(purpose_title) = purpose_title {
             let _ = tab
@@ -8922,6 +8958,7 @@ exit 1
             agent_color: None,
             tab_group_id: None,
             tab_group_active: false,
+            session_id: None,
         }
     }
 
