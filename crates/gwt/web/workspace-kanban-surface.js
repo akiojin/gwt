@@ -655,7 +655,7 @@ export function createWorkspaceKanbanSurface({
 
   function renderWindows() {
     for (const windowData of activeWorkspace()?.windows || []) {
-      if (workspaceWindowById(windowData.id)?.preset !== "workspace") continue;
+      if (workspaceWindowById(windowData.id)?.preset !== "work") continue;
       renderWorkspaceOverviewWindow(windowData.id);
     }
   }

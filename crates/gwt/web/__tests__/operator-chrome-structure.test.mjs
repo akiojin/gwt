@@ -509,8 +509,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("workspace"\)/,
-    "expected Workspace Overview to open the Workspace window instead of a drawer",
+    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("work"\)/,
+    "expected Workspace Overview to open the Work window instead of a drawer",
   );
   assert.match(
     appSource,
@@ -531,8 +531,8 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   );
   assert.match(
     appSource,
-    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"workspace"[\s\S]+return\s+"workspace"/,
-    "expected Workspace to be a first-class window surface",
+    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"work"[\s\S]+return\s+"work"/,
+    "expected Work to be a first-class window surface",
   );
   assert.match(
     workspaceOverviewSource,
@@ -598,16 +598,11 @@ test("Workspace Overview legacy drawer scaffold is retired", () => {
   );
 });
 
-test("non-agent surface presets open maximized from command focus paths", () => {
+test("no surface presets auto-maximize — uniform 720×420 floating windows", () => {
   assert.match(
     appSource,
-    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)[\s\S]+file_tree[\s\S]+branches[\s\S]+settings[\s\S]+profile[\s\S]+logs[\s\S]+issue[\s\S]+spec[\s\S]+workspace[\s\S]+board[\s\S]+pr/,
-    "expected frontend focus/spawn path to identify every non-agent surface preset as auto-maximized",
-  );
-  assert.match(
-    appSource,
-    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedSurfacePreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
-    "expected focusOrSpawnPreset to send viewport bounds when focusing existing non-agent surfaces",
+    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)\s*\{[^}]*return\s+false/,
+    "expected isAutoMaximizedSurfacePreset to always return false (auto-maximize abolished)",
   );
 });
 
@@ -2460,7 +2455,7 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-logs",
     "surface-knowledge",
     "surface-index",
-    "surface-workspace",
+    "surface-work",
     "surface-profile",
     "surface-console",
     "surface-mock",
@@ -2481,7 +2476,7 @@ test("every readable non-terminal surface participates in the opaque window chro
     "logs",
     "knowledge",
     "index",
-    "workspace",
+    "work",
     "profile",
     "console",
     "mock",
