@@ -749,12 +749,13 @@ enabled = false
         generate_codex_hooks(dir.path()).unwrap();
         let hooks_path = fs::canonicalize(dir.path().join(".codex/hooks.json")).unwrap();
         let pre_tool_key = format!("{}:pre_tool_use:0:0", hooks_path.display());
+        let pre_tool_key_toml = pre_tool_key.replace('\\', "\\\\").replace('"', "\\\"");
         let config_path = dir.path().join("codex-config.toml");
         fs::write(
             &config_path,
             format!(
                 r#"
-[hooks.state."{pre_tool_key}"]
+[hooks.state."{pre_tool_key_toml}"]
 enabled = false
 "#
             ),

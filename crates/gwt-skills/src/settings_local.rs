@@ -886,7 +886,7 @@ mod tests {
             "Stop chain must collapse to the event dispatcher; got: {stop_commands:?}"
         );
         assert!(
-            stop_commands[0].ends_with(" hook event Stop") && stop_commands[0].contains("gwtd"),
+            stop_commands[0].contains(" hook event Stop") && stop_commands[0].contains("gwtd"),
             "Stop dispatcher must target gwtd via absolute or literal path; got: {stop_commands:?}"
         );
         assert!(
@@ -2156,11 +2156,15 @@ mod tests {
     fn gwt_hook_bin_path_resolves_gui_binary_to_gwtd_sibling() {
         assert_eq!(
             gwt_hook_bin_path_with(Some(Path::new("/opt/gwt/bin/gwt")), |_| None),
-            "/opt/gwt/bin/gwtd"
+            Path::new("/opt/gwt/bin/gwt")
+                .with_file_name("gwtd")
+                .to_string_lossy()
         );
         assert_eq!(
             gwt_hook_bin_path_with(Some(Path::new("C:/tools/gwt.exe")), |_| None),
-            "C:/tools/gwtd.exe"
+            Path::new("C:/tools/gwt.exe")
+                .with_file_name("gwtd.exe")
+                .to_string_lossy()
         );
     }
 

@@ -46,7 +46,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
 
     HookOutput::stop_block(format!(
         "Discussion is still [active] on proposal \"{title}\".\n\
-         Next question or evidence blocker: {question}\n\
+         Next question, evidence blocker, or depth blocker: {question}\n\
          Continue the gwt-discussion workflow (investigate → ask the user → update Discussion TODO), \
          or call `gwtd discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
         title = pending.proposal_title,
@@ -75,6 +75,9 @@ mod tests {
 - Official Docs Proof: Claude Code hooks docs checked.\n\
 - External Research Proof: not-applicable: local-only behavior.\n\
 - Exit Blockers: none\n\
+- Depth Mode: normal\n\
+- Question Ledger: scope boundary, integration, failure, migration, verification checked\n\
+- Depth Gate: complete\n\
 - Next Question:\n\
 - Evidence Gate: complete\n\
 ";
@@ -88,8 +91,27 @@ mod tests {
 - Official Docs Proof: Claude Code hooks docs checked.\n\
 - External Research Proof: not-applicable: local-only behavior.\n\
 - Exit Blockers: implementation proof is missing\n\
+- Depth Mode: normal\n\
+- Question Ledger: scope boundary checked only\n\
+- Depth Gate: open\n\
 - Next Question:\n\
 - Evidence Gate: open\n\
+";
+
+    const ACTIVE_WITH_DEPTH_BLOCKER_WITHOUT_QUESTION: &str = "## Discussion TODO\n\n\
+### Proposal A - Depth gate [active]\n\
+- Summary: Evidence is complete but depth coverage is shallow.\n\
+- Implementation Proof: crates/gwt/src/discussion_resume.rs inspected.\n\
+- SPEC/Issue Proof: SPEC-1935 checked.\n\
+- Gap Check Proof: scope/integration/failure/migration/verification checked.\n\
+- Official Docs Proof: not-applicable: local-only behavior.\n\
+- External Research Proof: not-applicable: local-only behavior.\n\
+- Exit Blockers: none\n\
+- Depth Mode: normal\n\
+- Question Ledger: scope boundary checked only\n\
+- Depth Gate: open\n\
+- Next Question:\n\
+- Evidence Gate: complete\n\
 ";
 
     const ALL_RESOLVED: &str = "## Discussion TODO\n\n\
@@ -188,7 +210,21 @@ mod tests {
             &[
                 "Evidence gate",
                 "Exit Blockers remain unresolved",
-                "Next question or evidence blocker",
+                "Next question, evidence blocker, or depth blocker",
+            ],
+        );
+    }
+
+    #[test]
+    fn blocks_when_depth_gate_is_incomplete_without_next_question() {
+        let dir = tempfile::tempdir().unwrap();
+        write_discussion(dir.path(), ACTIVE_WITH_DEPTH_BLOCKER_WITHOUT_QUESTION);
+        assert_stop_block(
+            handle_with_input(dir.path(), "{}"),
+            &[
+                "Depth gate",
+                "Depth Gate is not complete",
+                "Next question, evidence blocker, or depth blocker",
             ],
         );
     }

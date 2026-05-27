@@ -78,12 +78,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
       const wizard = page.locator("#wizard-modal");
       await expect(wizard).toBeVisible();
-      const configureButton = wizard.getByRole("button", {
-        name: "Configure and start",
-      });
-      if (await configureButton.count()) {
-        await configureButton.click();
-      }
+      await chooseConfigureAndStart(page);
 
       const agentSelect = wizard.getByLabel("Agent", { exact: true });
       await expect(agentSelect).toBeVisible();
@@ -155,6 +150,44 @@ async function openLaunchWizardForCurrentBranch(page: Page): Promise<void> {
     id: workWindowId,
     branch_name: BRANCH_NAME,
   });
+}
+
+async function chooseConfigureAndStart(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  const agentSelect = wizard.getByLabel("Agent", { exact: true });
+  if (await agentSelect.isVisible().catch(() => false)) {
+    return;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const configureButton = wizard
+      .getByRole("button", { name: /Configure and start/ })
+      .first();
+    if (!(await configureButton.count())) {
+      break;
+    }
+    await expect(configureButton).toBeEnabled({ timeout: 10_000 });
+    await configureButton.click();
+
+    try {
+      await agentSelect.waitFor({ state: "visible", timeout: 2_000 });
+      return;
+    } catch {
+      // Some start-method layouts require the footer submit after card selection.
+    }
+
+    const submit = page.locator("#wizard-submit-button");
+    if (await submit.isVisible()) {
+      const label = (await submit.textContent())?.trim() ?? "";
+      if (label === "Choose start method" && !(await submit.isDisabled())) {
+        await submit.click();
+        await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
+        return;
+      }
+    }
+    await page.waitForTimeout(500);
+  }
+  await agentSelect.waitFor({ state: "visible", timeout: 10_000 });
 }
 
 async function createWorkWindow(page: Page) {

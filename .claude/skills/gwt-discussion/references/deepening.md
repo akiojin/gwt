@@ -81,7 +81,10 @@ Look for:
 
 After presenting the report, ask the user which points to deep-dive on.
 Before asking the user to choose points, narrow the list to the top 3 highest-impact points.
-Accept numbers, ranges (e.g., "1-3"), or "all".
+This top 3 list is the first batch, not an exit condition. After the selected
+batch is answered, update the `Question Ledger`, re-rank the remaining backlog,
+and continue until `Depth Gate` is complete or explicitly deferred with a
+reason. Accept numbers, ranges (e.g., "1-3"), or "all".
 
 ## Phase 5.2: Interactive deep-dive
 
@@ -142,6 +145,9 @@ Repeat steps 1-5 for each selected deepening point.
 
 - All selected deepening points have been addressed with user input.
 - Artifact updates have been applied.
+- `Question Ledger` records the selected points, answers, and any remaining
+  backlog disposition.
+- `Depth Gate` is `complete` or `deferred(<reason>)`.
 - A summary of changes is presented:
 
 ```text
