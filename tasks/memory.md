@@ -6179,3 +6179,10 @@ Type: lesson
 Context: Work画面のGit BranchesタブからLaunch/Resumeすると Window is not a Work surface エラー。wizard.rsのopen_launch_wizardとresume_branch_latest_agent_eventsがWindowPreset::Branchesのみ許可していた。レガシーのlaunch_wizard_runtime.rsはBranches+Work両方許可。
 Learning: app_runtime Phase F リファクタで旧コード(launch_wizard_runtime.rs)からの移植時にプリセット条件を狭くしたリグレッション。mod.rs:5420のload_branches_eventsは正しく両方許可していたので、同一ファイル内にパターンの不整合があった。
 Future Action: wizard.rsのプリセットチェック変更時はmod.rsの同種チェック(load_branches_events等)と一貫性を確認する。Work surface embedded branches パターンでは WindowPreset::Work も許可が必要。
+
+## 2026-05-27 — collect_resumable_agents excluded running agents causing empty Resume Picker
+
+Type: lesson
+Context: Resume Picker showed 'No resumable agents' even when Codex was Running. Root cause: collect_resumable_agents in wizard.rs filtered out live_session_ids entirely. Also, branch cleanup preset check at mod.rs:6323 only allowed WindowPreset::Branches, missing Work.
+Learning: When adding a new preset check (like the Work surface unification), grep all sites with the same error message string to ensure none are missed. Four sites had 'Window is not a Work surface' but one (branch cleanup) was not updated. Also, filtering running agents from the Resume Picker was a UX anti-pattern — the user sees a Running agent in the workspace card but Resume says none exist.
+Future Action: After any WindowPreset guard change, search all occurrences of the error message to confirm all sites are consistent. For picker/list UIs, prefer including all states with appropriate badges over silently filtering items the user can see elsewhere.
