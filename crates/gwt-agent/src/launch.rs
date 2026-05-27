@@ -12,6 +12,8 @@ use crate::{
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
+const CLAUDE_FAST_MODE_SETTINGS_JSON: &str = r#"{"fastMode":true}"#;
+
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
 fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
@@ -256,6 +258,10 @@ pub struct LaunchConfig {
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
     pub skip_permissions: bool,
+    pub fast_mode: bool,
+    /// Legacy Codex-only compatibility field. New callers should use
+    /// `fast_mode`; this remains populated for persisted/session consumers
+    /// that still distinguish Codex's service-tier implementation.
     pub codex_fast_mode: bool,
     pub runtime_target: LaunchRuntimeTarget,
     pub docker_service: Option<String>,
@@ -563,6 +569,7 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
+        let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
         LaunchConfig {
@@ -582,6 +589,7 @@ impl AgentLaunchBuilder {
             session_mode,
             resume_session_id,
             skip_permissions,
+            fast_mode,
             codex_fast_mode,
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
@@ -654,6 +662,11 @@ impl AgentLaunchBuilder {
 
         if self.skip_permissions {
             args.push("--dangerously-skip-permissions".to_string());
+        }
+
+        if self.fast_mode {
+            args.push("--settings".to_string());
+            args.push(CLAUDE_FAST_MODE_SETTINGS_JSON.to_string());
         }
 
         // Session mode
@@ -1123,6 +1136,30 @@ mod tests {
     }
 
     #[test]
+    fn build_claude_fast_mode_injects_session_settings() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .fast_mode(true)
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#));
+        assert!(config.fast_mode);
+        assert!(!config.codex_fast_mode);
+    }
+
+    #[test]
+    fn build_claude_without_fast_mode_omits_session_settings() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings" && pair[1].contains("fastMode")));
+    }
+
+    #[test]
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)
@@ -1134,6 +1171,7 @@ mod tests {
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1] == "service_tier=fast"));
         assert!(!config.args.contains(&"--full-auto".to_string()));
+        assert!(config.fast_mode);
         assert!(config.codex_fast_mode);
         assert!(!config.skip_permissions);
     }
@@ -2083,7 +2121,10 @@ mod tests {
             .env_vars
             .get("CODEX_HOME")
             .expect("CODEX_HOME must be set when a Codex backend profile is active");
-        assert!(codex_home.ends_with(".gwt/codex"), "got {codex_home}");
+        assert!(
+            Path::new(codex_home).ends_with(Path::new(".gwt").join("codex")),
+            "got {codex_home}"
+        );
         // API key env defaults to the GWT_CODEX_BACKEND_API_KEY_<UPPER> name.
         assert_eq!(
             config
@@ -2094,7 +2135,8 @@ mod tests {
         );
 
         // Generated config.toml exists and contains the expected provider id.
-        let body = std::fs::read_to_string(format!("{codex_home}/config.toml")).expect("read");
+        let body =
+            std::fs::read_to_string(Path::new(codex_home).join("config.toml")).expect("read");
         assert!(body.contains("model_provider = \"gwt-llmlb\""));
         assert!(body.contains("base_url = \"http://127.0.0.1:8080\""));
     }
