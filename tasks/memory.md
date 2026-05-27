@@ -6200,3 +6200,10 @@ Type: lesson
 Context: After adding a live E2E for Claude Code Fast mode, I incorrectly justified not launching real Claude Code by saying it could incur billing. The user corrected that starting Claude Code alone does not charge.
 Learning: Do not cite billing as a reason to avoid a Claude Code launch smoke. The valid concerns are environment/auth availability, external process stability, and cleanup; if those are acceptable, launch smoke should be performed.
 Future Action: When explaining why an E2E stops before an external AI tool, separate real constraints from assumptions. For Claude Code startup, prefer an env-gated real-launch smoke with explicit cleanup instead of claiming startup cost risk.
+
+## 2026-05-27 — Resume Picker must filter by workspace_id — headed E2E caught what unit tests missed
+
+Type: lesson
+Context: Resume Picker returned agents from ALL branches instead of the selected Work item. Unit tests passed because they only tested presence/absence of agents, not cross-branch leakage. The bug was only caught when the user asked for a headed browser check.
+Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
+Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.
