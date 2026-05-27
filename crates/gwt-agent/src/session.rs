@@ -55,6 +55,10 @@ pub struct Session {
     #[serde(default)]
     pub skip_permissions: bool,
     #[serde(default)]
+    pub fast_mode: bool,
+    /// Legacy Codex-only compatibility field. Deserialization still accepts
+    /// this key so older session TOML restores retain Fast mode intent.
+    #[serde(default)]
     pub codex_fast_mode: bool,
     #[serde(default)]
     pub runtime_target: LaunchRuntimeTarget,
@@ -150,6 +154,7 @@ impl Session {
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             skip_permissions: false,
+            fast_mode: false,
             codex_fast_mode: false,
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
@@ -189,6 +194,7 @@ impl Session {
         session.reasoning_level = config.reasoning_level.clone();
         session.session_mode = config.session_mode;
         session.skip_permissions = config.skip_permissions;
+        session.fast_mode = config.fast_mode;
         session.codex_fast_mode = config.codex_fast_mode;
         session.runtime_target = config.runtime_target;
         session.docker_service = config.docker_service.clone();
@@ -313,8 +319,9 @@ impl Session {
     /// legacy migration applied should use [`Session::load_and_migrate`].
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let session: Self = toml::from_str(&content)
+        let mut session: Self = toml::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        session.normalize_fast_mode_fields();
         Ok(session)
     }
 
@@ -352,6 +359,16 @@ impl Session {
             }
             self.schema_version = 3;
         }
+    }
+
+    fn normalize_fast_mode_fields(&mut self) {
+        if self.codex_fast_mode {
+            self.fast_mode = true;
+        }
+    }
+
+    pub fn fast_mode_enabled(&self) -> bool {
+        self.fast_mode || self.codex_fast_mode
     }
 }
 
@@ -592,6 +609,7 @@ mod tests {
         assert!(session.model.is_none());
         assert!(session.reasoning_level.is_none());
         assert!(!session.skip_permissions);
+        assert!(!session.fast_mode);
         assert!(!session.codex_fast_mode);
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
         assert!(session.docker_service.is_none());
@@ -765,6 +783,52 @@ display_name = "Claude Code"
         );
         assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
         assert_eq!(loaded.display_name, "Gemini CLI");
+    }
+
+    #[test]
+    fn load_legacy_codex_fast_mode_populates_fast_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-fast-mode.toml");
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let mut legacy = toml::map::Map::new();
+        legacy.insert("id".into(), toml::Value::String(session.id.clone()));
+        legacy.insert(
+            "worktree_path".into(),
+            toml::Value::String(session.worktree_path.display().to_string()),
+        );
+        legacy.insert("branch".into(), toml::Value::String(session.branch.clone()));
+        legacy.insert(
+            "agent_id".into(),
+            toml::Value::try_from(&session.agent_id).unwrap(),
+        );
+        legacy.insert(
+            "status".into(),
+            toml::Value::try_from(&session.status).unwrap(),
+        );
+        legacy.insert("codex_fast_mode".into(), toml::Value::Boolean(true));
+        legacy.insert(
+            "created_at".into(),
+            toml::Value::String(session.created_at.to_rfc3339()),
+        );
+        legacy.insert(
+            "updated_at".into(),
+            toml::Value::String(session.updated_at.to_rfc3339()),
+        );
+        legacy.insert(
+            "last_activity_at".into(),
+            toml::Value::String(session.last_activity_at.to_rfc3339()),
+        );
+        legacy.insert(
+            "display_name".into(),
+            toml::Value::String(session.display_name.clone()),
+        );
+        std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+
+        let loaded = Session::load(&path).unwrap();
+
+        assert!(loaded.fast_mode);
+        assert!(loaded.codex_fast_mode);
+        assert!(loaded.fast_mode_enabled());
     }
 
     #[test]
@@ -1261,6 +1325,7 @@ display_name = "Claude Code"
         config.model = Some("gpt-5.5".to_string());
         config.reasoning_level = Some("high".to_string());
         config.skip_permissions = true;
+        config.fast_mode = true;
         config.codex_fast_mode = true;
         config.runtime_target = LaunchRuntimeTarget::Docker;
         config.docker_service = Some("app".to_string());
@@ -1284,6 +1349,7 @@ display_name = "Claude Code"
         assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(session.reasoning_level.as_deref(), Some("high"));
         assert!(session.skip_permissions);
+        assert!(session.fast_mode);
         assert!(session.codex_fast_mode);
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Docker);
         assert_eq!(session.docker_service.as_deref(), Some("app"));

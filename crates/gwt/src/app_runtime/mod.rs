@@ -210,7 +210,7 @@ fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_age
     if session.skip_permissions {
         builder = builder.skip_permissions(true);
     }
-    if session.codex_fast_mode {
+    if session.fast_mode_enabled() {
         builder = builder.fast_mode(true);
     }
     builder = builder.runtime_target(session.runtime_target);
@@ -730,6 +730,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
                     log = log.count(value.len());
                 }
                 LaunchWizardAction::SetSkipPermissions { enabled }
+                | LaunchWizardAction::SetFastMode { enabled }
                 | LaunchWizardAction::SetCodexFastMode { enabled } => {
                     log = log.force(*enabled);
                 }
@@ -7451,6 +7452,7 @@ impl AppRuntime {
             session.reasoning_level = config.reasoning_level.clone();
             session.session_mode = config.session_mode;
             session.skip_permissions = config.skip_permissions;
+            session.fast_mode = config.fast_mode;
             session.codex_fast_mode = config.codex_fast_mode;
             session.runtime_target = config.runtime_target;
             session.docker_service = config.docker_service.clone();
@@ -8196,6 +8198,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
             gwt::LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
             gwt::LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
+            gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::Submit => "submit",
         }
@@ -9634,9 +9637,10 @@ exit 1
         assert_eq!(prepared.bytes, None);
         assert_eq!(prepared.storage_path, None);
         assert_eq!(prepared.agent_path, source.display().to_string());
+        let escaped_source = source.display().to_string().replace('\\', "\\\\");
         assert_eq!(
             super::format_file_attachment_prompt(&[prepared.agent_path]),
-            format!("File: \"{}\"", source.display())
+            format!("File: \"{escaped_source}\"")
         );
     }
 

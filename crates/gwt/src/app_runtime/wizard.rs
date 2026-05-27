@@ -565,7 +565,7 @@ impl AppRuntime {
         if session.skip_permissions {
             builder = builder.skip_permissions(true);
         }
-        if session.codex_fast_mode {
+        if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
         builder = builder.runtime_target(session.runtime_target);

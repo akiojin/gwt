@@ -1588,7 +1588,7 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     launchSettingsStart,
     linkedIssueStart,
   );
-  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+  for (const copy of ["Version", "Skip permission prompts", "Fast mode"]) {
     assert.ok(
       launchSettingsBlock.includes(`"${copy}"`),
       `expected Launch settings to include ${copy}`,
@@ -1610,7 +1610,7 @@ test("Launch wizard separates launch settings from runtime controls", () => {
       `expected Runtime to include ${copy}`,
     );
   }
-  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+  for (const copy of ["Version", "Skip permission prompts", "Fast mode"]) {
     assert.equal(
       runtimeBlock.includes(`"${copy}"`),
       false,
@@ -1657,8 +1657,18 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
   assert.match(
     appSource,
-    /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_codex_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
+    /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
     "expected Launch settings controls to be part of setup forms only",
+  );
+  assert.match(
+    appSource,
+    /appendCheckboxField\(\s*grid,\s*"Fast mode"[\s\S]*?launchWizard\.fast_mode[\s\S]*?kind:\s*"set_fast_mode"/,
+    "expected Launch settings to wire provider-neutral Fast mode controls",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /Codex fast mode/,
+    "expected Launch settings copy to avoid Codex-only Fast mode wording",
   );
   // SPEC-2014 Amendment 2026-05-20 (FR-057): Linked issue is gated by its
   // dedicated `show_linked_issue` flag so it only appears when the wizard
