@@ -18,8 +18,8 @@
 //!   propagate via `io::Error` so handlers can decide how to fail open.
 //!
 //! `gwt-discussion` intentionally does **not** use this module; its
-//! existing `.gwt/discussion.md` Markdown artifact is the source of
-//! truth for the `skill-discussion-stop-check` handler.
+//! `tasks/discussions.md` Markdown artifact is the source of truth for
+//! the `skill-discussion-stop-check` handler.
 
 use std::{
     fs,

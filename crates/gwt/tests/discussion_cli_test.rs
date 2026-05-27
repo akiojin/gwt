@@ -53,7 +53,7 @@ fn discussion_update_creates_single_canonical_discussions_file() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("tasks/discussions.md"),
+        stdout.replace('\\', "/").contains("tasks/discussions.md"),
         "stdout should name updated path, got: {stdout}"
     );
     let content =
@@ -111,4 +111,71 @@ fn discussion_update_rewrites_existing_section_instead_of_appending_duplicate() 
     );
     assert!(!content.contains("First summary"));
     assert!(content.contains("Updated summary"));
+}
+
+#[test]
+fn discussion_update_preserves_existing_proposal_blocks() {
+    let repo = tempfile::tempdir().expect("repo");
+
+    let first = run_gwtd_in(
+        repo.path(),
+        &[
+            "discussion",
+            "update",
+            "--date",
+            "2026-05-27",
+            "--title",
+            "Canonical discussion state",
+            "--status",
+            "active",
+            "--summary",
+            "Initial summary",
+            "--next",
+            "Continue",
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let path = repo.path().join("tasks/discussions.md");
+    let mut content = fs::read_to_string(&path).expect("read discussions");
+    content.push_str(
+        "\n### Proposal A - Store active state in tasks/discussions.md [active]\n\
+         - Implementation Proof: pending\n\
+         - Next Question: Keep this proposal while refreshing summary?\n",
+    );
+    fs::write(&path, content).expect("append proposal");
+
+    let second = run_gwtd_in(
+        repo.path(),
+        &[
+            "discussion",
+            "update",
+            "--date",
+            "2026-05-27",
+            "--title",
+            "Canonical discussion state",
+            "--status",
+            "active",
+            "--summary",
+            "Updated summary",
+            "--next",
+            "Continue again",
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let updated = fs::read_to_string(path).expect("read discussions");
+    assert!(updated.contains("Updated summary"));
+    assert!(
+        updated.contains("### Proposal A - Store active state in tasks/discussions.md [active]")
+    );
+    assert!(updated.contains("Keep this proposal while refreshing summary?"));
 }

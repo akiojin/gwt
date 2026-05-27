@@ -1,8 +1,9 @@
 //! `gwtd hook skill-discussion-stop-check` — Stop-block handler for the
 //! `gwt-discussion` skill (SPEC-1935 Phase 10, FR-014p).
 //!
-//! Reads `.gwt/discussion.md` in the current worktree and, when an
-//! `[active]` proposal with a non-empty `Next Question:` line is found,
+//! Reads `tasks/discussions.md` in the current worktree and, when an
+//! active discussion entry contains an `[active]` proposal with a
+//! non-empty `Next Question:` line, it
 //! returns `HookOutput::StopBlock` so Claude Code / Codex continue the
 //! agent instead of stopping. Claude Code's built-in `stop_hook_active`
 //! flag (FR-014o) short-circuits this handler to prevent infinite loops.
@@ -47,7 +48,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
     HookOutput::stop_block(format!(
         "Discussion is still [active] on proposal \"{title}\".\n\
          Next question or evidence blocker: {question}\n\
-         Continue the gwt-discussion workflow (investigate → ask the user → update Discussion TODO), \
+         Continue the gwt-discussion workflow (investigate → ask the user → update tasks/discussions.md), \
          or call `gwtd discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
         title = pending.proposal_title,
         question = question,
@@ -61,12 +62,14 @@ mod tests {
     use std::fs;
 
     const ACTIVE_WITH_QUESTION: &str = "## Discussion TODO\n\n\
+Status: active\n\n\
 ### Proposal A - Hook-driven resume [active]\n\
 - Summary: Keep unfinished discussion state in the local artifact.\n\
 - Next Question: Should SessionStart or UserPromptSubmit surface the resume proposal?\n\
 ";
 
     const ACTIVE_WITHOUT_QUESTION: &str = "## Discussion TODO\n\n\
+Status: active\n\n\
 ### Proposal A - Hook-driven resume [active]\n\
 - Summary: Keep unfinished discussion state in the local artifact.\n\
 - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected.\n\
@@ -80,6 +83,7 @@ mod tests {
 ";
 
     const ACTIVE_WITH_EXIT_BLOCKER_WITHOUT_QUESTION: &str = "## Discussion TODO\n\n\
+Status: active\n\n\
 ### Proposal A - Evidence gate [active]\n\
 - Summary: Implementation is not proven yet.\n\
 - Implementation Proof: TODO\n\
@@ -93,13 +97,14 @@ mod tests {
 ";
 
     const ALL_RESOLVED: &str = "## Discussion TODO\n\n\
+Status: active\n\n\
 ### Proposal A - Hook-driven resume [chosen]\n\
 - Summary: Done.\n\
 - Next Question: Should SessionStart surface the proposal?\n\
 ";
 
     fn write_discussion(dir: &Path, body: &str) {
-        let path = dir.join(".gwt/discussion.md");
+        let path = dir.join("tasks/discussions.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
     }

@@ -1,7 +1,7 @@
 //! `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`
 //!
 //! Exit CLI for the `gwt-discussion` skill (SPEC-1935 FR-014p). The LLM
-//! invokes these commands to mutate `.gwt/discussion.md` so the
+//! invokes these commands to mutate `tasks/discussions.md` so the
 //! `skill-discussion-stop-check` handler stops blocking Stop events.
 //!
 //! All commands are idempotent: calling `resolve` on an already-resolved

@@ -19,6 +19,25 @@ fn new_env() -> (TestEnv, TempDir) {
     (TestEnv::new(dir.path().to_path_buf()), dir)
 }
 
+fn canonical_discussion(body: &str) -> String {
+    format!(
+        "# Discussions\n\n\
+         ## 2026-05-27 — Skill exit CLI\n\n\
+         Status: active\n\
+         Topics: skill-exit\n\
+         Related SPECs: #1935\n\
+         Related Works:\n\
+         Promoted To:\n\n\
+         Summary:\n\
+         Active gwt-discussion state for CLI tests.\n\n\
+         Decisions:\n\n\
+         Open Questions:\n\n\
+         Next:\n\
+         Continue discussion exit handling.\n\n\
+         {body}"
+    )
+}
+
 #[test]
 fn should_dispatch_cli_recognises_the_three_new_verbs() {
     assert!(should_dispatch_cli(&argv(&["gwt", "discuss", "resolve"])));
@@ -29,11 +48,12 @@ fn should_dispatch_cli_recognises_the_three_new_verbs() {
 #[test]
 fn discuss_resolve_flips_active_proposal_to_chosen() {
     let (mut env, dir) = new_env();
-    let discussion_path = dir.path().join(".gwt/discussion.md");
+    let discussion_path = dir.path().join("tasks/discussions.md");
     std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
     std::fs::write(
         &discussion_path,
-        "### Proposal A - Hook-driven resume [active]\n\
+        canonical_discussion(
+            "### Proposal A - Hook-driven resume [active]\n\
          - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected\n\
          - SPEC/Issue Proof: SPEC-1935 checked\n\
          - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
@@ -42,6 +62,7 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
          - Exit Blockers: none\n\
          - Next Question: Should we block on Stop?\n\
          - Evidence Gate: complete\n",
+        ),
     )
     .unwrap();
 
@@ -58,15 +79,17 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
 #[test]
 fn discuss_resolve_rejects_incomplete_evidence_gate() {
     let (mut env, dir) = new_env();
-    let discussion_path = dir.path().join(".gwt/discussion.md");
+    let discussion_path = dir.path().join("tasks/discussions.md");
     std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
     std::fs::write(
         &discussion_path,
-        "### Proposal A - Evidence gap [active]\n\
+        canonical_discussion(
+            "### Proposal A - Evidence gap [active]\n\
          - Summary: Missing proof.\n\
          - Exit Blockers: none\n\
          - Next Question:\n\
          - Evidence Gate: complete\n",
+        ),
     )
     .unwrap();
 
@@ -84,11 +107,11 @@ fn discuss_resolve_rejects_incomplete_evidence_gate() {
 fn discuss_park_and_reject_follow_the_same_pattern() {
     for (action, expected) in &[("park", "[parked]"), ("reject", "[rejected]")] {
         let (mut env, dir) = new_env();
-        let path = dir.path().join(".gwt/discussion.md");
+        let path = dir.path().join("tasks/discussions.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "### Proposal B - WIP [active]\n- Next Question: ???\n",
+            canonical_discussion("### Proposal B - WIP [active]\n- Next Question: ???\n"),
         )
         .unwrap();
 
@@ -105,12 +128,14 @@ fn discuss_park_and_reject_follow_the_same_pattern() {
 #[test]
 fn discuss_clear_next_question_empties_the_field() {
     let (mut env, dir) = new_env();
-    let path = dir.path().join(".gwt/discussion.md");
+    let path = dir.path().join("tasks/discussions.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
-        "### Proposal A - Hook-driven resume [active]\n\
+        canonical_discussion(
+            "### Proposal A - Hook-driven resume [active]\n\
          - Next Question: Should SessionStart surface it?\n",
+        ),
     )
     .unwrap();
 

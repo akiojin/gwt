@@ -249,6 +249,8 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
         .find("\n## ")
         .map(|index| start + heading.len() + index + 1)
         .unwrap_or(content.len());
+    let existing_section = &content[start..next];
+    let entry = preserve_existing_proposal_blocks(entry, existing_section);
     let mut output = String::new();
     output.push_str(content[..start].trim_end());
     output.push_str("\n\n");
@@ -256,6 +258,28 @@ fn replace_or_append_section(content: &str, heading: &str, entry: &str) -> Strin
     output.push('\n');
     output.push_str(content[next..].trim_start_matches('\n'));
     output
+}
+
+fn preserve_existing_proposal_blocks(entry: &str, existing_section: &str) -> String {
+    let Some(blocks) = proposal_blocks(existing_section) else {
+        return entry.to_string();
+    };
+    let mut output = entry.trim_end().to_string();
+    output.push_str("\n\n");
+    output.push_str(blocks.trim());
+    output.push('\n');
+    output
+}
+
+fn proposal_blocks(section: &str) -> Option<&str> {
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        if line.trim_start().starts_with("### Proposal ") {
+            return Some(&section[offset..]);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 fn io_as_spec_error(err: std::io::Error) -> SpecOpsError {

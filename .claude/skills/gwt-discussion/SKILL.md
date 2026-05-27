@@ -43,7 +43,7 @@ Keep these artifacts throughout the discussion:
 
 - `Intake Memo` in conversation context for background, scope, and constraints
 - `Discussion TODO` in conversation context and mirrored to
-  `.gwt/discussion.md`
+  `tasks/discussions.md`
 - `Action Delta` for changes that are ready to land in `spec`, `plan`, `issue`,
   or build context
 - `Action Bundle` for the concrete follow-up actions that should happen next
@@ -56,10 +56,24 @@ Evidence is part of the discussion state, not a later implementation detail.
 Do not mark a proposal `[chosen]` until its evidence fields prove the outcome
 without relying on speculation, guesses, or vibes.
 
-Mirror structure for `.gwt/discussion.md`:
+Mirror structure for `tasks/discussions.md`:
 
 ```markdown
-## Discussion TODO
+## YYYY-MM-DD — <discussion title>
+
+Status: active
+Topics:
+Related SPECs:
+Related Works:
+Promoted To:
+
+Summary:
+
+Decisions:
+
+Open Questions:
+
+Next:
 
 ### Proposal A - <title> [active|parked|rejected|chosen]
 - Summary:
@@ -98,11 +112,12 @@ high-impact unknown behind it has been resolved.
 ## Exit CLI (Stop-block contract)
 
 SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
-which inspects `.gwt/discussion.md` and blocks Stop (with
-`{"decision":"block","reason":"..."}`) while any proposal is still `[active]`
-with a non-empty `Next Question:`, unresolved `Exit Blockers:`, incomplete
-proof fields, or an `Evidence Gate:` that is not `complete`. To let Stop
-succeed, mark each proposal explicitly using the exit CLI:
+which inspects active entries in `tasks/discussions.md` and blocks Stop (with
+`{"decision":"block","reason":"..."}`) while any proposal inside an active
+entry is still `[active]` with a non-empty `Next Question:`, unresolved
+`Exit Blockers:`, incomplete proof fields, or an `Evidence Gate:` that is not
+`complete`. To let Stop succeed, mark each proposal explicitly using the exit
+CLI:
 
 - `gwtd discuss resolve --proposal "Proposal A"` — active → chosen only after
   `Evidence Gate: complete`
@@ -118,7 +133,9 @@ the handler fail-safe: at most one forced continuation per Stop cycle.
 ## Resume hooks
 
 Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`
-may surface unfinished discussion candidates from `.gwt/discussion.md`.
+may surface unfinished discussion candidates from `tasks/discussions.md`.
+Pre-existing `.gwt/discussion.md` files are legacy read fallbacks only; do not
+write new discussion state there.
 
 Use this contract:
 
@@ -129,7 +146,7 @@ Use this contract:
   fallback from `UserPromptSubmit` and surface it after the next `Stop`.
 - Offer exactly `Resume discussion`, `Park proposal`, and `Dismiss for now`.
 - `Resume discussion` continues `gwt-discussion` before other work proceeds.
-- `Park proposal` changes the matching proposal in `.gwt/discussion.md` from
+- `Park proposal` changes the matching proposal in `tasks/discussions.md` from
   `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
