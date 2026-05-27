@@ -13646,7 +13646,10 @@ exit 1
                     agents[0].lifecycle_status,
                     Some(gwt::ResumableAgentLifecycleStatus::Running),
                 );
-                assert_eq!(agents[0].resume_kind, gwt::ResumableAgentResumeKind::Session);
+                assert_eq!(
+                    agents[0].resume_kind,
+                    gwt::ResumableAgentResumeKind::Session
+                );
             }
             other => panic!("unexpected backend event: {other:?}"),
         }
