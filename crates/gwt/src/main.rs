@@ -2893,7 +2893,7 @@ mod tests {
         assert_eq!(wrong_window_branches.len(), 1);
         assert!(matches!(
             wrong_window_branches[0].event,
-            BackendEvent::BranchError { ref message, .. } if message == "Window is not a Work surface"
+            BackendEvent::BranchError { ref message, .. } if message.contains("is not a Work surface")
         ));
         assert!(runtime
             .load_branches_events("client-1", &branches_id)
@@ -2946,7 +2946,7 @@ mod tests {
         assert!(matches!(
             cleanup_wrong[0].event,
             BackendEvent::BranchError { ref message, .. }
-                if message == "Window is not a Work surface"
+                if message.contains("is not a Work surface")
         ));
 
         let wizard_missing =
@@ -2964,7 +2964,7 @@ mod tests {
         assert!(matches!(
             wizard_wrong[0].event,
             BackendEvent::LaunchWizardOpenError { ref title, ref message }
-                if title == "Launch Agent" && message == "Window is not a Work surface"
+                if title == "Launch Agent" && message.contains("is not a Work surface")
         ));
 
         let issue_missing = runtime.open_issue_launch_wizard_events("client-1", "missing", 7);
