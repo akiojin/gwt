@@ -337,6 +337,7 @@
         idleMs: 300,
       });
       let viewportRasterTimer = null;
+      let hostResizeActive = false;
       let launchWizard = null;
       let launchWizardOpenError = null;
       let activeWorkProjection = null;
@@ -1936,14 +1937,27 @@
         );
       }
 
-      function syncMaximizedWindowsToViewport() {
+      function syncMaximizedWindowsToViewport({ persist = true } = {}) {
         const bounds = visibleBounds();
         const nextGeometry = maximizedGeometry(bounds);
+        let changed = false;
         for (const windowData of activeWorkspace().windows || []) {
           if (!windowData.maximized) {
             continue;
           }
           if (geometryMatches(windowData.geometry, nextGeometry)) {
+            continue;
+          }
+          changed = true;
+          if (!persist) {
+            const element = windowMap.get(windowData.id);
+            if (!element) {
+              continue;
+            }
+            element.style.left = `${nextGeometry.x}px`;
+            element.style.top = `${nextGeometry.y}px`;
+            element.style.width = `${nextGeometry.width}px`;
+            element.style.height = `${nextGeometry.height}px`;
             continue;
           }
           send({
@@ -1952,6 +1966,7 @@
             bounds,
           });
         }
+        return changed;
       }
 
       function renderProjectTabs() {
@@ -11267,7 +11282,9 @@
               });
             }
 
-            requestAnimationFrame(syncMaximizedWindowsToViewport);
+            if (!hostResizeActive) {
+              requestAnimationFrame(() => syncMaximizedWindowsToViewport());
+            }
 
             const topmostId = topmostWindowId(workspace);
             if (topmostId && ids.has(topmostId)) {
@@ -13243,21 +13260,30 @@
           event.preventDefault();
         }
       });
-      // SPEC-2008 Phase 24 / T-187: host resize must fan out `fitTerminal
-      // (persist=true)` to every visible terminal so xterm cols/rows stay
-      // aligned with the viewport and `UpdateWindowGeometry` reaches the
-      // backend PTY. The fan-out lives in `terminal-viewport-reflow.js`
-      // so the behavior is exercised by linkedom unit tests rather than
-      // only source-string contract.
+      // SPEC-2008 Phase 32: host resize persists terminal geometry only after
+      // the WebView2 resize stream settles, while each frame only previews
+      // maximized window bounds locally.
+      function hostResizeTerminalIds() {
+        return Array.from(terminalMap.keys()).filter((windowId) => {
+          const workspaceWindow = workspaceWindowById(windowId);
+          return Boolean(workspaceWindow?.maximized);
+        });
+      }
+
       attachHostResizeReflow({
         window,
-        terminalIds: () => terminalMap.keys(),
+        terminalIds: hostResizeTerminalIds,
         canRefreshViewport: canRefreshTerminalViewport,
-        fitTerminal,
-        beforeFan: () => {
-          frontendUnits.projectWorkspaceShell.renderWindowList();
-          syncMaximizedWindowsToViewport();
+        onFrame: () => {
+          hostResizeActive = true;
+          syncMaximizedWindowsToViewport({ persist: false });
         },
+        onSettled: () => {
+          hostResizeActive = false;
+          syncMaximizedWindowsToViewport();
+          frontendUnits.projectWorkspaceShell.renderWindowList();
+        },
+        fitTerminal,
       });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {

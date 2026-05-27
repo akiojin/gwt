@@ -5,10 +5,10 @@
 // source-string contracts).
 
 /**
- * Attach a host `window.resize` listener that refreshes every visible
- * terminal viewport. The caller supplies the terminal id iterator,
- * predicate, and per-id fit hook so the controller stays decoupled from
- * the IIFE-scoped state in `app.js`.
+ * Attach a host `window.resize` listener that keeps frame-local preview work
+ * separate from settled terminal persistence. The caller supplies the
+ * terminal id iterator, predicate, and per-id fit hook so the controller stays
+ * decoupled from the IIFE-scoped state in `app.js`.
  *
  * Returns a `dispose` function that detaches the listener — useful for
  * tests, harmless in production (bound to the lifetime of the page).
@@ -19,14 +19,34 @@ export function attachHostResizeReflow({
   canRefreshViewport,
   fitTerminal,
   beforeFan,
+  onFrame,
+  onSettled,
+  settleDelayMs = 120,
 }) {
   if (!window || typeof window.addEventListener !== "function") {
     throw new TypeError("attachHostResizeReflow requires a DOM window");
   }
   const hasRaf = typeof window.requestAnimationFrame === "function";
+  const setTimer =
+    typeof window.setTimeout === "function"
+      ? window.setTimeout.bind(window)
+      : globalThis.setTimeout.bind(globalThis);
+  const clearTimer =
+    typeof window.clearTimeout === "function"
+      ? window.clearTimeout.bind(window)
+      : globalThis.clearTimeout.bind(globalThis);
   let rafId = null;
-  const run = () => {
+  let settleTimer = null;
+  let disposed = false;
+  const runFrame = () => {
     rafId = null;
+    if (disposed) return;
+    if (typeof onFrame === "function") onFrame();
+  };
+  const runSettled = () => {
+    settleTimer = null;
+    if (disposed) return;
+    if (typeof onSettled === "function") onSettled();
     if (typeof beforeFan === "function") beforeFan();
     for (const windowId of terminalIds()) {
       if (typeof canRefreshViewport === "function" && !canRefreshViewport(windowId)) {
@@ -38,14 +58,22 @@ export function attachHostResizeReflow({
   const handler = () => {
     if (hasRaf) {
       if (rafId !== null) window.cancelAnimationFrame(rafId);
-      rafId = window.requestAnimationFrame(run);
+      rafId = window.requestAnimationFrame(runFrame);
     } else {
-      run();
+      runFrame();
     }
+    if (settleTimer !== null) {
+      clearTimer(settleTimer);
+    }
+    settleTimer = setTimer(runSettled, settleDelayMs);
   };
   window.addEventListener("resize", handler);
   return () => {
+    disposed = true;
     if (rafId !== null && hasRaf) window.cancelAnimationFrame(rafId);
+    if (settleTimer !== null) clearTimer(settleTimer);
+    rafId = null;
+    settleTimer = null;
     window.removeEventListener("resize", handler);
   };
 }

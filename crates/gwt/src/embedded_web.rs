@@ -3587,40 +3587,47 @@ mod tests {
         );
     }
 
-    /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
-    /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
-    /// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
-    /// for each visible terminal so the backend PTY cols/rows match. Without
-    /// this fan-out the wrap stays stuck until the user resizes a single
-    /// terminal manually.
+    /// SPEC-2008 FR-068..FR-070 Phase 32: host window resize must split the
+    /// frame-local maximized-window preview from the settled terminal
+    /// persistence path. Windows WebView2 fullscreen emits resize events
+    /// across multiple frames; persisted `fitTerminal` / window-list render
+    /// work in the frame path regresses into visible flicker.
     #[test]
-    fn embedded_web_host_window_resize_fans_out_terminal_fit() {
+    fn embedded_web_host_window_resize_settles_before_terminal_persistence() {
         let js = app_js();
-        // After SPEC-2008 Phase 24 follow-up (PR #2590), the host resize
-        // fan-out is dispatched through `attachHostResizeReflow` from
-        // `terminal-viewport-reflow.js`. The behaviour assertion lives in
-        // `__tests__/terminal-viewport-reflow.test.mjs`; this Rust contract
-        // only confirms the wiring stays in the bundle.
-        let attach_call = regex::Regex::new(r#"(?s)attachHostResizeReflow\(\{(?P<body>.*?)\}\);"#)
-            .expect("valid regex");
-        let captures = attach_call
-            .captures(js)
+        // Behaviour lives in `__tests__/terminal-viewport-reflow.test.mjs`;
+        // this source contract keeps app.js wired to the two-phase controller.
+        let start = js
+            .find("attachHostResizeReflow({")
             .expect("expected attachHostResizeReflow wiring for host window.resize");
-        let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
+        let after = &js[start..];
+        let end = after
+            .find("\n      window.addEventListener(\"pointerdown\"")
+            .expect("expected host resize wiring before global pointerdown listener");
+        let body = &after[..end];
         assert!(
-            body.contains("terminalIds: () => terminalMap.keys()")
-                || body.contains("terminalMap.keys()"),
-            "expected attachHostResizeReflow to iterate terminalMap so per-terminal fit \
-             can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
+            body.contains("terminalIds: hostResizeTerminalIds"),
+            "expected host resize to limit terminal persistence to the affected host-resize \
+             terminal set instead of all terminalMap keys (FR-070), body: {body}",
+        );
+        assert!(
+            body.contains("onFrame:")
+                && body.contains("hostResizeActive = true")
+                && body.contains("syncMaximizedWindowsToViewport({ persist: false })"),
+            "expected host resize frame path to do local maximized-window preview only \
+             (FR-068), body: {body}",
+        );
+        assert!(
+            body.contains("onSettled:")
+                && body.contains("hostResizeActive = false")
+                && body.contains("syncMaximizedWindowsToViewport()")
+                && body.contains("frontendUnits.projectWorkspaceShell.renderWindowList()"),
+            "expected host resize settled path to run backend sync and window-list refresh \
+             only after quiet (FR-069), body: {body}",
         );
         assert!(
             body.contains("fitTerminal,"),
-            "expected attachHostResizeReflow to receive fitTerminal so cols/rows refit and \
-             UpdateWindowGeometry persists to the backend; body: {body}",
-        );
-        assert!(
-            body.contains("syncMaximizedWindowsToViewport()"),
-            "expected attachHostResizeReflow.beforeFan to keep maximized window sync, body: {body}",
+            "expected settled host resize path to retain terminal fit persistence, body: {body}",
         );
     }
 
@@ -3668,7 +3675,7 @@ mod tests {
     fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
         let js = app_js();
         let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*requestAnimationFrame\(syncMaximizedWindowsToViewport\);",
+            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*if \(!hostResizeActive\) \{",
         )
         .expect("valid regex");
         let captures = visibility_block

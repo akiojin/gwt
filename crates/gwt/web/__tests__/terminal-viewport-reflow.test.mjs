@@ -31,23 +31,90 @@ function fixtureWindow() {
   return document.defaultView;
 }
 
-test("attachHostResizeReflow fans fitTerminal(persist=true) across visible terminals (T-184/T-187)", () => {
+function installHostResizeClock(window) {
+  let rafIdCounter = 1;
+  let timerIdCounter = 1;
+  const rafCallbacks = new Map();
+  const timers = new Map();
+  const cancelledRafIds = [];
+  const cancelledTimerIds = [];
+
+  window.requestAnimationFrame = (cb) => {
+    const id = rafIdCounter++;
+    rafCallbacks.set(id, cb);
+    return id;
+  };
+  window.cancelAnimationFrame = (id) => {
+    cancelledRafIds.push(id);
+    rafCallbacks.delete(id);
+  };
+  window.setTimeout = (cb, ms) => {
+    const id = timerIdCounter++;
+    timers.set(id, { cb, ms });
+    return id;
+  };
+  window.clearTimeout = (id) => {
+    cancelledTimerIds.push(id);
+    timers.delete(id);
+  };
+
+  return {
+    cancelledRafIds,
+    cancelledTimerIds,
+    pendingRafCount: () => rafCallbacks.size,
+    pendingTimerCount: () => timers.size,
+    latestTimerDelay: () => Array.from(timers.values()).at(-1)?.ms,
+    flushLatestRaf: () => {
+      const entry = Array.from(rafCallbacks.entries()).at(-1);
+      assert.ok(entry, "expected a pending rAF callback");
+      rafCallbacks.delete(entry[0]);
+      entry[1]();
+    },
+    flushLatestTimer: () => {
+      const entry = Array.from(timers.entries()).at(-1);
+      assert.ok(entry, "expected a pending settle timer");
+      timers.delete(entry[0]);
+      entry[1].cb();
+    },
+  };
+}
+
+test("attachHostResizeReflow previews on frame and persists only after resize settles (T-257/T-258)", () => {
   const window = fixtureWindow();
+  const clock = installHostResizeClock(window);
   const terminals = ["wtA", "wtB", "wtC"];
   const fitCalls = [];
-  const beforeFanCalls = [];
+  const frameCalls = [];
+  const settledCalls = [];
 
   const dispose = attachHostResizeReflow({
     window,
     terminalIds: () => terminals,
     canRefreshViewport: (id) => id !== "wtB", // wtB is hidden / minimised.
     fitTerminal: (id, persist) => fitCalls.push([id, persist]),
-    beforeFan: () => beforeFanCalls.push("flushed"),
+    onFrame: () => frameCalls.push("preview"),
+    onSettled: () => settledCalls.push("settled"),
+    settleDelayMs: 80,
   });
 
   window.dispatchEvent(new window.Event("resize"));
+  clock.flushLatestRaf();
 
-  assert.deepEqual(beforeFanCalls, ["flushed"]);
+  assert.deepEqual(frameCalls, ["preview"], "resize frame must run local preview");
+  assert.deepEqual(settledCalls, [], "settled path must not run during the resize frame");
+  assert.deepEqual(fitCalls, [], "persisted terminal fit must wait for resize settle");
+  assert.equal(clock.latestTimerDelay(), 80, "custom settle debounce must be honoured");
+
+  window.dispatchEvent(new window.Event("resize"));
+  clock.flushLatestRaf();
+
+  assert.deepEqual(frameCalls, ["preview", "preview"], "multi-frame resize should keep preview responsive");
+  assert.deepEqual(fitCalls, [], "continued resize must not persist terminal geometry");
+  assert.equal(clock.cancelledTimerIds.length, 1, "continued resize must reset the settle timer");
+
+  clock.flushLatestTimer();
+
+  assert.deepEqual(settledCalls, ["settled"], "settled callback must run once after quiet");
   assert.deepEqual(fitCalls, [
     ["wtA", true],
     ["wtC", true],
@@ -404,29 +471,31 @@ test("elementHasLayoutBox blocks 0-size containers (Issue #2832 / SPEC-2008 Phas
   assert.equal(elementHasLayoutBox({}), true);
 });
 
-test("attachHostResizeReflow coalesces rapid resize events via requestAnimationFrame (Issue #2903)", () => {
+test("attachHostResizeReflow coalesces same-frame resize preview via requestAnimationFrame (Issue #2903)", () => {
   const window = fixtureWindow();
+  const clock = installHostResizeClock(window);
   let rafCallback = null;
-  let rafIdCounter = 1;
-  let cancelledIds = [];
   window.requestAnimationFrame = (cb) => {
+    const id = clock.pendingRafCount() + 100;
     rafCallback = cb;
-    return rafIdCounter++;
+    return id;
   };
   window.cancelAnimationFrame = (id) => {
-    cancelledIds.push(id);
+    clock.cancelledRafIds.push(id);
     rafCallback = null;
   };
 
   const fitCalls = [];
-  const beforeFanCalls = [];
+  const frameCalls = [];
+  const settledCalls = [];
 
   const dispose = attachHostResizeReflow({
     window,
     terminalIds: () => ["wtA", "wtB"],
     canRefreshViewport: (id) => id !== "wtB",
     fitTerminal: (id, persist) => fitCalls.push([id, persist]),
-    beforeFan: () => beforeFanCalls.push("flushed"),
+    onFrame: () => frameCalls.push("preview"),
+    onSettled: () => settledCalls.push("settled"),
   });
 
   // Fire 5 rapid resize events (simulates Chrome maximize animation).
@@ -436,28 +505,26 @@ test("attachHostResizeReflow coalesces rapid resize events via requestAnimationF
 
   // Nothing should have executed synchronously — all deferred to rAF.
   assert.equal(fitCalls.length, 0, "fitTerminal must not fire synchronously when rAF is available");
-  assert.equal(beforeFanCalls.length, 0, "beforeFan must not fire synchronously when rAF is available");
+  assert.equal(frameCalls.length, 0, "preview must not fire synchronously when rAF is available");
+  assert.equal(settledCalls.length, 0, "settled path must not fire synchronously");
 
   // 4 intermediate rAFs should have been cancelled (5 events, only last survives).
-  assert.equal(cancelledIds.length, 4, "previous rAF frames must be cancelled on rapid resize");
+  assert.equal(clock.cancelledRafIds.length, 4, "previous rAF frames must be cancelled on rapid resize");
 
   // Flush the single surviving rAF callback.
   assert.ok(rafCallback, "a rAF must be scheduled after the last resize");
   rafCallback();
 
-  // Only one fan-out should have run.
-  assert.deepEqual(beforeFanCalls, ["flushed"], "beforeFan must fire exactly once");
-  assert.deepEqual(fitCalls, [["wtA", true]], "fitTerminal must fire once per visible terminal");
+  assert.deepEqual(frameCalls, ["preview"], "same-frame burst must run one preview");
+  assert.deepEqual(settledCalls, [], "settled callback must wait for debounce");
+  assert.deepEqual(fitCalls, [], "same-frame burst must not persist terminal geometry before settle");
 
   dispose();
 });
 
-test("attachHostResizeReflow dispose cancels pending rAF (Issue #2903)", () => {
+test("attachHostResizeReflow dispose cancels pending rAF and settle timer (T-259)", () => {
   const window = fixtureWindow();
-  let rafCallback = null;
-  let cancelCount = 0;
-  window.requestAnimationFrame = (cb) => { rafCallback = cb; return 99; };
-  window.cancelAnimationFrame = () => { cancelCount++; rafCallback = null; };
+  const clock = installHostResizeClock(window);
 
   const fitCalls = [];
   const dispose = attachHostResizeReflow({
@@ -468,11 +535,15 @@ test("attachHostResizeReflow dispose cancels pending rAF (Issue #2903)", () => {
   });
 
   window.dispatchEvent(new window.Event("resize"));
-  assert.ok(rafCallback, "rAF must be scheduled");
+  assert.equal(clock.pendingRafCount(), 1, "rAF must be scheduled");
+  assert.equal(clock.pendingTimerCount(), 1, "settle timer must be scheduled");
 
-  // Dispose before rAF fires.
+  // Dispose before either callback fires.
   dispose();
-  assert.equal(cancelCount, 1, "dispose must cancel pending rAF");
+  assert.equal(clock.cancelledRafIds.length, 1, "dispose must cancel pending rAF");
+  assert.equal(clock.cancelledTimerIds.length, 1, "dispose must cancel pending settle timer");
+  assert.equal(clock.pendingRafCount(), 0);
+  assert.equal(clock.pendingTimerCount(), 0);
 
   // Even if someone flushes an old callback ref, listener is removed.
   window.dispatchEvent(new window.Event("resize"));
@@ -490,8 +561,8 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /attachHostResizeReflow\(\{[\s\S]*?fitTerminal,\s*\n[\s\S]*?\}\)/,
-    "host resize fan-out must dispatch through the reflow controller",
+    /attachHostResizeReflow\(\{[\s\S]*?onFrame:\s*\(\)\s*=>[\s\S]*?onSettled:\s*\(\)\s*=>[\s\S]*?fitTerminal,\s*\n[\s\S]*?\}\)/,
+    "host resize reflow must split frame-local preview from settled terminal persistence",
   );
   assert.match(
     appSource,
