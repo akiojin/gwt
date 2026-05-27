@@ -273,6 +273,8 @@ pub struct LaunchWizardView {
     pub show_version: bool,
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
+    pub show_fast_mode: bool,
+    /// Legacy Codex-only compatibility field for older frontend payloads.
     pub show_codex_fast_mode: bool,
     pub show_branch_controls: bool,
     pub show_start_methods: bool,
@@ -288,6 +290,8 @@ pub struct LaunchWizardView {
     pub primary_action_label: String,
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
+    pub fast_mode: bool,
+    /// Legacy Codex-only compatibility field for older frontend payloads.
     pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     pub error: Option<String>,
@@ -549,6 +553,7 @@ pub fn quick_start_entries_from_sessions(
 }
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
+    let fast_mode = session.fast_mode_enabled();
     LaunchWizardPreviousProfile {
         agent_id: session.agent_id.command().to_string(),
         model: session.model,
@@ -561,7 +566,7 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
         }),
         session_mode: session.session_mode,
         skip_permissions: session.skip_permissions,
-        codex_fast_mode: session.codex_fast_mode,
+        codex_fast_mode: fast_mode,
         runtime_target: session.runtime_target,
         docker_service: session.docker_service,
         docker_lifecycle_intent: session.docker_lifecycle_intent,
@@ -842,6 +847,9 @@ pub enum LaunchWizardAction {
     SetSkipPermissions {
         enabled: bool,
     },
+    SetFastMode {
+        enabled: bool,
+    },
     SetCodexFastMode {
         enabled: bool,
     },
@@ -1116,6 +1124,10 @@ impl LaunchWizardState {
         let show_back_button = self.show_back_button();
         let show_manual_setup = self.show_manual_setup();
         let show_runtime_confirmation = self.show_runtime_confirmation();
+        let show_fast_mode = show_manual_setup
+            && self.launch_target_is_agent()
+            && self.current_agent_supports_fast_mode();
+        let fast_mode = self.fast_mode_enabled_for_current_agent();
         LaunchWizardView {
             title: if self.wizard_mode == LaunchWizardMode::StartWork {
                 "Start Work".to_string()
@@ -1186,6 +1198,7 @@ impl LaunchWizardState {
                 && agent_has_npm_package(self.effective_agent_id()),
             show_execution_mode: show_manual_setup && self.launch_target_is_agent(),
             show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
+            show_fast_mode,
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
@@ -1203,7 +1216,8 @@ impl LaunchWizardState {
             primary_action_label: self.primary_action_label(),
             primary_action_enabled: self.primary_action_enabled(),
             progress_steps: self.progress_steps_view(),
-            codex_fast_mode: self.codex_fast_mode,
+            fast_mode,
+            codex_fast_mode: self.codex_fast_mode && self.agent_is_codex(),
             launch_summary: self.launch_summary_view(),
             error: self.error.clone(),
         }
@@ -1406,6 +1420,9 @@ impl LaunchWizardState {
             LaunchWizardAction::ClearLinkedIssue => {
                 self.linked_issue_number = None;
             }
+            LaunchWizardAction::SetFastMode { enabled } => {
+                self.codex_fast_mode = enabled && self.current_agent_supports_fast_mode();
+            }
             LaunchWizardAction::SetCodexFastMode { enabled } => {
                 self.codex_fast_mode = enabled && self.agent_is_codex();
             }
@@ -1538,7 +1555,7 @@ impl LaunchWizardState {
             builder = builder.skip_permissions(true);
         }
 
-        if self.agent_is_codex() && self.codex_fast_mode {
+        if self.fast_mode_enabled_for_current_agent() {
             builder = builder.fast_mode(true);
         }
 
@@ -1748,7 +1765,8 @@ impl LaunchWizardState {
                 self.skip_permissions = self.selected == 0;
             }
             LaunchWizardStep::CodexFastMode => {
-                self.codex_fast_mode = self.selected == 0;
+                self.codex_fast_mode =
+                    self.selected == 0 && self.current_agent_supports_fast_mode();
             }
             LaunchWizardStep::BranchNameInput => {}
         }
@@ -1902,7 +1920,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
+        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
         self.mode = "resume".to_string();
         self.resume_session_id = Some(resume_session_id);
         self.finish_launch_request();
@@ -1951,7 +1969,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
+        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
         match mode {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
@@ -2029,7 +2047,7 @@ impl LaunchWizardState {
         self.mode = execution_mode_value_from_session_mode(profile.session_mode).to_string();
         self.resume_session_id = None;
         self.skip_permissions = profile.skip_permissions;
-        self.codex_fast_mode = profile.codex_fast_mode && self.agent_is_codex();
+        self.codex_fast_mode = profile.codex_fast_mode && self.current_agent_supports_fast_mode();
     }
 
     fn focus_existing_session(&mut self, index: usize) {
@@ -2561,10 +2579,10 @@ impl LaunchWizardState {
                 },
             });
         }
-        if self.agent_is_codex() {
+        if self.current_agent_supports_fast_mode() {
             summary.push(LaunchWizardSummaryView {
                 label: "Fast mode".to_string(),
-                value: if self.codex_fast_mode {
+                value: if self.fast_mode_enabled_for_current_agent() {
                     "on".to_string()
                 } else {
                     "off".to_string()
@@ -2751,7 +2769,7 @@ impl LaunchWizardState {
             };
         }
 
-        if !self.agent_is_codex() {
+        if !self.current_agent_supports_fast_mode() {
             self.codex_fast_mode = false;
         }
         self.sync_reasoning_state();
@@ -2841,6 +2859,15 @@ impl LaunchWizardState {
 
     fn agent_is_codex(&self) -> bool {
         self.launch_target_is_agent() && self.effective_agent_id() == "codex"
+    }
+
+    fn current_agent_supports_fast_mode(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()).supports_fast_mode()
+    }
+
+    fn fast_mode_enabled_for_current_agent(&self) -> bool {
+        self.codex_fast_mode && self.current_agent_supports_fast_mode()
     }
 
     /// SPEC-2014 2026-05-18 amendment FR-D: filtered Execution Mode option
@@ -3003,7 +3030,7 @@ impl LaunchWizardState {
                 mode: self.mode.clone(),
                 resume_session_id: self.resume_session_id.clone(),
                 skip_permissions: self.skip_permissions,
-                codex_fast_mode: self.codex_fast_mode && self.agent_is_codex(),
+                codex_fast_mode: self.fast_mode_enabled_for_current_agent(),
             },
         );
     }
@@ -3032,7 +3059,7 @@ impl LaunchWizardState {
         self.mode = draft.mode;
         self.resume_session_id = draft.resume_session_id;
         self.skip_permissions = draft.skip_permissions;
-        self.codex_fast_mode = draft.codex_fast_mode && self.agent_is_codex();
+        self.codex_fast_mode = draft.codex_fast_mode && self.current_agent_supports_fast_mode();
     }
 
     fn reset_agent_draft_defaults(&mut self) {
@@ -3163,7 +3190,7 @@ impl LaunchWizardState {
             self.version = version;
         }
         self.skip_permissions = entry.skip_permissions;
-        self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
+        self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
 
         match selected_action {
             QuickStartAction::ReuseEntry { .. } => {
@@ -3644,7 +3671,7 @@ const YES_NO_OPTIONS: [ChoiceOption; 2] = [
 const FAST_MODE_OPTIONS: [ChoiceOption; 2] = [
     ChoiceOption {
         label: "On",
-        description: "Use Codex fast service tier",
+        description: "Use the agent's Fast mode",
     },
     ChoiceOption {
         label: "Off",
@@ -3800,7 +3827,7 @@ impl<'a> LaunchWizardFlow<'a> {
             LaunchWizardStep::VersionSelect => Some(LaunchWizardStep::ExecutionMode),
             LaunchWizardStep::ExecutionMode => Some(LaunchWizardStep::SkipPermissions),
             LaunchWizardStep::SkipPermissions => {
-                if self.state.agent_is_codex() {
+                if self.state.current_agent_supports_fast_mode() {
                     Some(LaunchWizardStep::CodexFastMode)
                 } else {
                     None
@@ -4031,7 +4058,9 @@ fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizardState) -> 
             .position(|option| option.value == state.mode)
             .unwrap_or(0),
         LaunchWizardStep::SkipPermissions => usize::from(!state.skip_permissions),
-        LaunchWizardStep::CodexFastMode => usize::from(!state.codex_fast_mode),
+        LaunchWizardStep::CodexFastMode => {
+            usize::from(!state.fast_mode_enabled_for_current_agent())
+        }
     }
 }
 
@@ -6618,6 +6647,137 @@ mod tests {
             .launch_summary
             .iter()
             .any(|item| item.label == "Fast mode" && item.value == "on"));
+    }
+
+    #[test]
+    fn claude_fast_mode_is_exposed_and_applied_to_launch_config() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetFastMode { enabled: true });
+
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "claude");
+        assert!(view.show_fast_mode);
+        assert!(view.fast_mode);
+        assert!(!view.show_codex_fast_mode);
+        assert!(!view.codex_fast_mode);
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Fast mode" && item.value == "on"));
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#));
+    }
+
+    #[test]
+    fn runtime_context_resolution_preserves_claude_fast_mode_draft() {
+        let mut state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260527-fast"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            None,
+        );
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetFastMode { enabled: true });
+        assert!(state.view().fast_mode);
+
+        state.apply(LaunchWizardAction::Submit);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::ResolveRuntime(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+                    assert!(config.fast_mode);
+                }
+                other => panic!("expected agent runtime resolve request, got {other:?}"),
+            },
+            other => panic!("expected runtime resolve request, got {other:?}"),
+        }
+
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "work/20260527-fast".to_string(),
+            worktree_path: None,
+            quick_start_root: PathBuf::from("/tmp/repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        assert!(state.view().fast_mode);
+        state.apply(LaunchWizardAction::Submit);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+                    assert!(config.fast_mode);
+                    assert!(config.args.windows(2).any(|pair| {
+                        pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#
+                    }));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_agent_hides_and_ignores_fast_mode() {
+        let mut agent_options = sample_agent_options();
+        agent_options.push(AgentOption {
+            id: "aider".to_string(),
+            name: "Aider".to_string(),
+            available: true,
+            installed_version: None,
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            agent_options,
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "aider".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetFastMode { enabled: true });
+
+        let view = state.view();
+        assert_eq!(view.selected_agent_id, "aider");
+        assert!(!view.show_fast_mode);
+        assert!(!view.fast_mode);
+        assert!(!view.show_codex_fast_mode);
+        assert!(!view.codex_fast_mode);
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::Custom("aider".into()));
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings" && pair[1].contains("fastMode")));
     }
 
     #[test]

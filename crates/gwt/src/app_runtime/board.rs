@@ -299,7 +299,7 @@ impl AppRuntime {
         if session.skip_permissions {
             builder = builder.skip_permissions(true);
         }
-        if session.codex_fast_mode {
+        if session.fast_mode_enabled() {
             builder = builder.fast_mode(true);
         }
         if let Some(docker_service) = non_empty(session.docker_service.as_deref()) {

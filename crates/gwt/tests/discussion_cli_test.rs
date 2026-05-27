@@ -52,8 +52,9 @@ fn discussion_update_creates_single_canonical_discussions_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let normalized_stdout = stdout.replace('\\', "/");
     assert!(
-        stdout.replace('\\', "/").contains("tasks/discussions.md"),
+        normalized_stdout.contains("tasks/discussions.md"),
         "stdout should name updated path, got: {stdout}"
     );
     let content =
