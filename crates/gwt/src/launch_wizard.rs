@@ -2768,7 +2768,7 @@ impl LaunchWizardState {
             };
         }
 
-        if !self.agent_is_codex() {
+        if !self.current_agent_supports_fast_mode() {
             self.codex_fast_mode = false;
         }
         self.sync_reasoning_state();
@@ -6678,6 +6678,68 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#));
+    }
+
+    #[test]
+    fn runtime_context_resolution_preserves_claude_fast_mode_draft() {
+        let mut state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260527-fast"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            None,
+        );
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetFastMode { enabled: true });
+        assert!(state.view().fast_mode);
+
+        state.apply(LaunchWizardAction::Submit);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::ResolveRuntime(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+                    assert!(config.fast_mode);
+                }
+                other => panic!("expected agent runtime resolve request, got {other:?}"),
+            },
+            other => panic!("expected runtime resolve request, got {other:?}"),
+        }
+
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "work/20260527-fast".to_string(),
+            worktree_path: None,
+            quick_start_root: PathBuf::from("/tmp/repo"),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        assert!(state.view().fast_mode);
+        state.apply(LaunchWizardAction::Submit);
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+                    assert!(config.fast_mode);
+                    assert!(config.args.windows(2).any(|pair| {
+                        pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#
+                    }));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch request, got {other:?}"),
+        }
     }
 
     #[test]
