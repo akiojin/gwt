@@ -5422,7 +5422,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a Work surface".to_string(),
+                    message: format!("Window preset {:?} is not a Work surface", window.preset),
                 },
             )];
         }
@@ -6320,12 +6320,12 @@ impl AppRuntime {
             )];
         };
 
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a Work surface".to_string(),
+                    message: format!("Window preset {:?} is not a Work surface", window.preset),
                 },
             )];
         }
@@ -12048,7 +12048,7 @@ exit 1
             matches!(
                 &event.event,
                 BackendEvent::BranchError { message, .. }
-                    if message == "Window is not a Work surface"
+                    if message.contains("is not a Work surface")
             )
         });
         assert!(
@@ -13599,7 +13599,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_list_resumable_agents_excludes_live_session_ids() {
+    fn app_runtime_list_resumable_agents_includes_live_session_as_running() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13624,7 +13624,6 @@ exit 1
 
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        // Register the same session id as live so the picker skips it.
         let mut live = sample_active_agent_session("tab-1", "window-1");
         live.session_id = session_id.to_string();
         runtime
@@ -13638,10 +13637,16 @@ exit 1
 
         match events.first().map(|outbound| &outbound.event) {
             Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
-                assert!(
-                    agents.is_empty(),
-                    "live session must not appear in the Resume picker"
+                assert_eq!(
+                    agents.len(),
+                    1,
+                    "live session should appear with Running status"
                 );
+                assert_eq!(
+                    agents[0].lifecycle_status,
+                    Some(gwt::ResumableAgentLifecycleStatus::Running),
+                );
+                assert_eq!(agents[0].resume_kind, gwt::ResumableAgentResumeKind::Session);
             }
             other => panic!("unexpected backend event: {other:?}"),
         }

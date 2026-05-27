@@ -129,11 +129,13 @@ export function renderWorkspaceResumePicker({
         ),
       );
       const lifecycleTag =
-        agent.lifecycle_status === "interrupted"
-          ? { className: "is-interrupted", label: "Interrupted" }
-          : agent.lifecycle_status === "active"
-            ? { className: "is-active", label: "Active" }
-            : null;
+        agent.lifecycle_status === "running"
+          ? { className: "is-running", label: "Running" }
+          : agent.lifecycle_status === "interrupted"
+            ? { className: "is-interrupted", label: "Interrupted" }
+            : agent.lifecycle_status === "active"
+              ? { className: "is-active", label: "Active" }
+              : null;
       const tagClass = lifecycleTag
         ? `workspace-resume-picker-row-tag ${lifecycleTag.className}`
         : agent.resume_kind === "metadata_only"

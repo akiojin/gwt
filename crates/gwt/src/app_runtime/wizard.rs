@@ -115,7 +115,15 @@ impl AppRuntime {
         };
 
         if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
-            return launch_agent_open_error(client_id, "Window is not a Work surface");
+            tracing::warn!(
+                preset = ?window.preset,
+                window_id = id,
+                "open_launch_wizard rejected: wrong preset"
+            );
+            return launch_agent_open_error(
+                client_id,
+                format!("Window preset {:?} is not a Work surface", window.preset),
+            );
         }
         // SPEC-1934 US-7 / FR-034
         if tab.migration_pending {
@@ -647,7 +655,15 @@ impl AppRuntime {
             return branch_error("Window not found".to_string());
         };
         if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
-            return branch_error("Window is not a Work surface".to_string());
+            tracing::warn!(
+                preset = ?window.preset,
+                window_id = id,
+                "resume_branch_latest_agent rejected: wrong preset"
+            );
+            return branch_error(format!(
+                "Window preset {:?} is not a Work surface",
+                window.preset
+            ));
         }
         if tab.kind != gwt::ProjectKind::Git {
             return branch_error("Resume requires a Git project".to_string());
@@ -710,10 +726,10 @@ impl AppRuntime {
     }
 
     /// Build a list of agents that the Workspace Resume picker can offer
-    /// for the currently-active Git project tab. Filters out historical
-    /// entries (`is_assigned == false`), agents that are already live in
-    /// `active_agent_sessions`, and entries whose session_id does not have
-    /// a backing Session toml on disk.
+    /// for the currently-active Git project tab. Includes live agents with
+    /// `lifecycle_status = Running` so the picker can show them and focus
+    /// their window on click. Non-live entries require a backing Session
+    /// toml on disk.
     fn collect_resumable_agents(&self) -> Vec<gwt::ResumableAgentView> {
         let Some(tab_id) = self.active_tab_id.as_deref() else {
             return Vec::new();
@@ -753,10 +769,15 @@ impl AppRuntime {
             .agents
             .iter()
             .filter(|agent| !agent.session_id.trim().is_empty())
-            .filter(|agent| !live_session_ids.contains(agent.session_id.as_str()))
             .filter_map(|agent| {
-                let session_path = sessions_dir.join(format!("{}.toml", agent.session_id));
-                let (resume_kind, lifecycle_status) =
+                let is_live = live_session_ids.contains(agent.session_id.as_str());
+                let (resume_kind, lifecycle_status) = if is_live {
+                    (
+                        gwt::ResumableAgentResumeKind::Session,
+                        Some(gwt::ResumableAgentLifecycleStatus::Running),
+                    )
+                } else {
+                    let session_path = sessions_dir.join(format!("{}.toml", agent.session_id));
                     match gwt_agent::Session::load_and_migrate(&session_path) {
                         Ok(session) => {
                             let resume_kind = if session.exact_resume_session_id().is_some() {
@@ -777,7 +798,8 @@ impl AppRuntime {
                             (resume_kind, lifecycle_status)
                         }
                         Err(_) => return None,
-                    };
+                    }
+                };
                 Some(gwt::ResumableAgentView {
                     session_id: agent.session_id.clone(),
                     agent_id: agent.agent_id.clone(),

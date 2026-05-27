@@ -198,6 +198,7 @@ pub enum ResumableAgentResumeKind {
 pub enum ResumableAgentLifecycleStatus {
     Active,
     Interrupted,
+    Running,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
