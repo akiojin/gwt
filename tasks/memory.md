@@ -6186,3 +6186,10 @@ Type: lesson
 Context: During Claude Code Fast mode startup support, I initially reported completion after Rust tests and user visual confirmation, then admitted no automated E2E had been run when the user asked.
 Learning: Manual visual confirmation is not a substitute for an automated live E2E when the changed behavior crosses Launch Wizard frontend, WebSocket/backend state, and runtime context resolution.
 Future Action: For Launch Wizard or Start Work UI changes, add or run a live Playwright E2E that drives the actual user path before claiming E2E coverage; report manual checks separately from automated E2E.
+
+## 2026-05-27 — Claude Code startup alone is not a billing reason to skip E2E
+
+Type: lesson
+Context: After adding a live E2E for Claude Code Fast mode, I incorrectly justified not launching real Claude Code by saying it could incur billing. The user corrected that starting Claude Code alone does not charge.
+Learning: Do not cite billing as a reason to avoid a Claude Code launch smoke. The valid concerns are environment/auth availability, external process stability, and cleanup; if those are acceptable, launch smoke should be performed.
+Future Action: When explaining why an E2E stops before an external AI tool, separate real constraints from assumptions. For Claude Code startup, prefer an env-gated real-launch smoke with explicit cleanup instead of claiming startup cost risk.
