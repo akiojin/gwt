@@ -249,6 +249,9 @@ pub enum FrontendEvent {
     CloseWindow {
         id: String,
     },
+    CloseWindowGroup {
+        id: String,
+    },
     TerminalInput {
         id: String,
         data: String,

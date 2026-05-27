@@ -20,6 +20,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
   crates/gwt/web/__tests__/window-docking.test.mjs \
+  crates/gwt/web/__tests__/window-group-close-wiring.test.mjs \
   crates/gwt/web/__tests__/terminal-context-menu.test.mjs \
   crates/gwt/web/__tests__/terminal-wheel-scroll.test.mjs \
   crates/gwt/web/__tests__/canvas-wheel-gesture.test.mjs \

@@ -498,6 +498,27 @@ impl WorkspaceState {
         changed
     }
 
+    pub fn close_window_group(&mut self, id: &str) -> Vec<String> {
+        let Some(index) = self.window_index(id) else {
+            return Vec::new();
+        };
+        let group_id = self.persisted.windows[index].tab_group_id.clone();
+        let removed_ids = if let Some(group_id) = group_id {
+            self.persisted
+                .windows
+                .iter()
+                .filter(|window| window.tab_group_id.as_deref() == Some(group_id.as_str()))
+                .map(|window| window.id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            vec![self.persisted.windows[index].id.clone()]
+        };
+        self.persisted
+            .windows
+            .retain(|window| !removed_ids.iter().any(|id| id == &window.id));
+        removed_ids
+    }
+
     pub fn dock_window_tab(&mut self, id: &str, target_id: &str) -> bool {
         if id == target_id {
             return false;
@@ -1804,6 +1825,37 @@ mod tests {
         let claude = workspace.window("claude-1").expect("claude");
         assert!(claude.tab_group_id.is_none());
         assert!(!claude.tab_group_active);
+    }
+
+    #[test]
+    fn closing_window_group_removes_all_group_members() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        let removed = workspace.close_window_group("codex-1");
+
+        assert_eq!(removed, vec!["claude-1".to_string(), "codex-1".to_string()]);
+        assert!(workspace.window("claude-1").is_none());
+        assert!(workspace.window("codex-1").is_none());
+        assert!(
+            workspace.window(&shell.id).is_some(),
+            "unrelated windows must not be removed"
+        );
+    }
+
+    #[test]
+    fn single_close_stays_tab_scoped_after_group_close_is_added() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        assert!(workspace.close_window("codex-1"));
+
+        assert!(workspace.window("codex-1").is_none());
+        assert!(
+            workspace.window("claude-1").is_some(),
+            "existing close_window must remain a single-tab close"
+        );
     }
 
     #[test]

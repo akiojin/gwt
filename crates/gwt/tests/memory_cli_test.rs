@@ -45,8 +45,9 @@ fn memory_add_appends_typed_entry_to_existing_memory_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let normalized_stdout = stdout.replace('\\', "/");
     assert!(
-        stdout.contains("tasks/memory.md"),
+        normalized_stdout.contains("tasks/memory.md"),
         "stdout should name updated path, got: {stdout}"
     );
     let memory = fs::read_to_string(tasks.join("memory.md")).expect("read memory");

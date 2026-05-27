@@ -377,6 +377,36 @@ impl AppRuntime {
         events
     }
 
+    pub(crate) fn close_window_group_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let removed_raw_ids = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.close_window_group(&address.raw_id)
+        };
+        if removed_raw_ids.is_empty() {
+            return Vec::new();
+        }
+        for raw_id in removed_raw_ids {
+            let window_id = combined_window_id(&address.tab_id, &raw_id);
+            self.clear_agent_window_startup_restore(&window_id);
+            self.stop_window_runtime(&window_id);
+            self.remove_window_state_tracking(&window_id);
+            self.profile_selections.remove(&window_id);
+            self.window_lookup.remove(&window_id);
+            self.window_details.remove(&window_id);
+        }
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+        events
+    }
+
     pub(crate) fn list_windows_event(&self) -> BackendEvent {
         let windows = self
             .active_tab_id

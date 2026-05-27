@@ -1028,7 +1028,9 @@ fn load_linked_branches(repo_path: &Path) -> HashMap<u64, Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ffi::OsString, fs, path::PathBuf};
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    use std::{collections::HashMap, ffi::OsString, fs};
 
     use gwt_github::{
         client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},

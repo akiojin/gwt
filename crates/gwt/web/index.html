@@ -557,6 +557,21 @@
           tabindex="-1"
         ></div>
       </div>
+      <!-- SPEC-2008 Phase 31: confirm modal for closing every tab in a
+           floating window tab group from the titlebar close button. -->
+      <div
+        class="modal-backdrop"
+        id="close-window-group-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell close-project-tab-modal-shell close-window-group-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close window"
+          tabindex="-1"
+        ></div>
+      </div>
       <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
            window. Renderer lives in /app.js (frontendUnits.worktreePicker).
            Opens once per File Tree window open; selection routes the tree

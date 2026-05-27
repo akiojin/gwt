@@ -495,6 +495,9 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::CloseWindow { id } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::CloseWindowGroup { id } => {
+            FrontendUserActionLog::new("close_window_group", "window").window(id)
+        }
         FrontendEvent::LoadFileTree { id, path } => {
             FrontendUserActionLog::new("load_file_tree", "file")
                 .window(id)
@@ -3522,6 +3525,7 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
+            FrontendEvent::CloseWindowGroup { id } => self.close_window_group_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::PasteImage {
                 id,
@@ -9636,7 +9640,10 @@ exit 1
         assert_eq!(prepared.agent_path, source.display().to_string());
         assert_eq!(
             super::format_file_attachment_prompt(&[prepared.agent_path]),
-            format!("File: \"{}\"", source.display())
+            format!(
+                "File: {}",
+                super::quote_file_attachment_path(&source.display().to_string())
+            )
         );
     }
 
@@ -12419,6 +12426,66 @@ exit 1
                     && message == "Window not found"
             )
         }));
+    }
+
+    #[test]
+    fn app_runtime_close_window_group_removes_group_tracking() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::Git,
+            &[
+                WindowPreset::Claude,
+                WindowPreset::Codex,
+                WindowPreset::Board,
+            ],
+        );
+        assert!(tab.workspace.dock_window_tab("codex-1", "claude-1"));
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let claude_id = combined_window_id("tab-1", "claude-1");
+        let codex_id = combined_window_id("tab-1", "codex-1");
+        let board_id = combined_window_id("tab-1", "board-1");
+        for window_id in [&claude_id, &codex_id] {
+            runtime
+                .window_details
+                .insert(window_id.clone(), "detail".to_string());
+            runtime
+                .profile_selections
+                .insert(window_id.clone(), "default".to_string());
+            runtime
+                .window_pty_statuses
+                .insert(window_id.clone(), WindowProcessStatus::Running);
+            runtime
+                .window_hook_states
+                .insert(window_id.clone(), WindowProcessStatus::Waiting);
+            runtime.board_all_view_windows.insert(window_id.clone());
+        }
+
+        let events = runtime.close_window_group_events(&codex_id);
+
+        let tab = runtime.tab("tab-1").expect("tab");
+        assert!(tab.workspace.window("claude-1").is_none());
+        assert!(tab.workspace.window("codex-1").is_none());
+        assert!(tab.workspace.window("board-1").is_some());
+        assert!(runtime.window_lookup.contains_key(&board_id));
+        for window_id in [&claude_id, &codex_id] {
+            assert!(!runtime.window_lookup.contains_key(window_id));
+            assert!(!runtime.window_details.contains_key(window_id));
+            assert!(!runtime.profile_selections.contains_key(window_id));
+            assert!(!runtime.window_pty_statuses.contains_key(window_id));
+            assert!(!runtime.window_hook_states.contains_key(window_id));
+            assert!(!runtime.board_all_view_windows.contains(window_id));
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "group close must broadcast the updated workspace"
+        );
     }
 
     #[test]

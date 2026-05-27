@@ -1983,6 +1983,22 @@
         tabTitle: null,
         runningAgents: [],
       };
+      const closeWindowGroupModalEl = document.getElementById(
+        "close-window-group-modal",
+      );
+      const closeWindowGroupModalDialogEl = closeWindowGroupModalEl
+        ? closeWindowGroupModalEl.querySelector(".modal-shell")
+        : null;
+      let closeWindowGroupModalState = {
+        open: false,
+        windowId: null,
+        tabs: [],
+        runningAgents: [],
+      };
+      let closeWindowGroupReleaseTrap = null;
+      let closeWindowGroupReturnFocus = null;
+      let closeWindowGroupOverlayHandler = null;
+      let closeWindowGroupEscapeHandler = null;
 
       function renderCloseProjectTabModal() {
         if (!closeProjectTabModalEl || !closeProjectTabModalDialogEl) {
@@ -2038,6 +2054,226 @@
           runningAgents,
         };
         renderCloseProjectTabModal();
+      }
+
+      function resetCloseWindowGroupModalState() {
+        closeWindowGroupModalState = {
+          open: false,
+          windowId: null,
+          tabs: [],
+          runningAgents: [],
+        };
+      }
+
+      function runningAgentsForWindowTabs(tabs) {
+        return tabs
+          .filter((tab) => {
+            const status = String(tab?.status || "").toLowerCase();
+            return (
+              (isAgentWindowPreset(tab?.preset) || Boolean(tab?.agent_id)) &&
+              status === "running"
+            );
+          })
+          .map((tab) => ({
+            display_name: windowDisplayTitle(tab),
+            branch: String(tab?.dynamic_title_detail || "").trim() || null,
+          }));
+      }
+
+      function detachCloseWindowGroupModalHandlers() {
+        if (closeWindowGroupModalEl && closeWindowGroupOverlayHandler) {
+          closeWindowGroupModalEl.removeEventListener(
+            "click",
+            closeWindowGroupOverlayHandler,
+          );
+        }
+        if (closeWindowGroupEscapeHandler) {
+          document.removeEventListener("keydown", closeWindowGroupEscapeHandler);
+        }
+        closeWindowGroupOverlayHandler = null;
+        closeWindowGroupEscapeHandler = null;
+      }
+
+      function closeWindowGroupModalCancel() {
+        resetCloseWindowGroupModalState();
+        renderCloseWindowGroupModal();
+      }
+
+      function renderCloseWindowGroupModal() {
+        if (!closeWindowGroupModalEl || !closeWindowGroupModalDialogEl) {
+          return;
+        }
+        const isOpen = Boolean(closeWindowGroupModalState.open);
+        if (!isOpen) {
+          const wasOpen = closeWindowGroupModalEl.classList.contains("open");
+          closeWindowGroupModalEl.classList.remove("open");
+          closeWindowGroupModalEl.setAttribute("aria-hidden", "true");
+          closeWindowGroupModalDialogEl.replaceChildren();
+          detachCloseWindowGroupModalHandlers();
+          if (wasOpen && typeof closeWindowGroupReleaseTrap === "function") {
+            closeWindowGroupReleaseTrap();
+          }
+          closeWindowGroupReleaseTrap = null;
+          if (wasOpen && closeWindowGroupReturnFocus?.focus) {
+            try {
+              closeWindowGroupReturnFocus.focus({ preventScroll: true });
+            } catch {
+              closeWindowGroupReturnFocus.focus();
+            }
+          }
+          closeWindowGroupReturnFocus = null;
+          return;
+        }
+
+        const wasOpen = closeWindowGroupModalEl.classList.contains("open");
+        if (!wasOpen) {
+          closeWindowGroupReturnFocus = document.activeElement;
+          closeWindowGroupReleaseTrap = createFocusTrap(closeWindowGroupModalDialogEl, {
+            document,
+          });
+        }
+        closeWindowGroupModalEl.classList.add("open");
+        closeWindowGroupModalEl.removeAttribute("aria-hidden");
+        closeWindowGroupModalDialogEl.replaceChildren();
+
+        const tabs = Array.isArray(closeWindowGroupModalState.tabs)
+          ? closeWindowGroupModalState.tabs
+          : [];
+        const runningAgents = Array.isArray(closeWindowGroupModalState.runningAgents)
+          ? closeWindowGroupModalState.runningAgents
+          : [];
+        const actions = {
+          onCancel: closeWindowGroupModalCancel,
+          onConfirm: () => {
+            const targetId = closeWindowGroupModalState.windowId;
+            resetCloseWindowGroupModalState();
+            renderCloseWindowGroupModal();
+            if (targetId) {
+              send({ kind: "close_window_group", id: targetId });
+            }
+          },
+        };
+
+        const header = createNode("header", "close-project-tab-modal__header");
+        header.appendChild(
+          createNode("h2", "close-project-tab-modal__title", "Close window?"),
+        );
+        header.appendChild(
+          createNode(
+            "p",
+            "close-project-tab-modal__subtitle",
+            `${tabs.length} tabs will be closed.`,
+          ),
+        );
+        closeWindowGroupModalDialogEl.appendChild(header);
+
+        closeWindowGroupModalDialogEl.appendChild(
+          createNode(
+            "p",
+            "close-project-tab-modal__summary",
+            "Closing this window will close every tab in the group.",
+          ),
+        );
+        const tabList = createNode("ul", "close-project-tab-modal__agent-list");
+        for (const tab of tabs.slice(0, 4)) {
+          tabList.appendChild(
+            createNode("li", "close-project-tab-modal__agent-item", windowDisplayTitle(tab)),
+          );
+        }
+        closeWindowGroupModalDialogEl.appendChild(tabList);
+        if (tabs.length > 4) {
+          closeWindowGroupModalDialogEl.appendChild(
+            createNode(
+              "p",
+              "close-project-tab-modal__more",
+              `and ${tabs.length - 4} more`,
+            ),
+          );
+        }
+        if (runningAgents.length > 0) {
+          closeWindowGroupModalDialogEl.appendChild(
+            createNode(
+              "p",
+              "close-project-tab-modal__summary",
+              "Running agents will be stopped:",
+            ),
+          );
+          const agentList = createNode("ul", "close-project-tab-modal__agent-list");
+          for (const agent of runningAgents.slice(0, 3)) {
+            const label = agent.branch
+              ? `${agent.display_name} (${agent.branch})`
+              : agent.display_name;
+            agentList.appendChild(
+              createNode("li", "close-project-tab-modal__agent-item", label),
+            );
+          }
+          closeWindowGroupModalDialogEl.appendChild(agentList);
+        }
+
+        const footer = createNode(
+          "footer",
+          "close-project-tab-modal__footer modal-footer",
+        );
+        const cancelButton = createNode(
+          "button",
+          "text-button close-project-tab-modal__cancel",
+          "Cancel",
+        );
+        cancelButton.type = "button";
+        cancelButton.addEventListener("click", actions.onCancel);
+        footer.appendChild(cancelButton);
+
+        const confirmButton = createNode(
+          "button",
+          "wizard-button primary destructive close-project-tab-modal__confirm",
+          "Close window",
+        );
+        confirmButton.type = "button";
+        confirmButton.addEventListener("click", actions.onConfirm);
+        footer.appendChild(confirmButton);
+        closeWindowGroupModalDialogEl.appendChild(footer);
+
+        detachCloseWindowGroupModalHandlers();
+        closeWindowGroupOverlayHandler = (event) => {
+          if (event.target === closeWindowGroupModalEl) {
+            actions.onCancel();
+          }
+        };
+        closeWindowGroupEscapeHandler = (event) => {
+          if (event.key === "Escape") {
+            actions.onCancel();
+          }
+        };
+        closeWindowGroupModalEl.addEventListener(
+          "click",
+          closeWindowGroupOverlayHandler,
+        );
+        document.addEventListener("keydown", closeWindowGroupEscapeHandler);
+
+        try {
+          cancelButton.focus({ preventScroll: true });
+        } catch {
+          cancelButton.focus();
+        }
+      }
+
+      function requestCloseWindowGroup(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        const tabs = windowTabsFor(windowData);
+        if (tabs.length < 2) {
+          send({ kind: "close_window_group", id: windowId });
+          return;
+        }
+        closeWindowGroupModalState = {
+          open: true,
+          windowId,
+          tabs,
+          runningAgents: runningAgentsForWindowTabs(tabs),
+        };
+        renderCloseWindowGroupModal();
       }
 
       function updateProjectTabDot(buttonEl, projectRoot) {
@@ -10998,7 +11234,7 @@
 
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            send({ kind: "close_window", id: windowData.id });
+            requestCloseWindowGroup(windowData.id);
           });
 
           titlebar.addEventListener("pointerdown", (event) => {

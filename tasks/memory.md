@@ -6179,3 +6179,10 @@ Type: lesson
 Context: Work画面のGit BranchesタブからLaunch/Resumeすると Window is not a Work surface エラー。wizard.rsのopen_launch_wizardとresume_branch_latest_agent_eventsがWindowPreset::Branchesのみ許可していた。レガシーのlaunch_wizard_runtime.rsはBranches+Work両方許可。
 Learning: app_runtime Phase F リファクタで旧コード(launch_wizard_runtime.rs)からの移植時にプリセット条件を狭くしたリグレッション。mod.rs:5420のload_branches_eventsは正しく両方許可していたので、同一ファイル内にパターンの不整合があった。
 Future Action: wizard.rsのプリセットチェック変更時はmod.rsの同種チェック(load_branches_events等)と一貫性を確認する。Work surface embedded branches パターンでは WindowPreset::Work も許可が必要。
+
+## 2026-05-27 — Windows path separator assertions in CLI tests
+
+Type: workflow
+Context: During SPEC-2008 Phase 31 verification, full cargo test on Windows exposed multiple existing CLI tests that asserted tasks/foo.md substrings against stdout rendered with Windows backslashes.
+Learning: When CLI output includes local paths, tests should normalize separators or compare path components instead of asserting Unix-only substrings.
+Future Action: For Windows verification failures in CLI stdout path tests, first check whether the production output is correct and update the test to be separator-independent rather than changing user-facing path rendering.

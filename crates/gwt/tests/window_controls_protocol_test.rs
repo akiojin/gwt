@@ -106,6 +106,18 @@ fn frontend_event_deserializes_window_state_commands() {
         other => panic!("unexpected event: {other:?}"),
     }
 
+    let close_group = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "close_window_group",
+        "id": "project-1::agent-1"
+    }))
+    .expect("close_window_group should deserialize");
+    match close_group {
+        FrontendEvent::CloseWindowGroup { id } => {
+            assert_eq!(id, "project-1::agent-1");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
     let knowledge = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "load_knowledge_bridge",
         "id": "project-1::issue-1",
