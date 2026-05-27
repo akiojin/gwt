@@ -471,7 +471,7 @@ impl AppRuntime {
         client_id: &str,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let agents = self.collect_resumable_agents();
+        let agents = self.collect_resumable_agents(workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
@@ -730,7 +730,7 @@ impl AppRuntime {
     /// `lifecycle_status = Running` so the picker can show them and focus
     /// their window on click. Non-live entries require a backing Session
     /// toml on disk.
-    fn collect_resumable_agents(&self) -> Vec<gwt::ResumableAgentView> {
+    fn collect_resumable_agents(&self, workspace_id: Option<&str>) -> Vec<gwt::ResumableAgentView> {
         let Some(tab_id) = self.active_tab_id.as_deref() else {
             return Vec::new();
         };
@@ -769,6 +769,10 @@ impl AppRuntime {
             .agents
             .iter()
             .filter(|agent| !agent.session_id.trim().is_empty())
+            .filter(|agent| match workspace_id {
+                Some(id) => agent.workspace_id.as_deref() == Some(id),
+                None => true,
+            })
             .filter_map(|agent| {
                 let is_live = live_session_ids.contains(agent.session_id.as_str());
                 let (resume_kind, lifecycle_status) = if is_live {
