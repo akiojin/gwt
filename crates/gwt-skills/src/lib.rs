@@ -844,6 +844,14 @@ mod tests {
                 "expected discussion skill to require evidence proof fields in {relative}"
             );
             assert!(
+                discussion_skill.contains("## Depth Interview Loop")
+                    && discussion_skill.contains("Question Ledger")
+                    && discussion_skill.contains("Depth Gate")
+                    && discussion_skill.contains("After every answer")
+                    && discussion_skill.contains("Do not treat a small number of questions as a completion signal"),
+                "expected discussion skill to require depth-gated follow-up questioning in {relative}"
+            );
+            assert!(
                 discussion_skill.contains("official documentation")
                     && discussion_skill.contains("X search")
                     && discussion_skill.contains("X API Search Posts"),
@@ -940,7 +948,9 @@ mod tests {
                 discussion_command.contains("Plan Mode")
                     && discussion_command.contains("leave Plan Mode")
                     && discussion_command.contains("Coverage Checks")
-                    && discussion_command.contains("Exit Blockers"),
+                    && discussion_command.contains("Exit Blockers")
+                    && discussion_command.contains("Depth Gate")
+                    && discussion_command.contains("Question Ledger"),
                 "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
             );
             assert!(
@@ -965,6 +975,8 @@ mod tests {
             );
             assert!(
                 clarification.contains("Planning-ready requires covering the applicable categories")
+                    && clarification.contains("Depth Gate")
+                    && clarification.contains("Question Ledger")
                     && !clarification.contains("Ask at most 5 questions"),
                 "expected clarification guidance to require checklist coverage instead of a five-question cap in {relative}"
             );
@@ -978,7 +990,8 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 deepening.contains("Escalate from the normal discussion flow into deepening")
-                    && deepening.contains("top 3 highest-impact points"),
+                    && deepening.contains("top 3 highest-impact points")
+                    && deepening.contains("first batch, not an exit condition"),
                 "expected deepening guidance to allow automatic escalation and pre-prioritization in {relative}"
             );
         }
@@ -993,7 +1006,9 @@ mod tests {
                 intake.contains("Do not stop after the first slice success condition alone.")
                     && intake.contains("integration target")
                     && intake.contains("explicit non-goals")
-                    && intake.contains("verification signal"),
+                    && intake.contains("verification signal")
+                    && intake.contains("Depth Gate")
+                    && intake.contains("Question Ledger"),
                 "expected intake guidance to continue beyond the first-slice success signal in {relative}"
             );
         }

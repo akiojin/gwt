@@ -40,6 +40,9 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
          - Official Docs Proof: Claude Code hooks docs checked\n\
          - External Research Proof: not-applicable: local-only behavior\n\
          - Exit Blockers: none\n\
+         - Depth Mode: normal\n\
+         - Question Ledger: scope boundary, integration, failure, migration, verification checked\n\
+         - Depth Gate: complete\n\
          - Next Question: Should we block on Stop?\n\
          - Evidence Gate: complete\n",
     )
@@ -65,6 +68,38 @@ fn discuss_resolve_rejects_incomplete_evidence_gate() {
         "### Proposal A - Evidence gap [active]\n\
          - Summary: Missing proof.\n\
          - Exit Blockers: none\n\
+         - Next Question:\n\
+         - Evidence Gate: complete\n",
+    )
+    .unwrap();
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "discuss", "resolve", "--proposal", "Proposal A"]),
+    );
+    assert_eq!(code, 2);
+    let updated = std::fs::read_to_string(&discussion_path).unwrap();
+    assert!(updated.contains("[active]"));
+    assert!(!updated.contains("[chosen]"));
+}
+
+#[test]
+fn discuss_resolve_rejects_incomplete_depth_gate() {
+    let (mut env, dir) = new_env();
+    let discussion_path = dir.path().join(".gwt/discussion.md");
+    std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &discussion_path,
+        "### Proposal A - Depth gap [active]\n\
+         - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected\n\
+         - SPEC/Issue Proof: SPEC-1935 checked\n\
+         - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+         - Official Docs Proof: not-applicable: local-only behavior\n\
+         - External Research Proof: not-applicable: local-only behavior\n\
+         - Exit Blockers: none\n\
+         - Depth Mode: normal\n\
+         - Question Ledger: scope boundary checked only\n\
+         - Depth Gate: open\n\
          - Next Question:\n\
          - Evidence Gate: complete\n",
     )

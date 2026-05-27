@@ -9636,7 +9636,10 @@ exit 1
         assert_eq!(prepared.agent_path, source.display().to_string());
         assert_eq!(
             super::format_file_attachment_prompt(&[prepared.agent_path]),
-            format!("File: \"{}\"", source.display())
+            format!(
+                "File: {}",
+                super::quote_file_attachment_path(&source.display().to_string())
+            )
         );
     }
 
