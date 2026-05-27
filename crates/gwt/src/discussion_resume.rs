@@ -368,10 +368,29 @@ fn evidence_gate_blocker(proposal: &ParsedProposal) -> Option<String> {
         }
     }
 
-    match field_value(proposal, "Evidence Gate") {
+    let evidence_blocker = match field_value(proposal, "Evidence Gate") {
         Some(value) if value.eq_ignore_ascii_case("complete") => None,
         Some(value) => Some(format!("Evidence Gate is not complete: {value}")),
         None => Some("Evidence Gate is missing".to_string()),
+    };
+    if evidence_blocker.is_some() {
+        return evidence_blocker;
+    }
+
+    depth_gate_blocker(proposal)
+}
+
+fn depth_gate_blocker(proposal: &ParsedProposal) -> Option<String> {
+    let question_ledger = field_value(proposal, "Question Ledger");
+    if !is_acceptable_depth_ledger(question_ledger.as_deref()) {
+        return Some("Question Ledger is missing or incomplete".to_string());
+    }
+
+    match field_value(proposal, "Depth Gate") {
+        Some(value) if value.eq_ignore_ascii_case("complete") => None,
+        Some(value) if is_deferred_depth_gate(&value) => None,
+        Some(value) => Some(format!("Depth Gate is not complete: {value}")),
+        None => Some("Depth Gate is missing".to_string()),
     }
 }
 
@@ -410,6 +429,25 @@ fn is_placeholder_value(value: &str) -> bool {
         value.to_ascii_lowercase().as_str(),
         "tbd" | "todo" | "unknown" | "unverified" | "none" | "n/a" | "not-applicable"
     )
+}
+
+fn is_acceptable_depth_ledger(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    !is_placeholder_value(value)
+}
+
+fn is_deferred_depth_gate(value: &str) -> bool {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let Some(reason) = lower
+        .strip_prefix("deferred(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    !reason.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -692,6 +730,9 @@ mod tests {
              - Official Docs Proof: Claude Code hooks docs checked\n\
              - External Research Proof: not-applicable: local-only behavior\n\
              - Exit Blockers: none\n\
+             - Depth Mode: normal\n\
+             - Question Ledger: scope boundary, integration, failure, migration, verification checked\n\
+             - Depth Gate: complete\n\
              - Next Question:\n\
              - Evidence Gate: complete\n",
         )
@@ -702,6 +743,41 @@ mod tests {
             proposal_evidence_blocker_by_label(dir.path(), "Proposal A").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn discussion_stop_blocker_reports_depth_gate_without_next_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Depth gap [active]\n\
+             - Summary: Evidence is complete but depth is not.\n\
+             - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected and focused tests run\n\
+             - SPEC/Issue Proof: SPEC-1935 spec/plan/tasks checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: not-applicable: local-only behavior\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: none\n\
+             - Depth Mode: normal\n\
+             - Question Ledger: scope boundary checked only\n\
+             - Depth Gate: open\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        let pending = discussion_stop_blocker(dir.path())
+            .unwrap()
+            .expect("depth blocker should keep discussion active");
+        assert_eq!(pending.proposal_label, "Proposal A");
+        assert!(pending
+            .next_question
+            .as_deref()
+            .unwrap_or("")
+            .contains("Depth Gate is not complete"));
     }
 
     #[test]
@@ -724,6 +800,66 @@ mod tests {
             .unwrap()
             .expect("missing proof should block resolve");
         assert!(blocker.contains("Implementation Proof"));
+    }
+
+    #[test]
+    fn proposal_evidence_blocker_accepts_deferred_depth_gate_with_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Deferred depth [active]\n\
+             - Summary: Defers the remaining deepening work.\n\
+             - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected\n\
+             - SPEC/Issue Proof: SPEC-1935 checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: not-applicable: local-only behavior\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: none\n\
+             - Depth Mode: normal\n\
+             - Question Ledger: scope and integration covered; remaining alternatives deferred to next SPEC phase\n\
+             - Depth Gate: deferred(remaining alternatives are out of scope for this Action Bundle)\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            proposal_evidence_blocker_by_label(dir.path(), "Proposal A").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn proposal_evidence_blocker_rejects_deferred_depth_gate_without_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Empty deferred depth [active]\n\
+             - Summary: Defers without saying why.\n\
+             - Implementation Proof: crates/gwt/src/discussion_resume.rs inspected\n\
+             - SPEC/Issue Proof: SPEC-1935 checked\n\
+             - Gap Check Proof: scope/integration/failure/migration/verification checked\n\
+             - Official Docs Proof: not-applicable: local-only behavior\n\
+             - External Research Proof: not-applicable: local-only behavior\n\
+             - Exit Blockers: none\n\
+             - Depth Mode: normal\n\
+             - Question Ledger: scope checked\n\
+             - Depth Gate: deferred()\n\
+             - Next Question:\n\
+             - Evidence Gate: complete\n",
+        )
+        .unwrap();
+
+        let blocker = proposal_evidence_blocker_by_label(dir.path(), "Proposal A")
+            .unwrap()
+            .expect("empty deferred reason should block resolve");
+        assert!(blocker.contains("Depth Gate"));
     }
 
     #[test]

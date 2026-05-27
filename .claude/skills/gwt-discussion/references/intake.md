@@ -54,6 +54,10 @@ Stop when all of these are true:
 - The first slice has a visible success condition.
 - High-impact scope ambiguity has been resolved by the user.
 - The SPEC vs Issue decision is justified.
+- `Question Ledger` records the answers used for routing, scope, integration,
+  non-goals, failure handling, and verification signal.
+- `Depth Gate` is complete or explicitly deferred with a reason for the intake
+  slice.
 - Do not stop after the first slice success condition alone. Also resolve the
   integration target, explicit non-goals, and verification signal for the
   chosen slice before leaving intake.
@@ -80,6 +84,8 @@ Maintain in conversation context (not as a file):
 - Out of scope: <what is explicitly excluded>
 - Constraints: <technical, time, or design constraints>
 - Success signal: <how to know it works>
+- Question Ledger: <routing/scope/depth answers already covered>
+- Depth Gate: <open|complete|deferred(reason)>
 - Open questions: <unresolved items>
 - Candidate owner: <existing SPEC/Issue if found, or "none">
 ```

@@ -276,11 +276,9 @@ fn is_loopback_host(host: &str) -> bool {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
