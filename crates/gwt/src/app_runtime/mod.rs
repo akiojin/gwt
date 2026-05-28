@@ -842,6 +842,9 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             FrontendUserActionLog::new("open_release_notes", "release_notes")
                 .target(focus_version.as_deref().unwrap_or_default())
         }
+        FrontendEvent::ApplyUpdateToVersion { version } => {
+            FrontendUserActionLog::new("apply_update_to_version", "update").target(version)
+        }
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
@@ -3798,6 +3801,9 @@ impl AppRuntime {
             }
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
+            FrontendEvent::ApplyUpdateToVersion { version } => {
+                self.apply_update_to_version_events(&client_id, version)
+            }
             FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
@@ -3880,6 +3886,9 @@ impl AppRuntime {
     /// SPEC #2780: serve the bundled `CHANGELOG.md` to the Release Notes
     /// window. The parse runs once per process (cached) so this handler is
     /// effectively a copy from a static slice.
+    ///
+    /// SPEC #2780 v2 Amendment (FR-013): `current_version` is included so the
+    /// frontend can label the Update / Downgrade / Current action button.
     fn release_notes_events(
         &self,
         client_id: ClientId,
@@ -3897,9 +3906,57 @@ impl AppRuntime {
                 id,
                 entries: entries.to_vec(),
                 focus_version,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
             }
         };
         vec![OutboundEvent::reply(client_id, event)]
+    }
+
+    /// SPEC #2780 v2 Amendment (FR-014): user clicked Update / Downgrade on
+    /// a specific release in the Release Notes window. Resolves the platform
+    /// asset for the requested tag on a worker thread (network), then routes
+    /// through the existing `ApplyUpdateStart` pipeline so the standard
+    /// update modal renders downloading → ready → restart.
+    ///
+    /// Codex review on PR #2917: the resolved state is also published as
+    /// `UserEvent::UpdateAvailable` so `AppRuntime.pending_update` reflects
+    /// the chosen release. Without this step, `ApplyUpdateLater` /
+    /// `ApplyUpdateRestartNow` (which both gate on `self.pending_update`)
+    /// would either no-op or fire against an unrelated latest-update state
+    /// when the user selected a downgrade while `pending_update` was
+    /// `UpToDate`.
+    fn apply_update_to_version_events(
+        &self,
+        client_id: &str,
+        version: String,
+    ) -> Vec<OutboundEvent> {
+        let proxy = self.proxy.clone();
+        let client_id_owned = client_id.to_string();
+        self.blocking_tasks.spawn(move || {
+            let manager = gwt_core::update::UpdateManager::new();
+            let current_exe = std::env::current_exe().ok();
+            match manager.resolve_state_for_version(&version, current_exe.as_deref()) {
+                Ok(state) => {
+                    // Update `pending_update` first so Later / Restart now
+                    // read the selected release. The frontend update-cta
+                    // ignores the broadcast `UpdateState` here because its
+                    // local status is already `applying` (the modal was
+                    // opened by `beginUpdateDownloading` on click).
+                    proxy.send(UserEvent::UpdateAvailable(state.clone()));
+                    proxy.send(UserEvent::ApplyUpdateStart {
+                        state,
+                        client_id: client_id_owned,
+                    });
+                }
+                Err(message) => {
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                        client_id_owned,
+                        update_apply_error_failed("Resolve release", &message),
+                    )]));
+                }
+            }
+        });
+        vec![]
     }
 
     fn save_ui_trace_events(

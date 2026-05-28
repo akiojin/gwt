@@ -6207,3 +6207,17 @@ Type: lesson
 Context: Resume Picker returned agents from ALL branches instead of the selected Work item. Unit tests passed because they only tested presence/absence of agents, not cross-branch leakage. The bug was only caught when the user asked for a headed browser check.
 Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
 Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.
+
+## 2026-05-28 — Verify CSS tokens exist before using them in new components
+
+Type: lesson
+Context: SPEC-2780 v2 で Release Notes update button を実装した際、最初 --color-accent / --color-warning / --color-on-accent を fallback hex 付きで使ったが、これらは gwt のデザイン token として未定義だった。ユーザー目視で「CSS は合っていますか?」と指摘されて気付き、--color-state-active / --color-state-blocked / --color-text-disabled / --color-scrim 等の実 token に置換した。
+Learning: 新規 CSS を書くときは fallback hex 付きで未定義 token を仮置きしてはいけない。fallback だけが効くので見た目はテーマと不整合になるが、ビルド・テストは通って気付かない。
+Future Action: 新規 component の CSS を書く前に grep -E '^\s*--color-' crates/gwt/web/styles/tokens.css で実在 token を確認する。precedent component (update-modal__btn--primary / update-cta.is-error 等) を必ず参照して同じ token を使う。
+
+## 2026-05-28 — PR auto-merge can outrun review reply commits
+
+Type: lesson
+Context: SPEC-2780 v2 PR #2917 was set to auto-merge once CI passed. Codex+CodeRabbit posted P1/Major review threads after the initial push, but by the time the review reply commit was prepared and pushed, the PR had already auto-merged with the original buggy code on develop. The follow-up fix had to ship as a separate PR (#2918).
+Learning: When a PR can auto-merge, the agent must (1) check for unresolved review threads BEFORE pushing any commit that would trigger another CI cycle, AND (2) gate auto-merge on review resolution rather than just CI pass — otherwise review fixes land in a follow-up PR while the original P1 issues sit in develop unfixed.
+Future Action: Before declaring a PR ready: run gwtd pr review-threads <n> to inspect unresolved threads. If any P0/P1/Major comments exist, prefer addressing them BEFORE the auto-merge gate clears. If a PR has already auto-merged with unaddressed reviewer concerns, immediately raise a follow-up PR and Board-handoff to the user; do not stop at 'thread resolved' on the merged PR alone.
