@@ -805,6 +805,8 @@ pub struct ProfileSnapshotView {
     pub active_profile: String,
     pub selected_profile: String,
     pub profiles: Vec<ProfileEntryView>,
+    #[serde(default)]
+    pub os_env: Vec<ProfileEnvEntryView>,
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
@@ -3114,6 +3116,10 @@ mod tests {
                     is_default: true,
                     is_active: true,
                 }],
+                os_env: vec![ProfileEnvEntryView {
+                    key: "PATH".to_string(),
+                    value: "/usr/bin".to_string(),
+                }],
                 merged_preview: vec![ProfileEnvEntryView {
                     key: "TERM".to_string(),
                     value: "xterm-256color".to_string(),
@@ -3133,6 +3139,10 @@ mod tests {
         assert_eq!(
             value["snapshot"]["profiles"][0]["env_vars"][0]["key"],
             Value::String("TERM".to_string())
+        );
+        assert_eq!(
+            value["snapshot"]["os_env"][0]["value"],
+            Value::String("/usr/bin".to_string())
         );
     }
 

@@ -6208,6 +6208,34 @@ Context: Resume Picker returned agents from ALL branches instead of the selected
 Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
 Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.
 
+## 2026-05-28 — Panel roots must be anchored before pane overflow can work
+
+Type: failure-pattern
+Context: Profile window scroll bug (#2916): .profile-root had flex/min-height styles but was not included in the shared .window-body root group that applies position:absolute and inset:0.
+Learning: Child panes with overflow:auto only scroll when their root receives the window-body height constraint. A flex/grid pane can look correct in CSS but still expand past the window when the root is not anchored.
+Future Action: When adding or fixing panel surfaces, verify the surface root participates in the shared root containment rule and add an embedded-web contract test for scroll boundaries.
+
+## 2026-05-28 — Profile grid autosave rows need stable editable keys
+
+Type: lesson
+Context: SPEC-2015 Profile Environment Variables grid implemented row-level autosave and re-rendered rows from normalized profile payload.
+Learning: Editable rows that are keyed by the value being edited can lose subsequent key changes after the first autosave/re-render unless the row-local key mirror and backing draft entry are updated together. Pending added rows should also update visible Result cells immediately while debounce save is pending.
+Future Action: When adding autosaved table rows, test multi-character key edits, pending row value edits, backend roundtrip re-render, and duplicate-key collapse before declaring UI behavior complete.
+
+## 2026-05-28 — Work surface rerender must honor legacy preset aliases
+
+Type: failure-pattern
+Context: Visual E2E failures after Work unification: Quiet Work rows stayed empty for windows with preset=workspace because workspace-kanban-surface.renderWindows only refreshed preset=work. Branch Cleanup E2E also still targeted the old standalone branches surface while branches now lives under the Work surface tab.
+Learning: When a surface is renamed or consolidated, async rerender paths and E2E selectors must use the same preset alias set as the mount path. It is easy to update initial mount logic while leaving event-driven refresh paths on the new canonical preset only.
+Future Action: For future surface renames, add unit tests for renderWindows/event refresh using legacy preset aliases, then update Playwright fixtures/selectors to navigate through the canonical visible UI rather than stale standalone surface classes.
+
+## 2026-05-28 — Profile visual checks require screenshot inspection
+
+Type: lesson
+Context: Profile env grid UI was changed and headed E2E passed, but the user reported Profile Metadata was not visible. Screenshot inspection showed the metadata section was collapsed to 0px because .profile-editor-pane used a 2-row grid while renderProfile appends actions, metadata, and env sections.
+Learning: Headed browser execution alone is not visual verification. For layout changes, inspect screenshots or pixel/DOM geometry that proves the intended visible regions are actually visible and non-overlapping.
+Future Action: Before reporting UI layout work as visually verified, capture and open screenshots for the relevant state and add assertions for visible geometry/non-overlap, not only DOM presence.
+
 ## 2026-05-28 — Verify CSS tokens exist before using them in new components
 
 Type: lesson

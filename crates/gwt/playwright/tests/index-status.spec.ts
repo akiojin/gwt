@@ -389,12 +389,12 @@ test.describe("Project Index status surface", () => {
     const { root } = await openIndexSearchPanel(page);
     await expect(root.locator(".index-search-input")).toHaveAttribute(
       "placeholder",
-      "Search by meaning, e.g. workspace lifecycle",
+      "Search by meaning, e.g. work lifecycle",
     );
     await root.locator("[data-match-mode='all_terms']").click();
     await expect(root.locator(".index-search-input")).toHaveAttribute(
       "placeholder",
-      "All terms required, e.g. Workspace discussion",
+      "All terms required, e.g. Work discussion",
     );
     await root.locator(".index-search-input").fill("Workspace volatile");
     await root.locator(".index-run-button").click();
