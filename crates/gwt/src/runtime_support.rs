@@ -494,16 +494,23 @@ pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
-    /// SPEC-1942 US-14: `gwt serve` / `gwt --headless` — bootstrap the same
-    /// embedded server stack as the GUI route but skip wry/tao so the user
-    /// can open the UI in any browser.
-    Headless,
+    /// SPEC #2920: tray-resident process route. Phase 4 will wire `main()`
+    /// to dispatch this variant to `gwt::cli::tray::run`. Until then it is
+    /// reachable only from tests and reserves the routing slot so the
+    /// public enum API stays stable across Phase 2〜4 commits.
+    #[allow(dead_code)]
+    Tray,
+    /// SPEC #2920 Q9: `gwt serve` / `gwt --headless` verbs were removed in
+    /// v10.0.0 (supersede of SPEC-1942 US-14). `main()` matches this
+    /// variant first, writes the usage hint, and exits with code 2 — no
+    /// embedded server is bootstrapped on this route anymore.
+    LegacyServeUsageHint,
 }
 
 pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
     match argv.get(1).map(String::as_str) {
         Some("issue" | "pr" | "actions") => FrontDoorRoute::RepoBackedCli,
-        Some("serve" | "--headless") => FrontDoorRoute::Headless,
+        Some("serve" | "--headless") => FrontDoorRoute::LegacyServeUsageHint,
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
             debug_assert!(matches!(
                 top_verb,
@@ -514,6 +521,12 @@ pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
         _ => FrontDoorRoute::Gui,
     }
 }
+
+/// SPEC #2920 Q9: canonical stderr message emitted when a caller still
+/// invokes the removed `gwt serve` / `gwt --headless` verbs. Exposed so
+/// regression tests and `main()` share the exact same string.
+pub const LEGACY_SERVE_USAGE_HINT: &str =
+    "gwt: `gwt serve` / `gwt --headless` have been removed in v10.0.0 (SPEC #2920). Use `gwt --no-tray --no-open` instead.";
 
 #[cfg(windows)]
 pub(crate) fn attach_parent_console_for_cli() {
@@ -544,10 +557,10 @@ pub fn run_cli(argv: &[String]) -> io::Result<()> {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             std::process::exit(gwt::cli::dispatch(&mut env, argv));
         }
-        // Gui and Headless are both bootstrapped by `main()` after `run_cli`
-        // returns; `run_cli` itself only dispatches verbs that exit the
-        // process.
-        FrontDoorRoute::Gui | FrontDoorRoute::Headless => Ok(()),
+        // Gui, Tray, and LegacyServeUsageHint are all handled by `main()`
+        // after `run_cli` returns; `run_cli` itself only dispatches verbs
+        // that exit the process.
+        FrontDoorRoute::Gui | FrontDoorRoute::Tray | FrontDoorRoute::LegacyServeUsageHint => Ok(()),
     }
 }
 
@@ -817,38 +830,44 @@ mod tests {
         }
     }
 
-    // SPEC-1942 US-14 / FR-093: `gwt serve` keeps the GUI bootstrap stack
-    // (logging, AppRuntime, EmbeddedServer, watchers) but skips wry/tao so the
-    // user can open the same UI in any browser.
+    // SPEC #2920 Q9 (supersede of SPEC-1942 US-14): `gwt serve` is removed in
+    // v10. Routing must surface a `LegacyServeUsageHint` so `main()` can write
+    // the canonical hint and exit 2 instead of bootstrapping the server stack.
     #[test]
-    fn front_door_route_routes_serve_subcommand_to_headless() {
+    fn front_door_route_routes_serve_subcommand_to_legacy_usage_hint() {
         for args in [
             argv(&["gwt", "serve"]),
             argv(&["gwt", "serve", "--port", "8787"]),
             argv(&["gwt", "serve", "--bind", "0.0.0.0", "--open"]),
         ] {
-            assert_eq!(front_door_route(&args), FrontDoorRoute::Headless);
+            assert_eq!(
+                front_door_route(&args),
+                FrontDoorRoute::LegacyServeUsageHint
+            );
             assert!(
                 !gwt::cli::should_dispatch_cli(&args),
-                "serve must not fall through to CLI dispatch (route is handled by main): {args:?}"
+                "removed serve must not fall through to CLI dispatch: {args:?}"
             );
         }
     }
 
-    // SPEC-1942 US-14 / FR-094: `gwt --headless` is an equivalent alias for
-    // `gwt serve`. Both must resolve to `FrontDoorRoute::Headless` so user
-    // mental models stay flexible.
+    // SPEC #2920 Q9: `gwt --headless` is removed alongside `gwt serve`. Both
+    // forms must resolve to the same usage-hint route so the canonical message
+    // is shown regardless of which legacy spelling the caller used.
     #[test]
-    fn front_door_route_routes_dash_dash_headless_flag_to_headless() {
+    fn front_door_route_routes_dash_dash_headless_flag_to_legacy_usage_hint() {
         for args in [
             argv(&["gwt", "--headless"]),
             argv(&["gwt", "--headless", "--port", "8787"]),
             argv(&["gwt", "--headless", "--bind", "0.0.0.0"]),
         ] {
-            assert_eq!(front_door_route(&args), FrontDoorRoute::Headless);
+            assert_eq!(
+                front_door_route(&args),
+                FrontDoorRoute::LegacyServeUsageHint
+            );
             assert!(
                 !gwt::cli::should_dispatch_cli(&args),
-                "--headless must not fall through to CLI dispatch: {args:?}"
+                "removed --headless must not fall through to CLI dispatch: {args:?}"
             );
         }
     }

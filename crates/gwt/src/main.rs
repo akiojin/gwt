@@ -180,31 +180,6 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     }
 }
 
-/// SPEC-1942 US-14 / FR-095: best-effort `--open` implementation. Spawns the
-/// platform-specific browser launcher (`open` on macOS, `xdg-open` on Linux,
-/// `cmd /C start` on Windows) and detaches; failures are logged but never
-/// block the server, matching the acceptance scenario "spawn failure prints
-/// the URL on stderr and the server keeps running".
-fn spawn_open_default_browser(url: &str) {
-    let url_owned = url.to_string();
-    let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&url_owned).spawn()
-    } else if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url_owned])
-            .spawn()
-    } else {
-        std::process::Command::new("xdg-open")
-            .arg(&url_owned)
-            .spawn()
-    };
-    if let Err(error) = result {
-        eprintln!(
-            "gwt serve: could not auto-open browser ({error}); open this URL manually: {url_owned}"
-        );
-    }
-}
-
 fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
 }
@@ -6032,33 +6007,28 @@ fn main() -> wry::Result<()> {
     if !matches!(route, runtime_support::FrontDoorRoute::Gui) {
         // SPEC-1942 US-14 follow-up: Windows builds use
         // `windows_subsystem = "windows"` so stdout/stderr are detached by
-        // default. CLI verbs *and* the headless route both need terminal IO
-        // (CLI for command output, `gwt serve` for the printed browser URL
-        // and access log lines), so attach to the parent console for both.
+        // default. CLI verbs need terminal IO and the
+        // `LegacyServeUsageHint` route also needs stderr so users see
+        // the migration hint, so attach to the parent console for any
+        // non-GUI route.
         attach_parent_console_for_cli();
     }
-    if !matches!(
-        route,
-        runtime_support::FrontDoorRoute::Gui | runtime_support::FrontDoorRoute::Headless
-    ) {
+
+    // SPEC #2920 Q9: `gwt serve` / `gwt --headless` have been removed.
+    // Emit the canonical usage hint and exit before any GUI bootstrap so
+    // legacy callers fail fast and visibly instead of silently bringing
+    // up the WebView.
+    if matches!(route, runtime_support::FrontDoorRoute::LegacyServeUsageHint) {
+        eprintln!("{}", runtime_support::LEGACY_SERVE_USAGE_HINT);
+        std::process::exit(2);
+    }
+
+    if !matches!(route, runtime_support::FrontDoorRoute::Gui) {
         if let Err(error) = run_cli(&argv) {
             eprintln!("CLI dispatch failed: {error}");
             std::process::exit(1);
         }
     }
-
-    // SPEC-1942 US-14: parse `gwt serve` / `gwt --headless` argv up front so a
-    // bad flag bundle fails fast before any bootstrap side effects.
-    let serve_args = match route {
-        runtime_support::FrontDoorRoute::Headless => match gwt::cli::serve::parse(&argv[1..]) {
-            Ok(parsed) => Some(parsed),
-            Err(error) => {
-                eprintln!("gwt serve: {error}");
-                std::process::exit(2);
-            }
-        },
-        _ => None,
-    };
 
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
@@ -6071,16 +6041,12 @@ fn main() -> wry::Result<()> {
     }
 
     let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let lock_kind = if serve_args.is_some() {
-        gwt::gui_single_instance::LockKind::Headless
-    } else {
-        gwt::gui_single_instance::LockKind::Gui
-    };
-    let lock_role_label = if serve_args.is_some() {
-        "headless"
-    } else {
-        "GUI"
-    };
+    // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
+    // this point on the GUI route. Phase 3 will rework the kind taxonomy
+    // entirely to `(gwt_home, "tray", user_id)`; until then keep the
+    // existing `Gui` kind so single-instance behaviour is unchanged.
+    let lock_kind = gwt::gui_single_instance::LockKind::Gui;
+    let lock_role_label = "GUI";
     let _instance_lock_outcome = match gwt::gui_single_instance::acquire_instance_lock(
         &gwt_core::paths::gwt_home(),
         &startup_dir,
@@ -6117,19 +6083,12 @@ fn main() -> wry::Result<()> {
     }
 
     let runtime = Runtime::new().expect("tokio runtime");
-    // SPEC-1942 US-14 / FR-101 注記: macOS で `gwt serve` を起動すると、
-    // 既定では `NSApplication` の Activation Policy が `Regular` のままに
-    // なり、Dock アイコンと "GWT" メニューバーが表示されてしまう。Headless
-    // モードはサービス / daemon 的に動かしたい運用がほとんどなので、
-    // Activation Policy を `Prohibited` (Dock 非表示・menu 非表示・App
-    // Switcher 非表示) に切り替える。GUI route はこれまで通り `Regular`。
-    #[allow(unused_mut)]
-    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    #[cfg(target_os = "macos")]
-    if serve_args.is_some() {
-        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
-    }
+    // SPEC #2920: `gwt serve` is removed. Phase 5 will drop tao entirely
+    // and Phase 8 swaps the macOS NSApplication ActivationPolicy to
+    // `Prohibited` for the tray-resident process. Until then the GUI
+    // route keeps the default `Regular` activation, which matches the
+    // pre-SPEC-2920 behaviour.
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
@@ -6192,10 +6151,11 @@ fn main() -> wry::Result<()> {
         }));
     }
 
-    let (bind_addr, bind_port) = match serve_args.as_ref() {
-        Some(args) => (args.bind, args.port),
-        None => (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0_u16),
-    };
+    // SPEC #2920: bind defaults follow the GUI route (loopback + random
+    // port) now that `gwt serve --bind`/`--port` is gone. Phase 4 will
+    // restore `--bind` / `--port` parsing on the tray route via
+    // `TrayArgs`.
+    let (bind_addr, bind_port) = (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0_u16);
     let mut server = EmbeddedServer::start_with_bind(
         &runtime,
         bind_addr,
@@ -6213,9 +6173,6 @@ fn main() -> wry::Result<()> {
     // is `FrontendReady` which does not exercise this code path.
     app.set_server_url(front_door.browser_url.to_string());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
-    if serve_args.is_some() {
-        eprintln!("gwt serve: press Ctrl-C to stop");
-    }
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
     // written to that path so the CI workflow can read it back into
@@ -6244,7 +6201,10 @@ fn main() -> wry::Result<()> {
     // `DestroyWindow(hwnd)` which invalidates the parent HWND that WebView2
     // renders into. Binding the pair in a tuple keeps the Rust ownership of
     // `Window` until the closure (and therefore the process) ends.
-    let webview_surface: Option<(Window, wry::WebView)> = if serve_args.is_none() {
+    // SPEC #2920: GUI route always constructs the WebView surface now
+    // that the headless branch is gone. Phase 5 will replace this entire
+    // block with the tray-resident process bootstrap.
+    let webview_surface: Option<(Window, wry::WebView)> = {
         let builder = WindowBuilder::new()
             .with_title(APP_NAME)
             .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0));
@@ -6293,78 +6253,20 @@ fn main() -> wry::Result<()> {
             builder.build_gtk(vbox)?
         };
         Some((window, webview))
-    } else {
-        None
     };
 
     #[cfg(target_os = "macos")]
-    let native_menu = if serve_args.is_none() {
+    let native_menu = {
         let menu = gwt::MacosNativeMenu::new();
         menu.init_for_app();
         Some(menu)
-    } else {
-        None
     };
 
-    // SPEC-1942 US-14 / FR-097: in headless mode, Ctrl-C / SIGTERM are the
-    // only way to ask the server to shut down. Route both through the
-    // existing `UserEvent::QuitApp` path so the event_loop closure can run
-    // the same graceful shutdown sequence as the GUI close button.
-    //
-    // macOS caveat: `tao::EventLoop` without a native `Window` does not
-    // reliably wake the `NSApp.run()` runloop on `EventLoopProxy::send_event`,
-    // so the dispatched `UserEvent::QuitApp` may sit in the queue
-    // indefinitely. We arm a synchronous `std::thread` fallback timer that
-    // calls `std::process::exit(0)` if the graceful path does not complete
-    // within a short grace period. Using `std::thread::sleep` keeps the
-    // backstop independent of the tokio runtime / timer driver, so it fires
-    // even when the event_loop has stalled.
-    if serve_args.is_some() {
-        let graceful_grace = std::time::Duration::from_secs(5);
-        let trigger_shutdown = move |label: &'static str| {
-            eprintln!("gwt serve: {label} received, shutting down...");
-            // Arm the backstop FIRST so a stalled event loop cannot keep the
-            // process alive forever.
-            std::thread::Builder::new()
-                .name("gwt-serve-exit-backstop".to_string())
-                .spawn(move || {
-                    std::thread::sleep(graceful_grace);
-                    eprintln!(
-                        "gwt serve: graceful shutdown timed out after {graceful_grace:?}; exiting now"
-                    );
-                    std::process::exit(0);
-                })
-                .expect("spawn exit backstop thread");
-        };
-
-        let proxy_for_int = proxy.clone();
-        let trigger_int = trigger_shutdown;
-        drop(runtime.handle().spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                trigger_int("SIGINT");
-                let _ = proxy_for_int.send_event(UserEvent::QuitApp);
-            }
-        }));
-        #[cfg(unix)]
-        {
-            let proxy_for_term = proxy.clone();
-            let trigger_term = trigger_shutdown;
-            drop(runtime.handle().spawn(async move {
-                use tokio::signal::unix::{signal, SignalKind};
-                if let Ok(mut sig) = signal(SignalKind::terminate()) {
-                    if sig.recv().await.is_some() {
-                        trigger_term("SIGTERM");
-                        let _ = proxy_for_term.send_event(UserEvent::QuitApp);
-                    }
-                }
-            }));
-        }
-        if let Some(args) = serve_args.as_ref() {
-            if args.open {
-                spawn_open_default_browser(server.url());
-            }
-        }
-    }
+    // SPEC #2920: the SIGINT / SIGTERM signal handlers and the
+    // headless-only browser auto-open block lived in the deleted
+    // `gwt serve` route. Phase 4 will re-introduce both behind the
+    // tray-resident process bootstrap so the cross-platform shutdown
+    // contract is preserved.
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;

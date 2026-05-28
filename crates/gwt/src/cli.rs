@@ -23,7 +23,6 @@ mod pane;
 mod plan;
 mod pr;
 pub(crate) mod register;
-pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
