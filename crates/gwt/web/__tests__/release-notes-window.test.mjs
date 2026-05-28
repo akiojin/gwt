@@ -11,12 +11,22 @@ function makeFixture({ entries = sampleEntries(), focusVersion = null } = {}) {
   );
   const sent = [];
   const send = (msg) => sent.push(msg);
+  const downloadingCalls = [];
+  const beginUpdateDownloading = (version) => downloadingCalls.push(version);
   const controller = createReleaseNotesWindow({
     document,
     send,
     generateId: () => "rn-test-1",
+    beginUpdateDownloading,
   });
-  return { document, controller, sent, entries, focusVersion };
+  return {
+    document,
+    controller,
+    sent,
+    entries,
+    focusVersion,
+    downloadingCalls,
+  };
 }
 
 function sampleEntries() {
@@ -391,6 +401,59 @@ test("button reflects selection changes via sidebar click", () => {
     .click();
   btn = document.querySelector(".release-notes-update-action");
   assert.ok(btn.classList.contains("is-downgrade"));
+});
+
+// Codex review on PR #2917: opening the update modal in `downloading`
+// state must happen BEFORE sending `apply_update_to_version`, otherwise
+// update-cta.js drops the subsequent UpdateProgress / UpdateReady events.
+test("update button click calls beginUpdateDownloading before sending apply", () => {
+  const { document, controller, sent, downloadingCalls, entries } =
+    makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.36.0",
+  });
+  document.querySelector(".release-notes-update-action").click();
+  assert.deepEqual(downloadingCalls, ["9.38.0"]);
+  const applyMessage = sent.find((m) => m.kind === "apply_update_to_version");
+  assert.ok(applyMessage);
+  // Verify call order via the recorded arrays' state.
+  assert.equal(downloadingCalls[0], applyMessage.version);
+});
+
+test("downgrade Confirm also calls beginUpdateDownloading before sending apply", () => {
+  const { document, controller, sent, downloadingCalls, entries } =
+    makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  document.querySelector(".release-notes-update-action").click();
+  // Confirm modal is shown — no apply, no downloading yet.
+  assert.equal(downloadingCalls.length, 0);
+  document
+    .querySelector(".release-notes-downgrade-confirm__confirm")
+    .click();
+  assert.deepEqual(downloadingCalls, ["9.36.0"]);
+  const applyMessage = sent.find((m) => m.kind === "apply_update_to_version");
+  assert.equal(applyMessage.version, "9.36.0");
+});
+
+test("Cancel on downgrade modal does NOT call beginUpdateDownloading", () => {
+  const { document, controller, downloadingCalls, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  document.querySelector(".release-notes-update-action").click();
+  document.querySelector(".release-notes-downgrade-confirm__cancel").click();
+  assert.equal(downloadingCalls.length, 0);
 });
 
 test("payload without current_version hides the update button (backward-compat)", () => {

@@ -23,6 +23,13 @@ export function createReleaseNotesWindow({
   document,
   send = () => {},
   generateId = () => `release-notes-${Date.now()}`,
+  // SPEC #2780 v2 Amendment (FR-014, Codex review on PR #2917): the update
+  // CTA modal must be in `downloading` state before `apply_update_to_version`
+  // fires, otherwise UpdateProgress / UpdateReady events arriving from the
+  // backend are dropped by update-cta.js (which gates on `status ===
+  // "applying"`). The host (app.js) wires this to
+  // `updateCtaController.beginDownloadingFor`.
+  beginUpdateDownloading = () => {},
 } = {}) {
   if (!document) {
     throw new Error("createReleaseNotesWindow requires a document");
@@ -201,6 +208,16 @@ export function createReleaseNotesWindow({
   }
 
   function sendApply(version) {
+    // Open the update modal in `downloading` state BEFORE notifying the
+    // backend so the subsequent UpdateProgress / UpdateReady events land
+    // on a modal that is ready to render them (update-cta.js drops them
+    // when `status !== "applying"`).
+    try {
+      beginUpdateDownloading(version);
+    } catch {
+      // beginUpdateDownloading is a UI hint, not a hard dependency. Apply
+      // proceeds even if it throws so the backend pipeline still runs.
+    }
     send({ kind: "apply_update_to_version", version });
   }
 

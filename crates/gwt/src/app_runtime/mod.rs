@@ -3917,6 +3917,14 @@ impl AppRuntime {
     /// asset for the requested tag on a worker thread (network), then routes
     /// through the existing `ApplyUpdateStart` pipeline so the standard
     /// update modal renders downloading → ready → restart.
+    ///
+    /// Codex review on PR #2917: the resolved state is also published as
+    /// `UserEvent::UpdateAvailable` so `AppRuntime.pending_update` reflects
+    /// the chosen release. Without this step, `ApplyUpdateLater` /
+    /// `ApplyUpdateRestartNow` (which both gate on `self.pending_update`)
+    /// would either no-op or fire against an unrelated latest-update state
+    /// when the user selected a downgrade while `pending_update` was
+    /// `UpToDate`.
     fn apply_update_to_version_events(
         &self,
         client_id: &str,
@@ -3929,6 +3937,12 @@ impl AppRuntime {
             let current_exe = std::env::current_exe().ok();
             match manager.resolve_state_for_version(&version, current_exe.as_deref()) {
                 Ok(state) => {
+                    // Update `pending_update` first so Later / Restart now
+                    // read the selected release. The frontend update-cta
+                    // ignores the broadcast `UpdateState` here because its
+                    // local status is already `applying` (the modal was
+                    // opened by `beginUpdateDownloading` on click).
+                    proxy.send(UserEvent::UpdateAvailable(state.clone()));
                     proxy.send(UserEvent::ApplyUpdateStart {
                         state,
                         client_id: client_id_owned,
