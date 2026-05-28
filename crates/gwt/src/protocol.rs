@@ -170,6 +170,12 @@ pub enum FileAttachment {
         size: u64,
         data_base64: String,
     },
+    Uploaded {
+        upload_id: String,
+        filename: String,
+        mime_type: Option<String>,
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +264,13 @@ pub enum FrontendEvent {
         data_base64: String,
         mime_type: String,
         filename: Option<String>,
+    },
+    PasteImageUploaded {
+        id: String,
+        upload_id: String,
+        mime_type: String,
+        filename: Option<String>,
+        size: u64,
     },
     AttachFiles {
         id: String,
@@ -2833,6 +2846,37 @@ mod tests {
     }
 
     #[test]
+    fn frontend_event_accepts_uploaded_terminal_image_paste_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": "tab-1::agent-1",
+            "upload_id": "upload-1",
+            "mime_type": "image/png",
+            "filename": "screenshot.png",
+            "size": 12
+        }))
+        .expect("deserialize uploaded image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImageUploaded {
+                    id,
+                    upload_id,
+                    mime_type,
+                    filename: Some(filename),
+                    size,
+                } if id == "tab-1::agent-1"
+                    && upload_id == "upload-1"
+                    && mime_type == "image/png"
+                    && filename == "screenshot.png"
+                    && size == 12
+            ),
+            "uploaded image paste must expose upload id and image metadata"
+        );
+    }
+
+    #[test]
     fn frontend_event_accepts_terminal_file_attachment_paths() {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "attach_files",
@@ -2897,6 +2941,45 @@ mod tests {
                         )
             ),
             "browser file drops must expose inline file metadata and bytes"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_uploaded_terminal_file_attachments() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "uploaded",
+                    "upload_id": "upload-1",
+                    "filename": "large.bin",
+                    "mime_type": "application/octet-stream",
+                    "size": 10485761
+                }
+            ]
+        }))
+        .expect("deserialize uploaded file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles { id, files }
+                    if id == "tab-1::agent-1"
+                        && matches!(
+                            files.as_slice(),
+                            [super::FileAttachment::Uploaded {
+                                upload_id,
+                                filename,
+                                mime_type: Some(mime_type),
+                                size,
+                            }] if upload_id == "upload-1"
+                                && filename == "large.bin"
+                                && mime_type == "application/octet-stream"
+                                && *size == 10485761
+                        )
+            ),
+            "browser streaming uploads must expose upload id and metadata"
         );
     }
 

@@ -710,11 +710,12 @@ mod tests {
             "expected image paste to suppress duplicate text paste injection",
         );
         assert!(
-            html.contains("kind: \"paste_image\"")
-                && html.contains("data_base64")
+            html.contains("kind: \"paste_image_uploaded\"")
+                && html.contains("uploadPastedImage")
+                && html.contains("uploadAttachmentFile")
                 && html.contains("mime_type")
                 && html.contains("filename"),
-            "expected image paste backend event with payload, MIME type, and filename",
+            "expected image paste backend event with uploaded payload, MIME type, and filename",
         );
     }
 
@@ -733,15 +734,15 @@ mod tests {
         );
         assert!(
             html.contains("event.dataTransfer?.files")
-                && html.contains("readDroppedFileAsBase64")
-                && html.contains("MAX_FILE_DROP_BYTES"),
-            "expected browser file drops to read arbitrary files with a size guard",
+                && html.contains("uploadFilesAsAttachments")
+                && html.contains("createAttachmentProgressController"),
+            "expected browser file drops to upload files with visible progress",
         );
         assert!(
             html.contains("kind: \"attach_files\"")
-                && html.contains("source: \"inline\"")
-                && html.contains("data_base64"),
-            "expected browser file drops to send inline attach_files payloads",
+                && html.contains("source: \"uploaded\"")
+                && html.contains("upload_id"),
+            "expected browser file drops to send uploaded attach_files payloads",
         );
         let drop_start = html
             .find("function installTerminalFileDropHandlers")
@@ -756,9 +757,9 @@ mod tests {
             "generic file drops must not inherit the clipboard image MIME allow-list",
         );
         assert!(
-            html.contains("MAX_TOTAL_FILE_DROP_BYTES")
-                && drop_source.contains("droppedFilesWithinTotalSizeLimit"),
-            "browser file drops must enforce a total payload guard",
+            !drop_source.contains("MAX_TOTAL_FILE_DROP_BYTES")
+                && !drop_source.contains("droppedFilesWithinTotalSizeLimit"),
+            "browser file drops must not enforce the legacy total payload guard",
         );
         assert!(
             !drop_source.contains("Promise.all("),
@@ -819,8 +820,9 @@ mod tests {
         );
         assert!(
             context_menu_source.contains("readClipboardItems")
-                && context_menu_source.contains("pasteImage"),
-            "expected context menu Paste to preserve image paste routing",
+                && context_menu_source.contains("pasteImage")
+                && html.contains("paste_image_uploaded"),
+            "expected context menu Paste to preserve uploaded image paste routing",
         );
     }
 

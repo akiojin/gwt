@@ -3783,9 +3783,11 @@
         "image/jpeg",
         "image/webp",
       ]);
-      const MAX_FILE_DROP_BYTES = 10 * 1024 * 1024;
-      const MAX_TOTAL_FILE_DROP_BYTES = 50 * 1024 * 1024;
       const MAX_FILE_DROP_COUNT = 16;
+      const FILE_DROP_AGENT_TARGET_MESSAGE = "Drop files on a running Agent window.";
+      const FILE_DROP_COUNT_MESSAGE = `Drop up to ${MAX_FILE_DROP_COUNT} files at once.`;
+      const FILE_DROP_UPLOAD_FAILURE_MESSAGE = "Could not upload dropped file.";
+      const IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE = "Could not upload pasted image.";
 
       function findClipboardImagePasteItem(items) {
         for (const item of Array.from(items || [])) {
@@ -3799,43 +3801,25 @@
         return null;
       }
 
-      function dataUrlBase64Payload(dataUrl) {
-        if (typeof dataUrl !== "string") {
-          return null;
+      function defaultImagePasteFilename(mimeType) {
+        switch (mimeType) {
+          case "image/jpeg":
+            return "clipboard-image.jpg";
+          case "image/webp":
+            return "clipboard-image.webp";
+          case "image/png":
+          default:
+            return "clipboard-image.png";
         }
-        const commaIndex = dataUrl.indexOf(",");
-        if (commaIndex < 0) {
-          return null;
-        }
-        const payload = dataUrl.slice(commaIndex + 1);
-        return payload;
       }
 
-      function readClipboardImageAsBase64(file) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.addEventListener("load", () => {
-            resolve(dataUrlBase64Payload(reader.result));
-          });
-          reader.addEventListener("error", () => {
-            reject(reader.error || new Error("Failed to read clipboard image"));
-          });
-          reader.readAsDataURL(file);
-        });
-      }
-
-      function readDroppedFileAsBase64(file) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.addEventListener("load", () => {
-            const payload = dataUrlBase64Payload(reader.result);
-            resolve(payload === null ? "" : payload);
-          });
-          reader.addEventListener("error", () => {
-            reject(reader.error || new Error("Failed to read dropped file"));
-          });
-          reader.readAsDataURL(file);
-        });
+      function uploadFileFromImageBlob(blob, mimeType, filename) {
+        const type = mimeType || blob?.type || "";
+        const name = filename || blob?.name || defaultImagePasteFilename(type);
+        if (typeof File === "function" && (!(blob instanceof File) || !blob.name)) {
+          return new File([blob], name, { type });
+        }
+        return blob;
       }
 
       function dataTransferHasFiles(dataTransfer) {
@@ -3843,37 +3827,254 @@
         return types.includes("Files") || Boolean(dataTransfer?.files?.length);
       }
 
-      function droppedFilesWithinSizeLimit(files) {
-        return files.every((file) => file.size <= MAX_FILE_DROP_BYTES);
-      }
-
-      function droppedFilesWithinTotalSizeLimit(files) {
-        let totalBytes = 0;
-        for (const file of files) {
-          totalBytes += file.size || 0;
-          if (totalBytes > MAX_TOTAL_FILE_DROP_BYTES) {
-            return false;
-          }
-        }
-        return true;
-      }
-
       function droppedFilesWithinCountLimit(files) {
         return files.length <= MAX_FILE_DROP_COUNT;
       }
 
-      async function readDroppedFilesAsAttachments(files) {
+      function droppedFilesValidationFailure(files) {
+        if (!droppedFilesWithinCountLimit(files)) {
+          return FILE_DROP_COUNT_MESSAGE;
+        }
+        return null;
+      }
+
+      function showFileDropAlert(message) {
+        if (typeof window.alert === "function") {
+          window.alert(message);
+        }
+      }
+
+      function totalFileBytes(files) {
+        return files.reduce((total, file) => total + (file.size || 0), 0);
+      }
+
+      function attachmentFileCountLabel(count) {
+        return `${count} ${count === 1 ? "file" : "files"}`;
+      }
+
+      function ensureAttachmentProgressSurface() {
+        let surface = document.querySelector(".attachment-progress");
+        if (surface) {
+          return surface;
+        }
+        surface = document.createElement("div");
+        surface.className = "attachment-progress";
+        surface.hidden = true;
+        surface.setAttribute("role", "status");
+        surface.setAttribute("aria-live", "polite");
+        surface.innerHTML = `
+          <div class="attachment-progress__row">
+            <span class="attachment-progress__label"></span>
+            <button class="attachment-progress__cancel" type="button" title="Cancel upload">Cancel</button>
+          </div>
+          <div class="attachment-progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div class="attachment-progress__bar"></div>
+          </div>
+        `;
+        document.body.appendChild(surface);
+        return surface;
+      }
+
+      function createAttachmentProgressController(files) {
+        const surface = ensureAttachmentProgressSurface();
+        const label = surface.querySelector(".attachment-progress__label");
+        const track = surface.querySelector(".attachment-progress__track");
+        const bar = surface.querySelector(".attachment-progress__bar");
+        const cancel = surface.querySelector(".attachment-progress__cancel");
+        const abortController = new AbortController();
+        const totalBytes = totalFileBytes(files);
+        const fileCount = files.length;
+        const state = {
+          phase: "Uploading",
+          loadedBytes: 0,
+          failed: false,
+          done: false,
+          visible: true,
+        };
+
+        function percent() {
+          if (totalBytes <= 0) {
+            return state.done ? 100 : 0;
+          }
+          return Math.max(
+            0,
+            Math.min(100, Math.round((state.loadedBytes / totalBytes) * 100)),
+          );
+        }
+
+        function render() {
+          if (!state.visible) {
+            return;
+          }
+          const value = percent();
+          const suffix = totalBytes > 0 ? ` · ${value}%` : "";
+          surface.hidden = false;
+          surface.dataset.state = state.failed ? "error" : state.done ? "done" : "active";
+          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${suffix}`;
+          track.setAttribute("aria-valuenow", String(value));
+          bar.style.width = `${value}%`;
+          cancel.hidden = state.done || state.failed;
+        }
+
+        function showNow() {
+          state.visible = true;
+          render();
+        }
+
+        render();
+        cancel.onclick = () => {
+          abortController.abort();
+          fail("Upload cancelled.");
+        };
+
+        function setPhase(phase) {
+          state.phase = phase;
+          render();
+        }
+
+        function setUploadProgress(loadedBytes) {
+          state.loadedBytes = Math.max(0, loadedBytes || 0);
+          render();
+        }
+
+        function succeed() {
+          state.done = true;
+          state.phase = "Attached";
+          if (state.visible) {
+            render();
+            setTimeout(() => {
+              if (surface.dataset.state === "done") {
+                surface.hidden = true;
+              }
+            }, 700);
+          }
+        }
+
+        function fail(message) {
+          state.failed = true;
+          state.phase = message;
+          showNow();
+        }
+
+        return {
+          signal: abortController.signal,
+          setPhase,
+          setUploadProgress,
+          succeed,
+          fail,
+        };
+      }
+
+      let attachmentUploadTokenPromise = null;
+
+      async function attachmentUploadToken() {
+        if (!attachmentUploadTokenPromise) {
+          attachmentUploadTokenPromise = fetch("/internal/attachment-upload-token", {
+            credentials: "same-origin",
+          }).then(async (response) => {
+            if (!response.ok) {
+              throw new Error(`attachment upload token failed: ${response.status}`);
+            }
+            const payload = await response.json();
+            if (!payload?.token) {
+              throw new Error("attachment upload token missing");
+            }
+            return payload.token;
+          });
+        }
+        return attachmentUploadTokenPromise;
+      }
+
+      function uploadAttachmentFile(file, { onProgress, signal } = {}) {
+        if (typeof window.__gwtAttachmentUploader === "function") {
+          return window.__gwtAttachmentUploader({ file, onProgress, signal });
+        }
+        return new Promise((resolve, reject) => {
+          void attachmentUploadToken()
+            .then((token) => {
+              if (signal?.aborted) {
+                reject(new Error("upload aborted"));
+                return;
+              }
+              const params = new URLSearchParams({
+                filename: file.name || "file",
+                size: String(file.size || 0),
+              });
+              if (file.type) {
+                params.set("mime_type", file.type);
+              }
+              const xhr = new XMLHttpRequest();
+              xhr.open("POST", `/internal/attachments/upload?${params.toString()}`);
+              xhr.setRequestHeader("x-gwt-upload-token", token);
+              xhr.responseType = "json";
+              xhr.upload.onprogress = (event) => {
+                onProgress?.({
+                  loaded: event.loaded || 0,
+                  total: event.lengthComputable ? event.total : file.size || 0,
+                });
+              };
+              xhr.onload = () => {
+                if (xhr.status < 200 || xhr.status >= 300) {
+                  reject(new Error(`upload failed: ${xhr.status}`));
+                  return;
+                }
+                resolve(xhr.response || JSON.parse(xhr.responseText || "{}"));
+              };
+              xhr.onerror = () => reject(new Error("upload failed"));
+              xhr.onabort = () => reject(new Error("upload aborted"));
+              signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+              xhr.send(file);
+            })
+            .catch(reject);
+        });
+      }
+
+      async function uploadFilesAsAttachments(files, progress) {
+        const totalBytes = totalFileBytes(files);
+        let completedBytes = 0;
         const attachments = [];
         for (const file of files) {
+          const uploaded = await uploadAttachmentFile(file, {
+            signal: progress.signal,
+            onProgress: ({ loaded }) => {
+              progress.setUploadProgress(completedBytes + (loaded || 0));
+            },
+          });
+          completedBytes += file.size || uploaded?.size || 0;
+          progress.setUploadProgress(totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0);
           attachments.push({
-            source: "inline",
-            filename: file.name || "file",
-            mime_type: file.type || null,
-            size: file.size,
-            data_base64: await readDroppedFileAsBase64(file),
+            source: "uploaded",
+            upload_id: uploaded.upload_id,
+            filename: uploaded.filename || file.name || "file",
+            mime_type: uploaded.mime_type ?? (file.type || null),
+            size: uploaded.size ?? file.size ?? 0,
           });
         }
         return attachments;
+      }
+
+      async function uploadPastedImage(windowId, blob, { mimeType, filename } = {}) {
+        const file = uploadFileFromImageBlob(blob, mimeType, filename);
+        const progress = createAttachmentProgressController([file]);
+        try {
+          const uploaded = await uploadAttachmentFile(file, {
+            signal: progress.signal,
+            onProgress: ({ loaded }) => progress.setUploadProgress(loaded || 0),
+          });
+          progress.setPhase("Attaching");
+          send({
+            kind: "paste_image_uploaded",
+            id: windowId,
+            upload_id: uploaded.upload_id,
+            mime_type: uploaded.mime_type ?? file.type ?? mimeType ?? "",
+            filename: uploaded.filename || file.name || filename || null,
+            size: uploaded.size ?? file.size ?? 0,
+          });
+          progress.succeed();
+        } catch (_error) {
+          progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+          showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+        }
       }
 
       async function readNavigatorClipboardItems() {
@@ -4059,23 +4260,12 @@
           event.preventDefault();
           event.stopPropagation();
 
-          void readClipboardImageAsBase64(file)
-            .then((dataBase64) => {
-              if (!dataBase64) {
-                return;
-              }
-              send({
-                kind: "paste_image",
-                id: windowId,
-                data_base64: dataBase64,
-                mime_type: file.type || item.type,
-                filename: file.name || null,
-              });
-              terminal.focus();
-            })
-            .catch(() => {
-              terminal.focus();
-            });
+          void uploadPastedImage(windowId, file, {
+            mimeType: file.type || item.type,
+            filename: file.name || null,
+          }).finally(() => {
+            terminal.focus();
+          });
         };
 
         terminalRoot.addEventListener("paste", handlePaste, true);
@@ -4101,27 +4291,21 @@
           }
           event.preventDefault();
           event.stopPropagation();
-          if (
-            !droppedFilesWithinCountLimit(files) ||
-            !droppedFilesWithinSizeLimit(files) ||
-            !droppedFilesWithinTotalSizeLimit(files)
-          ) {
+          if (!isAgentWindowPreset(workspaceWindowById(windowId)?.preset)) {
+            showFileDropAlert(FILE_DROP_AGENT_TARGET_MESSAGE);
+            terminal.focus();
+            return;
+          }
+          const failure = droppedFilesValidationFailure(files);
+          if (failure) {
+            showFileDropAlert(failure);
             terminal.focus();
             return;
           }
 
-          void readDroppedFilesAsAttachments(files)
-            .then((attachments) => {
-              send({
-                kind: "attach_files",
-                id: windowId,
-                files: attachments,
-              });
-            })
-            .catch(() => {})
-            .finally(() => {
-              terminal.focus();
-            });
+          void sendDroppedFileAttachments(windowId, files).finally(() => {
+            terminal.focus();
+          });
         };
 
         terminalRoot.addEventListener("dragover", handleDragOver, true);
@@ -4139,18 +4323,10 @@
           terminalRoot,
           readClipboardText: readNavigatorClipboardText,
           readClipboardItems: readNavigatorClipboardItems,
-          blobToBase64: readClipboardImageAsBase64,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
           pasteText: (text) => terminal.paste(text),
-          pasteImage: ({ dataBase64, mimeType, filename }) => {
-            send({
-              kind: "paste_image",
-              id: windowId,
-              data_base64: dataBase64,
-              mime_type: mimeType,
-              filename,
-            });
-          },
+          pasteImage: ({ blob, mimeType, filename }) =>
+            uploadPastedImage(windowId, blob, { mimeType, filename }),
           focusTerminal: () => terminal.focus(),
         });
         return () => {
@@ -4180,6 +4356,104 @@
           return null;
         }
         return windowId;
+      }
+
+      function workspaceWindowIdFromDropEvent(event) {
+        const targetWindow = event.target?.closest?.(".workspace-window");
+        const targetWindowId = targetWindow?.dataset?.id || null;
+        if (targetWindowId) {
+          return targetWindowId;
+        }
+        const x = Number(event.clientX);
+        const y = Number(event.clientY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          return null;
+        }
+        const pointTarget = document.elementFromPoint(x, y);
+        const pointWindow = pointTarget?.closest?.(".workspace-window");
+        return pointWindow?.dataset?.id || null;
+      }
+
+      function agentWindowIdFromDropEvent(event) {
+        const windowId = workspaceWindowIdFromDropEvent(event);
+        if (!windowId || !terminalMap.has(windowId)) {
+          return null;
+        }
+        const windowData = workspaceWindowById(windowId);
+        if (!isAgentWindowPreset(windowData?.preset)) {
+          return null;
+        }
+        return windowId;
+      }
+
+      function eventTargetsTerminalRoot(event) {
+        return Boolean(event.target?.closest?.(".terminal-root"));
+      }
+
+      function focusTerminalForWindow(windowId) {
+        terminalMap.get(windowId)?.terminal.focus();
+      }
+
+      async function sendDroppedFileAttachments(windowId, files) {
+        const failure = droppedFilesValidationFailure(files);
+        if (failure) {
+          showFileDropAlert(failure);
+          focusTerminalForWindow(windowId);
+          return;
+        }
+
+        const progress = createAttachmentProgressController(files);
+        try {
+          const attachments = await uploadFilesAsAttachments(files, progress);
+          progress.setPhase("Attaching");
+          send({
+            kind: "attach_files",
+            id: windowId,
+            files: attachments,
+          });
+          progress.succeed();
+        } catch (_error) {
+          progress.fail(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
+          showFileDropAlert(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
+        } finally {
+          focusTerminalForWindow(windowId);
+        }
+      }
+
+      function installBrowserFileDropBridge() {
+        const handleDragOver = (event) => {
+          if (!dataTransferHasFiles(event.dataTransfer) || eventTargetsTerminalRoot(event)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (agentWindowIdFromDropEvent(event)) {
+            event.dataTransfer.dropEffect = "copy";
+          } else {
+            event.dataTransfer.dropEffect = "none";
+          }
+        };
+
+        const handleDrop = (event) => {
+          if (!dataTransferHasFiles(event.dataTransfer) || eventTargetsTerminalRoot(event)) {
+            return;
+          }
+          const files = Array.from(event.dataTransfer?.files || []);
+          if (files.length === 0) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          const windowId = agentWindowIdFromDropEvent(event);
+          if (!windowId) {
+            showFileDropAlert(FILE_DROP_AGENT_TARGET_MESSAGE);
+            return;
+          }
+          void sendDroppedFileAttachments(windowId, files);
+        };
+
+        window.addEventListener("dragover", handleDragOver, true);
+        window.addEventListener("drop", handleDrop, true);
       }
 
       function installNativeFileDropBridge() {
@@ -13142,6 +13416,7 @@
       }
 
       installCanvasWheelRouting();
+      installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
       window.addEventListener(

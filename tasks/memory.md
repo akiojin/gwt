@@ -6249,3 +6249,10 @@ Type: lesson
 Context: SPEC-2780 v2 PR #2917 was set to auto-merge once CI passed. Codex+CodeRabbit posted P1/Major review threads after the initial push, but by the time the review reply commit was prepared and pushed, the PR had already auto-merged with the original buggy code on develop. The follow-up fix had to ship as a separate PR (#2918).
 Learning: When a PR can auto-merge, the agent must (1) check for unresolved review threads BEFORE pushing any commit that would trigger another CI cycle, AND (2) gate auto-merge on review resolution rather than just CI pass — otherwise review fixes land in a follow-up PR while the original P1 issues sit in develop unfixed.
 Future Action: Before declaring a PR ready: run gwtd pr review-threads <n> to inspect unresolved threads. If any P0/P1/Major comments exist, prefer addressing them BEFORE the auto-merge gate clears. If a PR has already auto-merged with unaddressed reviewer concerns, immediately raise a follow-up PR and Board-handoff to the user; do not stop at 'thread resolved' on the merged PR alone.
+
+## 2026-05-28 — gwt-managed .gwt exclude covers attachment drop files
+
+Type: lesson
+Context: Planning SPEC-2012 attachment redesign: D&D/paste files will be copied under the worktree-local .gwt/drop-files directory and later removed with the worktree.
+Learning: gwt-skills already writes a broad .gwt/ entry to the gwt-managed block in .git/info/exclude for managed worktrees. Because Git worktree remove deletes ignored untracked files, .gwt/drop-files does not need a dedicated cleanup path when the managed exclude is present.
+Future Action: Before adding cleanup code for new project-local .gwt subdirectories, first verify the managed .git/info/exclude contract and prefer regression tests over redundant deletion logic.
