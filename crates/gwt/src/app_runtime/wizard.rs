@@ -471,7 +471,7 @@ impl AppRuntime {
         client_id: &str,
         workspace_id: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let agents = self.collect_resumable_agents();
+        let agents = self.collect_resumable_agents(workspace_id.as_deref());
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::WorkspaceResumableAgents {
@@ -730,7 +730,7 @@ impl AppRuntime {
     /// `lifecycle_status = Running` so the picker can show them and focus
     /// their window on click. Non-live entries require a backing Session
     /// toml on disk.
-    fn collect_resumable_agents(&self) -> Vec<gwt::ResumableAgentView> {
+    fn collect_resumable_agents(&self, workspace_id: Option<&str>) -> Vec<gwt::ResumableAgentView> {
         let Some(tab_id) = self.active_tab_id.as_deref() else {
             return Vec::new();
         };
@@ -755,20 +755,29 @@ impl AppRuntime {
         };
 
         let sessions_dir = self.sessions_dir.clone();
-        // SPEC-2359 US-42 follow-up: real-world projections carry many
-        // agents with `affiliation_status = unassigned` (set when the
-        // agent did not go through an explicit `workspace ensure` /
-        // `workspace join` flow). Resume Picker still wants to surface
-        // them as candidates as long as the agent has a Session toml the
-        // launcher can drive — otherwise the picker reports "No
-        // resumable agents" even when the user can clearly see prior
-        // sessions in the Workspace card. We therefore include every
-        // agent (Assigned + Unassigned) and rely on the Session toml +
-        // `live_session_ids` filters below to keep the list correct.
+
+        let work_item_session_ids: Option<std::collections::HashSet<String>> = workspace_id
+            .and_then(|wid| {
+                gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+                    .ok()
+                    .flatten()
+                    .and_then(|items| {
+                        items
+                            .work_items
+                            .into_iter()
+                            .find(|item| item.id == wid)
+                            .map(|item| item.agents.into_iter().map(|a| a.session_id).collect())
+                    })
+            });
+
         let mut entries: Vec<gwt::ResumableAgentView> = projection
             .agents
             .iter()
             .filter(|agent| !agent.session_id.trim().is_empty())
+            .filter(|agent| match &work_item_session_ids {
+                Some(ids) => ids.contains(&agent.session_id),
+                None => true,
+            })
             .filter_map(|agent| {
                 let is_live = live_session_ids.contains(agent.session_id.as_str());
                 let (resume_kind, lifecycle_status) = if is_live {
