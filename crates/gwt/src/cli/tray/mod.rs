@@ -16,6 +16,29 @@ pub mod autostart;
 pub mod lock;
 pub mod menu;
 
+/// SPEC #2920 FR-004: launch the OS default browser for the given URL.
+/// Shared by the tray `Open` menu handler (main.rs event loop) and the
+/// `gwt open` CLI (Phase 6). The launcher is detached so callers do
+/// not block on the spawned process.
+pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
+    use std::process::Command;
+    let child = if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).spawn()?
+    } else if cfg!(target_os = "windows") {
+        // The empty "" before the URL is required by `start` so a URL
+        // beginning with quoted text is not interpreted as a window
+        // title.
+        Command::new("cmd").args(["/C", "start", "", url]).spawn()?
+    } else {
+        Command::new("xdg-open").arg(url).spawn()?
+    };
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// CLI flags accepted by the tray-resident front door.
 ///
 /// SPEC #2920 FR-013: `--no-tray` skips tray-icon creation (for CI /

@@ -43,7 +43,10 @@ toml.workspace = true
 which.workspace = true
 fs2.workspace = true
 axum = { version = "0.8", features = ["ws"] }
-wry = "0.55"
+# SPEC #2920 Phase 4: tray-icon needs a host event loop. `tao` provides
+# the cross-platform NSApp / GTK / Windows message-pump glue. The wry
+# WebView dependency was removed alongside the tray migration; muda is
+# still pulled in transitively by tray-icon for menu construction.
 tao = "0.35"
 base64.workspace = true
 regex.workspace = true
@@ -60,15 +63,15 @@ tempfile.workspace = true
 tray-icon = "0.19"
 auto-launch = "0.5"
 whoami = "1.5"
+# SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
+# embedded `assets/icons/icon.png` at runtime via `image` on every host
+# OS. The legacy Windows/Linux-only gate stayed when the GUI route only
+# attached the icon to a `tao::Window`; the tray-resident process needs
+# it on macOS too.
+image.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-muda = "0.19"
-
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
-image.workspace = true
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource.workspace = true

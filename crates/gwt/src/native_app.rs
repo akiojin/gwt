@@ -1,167 +1,18 @@
+//! SPEC #2920 Phase 4 + 5: bundle identity constants for the
+//! tray-resident front door. The wry / muda native menubar definitions
+//! that previously lived in this file were removed when the tray-icon
+//! path replaced the wry WebView. The remaining constants are pure
+//! metadata (no platform code) and stay here so any future
+//! distribution-level helper has a single place to consult bundle
+//! identity, regardless of whether the heavier GUI crates are linked
+//! in.
+
 pub const APP_NAME: &str = "GWT";
 pub const MACOS_BUNDLE_IDENTIFIER: &str = "io.github.akiojin.gwt";
 pub const MACOS_APP_BUNDLE_NAME: &str = "GWT.app";
 pub const GUI_FRONT_DOOR_BINARY_NAME: &str = "gwt";
 pub const INTERNAL_DAEMON_BINARY_NAME: &str = "gwtd";
-pub const OPEN_PROJECT_MENU_ID: &str = "file.open_project";
-pub const RELOAD_MENU_ID: &str = "view.reload";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeLaunchSurface {
-    pub app_name: &'static str,
-    pub bundle_identifier: &'static str,
-    pub bundle_name: &'static str,
-    pub front_door_binary: &'static str,
-    pub daemon_binary: &'static str,
-    pub menu_titles: &'static [&'static str],
-    pub command_ids: &'static [&'static str],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeMenuCommand {
-    OpenProject,
-    ReloadWebView,
-}
 
 pub fn macos_bundle_identifier() -> &'static str {
     MACOS_BUNDLE_IDENTIFIER
-}
-
-pub fn macos_native_menu_titles() -> &'static [&'static str] {
-    &[APP_NAME, "File", "Edit", "View", "Window"]
-}
-
-pub fn native_launch_surface() -> NativeLaunchSurface {
-    NativeLaunchSurface {
-        app_name: APP_NAME,
-        bundle_identifier: macos_bundle_identifier(),
-        bundle_name: MACOS_APP_BUNDLE_NAME,
-        front_door_binary: GUI_FRONT_DOOR_BINARY_NAME,
-        daemon_binary: INTERNAL_DAEMON_BINARY_NAME,
-        menu_titles: macos_native_menu_titles(),
-        command_ids: &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
-    }
-}
-
-pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {
-    match menu_id {
-        OPEN_PROJECT_MENU_ID => Some(NativeMenuCommand::OpenProject),
-        RELOAD_MENU_ID => Some(NativeMenuCommand::ReloadWebView),
-        _ => None,
-    }
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub fn native_window_icon() -> Option<tao::window::Icon> {
-    let image = image::load_from_memory(include_bytes!("../../../assets/icons/icon.png")).ok()?;
-    let image = image.into_rgba8();
-    let (width, height) = image.dimensions();
-    tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()
-}
-
-#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_window_icon_loads_embedded_png() {
-        let icon = native_window_icon();
-        assert!(
-            icon.is_some(),
-            "native_window_icon must decode assets/icons/icon.png at build time"
-        );
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub struct MacosNativeMenu {
-    menu_bar: muda::Menu,
-    window_menu: muda::Submenu,
-}
-
-#[cfg(target_os = "macos")]
-impl Default for MacosNativeMenu {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl MacosNativeMenu {
-    pub fn new() -> Self {
-        use muda::{
-            accelerator::{Accelerator, Code, CMD_OR_CTRL},
-            AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu,
-        };
-
-        let menu_bar = Menu::new();
-        let app_menu = Submenu::new(APP_NAME, true);
-        let file_menu = Submenu::new("File", true);
-        let edit_menu = Submenu::new("Edit", true);
-        let view_menu = Submenu::new("View", true);
-        let window_menu = Submenu::new("Window", true);
-        let open_project_item = MenuItem::with_id(
-            OPEN_PROJECT_MENU_ID,
-            "Open Project...",
-            true,
-            Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)),
-        );
-        let reload_item = MenuItem::with_id(
-            RELOAD_MENU_ID,
-            "Reload",
-            true,
-            Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyR)),
-        );
-
-        let _ =
-            menu_bar.append_items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu]);
-        let _ = app_menu.append_items(&[
-            &PredefinedMenuItem::about(
-                None,
-                Some(AboutMetadata {
-                    name: Some(APP_NAME.to_string()),
-                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                    comments: Some(env!("CARGO_PKG_DESCRIPTION").to_string()),
-                    ..Default::default()
-                }),
-            ),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::hide(None),
-            &PredefinedMenuItem::hide_others(None),
-            &PredefinedMenuItem::show_all(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::quit(None),
-        ]);
-        let _ = file_menu.append_items(&[
-            &open_project_item,
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::close_window(None),
-        ]);
-        let _ = edit_menu.append_items(&[
-            &PredefinedMenuItem::undo(None),
-            &PredefinedMenuItem::redo(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::cut(None),
-            &PredefinedMenuItem::copy(None),
-            &PredefinedMenuItem::paste(None),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::select_all(None),
-        ]);
-        let _ = view_menu.append_items(&[&reload_item]);
-        let _ = window_menu.append_items(&[
-            &PredefinedMenuItem::minimize(None),
-            &PredefinedMenuItem::maximize(None),
-            &PredefinedMenuItem::bring_all_to_front(None),
-        ]);
-
-        Self {
-            menu_bar,
-            window_menu,
-        }
-    }
-
-    pub fn init_for_app(&self) {
-        self.menu_bar.init_for_nsapp();
-        self.window_menu.set_as_windows_menu_for_nsapp();
-    }
 }

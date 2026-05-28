@@ -26,13 +26,15 @@ use gwt::{
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
-    event::{Event, WindowEvent},
+    event::Event,
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    window::{Window, WindowBuilder},
 };
 use tokio::runtime::Runtime;
+use tray_icon::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    TrayIconBuilder,
+};
 use uuid::Uuid;
-use wry::WebViewBuilder;
 
 mod app_runtime;
 mod docker_launch;
@@ -116,7 +118,6 @@ const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuiFrontDoorLaunchSurface<'a> {
     browser_url: &'a str,
-    webview_url: &'a str,
 }
 
 /// Environment variable used by the Playwright CI workflow to receive the
@@ -176,8 +177,24 @@ pub(crate) fn write_browser_url_handoff_file(
 fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<'_> {
     GuiFrontDoorLaunchSurface {
         browser_url: server_url,
-        webview_url: server_url,
     }
+}
+
+/// SPEC #2920 Phase 4: decode the embedded GWT app icon into RGBA bytes
+/// so the cross-platform `tray-icon` crate can render it. Returns
+/// `None` if the icon resource cannot be decoded — the tray-resident
+/// process still starts in that case (the OS may fall back to a
+/// default placeholder, or `gwt open` provides a CLI fallback when the
+/// tray itself fails to surface).
+fn load_tray_icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    use std::io::Cursor;
+    const ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/icon.png");
+    let reader = image::ImageReader::new(Cursor::new(ICON_PNG))
+        .with_guessed_format()
+        .ok()?;
+    let img = reader.decode().ok()?.to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    Some((img.into_raw(), w, h))
 }
 
 fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
@@ -760,6 +777,12 @@ enum UserEvent {
         client_id: ClientId,
         event: FrontendEvent,
     },
+    /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
+    /// only producer of this variant. The browser UI now handles
+    /// drag/drop natively via the HTML5 API. The variant stays around
+    /// in case a follow-up reintroduces native drag/drop for the tray
+    /// window, but the event_loop arm in `main()` simply drops it.
+    #[allow(dead_code)]
     NativeFileDrop {
         paths: Vec<String>,
         x: i32,
@@ -885,7 +908,7 @@ enum UserEvent {
     /// loop exits through the same cleanup path as a window close request.
     QuitApp,
     #[cfg(target_os = "macos")]
-    MenuEvent(muda::MenuEvent),
+    MenuEvent(tray_icon::menu::MenuEvent),
 }
 
 #[cfg(test)]
@@ -1384,66 +1407,17 @@ mod tests {
     }
 
     // SPEC-1942 US-14 / 2026-05-20 Amendment Bug A: the GUI bootstrap must keep
-    // the `tao::Window` alive alongside the `wry::WebView` until `event_loop.run`
-    // terminates. On Windows the `tao::Window::Drop` impl calls
-    // `DestroyWindow(hwnd)`, which invalidates WebView2's parent HWND and
-    // leaves the process running an invisible window. Binding both into a
-    // tuple captured by the run-closure prevents that destruction.
-    #[test]
-    fn webview_surface_pairs_window_with_webview_for_event_loop_lifetime() {
-        let main_source = include_str!("main.rs");
-        // SPEC-1942 2026-05-20 Amendment Bug A: assemble the buggy pattern
-        // from substrings so the test's own assert message does not match
-        // the search and report a false positive.
-        let buggy_drop: String = ["let _ = ", "window", ";"].concat();
-        assert!(
-            main_source.contains("Option<(Window, wry::WebView)>"),
-            "webview_surface must hold the tao::Window alongside the wry::WebView so the OS window survives until event_loop.run terminates"
-        );
-        assert!(
-            main_source.contains("Some((window, webview))"),
-            "the GUI bootstrap must move the freshly built Window into webview_surface (do not drop it at the end of the inner block)"
-        );
-        assert!(
-            !main_source.contains(buggy_drop.as_str()),
-            "the bare `let _ = window` discards the Window at block end and on Windows triggers DestroyWindow before event_loop.run runs"
-        );
-        assert!(
-            main_source.contains("if let Some((_, webview)) = webview_surface.as_ref()"),
-            "ReloadWebView dispatch must destructure webview_surface as a (Window, WebView) tuple"
-        );
-    }
+    // SPEC #2920 Phase 4 + 5: the `webview_surface_pairs_*` and
+    // `native_webview_file_drop_*` regression tests previously pinned
+    // the wry/tao WebView lifetime contract. Both are obsolete now
+    // that the tray-resident process owns the front door and the
+    // WebView is gone; deleting them is part of the legacy GUI
+    // removal.
 
     #[test]
-    fn native_webview_file_drop_dispatches_frontend_custom_event() {
-        let main_source = include_str!("main.rs");
-        let drag_handler = [".with_drag_drop", "_handler"].concat();
-        let wry_drop = ["wry::DragDropEvent::", "Drop"].concat();
-        let native_event = ["UserEvent::Native", "FileDrop"].concat();
-        let frontend_event = ["gwt:native", "-file-drop"].concat();
-        let custom_event = ["window.dispatchEvent(new ", "CustomEvent"].concat();
-
-        assert!(
-            main_source.contains(drag_handler.as_str()),
-            "native WebView bootstrap must install Wry file drag/drop handling",
-        );
-        assert!(
-            main_source.contains(wry_drop.as_str()) && main_source.contains(native_event.as_str()),
-            "Wry drop events must cross into the tao event loop before evaluating frontend JS",
-        );
-        assert!(
-            main_source.contains(frontend_event.as_str())
-                && main_source.contains(custom_event.as_str()),
-            "native file drops must dispatch the frontend custom event with paths and pointer coordinates",
-        );
-    }
-
-    #[test]
-    fn gui_front_door_launch_surface_reuses_same_server_url_for_browser_and_native_webview() {
+    fn gui_front_door_launch_surface_exposes_server_url() {
         let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
-
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
-        assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
     }
 
     #[test]
@@ -1585,7 +1559,10 @@ mod tests {
         let html = crate::embedded_web::index_html();
         let app_js = crate::embedded_web::app_js();
 
-        assert_eq!(surface.browser_url, surface.webview_url);
+        // SPEC #2920 Phase 4: the launch surface now exposes only one
+        // URL (the browser URL); the previous `webview_url` mirror was
+        // removed alongside the wry WebView path.
+        assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
         assert!(
             html.contains("<script type=\"module\" src=\"/app.js\"></script>"),
             "expected browser and native front door modes to point at the same embedded frontend bundle entrypoint",
@@ -5994,7 +5971,7 @@ mod tests {
     }
 }
 
-fn main() -> wry::Result<()> {
+fn main() -> std::io::Result<()> {
     // Hydrate process PATH before any subprocess can spawn. macOS GUI launches
     // via launchd inherit a minimal PATH that omits /usr/local/bin and
     // /opt/homebrew/bin, breaking docker / gh / claude / codex / bunx / npx
@@ -6082,23 +6059,47 @@ fn main() -> wry::Result<()> {
         eprintln!("gwt daemon bootstrap: {error}");
     }
 
+    // SPEC #2920 Phase 4 / FR-011: acquire the per-user tray
+    // single-instance lock. A second `gwt` launched by the same user
+    // simply prints the running URL on stderr and exits 0 — the
+    // tray-resident process is one per OS-login user.
+    let mut tray_lock_handle = match gwt::cli::tray::lock::acquire(&gwt_core::paths::gwt_home()) {
+        Ok(handle) => handle,
+        Err(gwt::cli::tray::lock::TrayLockError::AlreadyRunning { url, .. }) => {
+            if url.trim().is_empty() {
+                eprintln!(
+                        "gwt: another tray-resident gwt instance is already running for this user (server still starting)"
+                    );
+            } else {
+                eprintln!("gwt browser URL: {url}");
+                eprintln!(
+                    "gwt: another tray-resident gwt instance is already running for this user"
+                );
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("gwt tray lock acquire failed: {error}");
+            std::process::exit(1);
+        }
+    };
+
     let runtime = Runtime::new().expect("tokio runtime");
-    // SPEC #2920: `gwt serve` is removed. Phase 5 will drop tao entirely
-    // and Phase 8 swaps the macOS NSApplication ActivationPolicy to
-    // `Prohibited` for the tray-resident process. Until then the GUI
-    // route keeps the default `Regular` activation, which matches the
-    // pre-SPEC-2920 behaviour.
+    // SPEC #2920 Phase 4: the tray-resident process now owns the event
+    // loop. We still use `tao::EventLoop` so the OS runloop integrates
+    // uniformly across macOS / Windows / Linux. macOS hides the Dock
+    // icon via `LSUIElement=true` in the .app bundle (Phase 9), so
+    // there is no need to flip the activation policy at runtime.
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
-    #[cfg(target_os = "macos")]
+    // SPEC #2920 Phase 4: the tray menu uses `tray_icon::menu::Menu`
+    // (re-exported from `muda`), and `MenuEvent::set_event_handler` is
+    // the single cross-platform callback. The legacy macOS native
+    // menubar was removed alongside the wry WebView.
     let menu_proxy = proxy.clone();
-    #[cfg(target_os = "macos")]
-    muda::MenuEvent::set_event_handler(Some(move |event| {
+    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| {
         let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
     }));
-    #[cfg(not(target_os = "macos"))]
-    let clients = ClientHub::default();
-    #[cfg(target_os = "macos")]
     let clients = ClientHub::default();
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
     let mut app = AppRuntime::new(
@@ -6166,13 +6167,15 @@ fn main() -> wry::Result<()> {
     )
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
-    let front_door = gui_front_door_launch_surface(server.url());
+    // SPEC #2920 Phase 4: own the browser URL so it can survive the
+    // tao event_loop closure's 'static requirement (the closure moves
+    // `server`, which the previous `&str` borrow blocked).
+    let browser_url: String = server.url().to_string();
+    let front_door = gui_front_door_launch_surface(&browser_url);
     // SPEC-2785 FR-E: hand the bound URL to AppRuntime so
     // `open_server_url_events` can gate `OpenServerUrl` requests against it.
-    // Must run before the WebView surface boots; the first frontend message
-    // is `FrontendReady` which does not exercise this code path.
-    app.set_server_url(front_door.browser_url.to_string());
-    eprintln!("gwt browser URL: {}", front_door.browser_url);
+    app.set_server_url(browser_url.clone());
+    eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
     // written to that path so the CI workflow can read it back into
@@ -6190,106 +6193,112 @@ fn main() -> wry::Result<()> {
         app.active_project_root().map(Path::to_path_buf),
     );
 
-    // SPEC-1942 US-14 / 2026-05-20 Amendment (Bug A): GUI path builds a wry/tao
-    // surface; headless path keeps the event_loop alive without any native
-    // window so the same closure can process UserEvent::Frontend / RuntimeHook
-    // / QuitApp messages from browser clients and signal handlers alike.
-    //
-    // The Window must live alongside the WebView until `event_loop.run`
-    // terminates: wry only borrows the Window (`&Window`) when attaching the
-    // WebView2 / WKWebView, and on Windows `tao::Window::Drop` calls
-    // `DestroyWindow(hwnd)` which invalidates the parent HWND that WebView2
-    // renders into. Binding the pair in a tuple keeps the Rust ownership of
-    // `Window` until the closure (and therefore the process) ends.
-    // SPEC #2920: GUI route always constructs the WebView surface now
-    // that the headless branch is gone. Phase 5 will replace this entire
-    // block with the tray-resident process bootstrap.
-    let webview_surface: Option<(Window, wry::WebView)> = {
-        let builder = WindowBuilder::new()
-            .with_title(APP_NAME)
-            .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0));
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let window_icon = gwt::native_window_icon();
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let builder = builder.with_window_icon(window_icon);
-        let window = builder.build(&event_loop).expect("window");
-        let native_file_drop_proxy = proxy.clone();
-        let builder = WebViewBuilder::new()
-            .with_url(front_door.webview_url)
-            .with_drag_drop_handler(move |event| {
-                if let wry::DragDropEvent::Drop { paths, position } = event {
-                    let paths = paths
-                        .into_iter()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .collect::<Vec<_>>();
-                    if !paths.is_empty() {
-                        let _ = native_file_drop_proxy.send_event(UserEvent::NativeFileDrop {
-                            paths,
-                            x: position.0,
-                            y: position.1,
-                        });
+    // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
+    // native WebView path is removed; instead we build a tray-icon menu
+    // with `[Open] / About / [Quit]` and rely on the existing
+    // `EmbeddedServer` + browser UI for the actual GUI surface. The tao
+    // event_loop is still used to keep the OS runloop alive (NSApp on
+    // macOS, MS message pump on Windows, GTK main loop on Linux). The
+    // tray-icon's NSStatusItem / NotifyIcon / StatusNotifierItem keeps
+    // the event source alive without needing a visible window.
+    let tray_menu = Menu::new();
+    let tray_open = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::OPEN,
+        "Open in browser",
+        true,
+        None,
+    );
+    let tray_about = PredefinedMenuItem::about(
+        Some("About GWT"),
+        Some(tray_icon::menu::AboutMetadata {
+            name: Some("GWT".into()),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
+            ..Default::default()
+        }),
+    );
+    let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
+    tray_menu
+        .append_items(&[
+            &tray_open,
+            &PredefinedMenuItem::separator(),
+            &tray_about,
+            &PredefinedMenuItem::separator(),
+            &tray_quit,
+        ])
+        .expect("tray menu items");
+
+    // Phase 4 Q7: tray-icon initialisation can fail on Linux when no
+    // StatusNotifierItem host is running (GNOME 3.26+ without the
+    // AppIndicator extension). Treat that as best-effort — the
+    // embedded server still runs and `gwt open` (Phase 6) can still
+    // surface the URL.
+    let tray_icon_handle = load_tray_icon_rgba()
+        .and_then(|(rgba, w, h)| {
+            let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
+            TrayIconBuilder::new()
+                .with_tooltip(format!("{APP_NAME} — open the browser UI"))
+                .with_menu(Box::new(tray_menu))
+                .with_icon(icon)
+                .build()
+                .ok()
+        })
+        .or_else(|| {
+            tracing::warn!(
+                target: "gwt_tray",
+                "tray icon initialisation failed; running in fallback mode (use `gwt open` to launch the browser)"
+            );
+            None
+        });
+
+    // Mark the URL on the tray lock file so a concurrent `gwt`
+    // launch and `gwt open` invocation can read it back. Best effort —
+    // failure to update the lock is logged and the server keeps
+    // running.
+    if let Err(error) = tray_lock_handle.set_url(&browser_url) {
+        tracing::warn!(
+            target: "gwt_tray",
+            error = %error,
+            "failed to write embedded server URL to tray lock file"
+        );
+    }
+
+    // SPEC #2920 Phase 4 / FR-097: cross-platform graceful shutdown via
+    // SIGINT / SIGTERM. Both route through `UserEvent::QuitApp` so the
+    // event loop closure runs the same cleanup as the tray Quit click.
+    {
+        let proxy_for_int = proxy.clone();
+        drop(runtime.handle().spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("gwt: SIGINT received, shutting down…");
+                let _ = proxy_for_int.send_event(UserEvent::QuitApp);
+            }
+        }));
+        #[cfg(unix)]
+        {
+            let proxy_for_term = proxy.clone();
+            drop(runtime.handle().spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    if sig.recv().await.is_some() {
+                        eprintln!("gwt: SIGTERM received, shutting down…");
+                        let _ = proxy_for_term.send_event(UserEvent::QuitApp);
                     }
                 }
-                true
-            });
-
-        #[cfg(any(
-            target_os = "windows",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "android"
-        ))]
-        let webview = builder.build(&window)?;
-        #[cfg(not(any(
-            target_os = "windows",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "android"
-        )))]
-        let webview = {
-            use tao::platform::unix::WindowExtUnix;
-            use wry::WebViewBuilderExtUnix;
-            let vbox = window.default_vbox().unwrap();
-            builder.build_gtk(vbox)?
-        };
-        Some((window, webview))
-    };
-
-    #[cfg(target_os = "macos")]
-    let native_menu = {
-        let menu = gwt::MacosNativeMenu::new();
-        menu.init_for_app();
-        Some(menu)
-    };
-
-    // SPEC #2920: the SIGINT / SIGTERM signal handlers and the
-    // headless-only browser auto-open block lived in the deleted
-    // `gwt serve` route. Phase 4 will re-introduce both behind the
-    // tray-resident process bootstrap so the cross-platform shutdown
-    // contract is preserved.
+            }));
+        }
+    }
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        let _ = webview_surface.as_ref();
+        // Keep the tray icon handle alive for the lifetime of the
+        // event loop closure; dropping it would unregister the tray
+        // icon from the OS. `tray_lock_handle` lives in the outer
+        // function so the lock file is released only at process exit.
+        let _ = &tray_icon_handle;
+        let _ = &tray_lock_handle;
         let _ = &runtime;
-        #[cfg(target_os = "macos")]
-        let _ = native_menu.as_ref();
 
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                // Kill every PTY / agent before the event loop exits so no
-                // child process outlives the window.
-                app.stop_all_runtimes();
-                board_projection_watchers.shutdown();
-                workspace_projection_watchers.shutdown();
-                #[cfg(unix)]
-                board_daemon_subscribers.shutdown();
-                server.shutdown();
-                *control_flow = ControlFlow::Exit;
-            }
             Event::UserEvent(UserEvent::QuitApp) => {
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
@@ -6318,24 +6327,11 @@ fn main() -> wry::Result<()> {
                     );
                 }
             }
-            Event::UserEvent(UserEvent::NativeFileDrop { paths, x, y }) => {
-                if let Some((_, webview)) = webview_surface.as_ref() {
-                    let detail = serde_json::json!({
-                        "paths": paths,
-                        "x": x,
-                        "y": y,
-                    });
-                    let script = format!(
-                        "window.dispatchEvent(new CustomEvent('gwt:native-file-drop', {{ detail: {} }}));",
-                        detail
-                    );
-                    if let Err(error) = webview.evaluate_script(&script) {
-                        tracing::debug!(
-                            error = %error,
-                            "failed to dispatch native file drop to frontend"
-                        );
-                    }
-                }
+            Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
+                // SPEC #2920: the wry WebView drag/drop handler was the
+                // only producer of this variant. The browser UI now
+                // handles drag/drop natively via the HTML5 API, so any
+                // stragglers from older clients are dropped silently.
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
@@ -6668,31 +6664,37 @@ fn main() -> wry::Result<()> {
                     BackendEvent::CloneProjectError { message },
                 )]);
             }
-            #[cfg(target_os = "macos")]
+            // SPEC #2920 Phase 4: the muda menu event handler is now
+            // cross-platform. The tray icon menu (Open / Quit) is the
+            // only producer; the legacy macOS native menubar
+            // (NativeMenuCommand) was removed alongside the wry
+            // WebView.
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
-                use gwt::NativeMenuCommand;
-                if let Some(command) = gwt::native_menu_command_for_id(event.id.as_ref()) {
-                    match command {
-                        NativeMenuCommand::OpenProject => {
-                            let events = app.open_project_dialog_events();
-                            board_projection_watchers.sync(&app, proxy.clone());
-                            workspace_projection_watchers.sync(&app, proxy.clone());
-                            #[cfg(unix)]
-                            board_daemon_subscribers.sync(&app, proxy.clone());
-                            clients.dispatch(events);
+                use gwt::cli::tray::menu::MenuAction;
+                match MenuAction::from_id(event.id.as_ref()) {
+                    Some(MenuAction::Open) => {
+                        // Best-effort browser open. Failure is logged
+                        // but does not interrupt the tray loop —
+                        // `gwt open` from the CLI is a fallback.
+                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&browser_url) {
+                            tracing::warn!(
+                                target: "gwt_tray",
+                                error = %error,
+                                url = browser_url.as_str(),
+                                "tray Open menu failed to launch the default browser"
+                            );
                         }
-                        NativeMenuCommand::ReloadWebView => {
-                            // SPEC-1942 US-14: headless mode has no native
-                            // WebView; the menu item itself only ships in
-                            // GUI builds, but guard against accidental
-                            // dispatch when the headless path leaves the
-                            // option as `None`.
-                            if let Some((_, webview)) = webview_surface.as_ref() {
-                                if let Err(error) = webview.reload() {
-                                    eprintln!("webview reload failed: {error}");
-                                }
-                            }
-                        }
+                    }
+                    Some(MenuAction::Quit) => {
+                        // Route through the same graceful shutdown
+                        // path as SIGINT / SIGTERM so PTY children
+                        // and watchers are torn down once.
+                        let _ = proxy.send_event(UserEvent::QuitApp);
+                    }
+                    Some(MenuAction::About) | None => {
+                        // The `About` item is the muda
+                        // `PredefinedMenuItem::about` which the OS
+                        // renders natively; nothing to do here.
                     }
                 }
             }
