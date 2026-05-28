@@ -6482,10 +6482,10 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // SPEC #2920: there is no headless `gwt serve` route anymore — the
+    // SPEC #2920: there is no headless route anymore — the
     // tray-resident process is the only front door. The bounded
     // shutdown backstop is still useful when graceful cleanup stalls,
-    // so always arm it (no longer gated by `serve_args.is_some()`).
+    // so always arm it (the legacy headless-only gate is gone).
     let is_headless = false;
     let mut gui_shutdown = GuiShutdownCoordinator::default();
 
