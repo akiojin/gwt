@@ -6207,3 +6207,10 @@ Type: lesson
 Context: Resume Picker returned agents from ALL branches instead of the selected Work item. Unit tests passed because they only tested presence/absence of agents, not cross-branch leakage. The bug was only caught when the user asked for a headed browser check.
 Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
 Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.
+
+## 2026-05-28 — Panel roots must be anchored before pane overflow can work
+
+Type: failure-pattern
+Context: Profile window scroll bug (#2916): .profile-root had flex/min-height styles but was not included in the shared .window-body root group that applies position:absolute and inset:0.
+Learning: Child panes with overflow:auto only scroll when their root receives the window-body height constraint. A flex/grid pane can look correct in CSS but still expand past the window when the root is not anchored.
+Future Action: When adding or fixing panel surfaces, verify the surface root participates in the shared root containment rule and add an embedded-web contract test for scroll boundaries.
