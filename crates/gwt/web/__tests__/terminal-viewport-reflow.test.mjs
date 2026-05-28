@@ -26,6 +26,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
@@ -616,6 +617,27 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /gateTerminalInputForReadiness/,
     "terminal.onData must consult gateTerminalInputForReadiness so pre-ready input cannot reach PTY",
+  );
+});
+
+test("app.css recovers terminal cell columns at the gwt default 720x420 window (Issue #2923 follow-up)", () => {
+  // The Claude Code footer (`bypass permissions on (shift+tab to cycle)` +
+  // `◯ <effort> · /effort`) lands at ~77 cells. With the original
+  // `inset: 8px 10px 10px;` and xterm's vendor `overflow-y: scroll`
+  // reserving a scrollbar gutter, the gwt-default 720×420 agent window
+  // shrank the cell grid to ~76 cols and Claude Code's footer wrapped
+  // `/effort` to `/eff` + `ort`. Pin the tighter inset and the
+  // `overflow-y: auto` override so the gutter only steals cells when
+  // scrollback is actually present.
+  assert.match(
+    appCssSource,
+    /\.terminal-root\s*\{[^}]*inset:\s*8px\s+4px\s+4px;/,
+    ".terminal-root must use the tightened 8px/4px/4px inset so the cell grid keeps ~+1 column at 720x420 windows",
+  );
+  assert.match(
+    appCssSource,
+    /\.surface-terminal\s+\.terminal-root\s+\.xterm-viewport\s*\{[^}]*overflow-y:\s*auto;/,
+    "xterm-viewport overflow-y must override the vendor `scroll` so the scrollbar gutter is reclaimed when scrollback is empty",
   );
 });
 

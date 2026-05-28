@@ -2360,8 +2360,8 @@ test("terminal root spacing stays inside the window body (SPEC-2008 FR-060)", ()
   );
   assert.match(
     body,
-    /inset:\s*8px\s+10px\s+10px\s*;/,
-    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body",
+    /inset:\s*8px\s+4px\s+4px\s*;/,
+    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body (Issue #2923 follow-up: side / bottom insets reduced to 4px so the cell grid recovers ~1 column at the gwt-default 720×420 window)",
   );
   assert.match(
     body,
