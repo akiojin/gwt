@@ -1,6 +1,67 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.49.0] - 2026-05-28
+
+### Bug Fixes
+
+- **gui:** Restore profile pane scrolling
+- **gui:** Refresh work surface legacy preset rerenders
+- **gui:** Profile環境変数グリッドの表示を調整
+- **gui:** Bound native close shutdown
+- **gui:** Address Codex review on Release Notes update-to-version flow (PR #2917)
+- **gui:** Drop pre-ready PTY input and require parent layout box at Claude Code launch
+- **gui:** Reclaim terminal cell columns so /effort indicator no longer wraps
+- **spec-2920:** Hide macOS Dock icon at runtime via NSApp activation policy
+- **gui:** Sync terminal grid on focus reflow
+- **gui:** Kill all runtimes before shutdown waits
+- **spec-2920:** Make UserEvent::MenuEvent cross-platform on Linux/Windows CI
+- **spec-2920:** Retarget release-asset check at load_tray_icon_rgba helper
+- **ci:** Install libxdo-dev for tray-icon link on Linux runners
+- **spec-2920:** Drop `serve_args` substring from main.rs comment
+- **gui:** Surface agent launch failures in terminal
+- **agent:** Repair corrupted Windows npx cache
+- **gui:** Keep pre-spawn launch errors visible
+- **agent:** Gate Windows-only package runner test helpers
+- **gui:** Polish update ready modal design
+
+### Documentation
+
+- **memory:** Record PR auto-merge race learning (SPEC-2780 v2)
+- **spec-2920:** Update READMEs to describe the tray-resident front door
+- **memory:** Record Claude Code npx cache repair
+- **memory:** Quote npx cache paths
+- **memory:** Record headed E2E verification lesson from Issue #2923/#2924 follow-up
+
+### Features
+
+- **gui:** Unify profile environment variables grid
+- **gui:** Add update-to-version button on Release Notes window (SPEC-2780 v2)
+- **gui:** 添付ファイルをdrop-filesへ集約
+- **spec-2920:** Add tray-icon / auto-launch deps and module skeleton
+- **spec-2920:** Remove `gwt serve` / `gwt --headless` verbs
+- **spec-2920:** Implement AutostartManager via auto-launch crate
+- **spec-2920:** Hide macOS Dock + ship Linux .desktop shortcut
+- **spec-2920:** Add per-user tray single-instance lock
+- **spec-2920:** Implement `gwt open` CLI verb
+- **spec-2920:** Replace wry WebView with tray-icon front door
+- **spec-2920:** Wire "Start at Login" autostart toggle into tray menu
+
+### Miscellaneous Tasks
+
+- Record profile scroll lesson
+- Profile表示確認の教訓を記録
+- Merge origin/develop
+- Merge origin develop
+- Merge origin develop into focus reflow
+- **spec-2920:** Merge origin/develop and resolve conflicts
+- Merge develop into npx cache repair branch
+- Merge develop into npx cache repair branch
+
+### Testing
+
+- **terminal:** Accept Windows short cwd paths
+
 ## [9.48.0] - 2026-05-28
 
 ### Bug Fixes
