@@ -3271,6 +3271,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn embedded_web_profile_root_is_constrained_to_window_body() {
+        let html = frontend_styles_bundle();
+
+        let start = html
+            .find(".profile-root")
+            .expect("expected Profile root CSS to be defined");
+        let block = &html[start..];
+        let end = block
+            .find('}')
+            .expect("expected Profile root CSS rule to close");
+        let body = &block[..end];
+
+        for prop in [
+            "position: absolute",
+            "inset: 0",
+            "display: flex",
+            "flex-direction: column",
+        ] {
+            assert!(
+                body.contains(prop),
+                "expected `.profile-root` to declare `{prop}` so Profile panes can own vertical scroll, got: {body}",
+            );
+        }
+    }
+
     /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
     /// primitives in its rendered HTML so paddings, scrollbars, and splits
     /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
