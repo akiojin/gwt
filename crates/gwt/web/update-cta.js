@@ -367,7 +367,7 @@ export function createUpdateCtaController({
       el("h2", { id: "update-modal-title", text: "Update ready" }),
       el("p", {
         className: "update-modal__version",
-        text: `v${version} is ready to install.`,
+        text: `gwt v${version} is ready to install.`,
       }),
       el("p", {
         className: "update-modal__hint",
