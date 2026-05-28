@@ -216,12 +216,20 @@ export function runTerminalActivationSequence({
   const { terminal, fitAddon } = runtime;
   const currentGrid = currentTerminalGrid(terminal);
   const parent = terminal.element && terminal.element.parentElement;
-  if (parent && !elementHasLayoutBox(parent)) {
+  // Issue #2923: the previous gate (`parent && !elementHasLayoutBox(parent)`)
+  // silently skipped when `parent` was null and let fit resolve against an
+  // unknown layout reference. A null parent at activation time means the
+  // terminal host is not attached, so `fitAddon.fit()` would fall back to
+  // xterm's default 80×24 grid and `isReady` would flip true on that
+  // wrong grid — the exact regression signature ("Welcome back Akio!"
+  // splash fragmented, recovers on resize). Require a real parent with a
+  // measurable layout box before continuing.
+  if (!parent || !elementHasLayoutBox(parent)) {
     return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   const rowsForRefresh = Math.max((terminal.rows || 1) - 1, 0);
   terminal.refresh(0, rowsForRefresh);
-  if (parent && typeof parent.getBoundingClientRect === "function") {
+  if (typeof parent.getBoundingClientRect === "function") {
     parent.getBoundingClientRect();
   }
   if (!fitAddonCanResolveDimensions(fitAddon)) {
@@ -235,4 +243,36 @@ export function runTerminalActivationSequence({
     terminal.focus();
   }
   return { ran: true, cols: terminal.cols, rows: terminal.rows };
+}
+
+/**
+ * Issue #2924: stray `C` byte appears in Claude Code's prompt buffer on
+ * launch even though the user pressed nothing. xterm.js can emit `onData`
+ * firings before the SPEC-2008 Phase 26.A initial-fit handshake has
+ * completed — for example application-response sequences echoed during
+ * the deferredWrites flush itself, or focus side-effects raised while the
+ * runtime is still resolving its cell metrics. The user reports the
+ * symptom is Claude-Code-only, deterministic, single-byte, and a real
+ * stdin byte (Backspace removes it, Enter sends it). Mirror the
+ * `deferredWrites` readiness contract: while `runtime.isReady === false`,
+ * drop the input rather than forwarding it to PTY. Pre-ready bytes are
+ * never produced by a real user keystroke (the terminal grid is not even
+ * fitted yet) so dropping is safer than deferring (which would still
+ * deliver the contaminant once the handshake completed).
+ *
+ * Returns `{ forward: true }` when the byte stream should be sent to PTY,
+ * `{ forward: false, reason: <slug> }` when it should be dropped. The
+ * reason is included so callers can emit a structured trace entry that
+ * survives `gwt_input_trace` log filtering.
+ *
+ * The gate is intentionally lenient when no runtime is registered or the
+ * runtime predates SPEC-2008 Phase 26.A (no `isReady` field), so non-PTY
+ * terminal surfaces and legacy callers keep working unchanged.
+ */
+export function gateTerminalInputForReadiness({ runtime, data: _data }) {
+  if (!runtime) return { forward: true };
+  if (runtime.isReady === false) {
+    return { forward: false, reason: "runtime-not-ready" };
+  }
+  return { forward: true };
 }

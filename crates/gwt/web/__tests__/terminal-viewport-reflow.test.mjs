@@ -19,6 +19,7 @@ import {
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
   elementHasLayoutBox,
+  gateTerminalInputForReadiness,
   runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
@@ -217,11 +218,19 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
 
 test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry flags (T-199)", () => {
   const callOrder = [];
+  const parent = {
+    clientWidth: 800,
+    clientHeight: 480,
+    getBoundingClientRect: () => {
+      callOrder.push("flush-layout");
+      return { width: 800, height: 480 };
+    },
+  };
   const runtime = {
     terminal: {
       cols: 100,
       rows: 30,
-      element: { parentElement: null },
+      element: { parentElement: parent },
       refresh: () => callOrder.push("refresh"),
       focus: () => callOrder.push("focus"),
     },
@@ -236,10 +245,38 @@ test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry 
     shouldPersistGeometry: false,
     sendGeometry: () => callOrder.push("sendGeometry"),
   });
-  // No layout flush is recorded because element has no parentElement;
   // sendGeometry / focus are suppressed by the flags.
-  assert.deepEqual(callOrder, ["refresh", "fit"]);
+  assert.deepEqual(callOrder, ["refresh", "flush-layout", "fit"]);
   assert.equal(result.ran, true);
+});
+
+test("runTerminalActivationSequence rejects null terminal host parent (Issue #2923)", () => {
+  // Phase 26.A's parent layout-box gate originally skipped when
+  // `terminal.element.parentElement` was null, so fitAddon resolved
+  // against an unknown layout reference and the deferredWrites still
+  // flushed into a 80×24 grid. The handshake must require a real
+  // parent with a measurable layout box before flipping isReady.
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: null },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => ({ cols: 100, rows: 30 }),
+    },
+  };
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-null-parent",
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+  assert.deepEqual(callOrder, [], "null parent must not fit, send geometry, or focus");
+  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
 });
 
 test("runTerminalActivationSequence waits for the terminal host layout box before fitting (#2839)", () => {
@@ -567,5 +604,66 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /lineHeight:\s*isBlinkBrowser/,
     "createTerminalRuntime must use isBlinkBrowser to select lineHeight",
+  );
+
+  // Issue #2924 — stray "C" byte appears in Claude Code prompt buffer on
+  // launch. xterm.js can emit onData firings before the initial-fit
+  // handshake has completed (e.g. application-response sequences echoed
+  // before the deferredWrites flush has even started). The terminal.onData
+  // callback must consult gateTerminalInputForReadiness so pre-ready
+  // input is dropped instead of contaminating Claude Code's stdin.
+  assert.match(
+    appSource,
+    /gateTerminalInputForReadiness/,
+    "terminal.onData must consult gateTerminalInputForReadiness so pre-ready input cannot reach PTY",
+  );
+});
+
+test("gateTerminalInputForReadiness drops onData firings before the initial-fit handshake (Issue #2924)", () => {
+  // Pre-ready firings exist because xterm.js emits responses to
+  // application queries (Primary DA, cursor reports, focus tracking)
+  // synchronously inside `terminal.write`, and the deferredWrites flush
+  // is itself called from inside the runtime once handshake completes.
+  // The user did not press a key — these bytes are xterm.js internal
+  // noise that must not reach Claude Code's stdin.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: false }, data: "C" }),
+    { forward: false, reason: "runtime-not-ready" },
+  );
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: false }, data: "\x1b[C" }),
+    { forward: false, reason: "runtime-not-ready" },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards onData firings once the runtime is ready", () => {
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: true }, data: "hello" }),
+    { forward: true },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards when no runtime is registered (defensive)", () => {
+  // A missing runtime means the firing was not produced by a gated xterm
+  // instance — preserve the legacy behaviour and forward, so non-PTY
+  // surfaces (e.g. board / static terminals) keep working if they ever
+  // route through the same helper.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: null, data: "C" }),
+    { forward: true },
+  );
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: undefined, data: "C" }),
+    { forward: true },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards when isReady is missing (legacy runtime)", () => {
+  // An older runtime that never set `isReady` should still forward input,
+  // because the gate only takes effect when the SPEC-2008 Phase 26.A
+  // handshake explicitly enrolled the runtime by setting isReady=false.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: {}, data: "C" }),
+    { forward: true },
   );
 });
