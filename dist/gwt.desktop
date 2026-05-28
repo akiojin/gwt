@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GWT
+GenericName=Git Worktree Manager
+Comment=Tray-resident front door for the Git Worktree Manager browser UI
+Exec=gwt
+Icon=gwt
+Terminal=false
+StartupNotify=false
+Categories=Development;Utility;
+Keywords=git;worktree;agent;developer;
+# SPEC #2920 FR-009 — drop this file into ~/.local/share/applications/ for
+# the application menu, or into ~/.config/autostart/ to run gwt at OS
+# login (the Settings page autostart toggle automates the latter).

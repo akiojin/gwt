@@ -331,6 +331,8 @@ jobs:
             <string>${RELEASE_VERSION}</string>
             <key>CFBundleVersion</key>
             <string>${RELEASE_VERSION}</string>
+            <key>LSUIElement</key>
+            <true/>
           </dict>
           </plist>
           EOF

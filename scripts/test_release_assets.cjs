@@ -136,6 +136,50 @@ run("macOS app bundle declares and ships the CFBundleIconFile resource", () => {
   );
 });
 
+run("macOS app bundle hides the Dock icon via LSUIElement=true (SPEC #2920)", () => {
+  // SPEC #2920 FR-008: the tray-resident process must not show in the
+  // macOS Dock or Cmd-Tab switcher. build-dmg owns the Info.plist
+  // template, so the canonical assertion lives next to the bundle
+  // resource checks above.
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  assert.match(
+    workflow,
+    /<key>LSUIElement<\/key>\s*\n\s*<true\/>/,
+    "build-dmg Info.plist must declare LSUIElement=true so the tray-resident process stays out of the Dock"
+  );
+});
+
+run("Linux distribution ships a gwt.desktop shortcut (SPEC #2920)", () => {
+  // SPEC #2920 FR-009: Linux distribution must include a .desktop file
+  // that the user can drop into ~/.local/share/applications/ for the
+  // application menu and into ~/.config/autostart/ via the Settings
+  // page. The canonical template lives under dist/.
+  const desktopPath = path.join(__dirname, "..", "dist", "gwt.desktop");
+  assert.ok(
+    fs.existsSync(desktopPath),
+    "dist/gwt.desktop must exist so Linux portable archive can ship a Desktop Entry"
+  );
+  const contents = fs.readFileSync(desktopPath, "utf8");
+  for (const requiredLine of [
+    /^\[Desktop Entry\]/m,
+    /^Type=Application/m,
+    /^Name=GWT/m,
+    /^Exec=gwt/m,
+    /^Icon=gwt/m,
+    /^Categories=.*Development.*/m,
+    /^StartupNotify=false/m,
+  ]) {
+    assert.match(
+      contents,
+      requiredLine,
+      `dist/gwt.desktop must include ${requiredLine}`
+    );
+  }
+});
+
 run("repository does not expose gwt through npm package metadata", () => {
   for (const relativePath of [
     "package.json",
