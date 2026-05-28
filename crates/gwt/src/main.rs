@@ -6085,12 +6085,27 @@ fn main() -> std::io::Result<()> {
     };
 
     let runtime = Runtime::new().expect("tokio runtime");
-    // SPEC #2920 Phase 4: the tray-resident process now owns the event
-    // loop. We still use `tao::EventLoop` so the OS runloop integrates
-    // uniformly across macOS / Windows / Linux. macOS hides the Dock
-    // icon via `LSUIElement=true` in the .app bundle (Phase 9), so
-    // there is no need to flip the activation policy at runtime.
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    // SPEC #2920 Phase 4: the tray-resident process owns the event loop
+    // but never opens a native Window. The `tao::EventLoop` integrates
+    // with the OS runloop uniformly across macOS / Windows / Linux.
+    //
+    // Hide the macOS Dock icon at runtime via the activation-policy
+    // API. `LSUIElement=true` in the .app bundle (Phase 9) covers the
+    // Finder/Dock launch path, but `cargo run` / `target/debug/gwt`
+    // launches bypass the bundle Info.plist and would otherwise show
+    // the binary in the Dock and Cmd-Tab. Flipping the policy at
+    // runtime keeps both launch surfaces consistent.
+    //
+    // Windows and Linux do not need a runtime equivalent: without a
+    // visible `tao::Window` neither OS shows a taskbar entry for the
+    // process, so the tray-only invariant holds without extra calls.
+    #[allow(unused_mut)]
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
+    }
     let proxy = event_loop.create_proxy();
     // SPEC #2920 Phase 4: the tray menu uses `tray_icon::menu::Menu`
     // (re-exported from `muda`), and `MenuEvent::set_event_handler` is
