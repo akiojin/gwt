@@ -17,6 +17,9 @@ pub mod ids {
     /// `About` is rendered via the OS native About dialog; we still keep
     /// an id so tests can assert the action is wired up.
     pub const ABOUT: &str = "gwt.tray.about";
+    /// SPEC #2920 Phase 8 / FR-005 + FR-007: "Start at Login" check
+    /// item. Click → `AutostartManager::install()` / `uninstall()`.
+    pub const AUTOSTART_TOGGLE: &str = "gwt.tray.autostart";
 }
 
 /// Logical menu action used by the Phase 4 event loop.
@@ -25,6 +28,11 @@ pub enum MenuAction {
     Open,
     Quit,
     About,
+    /// SPEC #2920 Phase 8: tray check item that mirrors
+    /// `AutostartManager::status()`. Clicking the item toggles the OS
+    /// autostart entry; the event loop handler reverts the check state
+    /// on failure.
+    ToggleAutostart,
 }
 
 impl MenuAction {
@@ -34,6 +42,7 @@ impl MenuAction {
             ids::OPEN => Some(Self::Open),
             ids::QUIT => Some(Self::Quit),
             ids::ABOUT => Some(Self::About),
+            ids::AUTOSTART_TOGGLE => Some(Self::ToggleAutostart),
             _ => None,
         }
     }
@@ -48,6 +57,10 @@ mod tests {
         assert_eq!(MenuAction::from_id(ids::OPEN), Some(MenuAction::Open));
         assert_eq!(MenuAction::from_id(ids::QUIT), Some(MenuAction::Quit));
         assert_eq!(MenuAction::from_id(ids::ABOUT), Some(MenuAction::About));
+        assert_eq!(
+            MenuAction::from_id(ids::AUTOSTART_TOGGLE),
+            Some(MenuAction::ToggleAutostart)
+        );
         assert_eq!(MenuAction::from_id("unknown"), None);
     }
 
@@ -59,5 +72,6 @@ mod tests {
         assert_eq!(ids::OPEN, "gwt.tray.open");
         assert_eq!(ids::QUIT, "gwt.tray.quit");
         assert_eq!(ids::ABOUT, "gwt.tray.about");
+        assert_eq!(ids::AUTOSTART_TOGGLE, "gwt.tray.autostart");
     }
 }
