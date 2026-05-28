@@ -1001,7 +1001,10 @@ enum UserEvent {
     /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The event
     /// loop exits through the same cleanup path as a window close request.
     QuitApp,
-    #[cfg(target_os = "macos")]
+    /// SPEC #2920 Phase 4: cross-platform muda/tray-icon menu event.
+    /// Was macOS-only when the legacy native menubar produced it, but
+    /// the new tray menu fires it on every host OS, so the cfg gate is
+    /// gone too.
     MenuEvent(tray_icon::menu::MenuEvent),
 }
 
