@@ -18,14 +18,15 @@ pub(crate) mod index;
 mod issue;
 mod issue_spec;
 pub(crate) mod memory;
+pub mod open;
 mod pane;
 mod plan;
 mod pr;
 pub(crate) mod register;
-pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
+pub mod tray;
 pub mod update;
 mod workspace;
 
@@ -141,6 +142,8 @@ pub enum CliCommand {
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Pane(PaneCommand),
+    /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
+    Open(open::OpenArgs),
 }
 
 /// SPEC-2077 family enum for `gwtd daemon ...`.
@@ -547,6 +550,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "workspace"
                     | "work"
                     | "pane"
+                    | "open"
             )
         })
         .unwrap_or(false)
@@ -769,6 +773,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Open(args) => open::run(env, args, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)

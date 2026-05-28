@@ -1833,7 +1833,7 @@ mod tests {
         // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
         // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?syncGeometryOnGridChange:\s*true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
@@ -1844,7 +1844,7 @@ mod tests {
         );
         assert!(
             activation_helper.is_match(js),
-            "expected programmatic terminal activation to refit, refresh, and pass a computed shouldFocus to xterm after render",
+            "expected programmatic terminal activation to refit, refresh, pass computed shouldFocus, and opt into grid-change geometry sync after render",
         );
         assert!(
             render_activation.is_match(js),
