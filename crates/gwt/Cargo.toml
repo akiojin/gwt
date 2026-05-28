@@ -57,6 +57,9 @@ encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
+tray-icon = "0.19"
+auto-launch = "0.5"
+whoami = "1.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

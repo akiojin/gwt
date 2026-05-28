@@ -18,6 +18,7 @@ pub(crate) mod index;
 mod issue;
 mod issue_spec;
 pub(crate) mod memory;
+pub mod open;
 mod pane;
 mod plan;
 mod pr;
@@ -26,6 +27,7 @@ pub mod serve;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
+pub mod tray;
 pub mod update;
 mod workspace;
 
