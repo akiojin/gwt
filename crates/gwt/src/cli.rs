@@ -142,9 +142,7 @@ pub enum CliCommand {
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Pane(PaneCommand),
-    /// SPEC #2920 FR-006: `gwt open` reads the tray-resident process's
-    /// single-instance lock and launches the OS default browser at the
-    /// embedded server URL. Self-contained — no extra parsed state.
+    /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
 }
 
