@@ -44,6 +44,7 @@
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
+        gateTerminalInputForReadiness,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -1159,6 +1160,8 @@
       const releaseNotesWindow = createReleaseNotesWindow({
         document,
         send,
+        beginUpdateDownloading: (version) =>
+          updateCtaController.beginDownloadingFor(version),
       });
 
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
@@ -2989,6 +2992,7 @@
             windowId,
             shouldFocus,
             shouldPersistGeometry,
+            syncGeometryOnGridChange: true,
             sendGeometry,
           });
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
@@ -3555,6 +3559,11 @@
             recomputeOperatorTelemetry();
             label.textContent = windowRuntimeLabel(runtimeState);
             const effectiveDetail = detailMap.get(windowId);
+            const statusTitle = effectiveDetail
+              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
+              : windowRuntimeLabel(runtimeState);
+            chip.title = statusTitle;
+            label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
               if (messageEl) {
@@ -3563,13 +3572,18 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              overlay.classList.toggle(
-                "visible",
-                runtimeState === "error" ||
-                  runtimeState === "stopped" ||
-                  (runtimeState === "running" && Boolean(effectiveDetail)),
-              );
-              if (runtimeState === "running" && Boolean(effectiveDetail)) {
+              const hasDetail = Boolean(effectiveDetail);
+              const shouldShowOverlay =
+                hasDetail &&
+                (runtimeState === "running" ||
+                  (runtimeState === "error" && !terminalHasOutput(windowId)));
+              const shouldSpin = shouldShowOverlay && runtimeState === "running";
+              const spinner = overlay.querySelector(".overlay-spinner");
+              if (spinner) {
+                spinner.hidden = !shouldSpin;
+              }
+              overlay.classList.toggle("visible", shouldShowOverlay);
+              if (shouldSpin) {
                 startSpinnerAnimation(overlay);
               } else {
                 stopSpinnerAnimation(overlay);
@@ -3781,9 +3795,11 @@
         "image/jpeg",
         "image/webp",
       ]);
-      const MAX_FILE_DROP_BYTES = 10 * 1024 * 1024;
-      const MAX_TOTAL_FILE_DROP_BYTES = 50 * 1024 * 1024;
       const MAX_FILE_DROP_COUNT = 16;
+      const FILE_DROP_AGENT_TARGET_MESSAGE = "Drop files on a running Agent window.";
+      const FILE_DROP_COUNT_MESSAGE = `Drop up to ${MAX_FILE_DROP_COUNT} files at once.`;
+      const FILE_DROP_UPLOAD_FAILURE_MESSAGE = "Could not upload dropped file.";
+      const IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE = "Could not upload pasted image.";
 
       function findClipboardImagePasteItem(items) {
         for (const item of Array.from(items || [])) {
@@ -3797,43 +3813,25 @@
         return null;
       }
 
-      function dataUrlBase64Payload(dataUrl) {
-        if (typeof dataUrl !== "string") {
-          return null;
+      function defaultImagePasteFilename(mimeType) {
+        switch (mimeType) {
+          case "image/jpeg":
+            return "clipboard-image.jpg";
+          case "image/webp":
+            return "clipboard-image.webp";
+          case "image/png":
+          default:
+            return "clipboard-image.png";
         }
-        const commaIndex = dataUrl.indexOf(",");
-        if (commaIndex < 0) {
-          return null;
-        }
-        const payload = dataUrl.slice(commaIndex + 1);
-        return payload;
       }
 
-      function readClipboardImageAsBase64(file) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.addEventListener("load", () => {
-            resolve(dataUrlBase64Payload(reader.result));
-          });
-          reader.addEventListener("error", () => {
-            reject(reader.error || new Error("Failed to read clipboard image"));
-          });
-          reader.readAsDataURL(file);
-        });
-      }
-
-      function readDroppedFileAsBase64(file) {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.addEventListener("load", () => {
-            const payload = dataUrlBase64Payload(reader.result);
-            resolve(payload === null ? "" : payload);
-          });
-          reader.addEventListener("error", () => {
-            reject(reader.error || new Error("Failed to read dropped file"));
-          });
-          reader.readAsDataURL(file);
-        });
+      function uploadFileFromImageBlob(blob, mimeType, filename) {
+        const type = mimeType || blob?.type || "";
+        const name = filename || blob?.name || defaultImagePasteFilename(type);
+        if (typeof File === "function" && (!(blob instanceof File) || !blob.name)) {
+          return new File([blob], name, { type });
+        }
+        return blob;
       }
 
       function dataTransferHasFiles(dataTransfer) {
@@ -3841,37 +3839,254 @@
         return types.includes("Files") || Boolean(dataTransfer?.files?.length);
       }
 
-      function droppedFilesWithinSizeLimit(files) {
-        return files.every((file) => file.size <= MAX_FILE_DROP_BYTES);
-      }
-
-      function droppedFilesWithinTotalSizeLimit(files) {
-        let totalBytes = 0;
-        for (const file of files) {
-          totalBytes += file.size || 0;
-          if (totalBytes > MAX_TOTAL_FILE_DROP_BYTES) {
-            return false;
-          }
-        }
-        return true;
-      }
-
       function droppedFilesWithinCountLimit(files) {
         return files.length <= MAX_FILE_DROP_COUNT;
       }
 
-      async function readDroppedFilesAsAttachments(files) {
+      function droppedFilesValidationFailure(files) {
+        if (!droppedFilesWithinCountLimit(files)) {
+          return FILE_DROP_COUNT_MESSAGE;
+        }
+        return null;
+      }
+
+      function showFileDropAlert(message) {
+        if (typeof window.alert === "function") {
+          window.alert(message);
+        }
+      }
+
+      function totalFileBytes(files) {
+        return files.reduce((total, file) => total + (file.size || 0), 0);
+      }
+
+      function attachmentFileCountLabel(count) {
+        return `${count} ${count === 1 ? "file" : "files"}`;
+      }
+
+      function ensureAttachmentProgressSurface() {
+        let surface = document.querySelector(".attachment-progress");
+        if (surface) {
+          return surface;
+        }
+        surface = document.createElement("div");
+        surface.className = "attachment-progress";
+        surface.hidden = true;
+        surface.setAttribute("role", "status");
+        surface.setAttribute("aria-live", "polite");
+        surface.innerHTML = `
+          <div class="attachment-progress__row">
+            <span class="attachment-progress__label"></span>
+            <button class="attachment-progress__cancel" type="button" title="Cancel upload">Cancel</button>
+          </div>
+          <div class="attachment-progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div class="attachment-progress__bar"></div>
+          </div>
+        `;
+        document.body.appendChild(surface);
+        return surface;
+      }
+
+      function createAttachmentProgressController(files) {
+        const surface = ensureAttachmentProgressSurface();
+        const label = surface.querySelector(".attachment-progress__label");
+        const track = surface.querySelector(".attachment-progress__track");
+        const bar = surface.querySelector(".attachment-progress__bar");
+        const cancel = surface.querySelector(".attachment-progress__cancel");
+        const abortController = new AbortController();
+        const totalBytes = totalFileBytes(files);
+        const fileCount = files.length;
+        const state = {
+          phase: "Uploading",
+          loadedBytes: 0,
+          failed: false,
+          done: false,
+          visible: true,
+        };
+
+        function percent() {
+          if (totalBytes <= 0) {
+            return state.done ? 100 : 0;
+          }
+          return Math.max(
+            0,
+            Math.min(100, Math.round((state.loadedBytes / totalBytes) * 100)),
+          );
+        }
+
+        function render() {
+          if (!state.visible) {
+            return;
+          }
+          const value = percent();
+          const suffix = totalBytes > 0 ? ` · ${value}%` : "";
+          surface.hidden = false;
+          surface.dataset.state = state.failed ? "error" : state.done ? "done" : "active";
+          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${suffix}`;
+          track.setAttribute("aria-valuenow", String(value));
+          bar.style.width = `${value}%`;
+          cancel.hidden = state.done || state.failed;
+        }
+
+        function showNow() {
+          state.visible = true;
+          render();
+        }
+
+        render();
+        cancel.onclick = () => {
+          abortController.abort();
+          fail("Upload cancelled.");
+        };
+
+        function setPhase(phase) {
+          state.phase = phase;
+          render();
+        }
+
+        function setUploadProgress(loadedBytes) {
+          state.loadedBytes = Math.max(0, loadedBytes || 0);
+          render();
+        }
+
+        function succeed() {
+          state.done = true;
+          state.phase = "Attached";
+          if (state.visible) {
+            render();
+            setTimeout(() => {
+              if (surface.dataset.state === "done") {
+                surface.hidden = true;
+              }
+            }, 700);
+          }
+        }
+
+        function fail(message) {
+          state.failed = true;
+          state.phase = message;
+          showNow();
+        }
+
+        return {
+          signal: abortController.signal,
+          setPhase,
+          setUploadProgress,
+          succeed,
+          fail,
+        };
+      }
+
+      let attachmentUploadTokenPromise = null;
+
+      async function attachmentUploadToken() {
+        if (!attachmentUploadTokenPromise) {
+          attachmentUploadTokenPromise = fetch("/internal/attachment-upload-token", {
+            credentials: "same-origin",
+          }).then(async (response) => {
+            if (!response.ok) {
+              throw new Error(`attachment upload token failed: ${response.status}`);
+            }
+            const payload = await response.json();
+            if (!payload?.token) {
+              throw new Error("attachment upload token missing");
+            }
+            return payload.token;
+          });
+        }
+        return attachmentUploadTokenPromise;
+      }
+
+      function uploadAttachmentFile(file, { onProgress, signal } = {}) {
+        if (typeof window.__gwtAttachmentUploader === "function") {
+          return window.__gwtAttachmentUploader({ file, onProgress, signal });
+        }
+        return new Promise((resolve, reject) => {
+          void attachmentUploadToken()
+            .then((token) => {
+              if (signal?.aborted) {
+                reject(new Error("upload aborted"));
+                return;
+              }
+              const params = new URLSearchParams({
+                filename: file.name || "file",
+                size: String(file.size || 0),
+              });
+              if (file.type) {
+                params.set("mime_type", file.type);
+              }
+              const xhr = new XMLHttpRequest();
+              xhr.open("POST", `/internal/attachments/upload?${params.toString()}`);
+              xhr.setRequestHeader("x-gwt-upload-token", token);
+              xhr.responseType = "json";
+              xhr.upload.onprogress = (event) => {
+                onProgress?.({
+                  loaded: event.loaded || 0,
+                  total: event.lengthComputable ? event.total : file.size || 0,
+                });
+              };
+              xhr.onload = () => {
+                if (xhr.status < 200 || xhr.status >= 300) {
+                  reject(new Error(`upload failed: ${xhr.status}`));
+                  return;
+                }
+                resolve(xhr.response || JSON.parse(xhr.responseText || "{}"));
+              };
+              xhr.onerror = () => reject(new Error("upload failed"));
+              xhr.onabort = () => reject(new Error("upload aborted"));
+              signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+              xhr.send(file);
+            })
+            .catch(reject);
+        });
+      }
+
+      async function uploadFilesAsAttachments(files, progress) {
+        const totalBytes = totalFileBytes(files);
+        let completedBytes = 0;
         const attachments = [];
         for (const file of files) {
+          const uploaded = await uploadAttachmentFile(file, {
+            signal: progress.signal,
+            onProgress: ({ loaded }) => {
+              progress.setUploadProgress(completedBytes + (loaded || 0));
+            },
+          });
+          completedBytes += file.size || uploaded?.size || 0;
+          progress.setUploadProgress(totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0);
           attachments.push({
-            source: "inline",
-            filename: file.name || "file",
-            mime_type: file.type || null,
-            size: file.size,
-            data_base64: await readDroppedFileAsBase64(file),
+            source: "uploaded",
+            upload_id: uploaded.upload_id,
+            filename: uploaded.filename || file.name || "file",
+            mime_type: uploaded.mime_type ?? (file.type || null),
+            size: uploaded.size ?? file.size ?? 0,
           });
         }
         return attachments;
+      }
+
+      async function uploadPastedImage(windowId, blob, { mimeType, filename } = {}) {
+        const file = uploadFileFromImageBlob(blob, mimeType, filename);
+        const progress = createAttachmentProgressController([file]);
+        try {
+          const uploaded = await uploadAttachmentFile(file, {
+            signal: progress.signal,
+            onProgress: ({ loaded }) => progress.setUploadProgress(loaded || 0),
+          });
+          progress.setPhase("Attaching");
+          send({
+            kind: "paste_image_uploaded",
+            id: windowId,
+            upload_id: uploaded.upload_id,
+            mime_type: uploaded.mime_type ?? file.type ?? mimeType ?? "",
+            filename: uploaded.filename || file.name || filename || null,
+            size: uploaded.size ?? file.size ?? 0,
+          });
+          progress.succeed();
+        } catch (_error) {
+          progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+          showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
+        }
       }
 
       async function readNavigatorClipboardItems() {
@@ -3955,6 +4170,16 @@
         const hasMessage = Boolean(messageEl.textContent);
         button.hidden = !hasMessage;
         button.disabled = !hasMessage;
+      }
+
+      function terminalHasOutput(windowId) {
+        if (terminalMap.get(windowId)?.hasOutput) {
+          return true;
+        }
+        if ((pendingOutputMap.get(windowId)?.length || 0) > 0) {
+          return true;
+        }
+        return pendingSnapshotMap.has(windowId);
       }
 
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {
@@ -4057,23 +4282,12 @@
           event.preventDefault();
           event.stopPropagation();
 
-          void readClipboardImageAsBase64(file)
-            .then((dataBase64) => {
-              if (!dataBase64) {
-                return;
-              }
-              send({
-                kind: "paste_image",
-                id: windowId,
-                data_base64: dataBase64,
-                mime_type: file.type || item.type,
-                filename: file.name || null,
-              });
-              terminal.focus();
-            })
-            .catch(() => {
-              terminal.focus();
-            });
+          void uploadPastedImage(windowId, file, {
+            mimeType: file.type || item.type,
+            filename: file.name || null,
+          }).finally(() => {
+            terminal.focus();
+          });
         };
 
         terminalRoot.addEventListener("paste", handlePaste, true);
@@ -4099,27 +4313,21 @@
           }
           event.preventDefault();
           event.stopPropagation();
-          if (
-            !droppedFilesWithinCountLimit(files) ||
-            !droppedFilesWithinSizeLimit(files) ||
-            !droppedFilesWithinTotalSizeLimit(files)
-          ) {
+          if (!isAgentWindowPreset(workspaceWindowById(windowId)?.preset)) {
+            showFileDropAlert(FILE_DROP_AGENT_TARGET_MESSAGE);
+            terminal.focus();
+            return;
+          }
+          const failure = droppedFilesValidationFailure(files);
+          if (failure) {
+            showFileDropAlert(failure);
             terminal.focus();
             return;
           }
 
-          void readDroppedFilesAsAttachments(files)
-            .then((attachments) => {
-              send({
-                kind: "attach_files",
-                id: windowId,
-                files: attachments,
-              });
-            })
-            .catch(() => {})
-            .finally(() => {
-              terminal.focus();
-            });
+          void sendDroppedFileAttachments(windowId, files).finally(() => {
+            terminal.focus();
+          });
         };
 
         terminalRoot.addEventListener("dragover", handleDragOver, true);
@@ -4137,18 +4345,10 @@
           terminalRoot,
           readClipboardText: readNavigatorClipboardText,
           readClipboardItems: readNavigatorClipboardItems,
-          blobToBase64: readClipboardImageAsBase64,
           supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
           pasteText: (text) => terminal.paste(text),
-          pasteImage: ({ dataBase64, mimeType, filename }) => {
-            send({
-              kind: "paste_image",
-              id: windowId,
-              data_base64: dataBase64,
-              mime_type: mimeType,
-              filename,
-            });
-          },
+          pasteImage: ({ blob, mimeType, filename }) =>
+            uploadPastedImage(windowId, blob, { mimeType, filename }),
           focusTerminal: () => terminal.focus(),
         });
         return () => {
@@ -4178,6 +4378,104 @@
           return null;
         }
         return windowId;
+      }
+
+      function workspaceWindowIdFromDropEvent(event) {
+        const targetWindow = event.target?.closest?.(".workspace-window");
+        const targetWindowId = targetWindow?.dataset?.id || null;
+        if (targetWindowId) {
+          return targetWindowId;
+        }
+        const x = Number(event.clientX);
+        const y = Number(event.clientY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          return null;
+        }
+        const pointTarget = document.elementFromPoint(x, y);
+        const pointWindow = pointTarget?.closest?.(".workspace-window");
+        return pointWindow?.dataset?.id || null;
+      }
+
+      function agentWindowIdFromDropEvent(event) {
+        const windowId = workspaceWindowIdFromDropEvent(event);
+        if (!windowId || !terminalMap.has(windowId)) {
+          return null;
+        }
+        const windowData = workspaceWindowById(windowId);
+        if (!isAgentWindowPreset(windowData?.preset)) {
+          return null;
+        }
+        return windowId;
+      }
+
+      function eventTargetsTerminalRoot(event) {
+        return Boolean(event.target?.closest?.(".terminal-root"));
+      }
+
+      function focusTerminalForWindow(windowId) {
+        terminalMap.get(windowId)?.terminal.focus();
+      }
+
+      async function sendDroppedFileAttachments(windowId, files) {
+        const failure = droppedFilesValidationFailure(files);
+        if (failure) {
+          showFileDropAlert(failure);
+          focusTerminalForWindow(windowId);
+          return;
+        }
+
+        const progress = createAttachmentProgressController(files);
+        try {
+          const attachments = await uploadFilesAsAttachments(files, progress);
+          progress.setPhase("Attaching");
+          send({
+            kind: "attach_files",
+            id: windowId,
+            files: attachments,
+          });
+          progress.succeed();
+        } catch (_error) {
+          progress.fail(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
+          showFileDropAlert(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
+        } finally {
+          focusTerminalForWindow(windowId);
+        }
+      }
+
+      function installBrowserFileDropBridge() {
+        const handleDragOver = (event) => {
+          if (!dataTransferHasFiles(event.dataTransfer) || eventTargetsTerminalRoot(event)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (agentWindowIdFromDropEvent(event)) {
+            event.dataTransfer.dropEffect = "copy";
+          } else {
+            event.dataTransfer.dropEffect = "none";
+          }
+        };
+
+        const handleDrop = (event) => {
+          if (!dataTransferHasFiles(event.dataTransfer) || eventTargetsTerminalRoot(event)) {
+            return;
+          }
+          const files = Array.from(event.dataTransfer?.files || []);
+          if (files.length === 0) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          const windowId = agentWindowIdFromDropEvent(event);
+          if (!windowId) {
+            showFileDropAlert(FILE_DROP_AGENT_TARGET_MESSAGE);
+            return;
+          }
+          void sendDroppedFileAttachments(windowId, files);
+        };
+
+        window.addEventListener("dragover", handleDragOver, true);
+        window.addEventListener("drop", handleDrop, true);
       }
 
       function installNativeFileDropBridge() {
@@ -4281,6 +4579,24 @@
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;
+          // Issue #2924: drop pre-ready onData firings — see
+          // gateTerminalInputForReadiness in terminal-viewport-reflow.js
+          // for the contract. The runtime is fetched fresh each firing so
+          // a late teardown/dispose race resolves cleanly.
+          const gate = gateTerminalInputForReadiness({
+            runtime: terminalMap.get(windowId),
+            data,
+          });
+          if (!gate.forward) {
+            console.debug("[gwt_input_trace:onData:dropped]", {
+              seq: inputTraceSeq,
+              windowId,
+              dataLen: data.length,
+              reason: gate.reason,
+              wsState,
+            });
+            return;
+          }
           console.debug("[gwt_input_trace:onData]", {
             seq: inputTraceSeq,
             windowId,
@@ -4308,6 +4624,7 @@
           // producing the post-launch corruption symptom.
           isReady: false,
           deferredWrites: [],
+          hasOutput: false,
           // Issue #2832: see completeInitialFitHandshake.
           handshakeAttempts: 0,
         };
@@ -4414,6 +4731,9 @@
               pendingOutputMap.set(windowId, queue);
               return;
             }
+            if (base64) {
+              runtime.hasOutput = true;
+            }
             // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
             // completed its initial fit, hold the chunk in the runtime's
             // deferred queue. The createTerminalRuntime rAF flushes this
@@ -4436,6 +4756,9 @@
         if (!runtime) {
           pendingSnapshotMap.set(windowId, base64);
           return;
+        }
+        if (base64) {
+          runtime.hasOutput = true;
         }
         // SPEC-2008 Phase 26.A / FR-057: snapshots that arrive before
         // the initial fit are held in pendingSnapshotMap and replayed
@@ -5516,6 +5839,7 @@
             selectedProfile: null,
             draft: null,
             saveTimer: null,
+            saveInFlight: false,
           });
         }
         return profileStateMap.get(windowId);
@@ -6375,6 +6699,196 @@
         };
       }
 
+      function normalizeProfileEnvKey(key) {
+        return String(key || "").trim();
+      }
+
+      function profileDraftPayload(draft) {
+        if (!draft) {
+          return { envVars: [], disabledEnv: [] };
+        }
+        const envByKey = new Map();
+        for (const entry of draft.envVars || []) {
+          const key = normalizeProfileEnvKey(entry.key);
+          if (!key) {
+            continue;
+          }
+          envByKey.set(key, {
+            key,
+            value: entry.value ?? "",
+          });
+        }
+        const disabledSet = new Set();
+        for (const entry of draft.disabledEnv || []) {
+          const key = normalizeProfileEnvKey(entry);
+          if (key) {
+            disabledSet.add(key);
+          }
+        }
+        for (const key of disabledSet) {
+          envByKey.delete(key);
+        }
+        return {
+          envVars: Array.from(envByKey.values()).sort((left, right) =>
+            left.key.localeCompare(right.key),
+          ),
+          disabledEnv: Array.from(disabledSet).sort((left, right) =>
+            left.localeCompare(right),
+          ),
+        };
+      }
+
+      function removeProfileEnvOverride(draft, key) {
+        const normalized = normalizeProfileEnvKey(key);
+        draft.envVars = (draft.envVars || []).filter(
+          (entry) => normalizeProfileEnvKey(entry.key) !== normalized,
+        );
+      }
+
+      function removeProfileDisabledKey(draft, key) {
+        const normalized = normalizeProfileEnvKey(key);
+        draft.disabledEnv = (draft.disabledEnv || []).filter(
+          (entry) => normalizeProfileEnvKey(entry) !== normalized,
+        );
+      }
+
+      function setProfileEnvOverride(draft, key, value) {
+        const normalized = normalizeProfileEnvKey(key);
+        if (!normalized) {
+          return null;
+        }
+        removeProfileDisabledKey(draft, normalized);
+        const existing = (draft.envVars || []).find(
+          (entry) => normalizeProfileEnvKey(entry.key) === normalized,
+        );
+        if (existing) {
+          existing.key = normalized;
+          existing.value = value ?? "";
+          return existing;
+        }
+        const entry = { key: normalized, value: value ?? "" };
+        draft.envVars.push(entry);
+        return entry;
+      }
+
+      function setProfileRowMode(draft, key, mode) {
+        const normalized = normalizeProfileEnvKey(key);
+        if (!normalized) {
+          return;
+        }
+        if (mode === "use_os") {
+          removeProfileEnvOverride(draft, normalized);
+          removeProfileDisabledKey(draft, normalized);
+          return;
+        }
+        if (mode === "disabled") {
+          removeProfileEnvOverride(draft, normalized);
+          if (
+            !(draft.disabledEnv || []).some(
+              (entry) => normalizeProfileEnvKey(entry) === normalized,
+            )
+          ) {
+            draft.disabledEnv.push(normalized);
+          }
+          return;
+        }
+        const existing = (draft.envVars || []).find(
+          (entry) => normalizeProfileEnvKey(entry.key) === normalized,
+        );
+        setProfileEnvOverride(draft, normalized, existing?.value ?? "");
+      }
+
+      function profileEnvironmentRows(snapshot, draft) {
+        const payload = profileDraftPayload(draft);
+        const osEntries = (snapshot.os_env || [])
+          .map((entry) => ({
+            key: normalizeProfileEnvKey(entry.key),
+            value: entry.value ?? "",
+          }))
+          .filter((entry) => entry.key)
+          .sort((left, right) => left.key.localeCompare(right.key));
+        const overrides = new Map(payload.envVars.map((entry) => [entry.key, entry]));
+        const disabled = new Set(payload.disabledEnv);
+        const osKeys = new Set();
+        const rows = [];
+
+        for (const entry of osEntries) {
+          osKeys.add(entry.key);
+          const mode = disabled.has(entry.key)
+            ? "disabled"
+            : overrides.has(entry.key)
+              ? "override"
+              : "use_os";
+          const profileValue = overrides.get(entry.key)?.value ?? "";
+          rows.push({
+            kind: "os",
+            key: entry.key,
+            osValue: entry.value,
+            mode,
+            profileValue,
+            result:
+              mode === "disabled"
+                ? "Disabled"
+                : mode === "override"
+                  ? profileValue
+                  : entry.value,
+          });
+        }
+
+        const addedKeys = new Set();
+        for (const entry of payload.envVars) {
+          if (osKeys.has(entry.key)) {
+            continue;
+          }
+          addedKeys.add(entry.key);
+          rows.push({
+            kind: "added",
+            key: entry.key,
+            osValue: "",
+            mode: "override",
+            profileValue: entry.value,
+            result: entry.value,
+          });
+        }
+        for (const key of payload.disabledEnv) {
+          if (osKeys.has(key) || addedKeys.has(key)) {
+            continue;
+          }
+          rows.push({
+            kind: "added",
+            key,
+            osValue: "",
+            mode: "disabled",
+            profileValue: "",
+            result: "Disabled",
+          });
+        }
+
+        rows.sort((left, right) => {
+          if (left.kind !== right.kind) {
+            return left.kind === "os" ? -1 : 1;
+          }
+          return left.key.localeCompare(right.key);
+        });
+
+        (draft.envVars || []).forEach((entry, index) => {
+          if (normalizeProfileEnvKey(entry.key)) {
+            return;
+          }
+          rows.push({
+            kind: "pending",
+            key: entry.key || "",
+            osValue: "",
+            mode: "override",
+            profileValue: entry.value ?? "",
+            result: entry.value ?? "",
+            draftIndex: index,
+          });
+        });
+
+        return rows;
+      }
+
       function selectedProfileEntry(state) {
         const profiles = state.snapshot?.profiles || [];
         if (!state.selectedProfile) {
@@ -6392,15 +6906,13 @@
         if (!draft) {
           return "";
         }
+        const payload = profileDraftPayload(draft);
         return JSON.stringify({
           currentName: draft.currentName,
           name: draft.name,
           description: draft.description,
-          envVars: draft.envVars.map((entry) => ({
-            key: entry.key,
-            value: entry.value,
-          })),
-          disabledEnv: draft.disabledEnv.slice(),
+          envVars: payload.envVars,
+          disabledEnv: payload.disabledEnv,
         });
       }
 
@@ -6435,6 +6947,17 @@
         }
       }
 
+      function profileHasEditableFocus(windowId) {
+        const element = windowMap.get(windowId);
+        const active = document.activeElement;
+        return Boolean(
+          element &&
+            active &&
+            element.contains(active) &&
+            active.matches?.("input, textarea, select"),
+        );
+      }
+
       function flushProfileSave(windowId) {
         const state = ensureProfileState(windowId);
         clearProfileSaveTimer(state);
@@ -6450,16 +6973,18 @@
         }
         state.loading = true;
         state.saving = true;
+        state.saveInFlight = true;
         state.error = "";
         updateProfileStatus(windowId);
+        const payload = profileDraftPayload(state.draft);
         send({
           kind: "save_profile",
           id: windowId,
           current_name: state.draft.currentName,
           name: state.draft.name,
           description: state.draft.description,
-          env_vars: state.draft.envVars.filter((entry) => entry.key.trim() || entry.value),
-          disabled_env: state.draft.disabledEnv.filter((entry) => entry.trim()),
+          env_vars: payload.envVars,
+          disabled_env: payload.disabledEnv,
         });
       }
 
@@ -6564,6 +7089,7 @@
           active_profile: "default",
           selected_profile: "default",
           profiles: [],
+          os_env: [],
           merged_preview: [],
         };
         const profiles = snapshot.profiles || [];
@@ -6599,7 +7125,7 @@
             createNode(
               "div",
               "profile-empty-copy",
-              "Create a profile to track env overrides, disabled OS variables, and merged preview output.",
+              "Create a profile to track env overrides and disabled OS variables.",
             ),
           );
           const button = createNode("button", "wizard-button primary", "New profile");
@@ -6655,7 +7181,7 @@
             createNode(
               "div",
               "profile-empty-copy",
-              "Each profile keeps its own env overrides and merged preview output.",
+              "Each profile keeps its own env overrides and disabled OS variables.",
             ),
           );
           editor.appendChild(empty);
@@ -6669,12 +7195,6 @@
         activeButton.disabled = selected.is_active || state.loading;
         activeButton.addEventListener("click", () => setActiveProfile(windowId));
         actions.appendChild(activeButton);
-
-        const saveButton = createNode("button", "wizard-button", "Save now");
-        saveButton.type = "button";
-        saveButton.disabled = !profileDraftIsDirty(state) || state.loading;
-        saveButton.addEventListener("click", () => flushProfileSave(windowId));
-        actions.appendChild(saveButton);
 
         const deleteButton = createNode("button", "wizard-button", "Delete");
         deleteButton.type = "button";
@@ -6712,134 +7232,137 @@
         metadata.appendChild(descriptionField);
         editor.appendChild(metadata);
 
-        const envSection = createNode("div", "profile-section");
-        const envHeader = createNode("div", "profile-row-header");
-        envHeader.appendChild(createNode("div", "mock-label", "Profile variables"));
-        const addEnvButton = createNode("button", "wizard-button", "Add variable");
-        addEnvButton.type = "button";
-        addEnvButton.addEventListener("click", () => {
-          state.draft.envVars.push({ key: "", value: "" });
-          renderProfile(windowId, true);
-        });
-        envHeader.appendChild(addEnvButton);
-        envSection.appendChild(envHeader);
-        const envTable = createNode("div", "profile-table");
-        if (state.draft.envVars.length === 0) {
-          envTable.appendChild(
-            createNode("div", "profile-empty-copy", "No env overrides for this profile."),
-          );
+        const envSection = createNode("div", "profile-section profile-env-section");
+        envSection.appendChild(createNode("div", "mock-label", "Environment Variables"));
+        const envGrid = createNode("div", "profile-env-grid");
+        const headerRow = createNode("div", "profile-env-grid-row profile-env-grid-head");
+        for (const label of ["Key", "OS", "Mode", "Profile", "Result"]) {
+          headerRow.appendChild(createNode("div", "", label));
         }
-        state.draft.envVars.forEach((entry, index) => {
-          const row = createNode("div", "profile-table-row");
-          const keyInput = document.createElement("input");
-          keyInput.type = "text";
-          keyInput.placeholder = "KEY";
-          // SPEC-2356 — env var rows have no surrounding <label>; use
-          // aria-label so screen readers announce purpose. The row index
-          // disambiguates rows within the same list.
-          keyInput.setAttribute("aria-label", `Env var key, row ${index + 1}`);
-          keyInput.value = entry.key;
-          keyInput.addEventListener("input", () => {
-            state.draft.envVars[index].key = keyInput.value;
+        envGrid.appendChild(headerRow);
+
+        const rows = profileEnvironmentRows(snapshot, state.draft);
+        rows.forEach((envRow, index) => {
+          const row = createNode(
+            "div",
+            `profile-env-grid-row profile-env-row is-${envRow.mode}`,
+          );
+
+          if (envRow.kind === "os") {
+            const keyCell = createNode("div", "profile-env-key", envRow.key);
+            keyCell.title = envRow.key;
+            row.appendChild(keyCell);
+          } else {
+            const keyInput = document.createElement("input");
+            keyInput.type = "text";
+            keyInput.placeholder = "KEY";
+            keyInput.value = envRow.key;
+            keyInput.setAttribute("aria-label", `Environment variable key, row ${index + 1}`);
+            keyInput.addEventListener("input", () => {
+              if (envRow.kind === "pending") {
+                state.draft.envVars[envRow.draftIndex].key = keyInput.value;
+                envRow.key = keyInput.value;
+              } else if (envRow.mode === "disabled") {
+                const previous = normalizeProfileEnvKey(envRow.key);
+                const target = (state.draft.disabledEnv || []).findIndex(
+                  (entry) => normalizeProfileEnvKey(entry) === previous,
+                );
+                if (target >= 0) {
+                  state.draft.disabledEnv[target] = keyInput.value;
+                  envRow.key = keyInput.value;
+                }
+              } else {
+                const previous = normalizeProfileEnvKey(envRow.key);
+                const target = (state.draft.envVars || []).find(
+                  (entry) => normalizeProfileEnvKey(entry.key) === previous,
+                );
+                if (target) {
+                  target.key = keyInput.value;
+                  envRow.key = keyInput.value;
+                }
+              }
+              scheduleProfileSave(windowId);
+            });
+            keyInput.addEventListener("blur", () => {
+              flushProfileSave(windowId);
+            });
+            row.appendChild(keyInput);
+          }
+
+          const osCell = createNode("div", "profile-env-os-value", envRow.osValue || "-");
+          osCell.title = envRow.osValue || "";
+          row.appendChild(osCell);
+
+          const modeSelect = document.createElement("select");
+          modeSelect.setAttribute("aria-label", `Environment variable mode, row ${index + 1}`);
+          const modeOptions =
+            envRow.kind === "os"
+              ? [
+                  ["use_os", "Use OS"],
+                  ["override", "Override"],
+                  ["disabled", "Disabled"],
+                ]
+              : [
+                  ["override", "Enabled"],
+                  ["disabled", "Disabled"],
+                ];
+          for (const option of modeOptions) {
+            const element = document.createElement("option");
+            element.value = option[0];
+            element.textContent = option[1];
+            modeSelect.appendChild(element);
+          }
+          modeSelect.value = envRow.mode;
+          modeSelect.addEventListener("change", () => {
+            const rowKey =
+              envRow.kind === "pending"
+                ? state.draft.envVars[envRow.draftIndex]?.key
+                : envRow.key;
+            if (envRow.kind === "pending" && !normalizeProfileEnvKey(rowKey)) {
+              if (modeSelect.value === "use_os") {
+                state.draft.envVars.splice(envRow.draftIndex, 1);
+              }
+            } else {
+              setProfileRowMode(state.draft, rowKey, modeSelect.value);
+            }
+            renderProfile(windowId, true);
             scheduleProfileSave(windowId);
           });
-          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
-          row.appendChild(keyInput);
+          row.appendChild(modeSelect);
 
           const valueInput = document.createElement("input");
           valueInput.type = "text";
-          valueInput.placeholder = "Value";
-          valueInput.setAttribute("aria-label", `Env var value, row ${index + 1}`);
-          valueInput.value = entry.value;
+          valueInput.placeholder = "Profile";
+          valueInput.value = envRow.profileValue;
+          valueInput.setAttribute("aria-label", `Profile value, row ${index + 1}`);
+          const resultCell = createNode("div", "profile-env-result", envRow.result);
+          resultCell.title = envRow.result;
           valueInput.addEventListener("input", () => {
-            state.draft.envVars[index].value = valueInput.value;
+            if (envRow.kind === "pending") {
+              state.draft.envVars[envRow.draftIndex].value = valueInput.value;
+              resultCell.textContent = valueInput.value;
+            } else {
+              setProfileEnvOverride(state.draft, envRow.key, valueInput.value);
+              modeSelect.value = "override";
+              resultCell.textContent = valueInput.value;
+            }
             scheduleProfileSave(windowId);
           });
           valueInput.addEventListener("blur", () => flushProfileSave(windowId));
           row.appendChild(valueInput);
-
-          const removeButton = createNode("button", "icon-button", "×");
-          removeButton.type = "button";
-          removeButton.setAttribute("aria-label", "Delete env var");
-          removeButton.addEventListener("click", () => {
-            state.draft.envVars.splice(index, 1);
-            renderProfile(windowId, true);
-            scheduleProfileSave(windowId);
-          });
-          row.appendChild(removeButton);
-          envTable.appendChild(row);
+          row.appendChild(resultCell);
+          envGrid.appendChild(row);
         });
-        envSection.appendChild(envTable);
-        editor.appendChild(envSection);
 
-        const disabledSection = createNode("div", "profile-section");
-        const disabledHeader = createNode("div", "profile-row-header");
-        disabledHeader.appendChild(createNode("div", "mock-label", "Disabled OS variables"));
-        const addDisabledButton = createNode("button", "wizard-button", "Add disabled key");
-        addDisabledButton.type = "button";
-        addDisabledButton.addEventListener("click", () => {
-          state.draft.disabledEnv.push("");
+        const addRow = createNode("button", "profile-env-add-row", "+ Add variable");
+        addRow.type = "button";
+        addRow.addEventListener("click", () => {
+          state.draft.envVars.push({ key: "", value: "" });
           renderProfile(windowId, true);
         });
-        disabledHeader.appendChild(addDisabledButton);
-        disabledSection.appendChild(disabledHeader);
-        const disabledTable = createNode("div", "profile-table");
-        if (state.draft.disabledEnv.length === 0) {
-          disabledTable.appendChild(
-            createNode("div", "profile-empty-copy", "No disabled OS variables for this profile."),
-          );
-        }
-        state.draft.disabledEnv.forEach((entry, index) => {
-          const row = createNode("div", "profile-table-row profile-disabled-row");
-          const keyInput = document.createElement("input");
-          keyInput.type = "text";
-          keyInput.placeholder = "SECRET_KEY";
-          keyInput.setAttribute("aria-label", `Disabled env key, row ${index + 1}`);
-          keyInput.value = entry;
-          keyInput.addEventListener("input", () => {
-            state.draft.disabledEnv[index] = keyInput.value;
-            scheduleProfileSave(windowId);
-          });
-          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
-          row.appendChild(keyInput);
-
-          const removeButton = createNode("button", "icon-button", "×");
-          removeButton.type = "button";
-          removeButton.setAttribute("aria-label", "Delete disabled env key");
-          removeButton.addEventListener("click", () => {
-            state.draft.disabledEnv.splice(index, 1);
-            renderProfile(windowId, true);
-            scheduleProfileSave(windowId);
-          });
-          row.appendChild(removeButton);
-          disabledTable.appendChild(row);
-        });
-        disabledSection.appendChild(disabledTable);
-        editor.appendChild(disabledSection);
-
-        const previewSection = createNode("div", "profile-section");
-        previewSection.appendChild(createNode("div", "mock-label", "Merged preview"));
-        previewSection.appendChild(
-          createNode(
-            "div",
-            "profile-empty-copy",
-            "The backend computes this preview from the current OS environment, disabled keys, and profile overrides.",
-          ),
-        );
-        const preview = createNode("div", "profile-preview");
-        if ((snapshot.merged_preview || []).length === 0) {
-          preview.appendChild(
-            createNode("div", "profile-empty-copy", "No merged entries to preview yet."),
-          );
-        }
-        for (const entry of snapshot.merged_preview || []) {
-          const row = createNode("div", "profile-preview-row");
-          row.appendChild(createNode("div", "profile-preview-key", entry.key));
-          row.appendChild(createNode("div", "profile-preview-value", entry.value));
-          preview.appendChild(row);
-        }
-        previewSection.appendChild(preview);
-        editor.appendChild(previewSection);
+        envGrid.appendChild(addRow);
+        envSection.appendChild(envGrid);
+        editor.appendChild(envSection);
 
         updateProfileStatus(windowId);
       }
@@ -11368,6 +11891,8 @@
         setActiveProfile,
         flushProfileSave,
         deleteProfile,
+        updateProfileStatus,
+        hasEditableFocus: profileHasEditableFocus,
         syncDraftFromSelection: syncProfileDraftFromSelection,
       });
 
@@ -11746,11 +12271,24 @@
           }
           case "profile_snapshot": {
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
+            const previousProfile = state.selectedProfile;
+            const wasSaveInFlight = state.saveInFlight;
             state.snapshot = event.snapshot || null;
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = "";
             state.selectedProfile = event.snapshot?.selected_profile || null;
+            const selectedProfileUnchanged =
+              !previousProfile || previousProfile === state.selectedProfile;
+            if (
+              wasSaveInFlight &&
+              selectedProfileUnchanged &&
+              frontendUnits.profileSurface.hasEditableFocus(event.id)
+            ) {
+              frontendUnits.profileSurface.updateProfileStatus(event.id);
+              break;
+            }
             frontendUnits.profileSurface.renderProfile(event.id);
             break;
           }
@@ -12059,6 +12597,7 @@
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = event.message;
             frontendUnits.profileSurface.renderProfile(event.id, true);
             break;
@@ -12924,6 +13463,7 @@
       }
 
       installCanvasWheelRouting();
+      installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
       window.addEventListener(

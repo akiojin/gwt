@@ -170,6 +170,12 @@ pub enum FileAttachment {
         size: u64,
         data_base64: String,
     },
+    Uploaded {
+        upload_id: String,
+        filename: String,
+        mime_type: Option<String>,
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +264,13 @@ pub enum FrontendEvent {
         data_base64: String,
         mime_type: String,
         filename: Option<String>,
+    },
+    PasteImageUploaded {
+        id: String,
+        upload_id: String,
+        mime_type: String,
+        filename: Option<String>,
+        size: u64,
     },
     AttachFiles {
         id: String,
@@ -657,6 +670,17 @@ pub enum FrontendEvent {
         #[serde(default)]
         focus_version: Option<String>,
     },
+    /// SPEC #2780 v2 Amendment (FR-014): user clicked the Update / Downgrade
+    /// action button in the Release Notes window. Backend resolves the
+    /// release-by-tag, builds [`gwt_core::update::UpdateState::Available`]
+    /// with the chosen version's platform-specific asset, then drives the
+    /// existing prepare → apply pipeline. Progress and completion broadcast
+    /// via [`BackendEvent::UpdateProgress`] / [`BackendEvent::UpdateReady`]
+    /// / [`BackendEvent::UpdateApplyError`] (the same modal the standard
+    /// update CTA uses).
+    ApplyUpdateToVersion {
+        version: String,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -794,6 +818,8 @@ pub struct ProfileSnapshotView {
     pub active_profile: String,
     pub selected_profile: String,
     pub profiles: Vec<ProfileEntryView>,
+    #[serde(default)]
+    pub os_env: Vec<ProfileEnvEntryView>,
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
@@ -1438,11 +1464,16 @@ pub enum BackendEvent {
     /// SPEC #2780 Release Notes window payload. Carries the parsed entries
     /// from the bundled `CHANGELOG.md` so the frontend can render the
     /// sidebar + content pane without further round-trips.
+    ///
+    /// `current_version` (SPEC #2780 v2 Amendment / FR-013) lets the frontend
+    /// label the Update / Downgrade / Current action button without a second
+    /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
+        current_version: String,
     },
     /// SPEC #2780 Release Notes window error. Emitted only when the bundled
     /// changelog yielded no entries; the UI renders an error pane pointing
@@ -2815,6 +2846,37 @@ mod tests {
     }
 
     #[test]
+    fn frontend_event_accepts_uploaded_terminal_image_paste_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": "tab-1::agent-1",
+            "upload_id": "upload-1",
+            "mime_type": "image/png",
+            "filename": "screenshot.png",
+            "size": 12
+        }))
+        .expect("deserialize uploaded image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImageUploaded {
+                    id,
+                    upload_id,
+                    mime_type,
+                    filename: Some(filename),
+                    size,
+                } if id == "tab-1::agent-1"
+                    && upload_id == "upload-1"
+                    && mime_type == "image/png"
+                    && filename == "screenshot.png"
+                    && size == 12
+            ),
+            "uploaded image paste must expose upload id and image metadata"
+        );
+    }
+
+    #[test]
     fn frontend_event_accepts_terminal_file_attachment_paths() {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "attach_files",
@@ -2879,6 +2941,45 @@ mod tests {
                         )
             ),
             "browser file drops must expose inline file metadata and bytes"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_uploaded_terminal_file_attachments() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "uploaded",
+                    "upload_id": "upload-1",
+                    "filename": "large.bin",
+                    "mime_type": "application/octet-stream",
+                    "size": 10485761
+                }
+            ]
+        }))
+        .expect("deserialize uploaded file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles { id, files }
+                    if id == "tab-1::agent-1"
+                        && matches!(
+                            files.as_slice(),
+                            [super::FileAttachment::Uploaded {
+                                upload_id,
+                                filename,
+                                mime_type: Some(mime_type),
+                                size,
+                            }] if upload_id == "upload-1"
+                                && filename == "large.bin"
+                                && mime_type == "application/octet-stream"
+                                && *size == 10485761
+                        )
+            ),
+            "browser streaming uploads must expose upload id and metadata"
         );
     }
 
@@ -3098,6 +3199,10 @@ mod tests {
                     is_default: true,
                     is_active: true,
                 }],
+                os_env: vec![ProfileEnvEntryView {
+                    key: "PATH".to_string(),
+                    value: "/usr/bin".to_string(),
+                }],
                 merged_preview: vec![ProfileEnvEntryView {
                     key: "TERM".to_string(),
                     value: "xterm-256color".to_string(),
@@ -3117,6 +3222,10 @@ mod tests {
         assert_eq!(
             value["snapshot"]["profiles"][0]["env_vars"][0]["key"],
             Value::String("TERM".to_string())
+        );
+        assert_eq!(
+            value["snapshot"]["os_env"][0]["value"],
+            Value::String("/usr/bin".to_string())
         );
     }
 

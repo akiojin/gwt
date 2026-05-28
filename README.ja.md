@@ -100,34 +100,39 @@ Linux デスクトップ版のビルドには WebKitGTK 系の依存が必要で
 
 ## 使い方
 
-ネイティブ GUI を起動します。
+`gwt` を起動するとタスクトレイ (macOS は menubar、Windows は notification
+area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にアイコンが
+常駐します。トレイメニューから操作します:
+
+- **Open in browser**: 既定ブラウザで埋込サーバー (`http://127.0.0.1:<port>/`)
+  を開きます。同じ URL は他のブラウザでも開けます。
+- **Start at login**: チェックすると OS 起動時に自動で `gwt` を起動します。
+  内部では `auto-launch` crate 経由で macOS Login Items / Windows HKCU Run
+  registry / Linux XDG autostart (`~/.config/autostart/gwt.desktop`) を切替
+  えます (SPEC #2920)。
+- **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
 ```bash
-gwt
+gwt                                 # トレイ常駐 + 埋込サーバー起動
+gwt open                            # 起動中の tray インスタンスの URL を既定ブラウザで開く
 ```
 
-起動時には前回の状態を復元するか、新しいプロジェクトディレクトリを開けます。
-同時に WebView 用のローカル HTTP/WebSocket サーバーも起動し、stderr に
-`http://127.0.0.1:<port>/` のような URL を出力します。ネイティブアプリの起動中は、
-同じ URL を通常のブラウザでも開けます。
+`gwt open` は Linux の GNOME 3.26+ など system tray を持たない環境向けの
+fallback です。tray アイコンが見えない場合でも `gwt browser URL: ...` が
+stderr に出力されるので、その URL を手動で開くか `gwt open` を実行して
+ください。
 
-### Headless / Browser-only モード
+タスクトレイ常駐は 1 OS-login ユーザーあたり 1 インスタンスです。同じ
+ユーザーで二重に `gwt` を起動した場合、後続プロセスは既存インスタンスの
+URL を stderr に出して exit 0 で終了します。
 
-`gwt serve` (等価 alias: `gwt --headless`) は、ネイティブウィンドウを開かずに
-同じ UI を起動します。embedded HTTP / WebSocket サーバーだけが立ち上がり、
-オペレーターは出力された URL を任意のブラウザで開いて操作します。
+### `gwt serve` 廃止について
 
-```bash
-gwt serve                              # 127.0.0.1、ランダムポート、ブラウザ自動起動
-gwt serve --no-open                    # 同じ動作だがブラウザ自動起動を抑制 (CI / スクリプト用)
-gwt serve --port 8787                  # 固定ポート + ブラウザ自動起動
-gwt serve --bind 0.0.0.0 --port 8787   # LAN (VPN 越し含む) へ公開 + ブラウザ自動起動
-gwt --headless --port 8787             # `gwt serve --port 8787` と同じ
-```
-
-既定でシステムブラウザが自動起動します。CI / 自動化で server だけ立ち上げ
-たい場合は `--no-open` を指定してください。`--open` は既存スクリプト互換性
-維持のため no-op flag として残しています。
+`gwt serve` / `gwt --headless` 経路は v10.0.0 で削除されました (SPEC #2920 Q9)。
+従来 `gwt serve --no-open` を使っていた CI / 自動化スクリプトは現状の `gwt`
+出力 (`gwt browser URL: ...`) と `GWT_BROWSER_URL_FILE` 環境変数のハンドオフ
+契約をそのまま利用できます。tray アイコンが見えない CI 環境では tray は
+best effort で初期化に失敗しますが、埋込サーバーは継続稼働します。
 
 信頼境界は **LAN のみ** (VPN-extended LAN を含む) です。`gwt serve` には
 TLS 終端、認証ゲート、レート制限は組み込まれていません。`--bind` で

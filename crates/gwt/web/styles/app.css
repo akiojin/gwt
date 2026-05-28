@@ -960,7 +960,12 @@ body {
 
 .terminal-root {
   position: absolute;
-  inset: 8px 10px 10px;
+  /* Issue #2923 follow-up: the bypass-permissions footer + Claude Code
+   * effort/chrome indicators land at ~77 cells. With the prior 10px
+   * horizontal inset the host shrank to ~76 cols and `/effort` wrapped to
+   * `/eff` + `ort`. Tighten the side / bottom inset so the cell grid
+   * recovers ~1 column without changing the gwt window default size. */
+  inset: 8px 4px 4px;
   padding: 0;
   overflow: hidden;
   background: #0a0d12;
@@ -974,6 +979,18 @@ body {
 .surface-terminal .terminal-root .xterm-helper-textarea {
   background: #0a0d12;
   color: #e8eaed;
+}
+
+/* Issue #2923 follow-up: xterm's vendor css pins `overflow-y: scroll` on
+ * the viewport so a scrollbar gutter is always reserved (~17px on
+ * Windows Blink). gwt drives its own wheel-scroll controller, so the
+ * always-on gutter is purely decorative and costs ~2 cells of cell
+ * grid. Switch to `auto` here so the gutter only appears when scrollback
+ * exists. Combined with the slimmer terminal-root inset above this
+ * keeps the Claude Code footer's `/effort` indicator on a single line
+ * at the gwt-default 720×420 window size. */
+.surface-terminal .terminal-root .xterm-viewport {
+  overflow-y: auto;
 }
 
 .terminal-overlay {
@@ -1073,6 +1090,7 @@ body {
 .logs-root,
 .knowledge-root,
 .index-search-root,
+.profile-root,
 .workspace-kanban-root,
 .workspace-overview-root,
 .mock-root {
@@ -2044,7 +2062,7 @@ body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.28fr);
+  grid-template-columns: minmax(160px, 0.48fr) minmax(0, 1.52fr);
 }
 
 .profile-list-pane,
@@ -2060,10 +2078,11 @@ body {
 }
 
 .profile-editor-pane {
-  overflow: auto;
+  overflow: hidden;
   padding: 12px;
   display: grid;
-  align-content: start;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: stretch;
   gap: 12px;
 }
 
@@ -2180,6 +2199,8 @@ body {
 
 .profile-field input,
 .profile-table-row input,
+.profile-env-grid input,
+.profile-env-grid select,
 .profile-textarea {
   width: 100%;
   min-width: 0;
@@ -2193,9 +2214,17 @@ body {
 }
 .profile-field input:focus,
 .profile-table-row input:focus,
+.profile-env-grid input:focus,
+.profile-env-grid select:focus,
 .profile-textarea:focus {
   outline: none;
   border-color: var(--color-focus-ring);
+}
+
+.profile-env-grid input,
+.profile-env-grid select {
+  padding: 6px 8px;
+  font-size: var(--type-xs);
 }
 
 .profile-textarea {
@@ -2224,6 +2253,107 @@ body {
   display: grid;
   gap: 10px;
   padding: 16px 12px;
+}
+
+.profile-env-section {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.profile-env-grid {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
+}
+
+.profile-env-grid-row {
+  display: grid;
+  grid-template-columns:
+    minmax(84px, 0.9fr)
+    minmax(72px, 0.75fr)
+    minmax(84px, 0.65fr)
+    minmax(100px, 1fr)
+    minmax(72px, 0.75fr);
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.profile-env-grid-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 0;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-env-row {
+  padding: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.profile-env-row.is-disabled {
+  background: color-mix(in oklab, var(--color-state-blocked) 8%, var(--color-surface));
+}
+
+.profile-env-key,
+.profile-env-os-value,
+.profile-env-result {
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+}
+
+.profile-env-key {
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+.profile-env-os-value,
+.profile-env-result {
+  color: var(--color-text-muted);
+}
+
+.profile-env-add-row {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-state-active) 6%, transparent);
+  color: var(--color-state-active);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-env-add-row:hover {
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
 .profile-preview {
@@ -2545,6 +2675,82 @@ body {
   font-size: var(--type-sm);
   text-align: left;
   cursor: pointer;
+}
+
+.attachment-progress {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1001;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 36px));
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-3);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+.attachment-progress[hidden] {
+  display: none;
+}
+
+.attachment-progress[data-state="error"] {
+  border-color: var(--color-danger);
+}
+
+.attachment-progress__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.attachment-progress__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-progress__cancel {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.attachment-progress__cancel[hidden] {
+  display: none;
+}
+
+.attachment-progress__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--color-text-muted) 20%, transparent);
+}
+
+.attachment-progress__bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-focus-ring);
+  transition: width 120ms ease;
+}
+
+.attachment-progress[data-state="error"] .attachment-progress__bar {
+  background: var(--color-danger);
 }
 
 .logs-filter-bar {

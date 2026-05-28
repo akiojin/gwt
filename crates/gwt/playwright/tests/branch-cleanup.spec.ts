@@ -21,13 +21,17 @@ test.describe("Branch Cleanup E2E", () => {
 
     await page.goto(APP_URL);
 
-    const branchesWindow = page.locator(".workspace-window.surface-branches");
+    const branchesWindow = page.locator(".workspace-window.surface-work");
     await expect(branchesWindow).toBeVisible({ timeout: 10_000 });
+    await branchesWindow.locator("[data-work-tab='branches']").click();
 
-    const firstBranch = branchesWindow.locator(
+    const branchSurface = branchesWindow.locator("[data-work-section='branches']");
+    await expect(branchSurface).toBeVisible();
+
+    const firstBranch = branchSurface.locator(
       ".branch-row[data-branch-name='work/cleanup-one']",
     );
-    const secondBranch = branchesWindow.locator(
+    const secondBranch = branchSurface.locator(
       ".branch-row[data-branch-name='work/cleanup-two']",
     );
     await expect(firstBranch).toContainText("safe");
@@ -36,7 +40,7 @@ test.describe("Branch Cleanup E2E", () => {
     await firstBranch.locator(".branch-cleanup-toggle").click();
     await secondBranch.locator(".branch-cleanup-toggle").click();
 
-    const cleanupTrigger = branchesWindow.getByRole("button", {
+    const cleanupTrigger = branchSurface.getByRole("button", {
       name: "Clean Up (2)",
     });
     await expect(cleanupTrigger).toBeEnabled();

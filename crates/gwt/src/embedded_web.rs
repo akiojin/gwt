@@ -710,11 +710,12 @@ mod tests {
             "expected image paste to suppress duplicate text paste injection",
         );
         assert!(
-            html.contains("kind: \"paste_image\"")
-                && html.contains("data_base64")
+            html.contains("kind: \"paste_image_uploaded\"")
+                && html.contains("uploadPastedImage")
+                && html.contains("uploadAttachmentFile")
                 && html.contains("mime_type")
                 && html.contains("filename"),
-            "expected image paste backend event with payload, MIME type, and filename",
+            "expected image paste backend event with uploaded payload, MIME type, and filename",
         );
     }
 
@@ -733,15 +734,15 @@ mod tests {
         );
         assert!(
             html.contains("event.dataTransfer?.files")
-                && html.contains("readDroppedFileAsBase64")
-                && html.contains("MAX_FILE_DROP_BYTES"),
-            "expected browser file drops to read arbitrary files with a size guard",
+                && html.contains("uploadFilesAsAttachments")
+                && html.contains("createAttachmentProgressController"),
+            "expected browser file drops to upload files with visible progress",
         );
         assert!(
             html.contains("kind: \"attach_files\"")
-                && html.contains("source: \"inline\"")
-                && html.contains("data_base64"),
-            "expected browser file drops to send inline attach_files payloads",
+                && html.contains("source: \"uploaded\"")
+                && html.contains("upload_id"),
+            "expected browser file drops to send uploaded attach_files payloads",
         );
         let drop_start = html
             .find("function installTerminalFileDropHandlers")
@@ -756,9 +757,9 @@ mod tests {
             "generic file drops must not inherit the clipboard image MIME allow-list",
         );
         assert!(
-            html.contains("MAX_TOTAL_FILE_DROP_BYTES")
-                && drop_source.contains("droppedFilesWithinTotalSizeLimit"),
-            "browser file drops must enforce a total payload guard",
+            !drop_source.contains("MAX_TOTAL_FILE_DROP_BYTES")
+                && !drop_source.contains("droppedFilesWithinTotalSizeLimit"),
+            "browser file drops must not enforce the legacy total payload guard",
         );
         assert!(
             !drop_source.contains("Promise.all("),
@@ -819,8 +820,9 @@ mod tests {
         );
         assert!(
             context_menu_source.contains("readClipboardItems")
-                && context_menu_source.contains("pasteImage"),
-            "expected context menu Paste to preserve image paste routing",
+                && context_menu_source.contains("pasteImage")
+                && html.contains("paste_image_uploaded"),
+            "expected context menu Paste to preserve uploaded image paste routing",
         );
     }
 
@@ -1831,7 +1833,7 @@ mod tests {
         // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
         // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?syncGeometryOnGridChange:\s*true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
@@ -1842,7 +1844,7 @@ mod tests {
         );
         assert!(
             activation_helper.is_match(js),
-            "expected programmatic terminal activation to refit, refresh, and pass a computed shouldFocus to xterm after render",
+            "expected programmatic terminal activation to refit, refresh, pass computed shouldFocus, and opt into grid-change geometry sync after render",
         );
         assert!(
             render_activation.is_match(js),
@@ -2725,10 +2727,20 @@ mod tests {
             "expected Profile surface to expose selection, CRUD, active-switch, and save events",
         );
         assert!(
-            html.contains("Merged preview")
-                && html
-                    .contains("The backend computes this preview from the current OS environment",),
-            "expected Profile surface to render the backend-owned merged preview contract",
+            html.contains("Environment Variables")
+                && html.contains("Use OS")
+                && html.contains("Override")
+                && html.contains("Disabled")
+                && html.contains("Result")
+                && html.contains("+ Add variable"),
+            "expected Profile surface to render a single environment variable grid",
+        );
+        assert!(
+            !html.contains("Save now")
+                && !html.contains("Profile variables")
+                && !html.contains("Disabled OS variables")
+                && !html.contains("Merged preview"),
+            "expected Profile Metadata lower content to be unified into the grid",
         );
     }
 
@@ -3268,6 +3280,32 @@ mod tests {
                     "expected layout primitive `{selector}` to declare `{prop}`, got: {body}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn embedded_web_profile_root_is_constrained_to_window_body() {
+        let html = frontend_styles_bundle();
+
+        let start = html
+            .find(".profile-root")
+            .expect("expected Profile root CSS to be defined");
+        let block = &html[start..];
+        let end = block
+            .find('}')
+            .expect("expected Profile root CSS rule to close");
+        let body = &block[..end];
+
+        for prop in [
+            "position: absolute",
+            "inset: 0",
+            "display: flex",
+            "flex-direction: column",
+        ] {
+            assert!(
+                body.contains(prop),
+                "expected `.profile-root` to declare `{prop}` so Profile panes can own vertical scroll, got: {body}",
+            );
         }
     }
 

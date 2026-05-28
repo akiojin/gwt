@@ -1240,6 +1240,42 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
+test("terminal error overlay is limited to pre-output startup failures", () => {
+  const visibleToggle = appSource.match(
+    /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
+  );
+  assert.ok(visibleToggle, "expected terminal overlay visibility toggle");
+  assert.match(
+    visibleToggle[1],
+    /shouldShowOverlay/,
+    "expected terminal overlay visibility to be driven by the named guard",
+  );
+  const overlayVisibilitySource = appSource.match(
+    /const\s+shouldShowOverlay\s*=\s*([\s\S]*?);\s*const\s+shouldSpin/,
+  );
+  assert.ok(overlayVisibilitySource, "expected shouldShowOverlay guard");
+  assert.match(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"error"[\s\S]*!terminalHasOutput\(windowId\)/,
+    "error overlay must only be visible for startup failures before terminal output exists",
+  );
+  assert.doesNotMatch(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"stopped"/,
+    "stopped status must not cover the terminal output with the overlay",
+  );
+  assert.match(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"running"/,
+    "running startup details may still use the explicit copy overlay",
+  );
+  assert.match(
+    appSource,
+    /function\s+terminalHasOutput\(windowId\)[\s\S]+pendingOutputMap[\s\S]+pendingSnapshotMap/,
+    "pre-output detection must include pending writes and snapshots, not just rendered terminal state",
+  );
+});
+
 test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {
   // Catch the gap where someone adds a new @keyframes + animation without
   // pairing it with a reduced-motion override. Approach: for each
@@ -1962,9 +1998,9 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // accordingly.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
-    { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
-    { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
-    { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
+    { selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
+    { selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
     { selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
   ];
   for (const { selector, desc } of expected) {
@@ -2360,8 +2396,8 @@ test("terminal root spacing stays inside the window body (SPEC-2008 FR-060)", ()
   );
   assert.match(
     body,
-    /inset:\s*8px\s+10px\s+10px\s*;/,
-    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body",
+    /inset:\s*8px\s+4px\s+4px\s*;/,
+    ".terminal-root must express terminal chrome spacing as inset so its outer box stays inside .window-body (Issue #2923 follow-up: side / bottom insets reduced to 4px so the cell grid recovers ~1 column at the gwt-default 720×420 window)",
   );
   assert.match(
     body,

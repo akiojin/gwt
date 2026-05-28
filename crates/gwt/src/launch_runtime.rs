@@ -1,5 +1,9 @@
 use super::*;
 
+use std::fs;
+use std::io::{BufRead, BufReader, Read};
+use std::sync::{Arc, Mutex};
+
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -329,14 +333,16 @@ fn wrap_windows_host_shell_command(
     args: &[String],
     env: &mut HashMap<String, String>,
 ) -> (String, Vec<String>) {
+    let cwd = env.get("GWT_PROJECT_ROOT").map(String::as_str);
     match shell {
         gwt_agent::WindowsShellKind::CommandPrompt => {
-            let expression = format!("{} & exit", build_cmd_command_expression(command, args));
+            let expression = build_cmd_wrapped_command_expression(command, args, cwd);
             env.insert(WINDOWS_HOST_SHELL_EXPRESSION_ENV.to_string(), expression);
             (
                 windows_shell_process_command(shell).to_string(),
                 vec![
                     "/d".to_string(),
+                    "/v:on".to_string(),
                     "/k".to_string(),
                     format!("%{WINDOWS_HOST_SHELL_EXPRESSION_ENV}%"),
                 ],
@@ -349,14 +355,114 @@ fn wrap_windows_host_shell_command(
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                build_powershell_command_script(command, args),
+                build_powershell_command_script(command, args, cwd),
             ],
         ),
     }
 }
 
+fn sensitive_launch_key(value: &str) -> bool {
+    let normalized = value
+        .trim_start_matches('-')
+        .replace(['-', '_'], "")
+        .to_ascii_lowercase();
+    normalized == "apikey"
+        || normalized == "token"
+        || normalized == "authtoken"
+        || normalized == "hooktoken"
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("token")
+        || normalized.contains("secret")
+}
+
+fn sanitize_launch_display_tokens(command: &str, args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    out.push(command.to_string());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            out.push("[REDACTED]".to_string());
+            redact_next = false;
+            continue;
+        }
+        if let Some((key, _value)) = arg.split_once('=') {
+            if sensitive_launch_key(key) {
+                out.push(format!("{key}=[REDACTED]"));
+                continue;
+            }
+        }
+        if sensitive_launch_key(arg) {
+            out.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+fn quote_display_token_if_needed(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn launch_display_command(command: &str, args: &[String]) -> String {
+    let tokens = sanitize_launch_display_tokens(command, args);
+    tokens
+        .iter()
+        .map(|token| quote_display_token_if_needed(&gwt_core::process_console::redact_line(token)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn launch_banner_lines(command: &str, args: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut lines = vec![
+        "[gwt] launching agent".to_string(),
+        "[gwt] runtime: host".to_string(),
+    ];
+    if let Some(cwd) = cwd.filter(|value| !value.is_empty()) {
+        lines.push(format!("[gwt] cwd: {cwd}"));
+    }
+    lines.push(format!(
+        "[gwt] command: {}",
+        launch_display_command(command, args)
+    ));
+    lines
+}
+
+fn escape_cmd_echo_text(value: &str) -> String {
+    value
+        .replace('^', "^^")
+        .replace('!', "^!")
+        .replace('&', "^&")
+        .replace('|', "^|")
+        .replace('<', "^<")
+        .replace('>', "^>")
+        .replace('%', "^%")
+}
+
+fn build_cmd_wrapped_command_expression(
+    command: &str,
+    args: &[String],
+    cwd: Option<&str>,
+) -> String {
+    let mut parts = launch_banner_lines(command, args, cwd)
+        .into_iter()
+        .map(|line| format!("echo {}", escape_cmd_echo_text(&line)))
+        .collect::<Vec<_>>();
+    parts.push(build_cmd_command_expression(command, args));
+    parts.push("set GWT_AGENT_EXIT=!ERRORLEVEL!".to_string());
+    parts.push("echo.".to_string());
+    parts.push("echo [gwt] process exited with status !GWT_AGENT_EXIT!".to_string());
+    parts.push("exit !GWT_AGENT_EXIT!".to_string());
+    parts.join(" & ")
+}
+
 fn escape_cmd_double_quoted(value: &str) -> String {
-    value.replace('"', "\"\"")
+    value.replace('!', "^!").replace('"', "\"\"")
 }
 
 fn quote_cmd_token_if_needed(value: &str) -> String {
@@ -385,24 +491,26 @@ fn quote_powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn build_powershell_command_script(command: &str, args: &[String]) -> String {
+fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&str>) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(quote_powershell_literal(command));
     parts.extend(args.iter().map(|arg| quote_powershell_literal(arg)));
-    format!(
-        "& {}; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if (-not $?) {{ exit 1 }}",
-        parts.join(" ")
-    )
+    let mut script = launch_banner_lines(command, args, cwd)
+        .into_iter()
+        .map(|line| format!("Write-Host {}", quote_powershell_literal(&line)))
+        .collect::<Vec<_>>();
+    script.push(format!("& {}", parts.join(" ")));
+    script.push(
+        "$gwtExitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }"
+            .to_string(),
+    );
+    script.push("Write-Host ''".to_string());
+    script.push("Write-Host \"[gwt] process exited with status $gwtExitCode\"".to_string());
+    script.push("exit $gwtExitCode".to_string());
+    script.join("; ")
 }
 
-pub fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
-    apply_host_package_runner_fallback_with_probe(
-        config,
-        "npx".to_string(),
-        probe_host_package_runner,
-    )
-}
-
+#[cfg(test)]
 pub fn apply_host_package_runner_fallback_with_probe<F>(
     config: &mut gwt_agent::LaunchConfig,
     fallback_executable: String,
@@ -421,6 +529,138 @@ where
     true
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostPackageRunnerFallbackReport {
+    pub switched_to_fallback: bool,
+    pub repaired_npx_cache: bool,
+    pub messages: Vec<String>,
+}
+
+pub fn apply_host_package_runner_fallback_checked(
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<HostPackageRunnerFallbackReport, String> {
+    apply_host_package_runner_fallback_checked_with_probe_and_repair(
+        config,
+        "npx".to_string(),
+        default_windows_npx_cache_base(),
+        probe_host_package_runner_outcome,
+        repair_windows_npx_cache,
+    )
+}
+
+fn apply_host_package_runner_fallback_checked_with_probe_and_repair<F, R>(
+    config: &mut gwt_agent::LaunchConfig,
+    fallback_executable: String,
+    npx_cache_base: Option<PathBuf>,
+    mut probe: F,
+    mut repair: R,
+) -> Result<HostPackageRunnerFallbackReport, String>
+where
+    F: FnMut(
+        &str,
+        Vec<String>,
+        &HashMap<String, String>,
+        &[String],
+        Option<PathBuf>,
+    ) -> PackageRunnerProbeOutcome,
+    R: FnMut(&WindowsNpxCacheRepairCandidate) -> Result<(), String>,
+{
+    let Some(version_spec) = host_package_runner_version_spec(config) else {
+        return Ok(HostPackageRunnerFallbackReport::default());
+    };
+    if !command_matches_runner(&config.command, "bunx") {
+        return Ok(HostPackageRunnerFallbackReport::default());
+    }
+
+    let cwd = config.working_dir.clone();
+    let bunx_probe = probe(
+        &config.command,
+        vec![version_spec.clone(), "--version".to_string()],
+        &config.env_vars,
+        &config.remove_env,
+        cwd.clone(),
+    );
+    if bunx_probe.success {
+        return Ok(HostPackageRunnerFallbackReport::default());
+    }
+
+    let agent_args = strip_package_runner_args(&config.args, &version_spec);
+    let mut fallback_args = vec!["--yes".to_string(), version_spec.clone()];
+    fallback_args.extend(agent_args);
+    let fallback_probe_args = vec![
+        "--yes".to_string(),
+        version_spec.clone(),
+        "--version".to_string(),
+    ];
+    let mut report = HostPackageRunnerFallbackReport::default();
+    let first_npx_probe = probe(
+        &fallback_executable,
+        fallback_probe_args.clone(),
+        &config.env_vars,
+        &config.remove_env,
+        cwd.clone(),
+    );
+    if first_npx_probe.success {
+        config.command = fallback_executable;
+        config.args = fallback_args;
+        report.switched_to_fallback = true;
+        report
+            .messages
+            .push("bunx unavailable, switching to npx...".to_string());
+        return Ok(report);
+    }
+
+    let probe_output = first_npx_probe.combined_output();
+    let repair_candidate = npx_cache_base
+        .as_deref()
+        .and_then(|base| detect_windows_npx_cache_corruption(&probe_output, base));
+    let Some(repair_candidate) = repair_candidate else {
+        return Err(format!(
+            "npx package-runner probe failed for {version_spec}. {} Manual recovery: run `npx --yes {version_spec} --version` in a terminal and repair the reported npm `_npx` directory if npm reports a missing executable.",
+            first_npx_probe.diagnostic()
+        ));
+    };
+
+    report.repaired_npx_cache = true;
+    report.messages.push(format!(
+        "Detected broken npm npx cache; repairing {}...",
+        repair_candidate.npx_root.display()
+    ));
+    repair(&repair_candidate).map_err(|error| {
+        format!(
+            "Failed to repair npm npx cache at {}: {error}. Manual recovery: remove this `_npx` directory and retry the launch.",
+            repair_candidate.npx_root.display()
+        )
+    })?;
+    report
+        .messages
+        .push("npm npx cache repair succeeded; retrying launch...".to_string());
+
+    let second_npx_probe = probe(
+        &fallback_executable,
+        fallback_probe_args,
+        &config.env_vars,
+        &config.remove_env,
+        cwd,
+    );
+    if !second_npx_probe.success {
+        return Err(format!(
+            "npx package-runner probe failed after repairing npm npx cache at {}. {} Manual recovery: remove this `_npx` directory and retry the launch.",
+            repair_candidate.npx_root.display(),
+            second_npx_probe.diagnostic()
+        ));
+    }
+
+    config.command = fallback_executable;
+    config.args = fallback_args;
+    report.switched_to_fallback = true;
+    report
+        .messages
+        .push("bunx unavailable, switching to npx...".to_string());
+    Ok(report)
+}
+
+#[cfg(test)]
 fn resolve_host_package_runner_with_probe<F>(
     config: &gwt_agent::LaunchConfig,
     fallback_executable: String,
@@ -475,24 +715,29 @@ fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<S
     Some(version_spec.clone())
 }
 
-fn probe_host_package_runner(
+fn probe_host_package_runner_outcome(
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
     remove_env: &[String],
     cwd: Option<PathBuf>,
-) -> bool {
-    probe_host_package_runner_with_timeout(
-        command,
-        args,
-        env_vars,
-        remove_env,
-        cwd,
-        Duration::from_secs(5),
-        Duration::from_millis(50),
+) -> PackageRunnerProbeOutcome {
+    let hub = gwt_core::process_console::global();
+    probe_host_package_runner_with_timeout_and_hub(
+        PackageRunnerProbeRequest {
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            timeout: Duration::from_secs(5),
+            poll_interval: Duration::from_millis(50),
+        },
+        &hub,
     )
 }
 
+#[cfg(test)]
 pub fn probe_host_package_runner_with_timeout(
     command: &str,
     args: Vec<String>,
@@ -502,11 +747,122 @@ pub fn probe_host_package_runner_with_timeout(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
+    let hub = gwt_core::process_console::global();
+    probe_host_package_runner_with_timeout_and_hub(
+        PackageRunnerProbeRequest {
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            timeout,
+            poll_interval,
+        },
+        &hub,
+    )
+    .success
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageRunnerProbeOutcome {
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+    error: Option<String>,
+}
+
+impl PackageRunnerProbeOutcome {
+    #[cfg(all(test, windows))]
+    fn success() -> Self {
+        Self {
+            success: true,
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    fn failure_with_stderr(stderr: &str) -> Self {
+        Self {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            timed_out: false,
+            error: None,
+        }
+    }
+
+    fn combined_output(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    fn diagnostic(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(error) = &self.error {
+            parts.push(error.clone());
+        }
+        if self.timed_out {
+            parts.push("probe timed out".to_string());
+        }
+        if let Some(code) = self.exit_code {
+            parts.push(format!("exit status {code}"));
+        }
+        let output = self.combined_output();
+        let output = output.trim();
+        if !output.is_empty() {
+            let redacted = gwt_core::process_console::redact_line(output);
+            parts.push(truncate_diagnostic(&redacted, 1200));
+        }
+        if parts.is_empty() {
+            "probe failed without output.".to_string()
+        } else {
+            format!("Probe detail: {}.", parts.join("; "))
+        }
+    }
+}
+
+fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+struct PackageRunnerProbeRequest<'a> {
+    command: &'a str,
+    args: Vec<String>,
+    env_vars: &'a HashMap<String, String>,
+    remove_env: &'a [String],
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    poll_interval: Duration,
+}
+
+fn probe_host_package_runner_with_timeout_and_hub(
+    request: PackageRunnerProbeRequest<'_>,
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+) -> PackageRunnerProbeOutcome {
+    let PackageRunnerProbeRequest {
+        command,
+        args,
+        env_vars,
+        remove_env,
+        cwd,
+        timeout,
+        poll_interval,
+    } = request;
     // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit summary tracing
-    // around the bounded-poll spawn so the Logs Process facet (kind =
-    // agent) and the Console window see the launch attempt. stdio is
-    // intentionally null because the caller only consumes the timeout +
-    // exit status; nothing to forward to the hub.
+    // around the bounded-poll spawn and forward probe stdout/stderr into
+    // the ProcessConsoleHub so failed package-runner probes are inspectable.
     let agent_spawn_id =
         AGENT_LAUNCH_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let agent_label = format!("{} {}", command, args.join(" "));
@@ -523,8 +879,8 @@ pub fn probe_host_package_runner_with_timeout(
     process
         .args(&args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for key in remove_env {
         process.env_remove(key);
     }
@@ -532,20 +888,57 @@ pub fn probe_host_package_runner_with_timeout(
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
-    let Ok(mut child) = process.spawn() else {
-        tracing::info!(
-            target: "gwt.process.summary",
-            kind = "agent",
-            spawn_id = agent_spawn_id,
-            label = %agent_label,
-            phase = "end",
-            exit_code = None::<i64>,
-            success = false,
-            error = "spawn failed",
-            "process end",
-        );
-        return false;
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!("[gwt] failed to start package-runner probe: {error}");
+            push_probe_console_line(
+                hub,
+                agent_spawn_id,
+                gwt_core::process_console::ProcessStream::Stderr,
+                &message,
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = agent_spawn_id,
+                label = %agent_label,
+                phase = "end",
+                exit_code = None::<i64>,
+                success = false,
+                error = "spawn failed",
+                "process end",
+            );
+            return PackageRunnerProbeOutcome {
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                timed_out: false,
+                error: Some(error.to_string()),
+            };
+        }
     };
+    let captured_stdout = Arc::new(Mutex::new(String::new()));
+    let captured_stderr = Arc::new(Mutex::new(String::new()));
+    let stdout_forwarder = child.stdout.take().map(|stdout| {
+        forward_probe_stream(
+            stdout,
+            hub.clone(),
+            agent_spawn_id,
+            gwt_core::process_console::ProcessStream::Stdout,
+            Arc::clone(&captured_stdout),
+        )
+    });
+    let stderr_forwarder = child.stderr.take().map(|stderr| {
+        forward_probe_stream(
+            stderr,
+            hub.clone(),
+            agent_spawn_id,
+            gwt_core::process_console::ProcessStream::Stderr,
+            Arc::clone(&captured_stderr),
+        )
+    });
     let start = Instant::now();
     let emit_end = |exit_code: Option<i32>, success: bool, note: Option<&str>| {
         tracing::info!(
@@ -561,19 +954,43 @@ pub fn probe_host_package_runner_with_timeout(
             "process end",
         );
     };
+    let join_forwarders = |stdout_forwarder: Option<JoinHandle<()>>,
+                           stderr_forwarder: Option<JoinHandle<()>>| {
+        if let Some(handle) = stdout_forwarder {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_forwarder {
+            let _ = handle.join();
+        }
+    };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                join_forwarders(stdout_forwarder, stderr_forwarder);
                 let success = status.success();
                 emit_end(status.code(), success, None);
-                return success;
+                return PackageRunnerProbeOutcome {
+                    success,
+                    exit_code: status.code(),
+                    stdout: captured_string(&captured_stdout),
+                    stderr: captured_string(&captured_stderr),
+                    timed_out: false,
+                    error: None,
+                };
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     emit_end(None, false, Some("timeout"));
-                    return false;
+                    return PackageRunnerProbeOutcome {
+                        success: false,
+                        exit_code: None,
+                        stdout: captured_string(&captured_stdout),
+                        stderr: captured_string(&captured_stderr),
+                        timed_out: true,
+                        error: None,
+                    };
                 }
                 thread::sleep(poll_interval);
             }
@@ -581,10 +998,225 @@ pub fn probe_host_package_runner_with_timeout(
                 let _ = child.kill();
                 let _ = child.wait();
                 emit_end(None, false, Some("wait error"));
-                return false;
+                return PackageRunnerProbeOutcome {
+                    success: false,
+                    exit_code: None,
+                    stdout: captured_string(&captured_stdout),
+                    stderr: captured_string(&captured_stderr),
+                    timed_out: false,
+                    error: Some("wait error".to_string()),
+                };
             }
         }
     }
+}
+
+fn forward_probe_stream<R>(
+    reader: R,
+    hub: gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: gwt_core::process_console::ProcessStream,
+    captured: Arc<Mutex<String>>,
+) -> JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    for piece in line.trim_end_matches(['\r', '\n']).split('\r') {
+                        if let Ok(mut captured) = captured.lock() {
+                            captured.push_str(piece);
+                            captured.push('\n');
+                        }
+                        push_probe_console_line(&hub, spawn_id, stream, piece);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn captured_string(captured: &Arc<Mutex<String>>) -> String {
+    captured
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| String::new())
+}
+
+fn push_probe_console_line(
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: gwt_core::process_console::ProcessStream,
+    message: &str,
+) {
+    if message.is_empty() {
+        return;
+    }
+    let stripped = gwt_core::process_console::strip_ansi(message);
+    let redacted = gwt_core::process_console::redact_line(&stripped);
+    hub.push(gwt_core::process_console::ProcessLine::new(
+        gwt_core::process_console::ProcessKind::AgentBootstrap,
+        spawn_id,
+        stream,
+        redacted,
+    ));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsNpxCacheRepairCandidate {
+    npx_root: PathBuf,
+    missing_binary: PathBuf,
+}
+
+fn detect_windows_npx_cache_corruption(
+    output: &str,
+    npx_cache_base: &Path,
+) -> Option<WindowsNpxCacheRepairCandidate> {
+    #[cfg(not(windows))]
+    {
+        let _ = output;
+        let _ = npx_cache_base;
+        None
+    }
+    #[cfg(windows)]
+    {
+        let npx_cache_base = lexical_normalize_path(npx_cache_base);
+        for candidate in extract_windows_exe_paths(output) {
+            let missing_binary = lexical_normalize_path(Path::new(&candidate));
+            if !missing_binary.starts_with(&npx_cache_base) || missing_binary.exists() {
+                continue;
+            }
+            let relative = missing_binary.strip_prefix(&npx_cache_base).ok()?;
+            let mut components = relative.components();
+            let hash = components.next()?.as_os_str();
+            if hash.is_empty() {
+                continue;
+            }
+            let npx_root = npx_cache_base.join(hash);
+            if !npx_root.is_dir() || !has_old_binary_marker(&missing_binary) {
+                continue;
+            }
+            return Some(WindowsNpxCacheRepairCandidate {
+                npx_root,
+                missing_binary,
+            });
+        }
+        None
+    }
+}
+
+#[cfg(windows)]
+fn extract_windows_exe_paths(output: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for segment in output.split(['"', '\'']) {
+        collect_windows_exe_path_candidate(segment, &mut paths);
+    }
+    for token in output.split_whitespace() {
+        collect_windows_exe_path_candidate(token, &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(windows)]
+fn collect_windows_exe_path_candidate(segment: &str, paths: &mut Vec<String>) {
+    let normalized = segment
+        .trim_matches(|ch: char| ch == '`' || ch == ',' || ch == ';')
+        .replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    let Some(start) = lower.find("\\npm-cache\\_npx\\") else {
+        return;
+    };
+    let Some(exe_end) = lower[start..].find(".exe").map(|index| start + index + 4) else {
+        return;
+    };
+    let prefix_start = find_windows_path_start(&normalized, start).unwrap_or_else(|| {
+        normalized[..start]
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + 1)
+    });
+    let mut candidate = normalized[prefix_start..exe_end].to_string();
+    while candidate.contains("\\\\") {
+        candidate = candidate.replace("\\\\", "\\");
+    }
+    if !candidate.is_empty() {
+        paths.push(candidate);
+    }
+}
+
+#[cfg(windows)]
+fn find_windows_path_start(value: &str, end: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let max = end.saturating_sub(2).min(bytes.len().saturating_sub(2));
+    (0..=max).rev().find(|&index| {
+        bytes[index].is_ascii_alphabetic()
+            && bytes.get(index + 1) == Some(&b':')
+            && bytes
+                .get(index + 2)
+                .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
+    })
+}
+
+#[cfg(windows)]
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+#[cfg(windows)]
+fn has_old_binary_marker(missing_binary: &Path) -> bool {
+    let Some(parent) = missing_binary.parent() else {
+        return false;
+    };
+    let Some(file_name) = missing_binary.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let prefix = format!("{file_name}.old.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+            })
+    })
+}
+
+fn default_windows_npx_cache_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("npm-cache").join("_npx"))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn repair_windows_npx_cache(candidate: &WindowsNpxCacheRepairCandidate) -> Result<(), String> {
+    fs::remove_dir_all(&candidate.npx_root).map_err(|error| error.to_string())
 }
 
 static AGENT_LAUNCH_SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
@@ -699,6 +1331,8 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use tempfile::tempdir;
 
     fn test_path(entries: &[&str]) -> String {
         std::env::join_paths(entries.iter().map(Path::new))
@@ -709,6 +1343,24 @@ mod tests {
 
     fn posix_path_entries(path: &str) -> Vec<&str> {
         path.split(':').collect()
+    }
+
+    #[cfg(windows)]
+    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .working_dir("E:/gwt/develop")
+            .version("latest")
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--print".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
+        config.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
+        config
     }
 
     #[test]
@@ -740,6 +1392,330 @@ mod tests {
             interactive_windows_shell_args(gwt_agent::WindowsShellKind::PowerShell7),
             vec!["-NoLogo"]
         );
+    }
+
+    #[test]
+    fn powershell_agent_wrapper_prints_terminal_launch_banner_and_exit_status() {
+        let mut env = HashMap::from([(
+            "GWT_PROJECT_ROOT".to_string(),
+            r"E:\gwt\work\demo".to_string(),
+        )]);
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--api-key".to_string(),
+            "raw-secret-value".to_string(),
+        ];
+
+        let (command, shell_args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::PowerShell7,
+            r"C:\Program Files\nodejs\npx.cmd",
+            &args,
+            &mut env,
+        );
+
+        assert_eq!(command, "pwsh");
+        let script = shell_args.last().expect("PowerShell command script");
+        assert!(script.contains("[gwt] launching agent"));
+        assert!(script.contains("[gwt] runtime: host"));
+        assert!(script.contains(r"[gwt] cwd: E:\gwt\work\demo"));
+        assert!(script.contains("[gwt] command:"));
+        assert!(script.contains("[REDACTED]"));
+        let display_line = script
+            .split(';')
+            .find(|line| line.contains("[gwt] command:"))
+            .expect("display command banner line");
+        assert!(!display_line.contains("raw-secret-value"));
+        assert!(script.contains("[gwt] process exited with status"));
+        assert!(script.contains("exit $gwtExitCode"));
+    }
+
+    #[test]
+    fn command_prompt_agent_wrapper_prints_terminal_launch_banner_and_exit_status() {
+        let mut env = HashMap::from([(
+            "GWT_PROJECT_ROOT".to_string(),
+            r"E:\gwt\work\demo".to_string(),
+        )]);
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+        ];
+
+        let (command, shell_args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::CommandPrompt,
+            "npx.cmd",
+            &args,
+            &mut env,
+        );
+
+        assert_eq!(command, "cmd.exe");
+        assert_eq!(
+            shell_args,
+            vec![
+                "/d".to_string(),
+                "/v:on".to_string(),
+                "/k".to_string(),
+                format!("%{WINDOWS_HOST_SHELL_EXPRESSION_ENV}%")
+            ],
+        );
+        let expression = env
+            .get(WINDOWS_HOST_SHELL_EXPRESSION_ENV)
+            .expect("cmd shell expression");
+        assert!(expression.contains("[gwt] launching agent"));
+        assert!(expression.contains("[gwt] runtime: host"));
+        assert!(expression.contains(r"[gwt] cwd: E:\gwt\work\demo"));
+        assert!(expression.contains("[gwt] command:"));
+        assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
+        assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
+    }
+
+    #[test]
+    fn package_runner_probe_forwards_failed_stderr_to_agent_console() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "echo probe boom 1>&2 & exit /b 1".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "echo probe boom >&2; exit 1".to_string()],
+            )
+        };
+
+        let outcome = probe_host_package_runner_with_timeout_and_hub(
+            PackageRunnerProbeRequest {
+                command: &command,
+                args,
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(!outcome.success);
+        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        assert!(
+            lines.iter().any(|line| {
+                line.stream == gwt_core::process_console::ProcessStream::Stderr
+                    && line.message.contains("probe boom")
+            }),
+            "expected failed probe stderr in agent console lines: {lines:?}",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp
+            .path()
+            .join("Local Cache With Spaces")
+            .join("npm-cache")
+            .join("_npx");
+        let npx_root = npx_base.join("97540b0888a2deac");
+        let bin_dir = npx_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let missing_binary = bin_dir.join("claude.exe");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            missing_binary.display()
+        );
+
+        let candidate = detect_windows_npx_cache_corruption(&stderr, &npx_base)
+            .expect("corrupt npx cache should be detected");
+
+        assert_eq!(candidate.npx_root, npx_root);
+        assert_eq!(candidate.missing_binary, missing_binary);
+
+        fs::write(&candidate.missing_binary, "restored binary").expect("write expected binary");
+        assert!(
+            detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
+            "existing expected binary must not be treated as repairable",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npx_cache_corruption_detection_rejects_paths_outside_local_npx_root() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let outside_root = temp.path().join("other-cache").join("_npx").join("abc");
+        let bin_dir = outside_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            bin_dir.join("claude.exe").display()
+        );
+
+        assert!(
+            detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
+            "paths outside the verified npm _npx root must never be repaired",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let npx_root = npx_base.join("97540b0888a2deac");
+        let bin_dir = npx_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            bin_dir.join("claude.exe").display()
+        );
+        let mut config = sample_versioned_launch_config();
+        let mut probe_calls = Vec::new();
+        let mut repair_calls = Vec::new();
+
+        let report = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            Some(npx_base.clone()),
+            |command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((command.to_string(), args.clone()));
+                match probe_calls.len() {
+                    1 => PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+                    2 => PackageRunnerProbeOutcome::failure_with_stderr(&stderr),
+                    3 => PackageRunnerProbeOutcome::success(),
+                    _ => panic!("unexpected extra probe call: {probe_calls:?}"),
+                }
+            },
+            |candidate| {
+                repair_calls.push(candidate.npx_root.clone());
+                fs::remove_dir_all(&candidate.npx_root).expect("remove corrupt npx root");
+                Ok(())
+            },
+        )
+        .expect("corrupt npx cache should be repaired");
+
+        assert!(report.switched_to_fallback);
+        assert!(report.repaired_npx_cache);
+        assert_eq!(repair_calls, vec![npx_root]);
+        assert_eq!(probe_calls.len(), 3);
+        assert_eq!(probe_calls[1].0, "npx");
+        assert_eq!(
+            probe_calls[1].1,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--version".to_string(),
+            ],
+        );
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let npx_root = npx_base.join("97540b0888a2deac");
+        let bin_dir = npx_root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
+            .expect("write old binary marker");
+        let stderr = format!(
+            "'\"{}\"' is not recognized as an internal or external command",
+            bin_dir.join("claude.exe").display()
+        );
+        let mut config = sample_versioned_launch_config();
+        let original_command = config.command.clone();
+        let mut repair_calls = 0;
+
+        let error = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            Some(npx_base),
+            |command, _args, _env, _remove_env, _cwd| {
+                if command.eq_ignore_ascii_case("bunx") {
+                    PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                } else {
+                    PackageRunnerProbeOutcome::failure_with_stderr(&stderr)
+                }
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Err("access denied".to_string())
+            },
+        )
+        .expect_err("repair failure should stop before agent spawn");
+
+        assert_eq!(repair_calls, 1);
+        assert_eq!(config.command, original_command);
+        assert!(error.contains("Failed to repair npm npx cache"));
+        assert!(error.contains("access denied"));
+        assert!(error.contains(&npx_root.display().to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let mut config = sample_versioned_launch_config();
+        let mut repair_calls = 0;
+
+        let error = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            Some(npx_base),
+            |command, _args, _env, _remove_env, _cwd| {
+                if command.eq_ignore_ascii_case("bunx") {
+                    PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                } else {
+                    PackageRunnerProbeOutcome::failure_with_stderr("registry timeout")
+                }
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .expect_err("unrelated npx failure should fail before agent spawn");
+
+        assert_eq!(repair_calls, 0);
+        assert!(error.contains("npx package-runner probe failed"));
+        assert!(error.contains("registry timeout"));
     }
 
     // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):

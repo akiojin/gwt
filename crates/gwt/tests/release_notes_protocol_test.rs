@@ -54,6 +54,7 @@ fn serializes_release_notes_payload_with_snake_case_kind() {
         id: "project-1::release-notes-1".into(),
         entries,
         focus_version: Some("9.38.0".into()),
+        current_version: "9.36.0".into(),
     };
 
     let v = serde_json::to_value(&event).expect("should serialize");
@@ -72,12 +73,46 @@ fn omits_focus_version_when_none_for_payload() {
         id: "project-1::release-notes-1".into(),
         entries: vec![],
         focus_version: None,
+        current_version: "9.36.0".into(),
     };
     let v = serde_json::to_value(&event).expect("should serialize");
     assert!(
         v.get("focus_version").is_none(),
         "focus_version must be omitted when None: {v}"
     );
+}
+
+// SPEC #2780 v2 Amendment (FR-013): payload carries the current running
+// version so the frontend can label the Update action button correctly.
+#[test]
+fn serializes_release_notes_payload_with_current_version() {
+    let event = BackendEvent::ReleaseNotesPayload {
+        id: "project-1::release-notes-1".into(),
+        entries: vec![],
+        focus_version: None,
+        current_version: "9.36.0".into(),
+    };
+    let v = serde_json::to_value(&event).expect("should serialize");
+    assert_eq!(v["current_version"], "9.36.0");
+}
+
+// SPEC #2780 v2 Amendment (FR-014): FrontendEvent::ApplyUpdateToVersion
+// carries the user's chosen version so the backend can resolve the matching
+// release tag.
+#[test]
+fn deserializes_apply_update_to_version() {
+    let msg = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "apply_update_to_version",
+        "version": "9.36.0"
+    }))
+    .expect("apply_update_to_version should deserialize");
+
+    match msg {
+        FrontendEvent::ApplyUpdateToVersion { version } => {
+            assert_eq!(version, "9.36.0");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }
 
 #[test]

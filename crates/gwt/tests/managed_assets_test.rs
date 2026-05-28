@@ -100,6 +100,10 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
 
     let exclude_path = dir.path().join(".git/info/exclude");
     let exclude = std::fs::read_to_string(&exclude_path).expect("read exclude");
+    assert!(
+        exclude.contains("\n.gwt/\n"),
+        ".gwt/drop-files/ must stay covered by the broad project-local .gwt/ exclude"
+    );
     assert!(exclude.contains(".claude/skills/gwt-*"));
     assert!(exclude.contains(".claude/commands/gwt-*"));
     assert!(exclude.contains(".codex/skills/gwt-*"));

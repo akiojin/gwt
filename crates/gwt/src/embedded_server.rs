@@ -9,7 +9,7 @@ use axum::{
     extract::{
         connect_info::ConnectInfo,
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Request, State,
+        Query, Request, State,
     },
     http::{
         header::{AUTHORIZATION, HOST, ORIGIN, USER_AGENT},
@@ -23,14 +23,19 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use gwt::{FrontendEvent, HookForwardTarget, RuntimeHookEvent};
 use gwt_terminal::PtyHandle;
+use serde::{Deserialize, Serialize};
 use tokio::{
+    io::AsyncWriteExt,
     net::TcpListener,
     runtime::Runtime,
     sync::{mpsc, oneshot},
 };
 use uuid::Uuid;
 
-use crate::{embedded_web, AppEventProxy, DispatchTarget, OutboundEvent, UserEvent};
+use crate::{
+    embedded_web, AppEventProxy, AttachmentUploadStore, DispatchTarget, OutboundEvent,
+    UploadedAttachment, UserEvent,
+};
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
@@ -167,6 +172,8 @@ struct ServerState {
     proxy: AppEventProxy,
     clients: ClientHub,
     hook_forward_token: String,
+    attachment_upload_token: String,
+    attachment_uploads: AttachmentUploadStore,
     pty_writers: PtyWriterRegistry,
     // Held only so the in-process sink stays alive for the lifetime of the
     // server. Read directly through [`EmbeddedServer::access_log`] in tests.
@@ -195,6 +202,7 @@ impl EmbeddedServer {
         proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
     ) -> std::io::Result<Self> {
         Self::start_with_bind(
             runtime,
@@ -203,6 +211,7 @@ impl EmbeddedServer {
             proxy,
             clients,
             pty_writers,
+            attachment_uploads,
         )
     }
 
@@ -217,11 +226,13 @@ impl EmbeddedServer {
         proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
     ) -> std::io::Result<Self> {
         let listener = runtime.block_on(TcpListener::bind((bind, port)))?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let hook_forward_token = Uuid::new_v4().to_string();
+        let attachment_upload_token = Uuid::new_v4().to_string();
         let access_log = AccessLogSink::default();
 
         let app = route_root_js_modules(
@@ -286,12 +297,22 @@ impl EmbeddedServer {
             get(embedded_web::font_jetbrains_mono_handler),
         )
         .route("/healthz", get(health_handler))
+        .route(
+            "/internal/attachment-upload-token",
+            get(attachment_upload_token_handler),
+        )
+        .route(
+            "/internal/attachments/upload",
+            post(attachment_upload_handler),
+        )
         .route("/internal/hook-live", post(hook_live_handler))
         .route("/ws", get(websocket_handler))
         .with_state(ServerState {
             proxy,
             clients,
             hook_forward_token: hook_forward_token.clone(),
+            attachment_upload_token,
+            attachment_uploads,
             pty_writers,
             access_log: access_log.clone(),
         })
@@ -359,6 +380,148 @@ fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState>
 
 pub async fn health_handler() -> &'static str {
     "ok"
+}
+
+#[derive(Debug, Serialize)]
+struct AttachmentUploadTokenResponse {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentUploadQuery {
+    filename: Option<String>,
+    mime_type: Option<String>,
+    size: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttachmentUploadResponse {
+    upload_id: String,
+    filename: String,
+    mime_type: Option<String>,
+    size: u64,
+}
+
+async fn attachment_upload_token_handler(State(state): State<ServerState>) -> impl IntoResponse {
+    Json(AttachmentUploadTokenResponse {
+        token: state.attachment_upload_token,
+    })
+}
+
+async fn attachment_upload_handler(
+    headers: HeaderMap,
+    Query(query): Query<AttachmentUploadQuery>,
+    State(state): State<ServerState>,
+    request: Request,
+) -> Response {
+    if !websocket_origin_authorized(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let authorized = headers
+        .get("x-gwt-upload-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| token == state.attachment_upload_token);
+    if !authorized {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let filename = query
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("file")
+        .to_string();
+    let mime_type = query
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let (upload_id, path) = state.attachment_uploads.allocate_path();
+
+    if let Some(parent) = path.parent() {
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create upload directory: {error}"),
+            )
+                .into_response();
+        }
+    }
+
+    let mut file = match tokio::fs::File::create(&path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create upload file: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let mut total_size = 0_u64;
+    let mut stream = request.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&path).await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("failed to read upload: {error}"),
+                )
+                    .into_response();
+            }
+        };
+        total_size += chunk.len() as u64;
+        if let Err(error) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write upload: {error}"),
+            )
+                .into_response();
+        }
+    }
+    if let Err(error) = file.flush().await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to flush upload: {error}"),
+        )
+            .into_response();
+    }
+    if let Some(declared) = query.size {
+        if declared != total_size {
+            let _ = tokio::fs::remove_file(&path).await;
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("upload size mismatch: declared {declared}, received {total_size}"),
+            )
+                .into_response();
+        }
+    }
+
+    if let Err(error) = state.attachment_uploads.insert(
+        upload_id.clone(),
+        UploadedAttachment {
+            path,
+            filename: filename.clone(),
+            mime_type: mime_type.clone(),
+            size: total_size,
+        },
+    ) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
+    }
+
+    Json(AttachmentUploadResponse {
+        upload_id,
+        filename,
+        mime_type,
+        size: total_size,
+    })
+    .into_response()
 }
 
 /// Format an [`IpAddr`] for embedding in a URL: IPv6 addresses are wrapped in
@@ -662,7 +825,7 @@ mod tests {
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::{runtime::Runtime, sync::mpsc};
 
-    use crate::{AppEventProxy, OutboundEvent, UserEvent};
+    use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
     use super::{
         handle_frontend_message, websocket_origin_authorized, ClientHub, EmbeddedServer,
@@ -676,6 +839,8 @@ mod tests {
                 proxy,
                 clients: ClientHub::default(),
                 hook_forward_token: "token".to_string(),
+                attachment_upload_token: "upload-token".to_string(),
+                attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
                 access_log: super::AccessLogSink::default(),
             },
@@ -894,8 +1059,14 @@ mod tests {
         let (proxy, events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
-        let mut server =
-            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("embedded server");
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
         let hook = server.hook_forward_target();
         let client = reqwest::blocking::Client::new();
 
@@ -1056,6 +1227,63 @@ mod tests {
         server.shutdown();
     }
 
+    #[test]
+    fn embedded_server_streams_attachment_uploads_into_upload_store() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let upload_store = AttachmentUploadStore::in_system_temp();
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
+                .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let token_response: serde_json::Value = client
+            .get(format!("{}internal/attachment-upload-token", server.url()))
+            .send()
+            .expect("token request")
+            .json()
+            .expect("token json");
+        let token = token_response
+            .get("token")
+            .and_then(|value| value.as_str())
+            .expect("token field")
+            .to_string();
+
+        let upload_response: serde_json::Value = client
+            .post(format!(
+                "{}internal/attachments/upload?filename=Large%20File.bin&mime_type=application%2Foctet-stream&size=12",
+                server.url()
+            ))
+            .header("x-gwt-upload-token", token)
+            .body("upload-bytes")
+            .send()
+            .expect("upload request")
+            .json()
+            .expect("upload json");
+        let upload_id = upload_response
+            .get("upload_id")
+            .and_then(|value| value.as_str())
+            .expect("upload id");
+
+        let uploaded = upload_store
+            .take(upload_id)
+            .expect("take upload")
+            .expect("uploaded file registered");
+        assert_eq!(uploaded.filename, "Large File.bin");
+        assert_eq!(
+            uploaded.mime_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(uploaded.size, 12);
+        assert_eq!(
+            std::fs::read(uploaded.path).expect("read uploaded temp"),
+            b"upload-bytes"
+        );
+
+        server.shutdown();
+    }
+
     // ---------------------------------------------------------------
     // SPEC-1942 US-14: bind / port surface + access log middleware
     // ---------------------------------------------------------------
@@ -1073,6 +1301,7 @@ mod tests {
             proxy,
             clients,
             pty_writers,
+            AttachmentUploadStore::in_system_temp(),
         )
         .expect("loopback bind succeeds");
 
@@ -1097,6 +1326,7 @@ mod tests {
             proxy,
             clients,
             pty_writers,
+            AttachmentUploadStore::in_system_temp(),
         )
         .expect("0.0.0.0 bind succeeds");
 
@@ -1114,8 +1344,14 @@ mod tests {
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
-        let mut server =
-            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("server");
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("server");
 
         let url = server.url().to_string();
         let client = reqwest::blocking::Client::new();
@@ -1153,8 +1389,14 @@ mod tests {
         let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
-        let mut server =
-            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("server");
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("server");
 
         let url = server.url().to_string();
         let client = reqwest::blocking::Client::new();

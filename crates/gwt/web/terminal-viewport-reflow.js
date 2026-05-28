@@ -208,6 +208,7 @@ export function runTerminalActivationSequence({
   windowId,
   shouldFocus = true,
   shouldPersistGeometry = true,
+  syncGeometryOnGridChange = false,
   sendGeometry,
 }) {
   if (!runtime || !runtime.terminal || !runtime.fitAddon) {
@@ -228,11 +229,49 @@ export function runTerminalActivationSequence({
     return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   fitAddon.fit();
-  if (shouldPersistGeometry && typeof sendGeometry === "function") {
-    sendGeometry(windowId, terminal.cols, terminal.rows);
+  const fittedGrid = currentTerminalGrid(terminal);
+  const gridChanged =
+    fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;
+  if (
+    (shouldPersistGeometry || (syncGeometryOnGridChange && gridChanged)) &&
+    typeof sendGeometry === "function"
+  ) {
+    sendGeometry(windowId, fittedGrid.cols, fittedGrid.rows);
   }
   if (shouldFocus && typeof terminal.focus === "function") {
     terminal.focus();
   }
-  return { ran: true, cols: terminal.cols, rows: terminal.rows };
+  return { ran: true, cols: fittedGrid.cols, rows: fittedGrid.rows };
+}
+
+/**
+ * Issue #2924: stray `C` byte appears in Claude Code's prompt buffer on
+ * launch even though the user pressed nothing. xterm.js can emit `onData`
+ * firings before the SPEC-2008 Phase 26.A initial-fit handshake has
+ * completed — for example application-response sequences echoed during
+ * the deferredWrites flush itself, or focus side-effects raised while the
+ * runtime is still resolving its cell metrics. The user reports the
+ * symptom is Claude-Code-only, deterministic, single-byte, and a real
+ * stdin byte (Backspace removes it, Enter sends it). Mirror the
+ * `deferredWrites` readiness contract: while `runtime.isReady === false`,
+ * drop the input rather than forwarding it to PTY. Pre-ready bytes are
+ * never produced by a real user keystroke (the terminal grid is not even
+ * fitted yet) so dropping is safer than deferring (which would still
+ * deliver the contaminant once the handshake completed).
+ *
+ * Returns `{ forward: true }` when the byte stream should be sent to PTY,
+ * `{ forward: false, reason: <slug> }` when it should be dropped. The
+ * reason is included so callers can emit a structured trace entry that
+ * survives `gwt_input_trace` log filtering.
+ *
+ * The gate is intentionally lenient when no runtime is registered or the
+ * runtime predates SPEC-2008 Phase 26.A (no `isReady` field), so non-PTY
+ * terminal surfaces and legacy callers keep working unchanged.
+ */
+export function gateTerminalInputForReadiness({ runtime, data: _data }) {
+  if (!runtime) return { forward: true };
+  if (runtime.isReady === false) {
+    return { forward: false, reason: "runtime-not-ready" };
+  }
+  return { forward: true };
 }
