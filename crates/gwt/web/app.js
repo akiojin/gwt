@@ -1159,6 +1159,8 @@
       const releaseNotesWindow = createReleaseNotesWindow({
         document,
         send,
+        beginUpdateDownloading: (version) =>
+          updateCtaController.beginDownloadingFor(version),
       });
 
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
@@ -2989,6 +2991,7 @@
             windowId,
             shouldFocus,
             shouldPersistGeometry,
+            syncGeometryOnGridChange: true,
             sendGeometry,
           });
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
@@ -5516,6 +5519,7 @@
             selectedProfile: null,
             draft: null,
             saveTimer: null,
+            saveInFlight: false,
           });
         }
         return profileStateMap.get(windowId);
@@ -6375,6 +6379,196 @@
         };
       }
 
+      function normalizeProfileEnvKey(key) {
+        return String(key || "").trim();
+      }
+
+      function profileDraftPayload(draft) {
+        if (!draft) {
+          return { envVars: [], disabledEnv: [] };
+        }
+        const envByKey = new Map();
+        for (const entry of draft.envVars || []) {
+          const key = normalizeProfileEnvKey(entry.key);
+          if (!key) {
+            continue;
+          }
+          envByKey.set(key, {
+            key,
+            value: entry.value ?? "",
+          });
+        }
+        const disabledSet = new Set();
+        for (const entry of draft.disabledEnv || []) {
+          const key = normalizeProfileEnvKey(entry);
+          if (key) {
+            disabledSet.add(key);
+          }
+        }
+        for (const key of disabledSet) {
+          envByKey.delete(key);
+        }
+        return {
+          envVars: Array.from(envByKey.values()).sort((left, right) =>
+            left.key.localeCompare(right.key),
+          ),
+          disabledEnv: Array.from(disabledSet).sort((left, right) =>
+            left.localeCompare(right),
+          ),
+        };
+      }
+
+      function removeProfileEnvOverride(draft, key) {
+        const normalized = normalizeProfileEnvKey(key);
+        draft.envVars = (draft.envVars || []).filter(
+          (entry) => normalizeProfileEnvKey(entry.key) !== normalized,
+        );
+      }
+
+      function removeProfileDisabledKey(draft, key) {
+        const normalized = normalizeProfileEnvKey(key);
+        draft.disabledEnv = (draft.disabledEnv || []).filter(
+          (entry) => normalizeProfileEnvKey(entry) !== normalized,
+        );
+      }
+
+      function setProfileEnvOverride(draft, key, value) {
+        const normalized = normalizeProfileEnvKey(key);
+        if (!normalized) {
+          return null;
+        }
+        removeProfileDisabledKey(draft, normalized);
+        const existing = (draft.envVars || []).find(
+          (entry) => normalizeProfileEnvKey(entry.key) === normalized,
+        );
+        if (existing) {
+          existing.key = normalized;
+          existing.value = value ?? "";
+          return existing;
+        }
+        const entry = { key: normalized, value: value ?? "" };
+        draft.envVars.push(entry);
+        return entry;
+      }
+
+      function setProfileRowMode(draft, key, mode) {
+        const normalized = normalizeProfileEnvKey(key);
+        if (!normalized) {
+          return;
+        }
+        if (mode === "use_os") {
+          removeProfileEnvOverride(draft, normalized);
+          removeProfileDisabledKey(draft, normalized);
+          return;
+        }
+        if (mode === "disabled") {
+          removeProfileEnvOverride(draft, normalized);
+          if (
+            !(draft.disabledEnv || []).some(
+              (entry) => normalizeProfileEnvKey(entry) === normalized,
+            )
+          ) {
+            draft.disabledEnv.push(normalized);
+          }
+          return;
+        }
+        const existing = (draft.envVars || []).find(
+          (entry) => normalizeProfileEnvKey(entry.key) === normalized,
+        );
+        setProfileEnvOverride(draft, normalized, existing?.value ?? "");
+      }
+
+      function profileEnvironmentRows(snapshot, draft) {
+        const payload = profileDraftPayload(draft);
+        const osEntries = (snapshot.os_env || [])
+          .map((entry) => ({
+            key: normalizeProfileEnvKey(entry.key),
+            value: entry.value ?? "",
+          }))
+          .filter((entry) => entry.key)
+          .sort((left, right) => left.key.localeCompare(right.key));
+        const overrides = new Map(payload.envVars.map((entry) => [entry.key, entry]));
+        const disabled = new Set(payload.disabledEnv);
+        const osKeys = new Set();
+        const rows = [];
+
+        for (const entry of osEntries) {
+          osKeys.add(entry.key);
+          const mode = disabled.has(entry.key)
+            ? "disabled"
+            : overrides.has(entry.key)
+              ? "override"
+              : "use_os";
+          const profileValue = overrides.get(entry.key)?.value ?? "";
+          rows.push({
+            kind: "os",
+            key: entry.key,
+            osValue: entry.value,
+            mode,
+            profileValue,
+            result:
+              mode === "disabled"
+                ? "Disabled"
+                : mode === "override"
+                  ? profileValue
+                  : entry.value,
+          });
+        }
+
+        const addedKeys = new Set();
+        for (const entry of payload.envVars) {
+          if (osKeys.has(entry.key)) {
+            continue;
+          }
+          addedKeys.add(entry.key);
+          rows.push({
+            kind: "added",
+            key: entry.key,
+            osValue: "",
+            mode: "override",
+            profileValue: entry.value,
+            result: entry.value,
+          });
+        }
+        for (const key of payload.disabledEnv) {
+          if (osKeys.has(key) || addedKeys.has(key)) {
+            continue;
+          }
+          rows.push({
+            kind: "added",
+            key,
+            osValue: "",
+            mode: "disabled",
+            profileValue: "",
+            result: "Disabled",
+          });
+        }
+
+        rows.sort((left, right) => {
+          if (left.kind !== right.kind) {
+            return left.kind === "os" ? -1 : 1;
+          }
+          return left.key.localeCompare(right.key);
+        });
+
+        (draft.envVars || []).forEach((entry, index) => {
+          if (normalizeProfileEnvKey(entry.key)) {
+            return;
+          }
+          rows.push({
+            kind: "pending",
+            key: entry.key || "",
+            osValue: "",
+            mode: "override",
+            profileValue: entry.value ?? "",
+            result: entry.value ?? "",
+            draftIndex: index,
+          });
+        });
+
+        return rows;
+      }
+
       function selectedProfileEntry(state) {
         const profiles = state.snapshot?.profiles || [];
         if (!state.selectedProfile) {
@@ -6392,15 +6586,13 @@
         if (!draft) {
           return "";
         }
+        const payload = profileDraftPayload(draft);
         return JSON.stringify({
           currentName: draft.currentName,
           name: draft.name,
           description: draft.description,
-          envVars: draft.envVars.map((entry) => ({
-            key: entry.key,
-            value: entry.value,
-          })),
-          disabledEnv: draft.disabledEnv.slice(),
+          envVars: payload.envVars,
+          disabledEnv: payload.disabledEnv,
         });
       }
 
@@ -6435,6 +6627,17 @@
         }
       }
 
+      function profileHasEditableFocus(windowId) {
+        const element = windowMap.get(windowId);
+        const active = document.activeElement;
+        return Boolean(
+          element &&
+            active &&
+            element.contains(active) &&
+            active.matches?.("input, textarea, select"),
+        );
+      }
+
       function flushProfileSave(windowId) {
         const state = ensureProfileState(windowId);
         clearProfileSaveTimer(state);
@@ -6450,16 +6653,18 @@
         }
         state.loading = true;
         state.saving = true;
+        state.saveInFlight = true;
         state.error = "";
         updateProfileStatus(windowId);
+        const payload = profileDraftPayload(state.draft);
         send({
           kind: "save_profile",
           id: windowId,
           current_name: state.draft.currentName,
           name: state.draft.name,
           description: state.draft.description,
-          env_vars: state.draft.envVars.filter((entry) => entry.key.trim() || entry.value),
-          disabled_env: state.draft.disabledEnv.filter((entry) => entry.trim()),
+          env_vars: payload.envVars,
+          disabled_env: payload.disabledEnv,
         });
       }
 
@@ -6564,6 +6769,7 @@
           active_profile: "default",
           selected_profile: "default",
           profiles: [],
+          os_env: [],
           merged_preview: [],
         };
         const profiles = snapshot.profiles || [];
@@ -6599,7 +6805,7 @@
             createNode(
               "div",
               "profile-empty-copy",
-              "Create a profile to track env overrides, disabled OS variables, and merged preview output.",
+              "Create a profile to track env overrides and disabled OS variables.",
             ),
           );
           const button = createNode("button", "wizard-button primary", "New profile");
@@ -6655,7 +6861,7 @@
             createNode(
               "div",
               "profile-empty-copy",
-              "Each profile keeps its own env overrides and merged preview output.",
+              "Each profile keeps its own env overrides and disabled OS variables.",
             ),
           );
           editor.appendChild(empty);
@@ -6669,12 +6875,6 @@
         activeButton.disabled = selected.is_active || state.loading;
         activeButton.addEventListener("click", () => setActiveProfile(windowId));
         actions.appendChild(activeButton);
-
-        const saveButton = createNode("button", "wizard-button", "Save now");
-        saveButton.type = "button";
-        saveButton.disabled = !profileDraftIsDirty(state) || state.loading;
-        saveButton.addEventListener("click", () => flushProfileSave(windowId));
-        actions.appendChild(saveButton);
 
         const deleteButton = createNode("button", "wizard-button", "Delete");
         deleteButton.type = "button";
@@ -6712,134 +6912,137 @@
         metadata.appendChild(descriptionField);
         editor.appendChild(metadata);
 
-        const envSection = createNode("div", "profile-section");
-        const envHeader = createNode("div", "profile-row-header");
-        envHeader.appendChild(createNode("div", "mock-label", "Profile variables"));
-        const addEnvButton = createNode("button", "wizard-button", "Add variable");
-        addEnvButton.type = "button";
-        addEnvButton.addEventListener("click", () => {
-          state.draft.envVars.push({ key: "", value: "" });
-          renderProfile(windowId, true);
-        });
-        envHeader.appendChild(addEnvButton);
-        envSection.appendChild(envHeader);
-        const envTable = createNode("div", "profile-table");
-        if (state.draft.envVars.length === 0) {
-          envTable.appendChild(
-            createNode("div", "profile-empty-copy", "No env overrides for this profile."),
-          );
+        const envSection = createNode("div", "profile-section profile-env-section");
+        envSection.appendChild(createNode("div", "mock-label", "Environment Variables"));
+        const envGrid = createNode("div", "profile-env-grid");
+        const headerRow = createNode("div", "profile-env-grid-row profile-env-grid-head");
+        for (const label of ["Key", "OS", "Mode", "Profile", "Result"]) {
+          headerRow.appendChild(createNode("div", "", label));
         }
-        state.draft.envVars.forEach((entry, index) => {
-          const row = createNode("div", "profile-table-row");
-          const keyInput = document.createElement("input");
-          keyInput.type = "text";
-          keyInput.placeholder = "KEY";
-          // SPEC-2356 — env var rows have no surrounding <label>; use
-          // aria-label so screen readers announce purpose. The row index
-          // disambiguates rows within the same list.
-          keyInput.setAttribute("aria-label", `Env var key, row ${index + 1}`);
-          keyInput.value = entry.key;
-          keyInput.addEventListener("input", () => {
-            state.draft.envVars[index].key = keyInput.value;
+        envGrid.appendChild(headerRow);
+
+        const rows = profileEnvironmentRows(snapshot, state.draft);
+        rows.forEach((envRow, index) => {
+          const row = createNode(
+            "div",
+            `profile-env-grid-row profile-env-row is-${envRow.mode}`,
+          );
+
+          if (envRow.kind === "os") {
+            const keyCell = createNode("div", "profile-env-key", envRow.key);
+            keyCell.title = envRow.key;
+            row.appendChild(keyCell);
+          } else {
+            const keyInput = document.createElement("input");
+            keyInput.type = "text";
+            keyInput.placeholder = "KEY";
+            keyInput.value = envRow.key;
+            keyInput.setAttribute("aria-label", `Environment variable key, row ${index + 1}`);
+            keyInput.addEventListener("input", () => {
+              if (envRow.kind === "pending") {
+                state.draft.envVars[envRow.draftIndex].key = keyInput.value;
+                envRow.key = keyInput.value;
+              } else if (envRow.mode === "disabled") {
+                const previous = normalizeProfileEnvKey(envRow.key);
+                const target = (state.draft.disabledEnv || []).findIndex(
+                  (entry) => normalizeProfileEnvKey(entry) === previous,
+                );
+                if (target >= 0) {
+                  state.draft.disabledEnv[target] = keyInput.value;
+                  envRow.key = keyInput.value;
+                }
+              } else {
+                const previous = normalizeProfileEnvKey(envRow.key);
+                const target = (state.draft.envVars || []).find(
+                  (entry) => normalizeProfileEnvKey(entry.key) === previous,
+                );
+                if (target) {
+                  target.key = keyInput.value;
+                  envRow.key = keyInput.value;
+                }
+              }
+              scheduleProfileSave(windowId);
+            });
+            keyInput.addEventListener("blur", () => {
+              flushProfileSave(windowId);
+            });
+            row.appendChild(keyInput);
+          }
+
+          const osCell = createNode("div", "profile-env-os-value", envRow.osValue || "-");
+          osCell.title = envRow.osValue || "";
+          row.appendChild(osCell);
+
+          const modeSelect = document.createElement("select");
+          modeSelect.setAttribute("aria-label", `Environment variable mode, row ${index + 1}`);
+          const modeOptions =
+            envRow.kind === "os"
+              ? [
+                  ["use_os", "Use OS"],
+                  ["override", "Override"],
+                  ["disabled", "Disabled"],
+                ]
+              : [
+                  ["override", "Enabled"],
+                  ["disabled", "Disabled"],
+                ];
+          for (const option of modeOptions) {
+            const element = document.createElement("option");
+            element.value = option[0];
+            element.textContent = option[1];
+            modeSelect.appendChild(element);
+          }
+          modeSelect.value = envRow.mode;
+          modeSelect.addEventListener("change", () => {
+            const rowKey =
+              envRow.kind === "pending"
+                ? state.draft.envVars[envRow.draftIndex]?.key
+                : envRow.key;
+            if (envRow.kind === "pending" && !normalizeProfileEnvKey(rowKey)) {
+              if (modeSelect.value === "use_os") {
+                state.draft.envVars.splice(envRow.draftIndex, 1);
+              }
+            } else {
+              setProfileRowMode(state.draft, rowKey, modeSelect.value);
+            }
+            renderProfile(windowId, true);
             scheduleProfileSave(windowId);
           });
-          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
-          row.appendChild(keyInput);
+          row.appendChild(modeSelect);
 
           const valueInput = document.createElement("input");
           valueInput.type = "text";
-          valueInput.placeholder = "Value";
-          valueInput.setAttribute("aria-label", `Env var value, row ${index + 1}`);
-          valueInput.value = entry.value;
+          valueInput.placeholder = "Profile";
+          valueInput.value = envRow.profileValue;
+          valueInput.setAttribute("aria-label", `Profile value, row ${index + 1}`);
+          const resultCell = createNode("div", "profile-env-result", envRow.result);
+          resultCell.title = envRow.result;
           valueInput.addEventListener("input", () => {
-            state.draft.envVars[index].value = valueInput.value;
+            if (envRow.kind === "pending") {
+              state.draft.envVars[envRow.draftIndex].value = valueInput.value;
+              resultCell.textContent = valueInput.value;
+            } else {
+              setProfileEnvOverride(state.draft, envRow.key, valueInput.value);
+              modeSelect.value = "override";
+              resultCell.textContent = valueInput.value;
+            }
             scheduleProfileSave(windowId);
           });
           valueInput.addEventListener("blur", () => flushProfileSave(windowId));
           row.appendChild(valueInput);
-
-          const removeButton = createNode("button", "icon-button", "×");
-          removeButton.type = "button";
-          removeButton.setAttribute("aria-label", "Delete env var");
-          removeButton.addEventListener("click", () => {
-            state.draft.envVars.splice(index, 1);
-            renderProfile(windowId, true);
-            scheduleProfileSave(windowId);
-          });
-          row.appendChild(removeButton);
-          envTable.appendChild(row);
+          row.appendChild(resultCell);
+          envGrid.appendChild(row);
         });
-        envSection.appendChild(envTable);
-        editor.appendChild(envSection);
 
-        const disabledSection = createNode("div", "profile-section");
-        const disabledHeader = createNode("div", "profile-row-header");
-        disabledHeader.appendChild(createNode("div", "mock-label", "Disabled OS variables"));
-        const addDisabledButton = createNode("button", "wizard-button", "Add disabled key");
-        addDisabledButton.type = "button";
-        addDisabledButton.addEventListener("click", () => {
-          state.draft.disabledEnv.push("");
+        const addRow = createNode("button", "profile-env-add-row", "+ Add variable");
+        addRow.type = "button";
+        addRow.addEventListener("click", () => {
+          state.draft.envVars.push({ key: "", value: "" });
           renderProfile(windowId, true);
         });
-        disabledHeader.appendChild(addDisabledButton);
-        disabledSection.appendChild(disabledHeader);
-        const disabledTable = createNode("div", "profile-table");
-        if (state.draft.disabledEnv.length === 0) {
-          disabledTable.appendChild(
-            createNode("div", "profile-empty-copy", "No disabled OS variables for this profile."),
-          );
-        }
-        state.draft.disabledEnv.forEach((entry, index) => {
-          const row = createNode("div", "profile-table-row profile-disabled-row");
-          const keyInput = document.createElement("input");
-          keyInput.type = "text";
-          keyInput.placeholder = "SECRET_KEY";
-          keyInput.setAttribute("aria-label", `Disabled env key, row ${index + 1}`);
-          keyInput.value = entry;
-          keyInput.addEventListener("input", () => {
-            state.draft.disabledEnv[index] = keyInput.value;
-            scheduleProfileSave(windowId);
-          });
-          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
-          row.appendChild(keyInput);
-
-          const removeButton = createNode("button", "icon-button", "×");
-          removeButton.type = "button";
-          removeButton.setAttribute("aria-label", "Delete disabled env key");
-          removeButton.addEventListener("click", () => {
-            state.draft.disabledEnv.splice(index, 1);
-            renderProfile(windowId, true);
-            scheduleProfileSave(windowId);
-          });
-          row.appendChild(removeButton);
-          disabledTable.appendChild(row);
-        });
-        disabledSection.appendChild(disabledTable);
-        editor.appendChild(disabledSection);
-
-        const previewSection = createNode("div", "profile-section");
-        previewSection.appendChild(createNode("div", "mock-label", "Merged preview"));
-        previewSection.appendChild(
-          createNode(
-            "div",
-            "profile-empty-copy",
-            "The backend computes this preview from the current OS environment, disabled keys, and profile overrides.",
-          ),
-        );
-        const preview = createNode("div", "profile-preview");
-        if ((snapshot.merged_preview || []).length === 0) {
-          preview.appendChild(
-            createNode("div", "profile-empty-copy", "No merged entries to preview yet."),
-          );
-        }
-        for (const entry of snapshot.merged_preview || []) {
-          const row = createNode("div", "profile-preview-row");
-          row.appendChild(createNode("div", "profile-preview-key", entry.key));
-          row.appendChild(createNode("div", "profile-preview-value", entry.value));
-          preview.appendChild(row);
-        }
-        previewSection.appendChild(preview);
-        editor.appendChild(previewSection);
+        envGrid.appendChild(addRow);
+        envSection.appendChild(envGrid);
+        editor.appendChild(envSection);
 
         updateProfileStatus(windowId);
       }
@@ -11368,6 +11571,8 @@
         setActiveProfile,
         flushProfileSave,
         deleteProfile,
+        updateProfileStatus,
+        hasEditableFocus: profileHasEditableFocus,
         syncDraftFromSelection: syncProfileDraftFromSelection,
       });
 
@@ -11746,11 +11951,24 @@
           }
           case "profile_snapshot": {
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
+            const previousProfile = state.selectedProfile;
+            const wasSaveInFlight = state.saveInFlight;
             state.snapshot = event.snapshot || null;
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = "";
             state.selectedProfile = event.snapshot?.selected_profile || null;
+            const selectedProfileUnchanged =
+              !previousProfile || previousProfile === state.selectedProfile;
+            if (
+              wasSaveInFlight &&
+              selectedProfileUnchanged &&
+              frontendUnits.profileSurface.hasEditableFocus(event.id)
+            ) {
+              frontendUnits.profileSurface.updateProfileStatus(event.id);
+              break;
+            }
             frontendUnits.profileSurface.renderProfile(event.id);
             break;
           }
@@ -12059,6 +12277,7 @@
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = event.message;
             frontendUnits.profileSurface.renderProfile(event.id, true);
             break;

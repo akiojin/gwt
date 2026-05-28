@@ -274,6 +274,100 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
     )
 }
 
+const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiShutdownReason {
+    /// SPEC #2920: retained for the unit tests that still exercise
+    /// `request_gui_shutdown` against the legacy native-close path. The
+    /// runtime tray-resident process never constructs this variant
+    /// because the wry/tao `Window` was removed.
+    #[allow(dead_code)]
+    NativeClose,
+    QuitApp,
+    LoopDestroyed,
+}
+
+impl GuiShutdownReason {
+    fn arms_backstop(self) -> bool {
+        !matches!(self, Self::LoopDestroyed)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NativeClose => "native close",
+            Self::QuitApp => "quit app",
+            Self::LoopDestroyed => "loop destroyed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiShutdownOutcome {
+    Started,
+    AlreadyStarted,
+}
+
+#[derive(Debug, Default)]
+struct GuiShutdownCoordinator {
+    started: bool,
+}
+
+fn request_gui_shutdown(
+    coordinator: &mut GuiShutdownCoordinator,
+    reason: GuiShutdownReason,
+    arm_backstop: impl FnOnce(GuiShutdownReason, Duration),
+    cleanup: impl FnOnce(),
+) -> GuiShutdownOutcome {
+    if coordinator.started {
+        tracing::debug!(
+            target: "gwt::shutdown",
+            reason = reason.label(),
+            "gui shutdown already started; skipping duplicate cleanup"
+        );
+        return GuiShutdownOutcome::AlreadyStarted;
+    }
+
+    coordinator.started = true;
+    tracing::info!(
+        target: "gwt::shutdown",
+        reason = reason.label(),
+        backstop = reason.arms_backstop(),
+        grace_ms = GUI_SHUTDOWN_BACKSTOP_GRACE.as_millis() as u64,
+        "gui shutdown requested"
+    );
+    if reason.arms_backstop() {
+        arm_backstop(reason, GUI_SHUTDOWN_BACKSTOP_GRACE);
+    }
+    cleanup();
+    tracing::info!(
+        target: "gwt::shutdown",
+        reason = reason.label(),
+        "gui shutdown cleanup completed"
+    );
+    GuiShutdownOutcome::Started
+}
+
+fn spawn_gui_exit_backstop(reason: GuiShutdownReason, grace: Duration) {
+    thread::Builder::new()
+        .name("gwt-gui-exit-backstop".to_string())
+        .spawn(move || {
+            thread::sleep(grace);
+            eprintln!(
+                "gwt gui: {} shutdown timed out after {grace:?}; exiting now",
+                reason.label()
+            );
+            tracing::error!(
+                target: "gwt::shutdown",
+                reason = reason.label(),
+                grace_ms = grace.as_millis() as u64,
+                "gui shutdown timed out; forcing process exit"
+            );
+            std::process::exit(0);
+        })
+        .expect("spawn gui exit backstop thread");
+}
+
 enum BoardProjectionWatcherMessage {
     Changed(Vec<PathBuf>),
     Stop,
@@ -1066,6 +1160,70 @@ mod tests {
             42,
         )
         .is_none());
+    }
+
+    #[test]
+    fn gui_shutdown_arms_backstop_before_cleanup_and_only_once() {
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::NativeClose,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec!["backstop:NativeClose:5s".to_string(), "cleanup".to_string()].as_slice()
+        );
+
+        let duplicate = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::QuitApp,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("duplicate-backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("duplicate-cleanup".to_string()),
+        );
+
+        assert_eq!(duplicate, super::GuiShutdownOutcome::AlreadyStarted);
+        assert_eq!(
+            calls.borrow().len(),
+            2,
+            "duplicate shutdown must not rerun cleanup"
+        );
+    }
+
+    #[test]
+    fn loop_destroyed_cleanup_runs_without_backstop_when_no_prior_shutdown() {
+        let mut coordinator = super::GuiShutdownCoordinator::default();
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let outcome = super::request_gui_shutdown(
+            &mut coordinator,
+            super::GuiShutdownReason::LoopDestroyed,
+            |reason, grace| {
+                calls
+                    .borrow_mut()
+                    .push(format!("backstop:{reason:?}:{grace:?}"))
+            },
+            || calls.borrow_mut().push("cleanup".to_string()),
+        );
+
+        assert_eq!(outcome, super::GuiShutdownOutcome::Started);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            vec!["cleanup".to_string()].as_slice()
+        );
     }
 
     #[test]
@@ -6321,6 +6479,13 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // SPEC #2920: there is no headless `gwt serve` route anymore — the
+    // tray-resident process is the only front door. The bounded
+    // shutdown backstop is still useful when graceful cleanup stalls,
+    // so always arm it (no longer gated by `serve_args.is_some()`).
+    let is_headless = false;
+    let mut gui_shutdown = GuiShutdownCoordinator::default();
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         // Keep the tray icon handle alive for the lifetime of the
@@ -6332,13 +6497,29 @@ fn main() -> std::io::Result<()> {
         let _ = &runtime;
 
         match event {
+            // SPEC #2920: the wry/tao native Window is gone, so
+            // `WindowEvent::CloseRequested` cannot fire on the
+            // tray-resident process. Quit goes through the tray menu
+            // (`UserEvent::QuitApp`), SIGINT/SIGTERM, or
+            // `Event::LoopDestroyed` instead.
             Event::UserEvent(UserEvent::QuitApp) => {
-                app.stop_all_runtimes();
-                board_projection_watchers.shutdown();
-                workspace_projection_watchers.shutdown();
-                #[cfg(unix)]
-                board_daemon_subscribers.shutdown();
-                server.shutdown();
+                request_gui_shutdown(
+                    &mut gui_shutdown,
+                    GuiShutdownReason::QuitApp,
+                    |reason, grace| {
+                        if !is_headless {
+                            spawn_gui_exit_backstop(reason, grace);
+                        }
+                    },
+                    || {
+                        app.stop_all_runtimes();
+                        board_projection_watchers.shutdown();
+                        workspace_projection_watchers.shutdown();
+                        #[cfg(unix)]
+                        board_daemon_subscribers.shutdown();
+                        server.shutdown();
+                    },
+                );
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
@@ -6755,14 +6936,21 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::LoopDestroyed => {
-                // Belt-and-suspenders: if the event loop is torn down via a
-                // path other than CloseRequested, still release PTY children.
-                app.stop_all_runtimes();
-                board_projection_watchers.shutdown();
-                workspace_projection_watchers.shutdown();
-                #[cfg(unix)]
-                board_daemon_subscribers.shutdown();
-                server.shutdown();
+                request_gui_shutdown(
+                    &mut gui_shutdown,
+                    GuiShutdownReason::LoopDestroyed,
+                    |_, _| {},
+                    || {
+                        // Belt-and-suspenders: if the event loop is torn down via a
+                        // path other than CloseRequested, still release PTY children.
+                        app.stop_all_runtimes();
+                        board_projection_watchers.shutdown();
+                        workspace_projection_watchers.shutdown();
+                        #[cfg(unix)]
+                        board_daemon_subscribers.shutdown();
+                        server.shutdown();
+                    },
+                );
             }
             _ => {}
         }

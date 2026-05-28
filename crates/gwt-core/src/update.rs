@@ -908,9 +908,24 @@ impl UpdateManager {
         current_exe: Option<&Path>,
     ) -> Result<UpdateState, String> {
         let release = self.fetch_release_by_tag(version)?;
-        let normalized = parse_tag_version(&release.tag_name)
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| version.trim().trim_start_matches('v').to_string());
+        // Codex review on PR #2917: refuse to stage a payload under the
+        // caller's chosen version when the server returned an unparseable
+        // or mismatched tag. Matches `check()`'s parse-or-fail behavior so
+        // a single permissive code path can't bypass the safety the rest of
+        // the apply pipeline assumes.
+        let normalized = parse_tag_version(&release.tag_name).ok_or_else(|| {
+            format!(
+                "Failed to parse release tag as version: {}",
+                release.tag_name
+            )
+        })?;
+        let requested = version.trim().trim_start_matches('v');
+        let normalized = normalized.to_string();
+        if normalized != requested {
+            return Err(format!(
+                "Release tag mismatch: requested v{requested} but server returned v{normalized}"
+            ));
+        }
 
         let platform = Platform::detect();
         let portable_asset_url = platform
@@ -3526,6 +3541,63 @@ mod tests {
             }
             other => panic!("expected UpdateState::Available, got {other:?}"),
         }
+    }
+
+    // Codex review on PR #2917: reject mismatched / unparseable tags rather
+    // than falling back to the caller's input. `check()` already fails fast
+    // on invalid release tags and `resolve_state_for_version` should match.
+    #[test]
+    fn resolve_state_for_version_rejects_unparseable_tag_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_body = r#"{
+  "tag_name": "totally-not-a-version",
+  "html_url": "https://example.invalid/x",
+  "assets": []
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .resolve_state_for_version("7.0.0", None)
+            .expect_err("malformed tag must not be accepted");
+        assert!(
+            err.to_lowercase().contains("tag") || err.to_lowercase().contains("version"),
+            "error should mention tag/version mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_state_for_version_rejects_mismatched_tag_name() {
+        let temp = tempfile::tempdir().unwrap();
+        // Requested v7.0.0 but server returns v8.0.0 — must reject so we
+        // don't stage v8.0.0 under the user's chosen v7.0.0 label.
+        let release_body = r#"{
+  "tag_name": "v8.0.0",
+  "html_url": "https://example.invalid/v8",
+  "assets": [
+    {"name": "gwt-windows-x86_64.zip", "browser_download_url": "https://example.invalid/v8/win.zip"}
+  ]
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .resolve_state_for_version("7.0.0", None)
+            .expect_err("tag mismatch must be rejected");
+        assert!(
+            err.to_lowercase().contains("tag") || err.to_lowercase().contains("mismatch"),
+            "error should mention tag mismatch: {err}"
+        );
     }
 
     #[test]

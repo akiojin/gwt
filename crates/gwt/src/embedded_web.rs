@@ -1831,7 +1831,7 @@ mod tests {
         // shorthand `shouldFocus,` or an explicit `shouldFocus: <expr>`
         // form, but no longer pins the value to a literal `true`.
         let activation_helper = regex::Regex::new(
-            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
+            r#"(?s)function scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry\s*=\s*true[\s\S]*?\}\s*=\s*\{\},\s*\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?runTerminalActivationSequence\(\{[\s\S]*?runtime: activeRuntime,[\s\S]*?shouldFocus(?:\s*[,:])[\s\S]*?shouldPersistGeometry(?:\s*[,:])[\s\S]*?syncGeometryOnGridChange:\s*true,[\s\S]*?sendGeometry,[\s\S]*?\}\);[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);"#,
         )
         .expect("valid regex");
 
@@ -1842,7 +1842,7 @@ mod tests {
         );
         assert!(
             activation_helper.is_match(js),
-            "expected programmatic terminal activation to refit, refresh, and pass a computed shouldFocus to xterm after render",
+            "expected programmatic terminal activation to refit, refresh, pass computed shouldFocus, and opt into grid-change geometry sync after render",
         );
         assert!(
             render_activation.is_match(js),
@@ -2725,10 +2725,20 @@ mod tests {
             "expected Profile surface to expose selection, CRUD, active-switch, and save events",
         );
         assert!(
-            html.contains("Merged preview")
-                && html
-                    .contains("The backend computes this preview from the current OS environment",),
-            "expected Profile surface to render the backend-owned merged preview contract",
+            html.contains("Environment Variables")
+                && html.contains("Use OS")
+                && html.contains("Override")
+                && html.contains("Disabled")
+                && html.contains("Result")
+                && html.contains("+ Add variable"),
+            "expected Profile surface to render a single environment variable grid",
+        );
+        assert!(
+            !html.contains("Save now")
+                && !html.contains("Profile variables")
+                && !html.contains("Disabled OS variables")
+                && !html.contains("Merged preview"),
+            "expected Profile Metadata lower content to be unified into the grid",
         );
     }
 
@@ -3268,6 +3278,32 @@ mod tests {
                     "expected layout primitive `{selector}` to declare `{prop}`, got: {body}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn embedded_web_profile_root_is_constrained_to_window_body() {
+        let html = frontend_styles_bundle();
+
+        let start = html
+            .find(".profile-root")
+            .expect("expected Profile root CSS to be defined");
+        let block = &html[start..];
+        let end = block
+            .find('}')
+            .expect("expected Profile root CSS rule to close");
+        let body = &block[..end];
+
+        for prop in [
+            "position: absolute",
+            "inset: 0",
+            "display: flex",
+            "flex-direction: column",
+        ] {
+            assert!(
+                body.contains(prop),
+                "expected `.profile-root` to declare `{prop}` so Profile panes can own vertical scroll, got: {body}",
+            );
         }
     }
 

@@ -449,6 +449,36 @@ mod tests {
         command_config(sleep_command(secs))
     }
 
+    fn cwd_output_matches(text: &str, canonical_cwd: &str) -> bool {
+        let normalized_text = text.replace('/', "\\").to_ascii_lowercase();
+        let normalized_cwd = canonical_cwd.replace('/', "\\").to_ascii_lowercase();
+        if normalized_text.contains(&normalized_cwd)
+            || normalized_cwd.contains(normalized_text.trim())
+        {
+            return true;
+        }
+
+        #[cfg(windows)]
+        {
+            let components = std::path::Path::new(canonical_cwd)
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(value) => {
+                        Some(value.to_string_lossy().to_ascii_lowercase())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if components.len() >= 2 {
+                let suffix_len = components.len().min(3);
+                let suffix = components[components.len() - suffix_len..].join("\\");
+                return normalized_text.contains(&suffix);
+            }
+        }
+
+        false
+    }
+
     #[cfg(unix)]
     #[test]
     fn normalize_spawn_config_resolves_command_from_config_path() {
@@ -642,7 +672,7 @@ mod tests {
             .unwrap_or(&canonical_temp)
             .to_string();
         assert!(
-            text.contains(&canonical_temp) || canonical_temp.contains(text.trim()),
+            cwd_output_matches(&text, &canonical_temp),
             "Expected temp dir path in output.\n  output: {text}\n  expected: {canonical_temp}"
         );
     }
