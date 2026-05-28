@@ -208,6 +208,7 @@ export function runTerminalActivationSequence({
   windowId,
   shouldFocus = true,
   shouldPersistGeometry = true,
+  syncGeometryOnGridChange = false,
   sendGeometry,
 }) {
   if (!runtime || !runtime.terminal || !runtime.fitAddon) {
@@ -228,11 +229,17 @@ export function runTerminalActivationSequence({
     return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   fitAddon.fit();
-  if (shouldPersistGeometry && typeof sendGeometry === "function") {
-    sendGeometry(windowId, terminal.cols, terminal.rows);
+  const fittedGrid = currentTerminalGrid(terminal);
+  const gridChanged =
+    fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;
+  if (
+    (shouldPersistGeometry || (syncGeometryOnGridChange && gridChanged)) &&
+    typeof sendGeometry === "function"
+  ) {
+    sendGeometry(windowId, fittedGrid.cols, fittedGrid.rows);
   }
   if (shouldFocus && typeof terminal.focus === "function") {
     terminal.focus();
   }
-  return { ran: true, cols: terminal.cols, rows: terminal.rows };
+  return { ran: true, cols: fittedGrid.cols, rows: fittedGrid.rows };
 }

@@ -242,6 +242,109 @@ test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry 
   assert.equal(result.ran, true);
 });
 
+test("runTerminalActivationSequence syncs geometry when focus reflow changes the xterm grid (T-266)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: null },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 112, rows: 28 }),
+      fit: () => {
+        callOrder.push("fit");
+        runtime.terminal.cols = 112;
+        runtime.terminal.rows = 28;
+      },
+    },
+  };
+  let geometry = null;
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-focus-grid-changed",
+    shouldFocus: false,
+    shouldPersistGeometry: false,
+    syncGeometryOnGridChange: true,
+    sendGeometry: (id, cols, rows) => {
+      callOrder.push("sendGeometry");
+      geometry = { id, cols, rows };
+    },
+  });
+
+  assert.deepEqual(
+    callOrder,
+    ["refresh", "fit", "sendGeometry"],
+    "focus reflow must sync backend geometry exactly when fit changes cols/rows",
+  );
+  assert.deepEqual(geometry, { id: "win-focus-grid-changed", cols: 112, rows: 28 });
+  assert.deepEqual(result, { ran: true, cols: 112, rows: 28 });
+});
+
+test("runTerminalActivationSequence does not sync unchanged focus grids (T-266)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 100,
+      rows: 30,
+      element: { parentElement: null },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 100, rows: 30 }),
+      fit: () => callOrder.push("fit"),
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-focus-grid-unchanged",
+    shouldFocus: false,
+    shouldPersistGeometry: false,
+    syncGeometryOnGridChange: true,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, ["refresh", "fit"]);
+  assert.deepEqual(result, { ran: true, cols: 100, rows: 30 });
+});
+
+test("runTerminalActivationSequence keeps viewport-only fits off grid-change sync (T-266)", () => {
+  const callOrder = [];
+  const runtime = {
+    terminal: {
+      cols: 80,
+      rows: 24,
+      element: { parentElement: null },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      proposeDimensions: () => ({ cols: 120, rows: 32 }),
+      fit: () => {
+        callOrder.push("fit");
+        runtime.terminal.cols = 120;
+        runtime.terminal.rows = 32;
+      },
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-viewport-only",
+    shouldFocus: false,
+    shouldPersistGeometry: false,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, ["refresh", "fit"]);
+  assert.deepEqual(result, { ran: true, cols: 120, rows: 32 });
+});
+
 test("runTerminalActivationSequence waits for the terminal host layout box before fitting (#2839)", () => {
   const callOrder = [];
   const runtime = {
@@ -521,7 +624,12 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   assert.match(
     appSource,
     /scheduleTerminalFocusActivation\(topmostId,\s*\{\s*shouldPersistGeometry:\s*false,?\s*\}\)/,
-    "topmost focus activation must not persist geometry on every workspace render",
+    "topmost focus activation must not persist geometry unconditionally on every workspace render",
+  );
+  assert.match(
+    appSource,
+    /function scheduleTerminalFocusActivation\([\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?shouldPersistGeometry,[\s\S]*?syncGeometryOnGridChange:\s*true,[\s\S]*?sendGeometry,[\s\S]*?\}\);/,
+    "focus activation must opt into grid-change geometry sync while keeping caller-owned persistence",
   );
 
   // Issue #2832 — SPEC-2008 Phase 26.A regression fix: completeInitialFitHandshake
