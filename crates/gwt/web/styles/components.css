@@ -1800,13 +1800,144 @@ kbd.op-kbd {
 }
 .release-notes-version-header {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.release-notes-version-title {
+  display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 12px;
+  min-width: 0;
 }
 .release-notes-date {
   color: var(--color-text-muted);
   font-size: 12px;
+}
+/* SPEC #2780 v2 Amendment (FR-015): per-version update action button.
+   Color tokens follow the same conventions as `.update-modal__btn--primary`
+   and `.update-cta.is-error` so the action button matches the global
+   update CTA design language. */
+.release-notes-update-action {
+  appearance: none;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-normal);
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+.release-notes-update-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.release-notes-update-action.is-update {
+  background: var(--color-state-active);
+  border-color: var(--color-state-active);
+  color: var(--color-text-on-accent, #0a0a0a);
+}
+.release-notes-update-action.is-update:hover {
+  background: color-mix(in oklab, var(--color-state-active) 88%, #000000);
+  border-color: color-mix(in oklab, var(--color-state-active) 88%, #000000);
+}
+.release-notes-update-action.is-downgrade {
+  background: transparent;
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+.release-notes-update-action.is-downgrade:hover {
+  background: color-mix(in oklab, var(--color-state-blocked) 14%, transparent);
+}
+.release-notes-update-action.is-current,
+.release-notes-update-action[disabled] {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-disabled);
+  cursor: default;
+}
+
+/* SPEC #2780 v2 Amendment (FR-016): downgrade confirm modal. Mirrors
+   `.update-modal` panel + `.update-modal__btn` button conventions so the
+   confirm dialog feels native to the update flow it triggers. */
+.release-notes-downgrade-confirm {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-scrim);
+  z-index: 2;
+}
+.release-notes-downgrade-confirm__dialog {
+  min-width: 360px;
+  max-width: 480px;
+  width: calc(100% - 48px);
+  padding: 24px 28px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  box-shadow: var(--shadow-2);
+  font-family: var(--font-body);
+}
+.release-notes-downgrade-confirm__title {
+  margin: 0 0 12px;
+  font-size: var(--type-md);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-text-strong);
+}
+.release-notes-downgrade-confirm__body {
+  margin: 0 0 16px;
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+  line-height: 1.5;
+}
+.release-notes-downgrade-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.release-notes-downgrade-confirm__cancel,
+.release-notes-downgrade-confirm__confirm {
+  appearance: none;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+.release-notes-downgrade-confirm__cancel:focus-visible,
+.release-notes-downgrade-confirm__confirm:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.release-notes-downgrade-confirm__cancel {
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+}
+.release-notes-downgrade-confirm__cancel:hover {
+  background: color-mix(in oklab, var(--color-text) 10%, transparent);
+}
+.release-notes-downgrade-confirm__confirm {
+  background: var(--color-state-blocked);
+  border: 1px solid var(--color-state-blocked);
+  color: var(--color-text-on-accent, #0a0a0a);
+}
+.release-notes-downgrade-confirm__confirm:hover {
+  background: color-mix(in oklab, var(--color-state-blocked) 88%, #000000);
+  border-color: color-mix(in oklab, var(--color-state-blocked) 88%, #000000);
 }
 .release-notes-content h3 {
   margin: 14px 0 6px 0;

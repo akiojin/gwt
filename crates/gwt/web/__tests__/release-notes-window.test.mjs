@@ -237,3 +237,170 @@ test("handlePayload with empty entries falls back to the empty state", () => {
   const empty = document.querySelector(".release-notes-empty");
   assert.ok(empty);
 });
+
+// SPEC #2780 v2 Amendment (FR-015): update action button states.
+
+test("content header shows 'Current version' (disabled) for the running version", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.37.0",
+    current_version: "9.37.0",
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn, "update action button must be rendered");
+  assert.equal(btn.textContent.trim(), "Current version");
+  assert.equal(btn.disabled, true);
+  assert.ok(btn.classList.contains("is-current"));
+});
+
+test("content header shows 'Update to v{x}' (primary) for a newer version", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.36.0",
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn);
+  assert.equal(btn.textContent.trim(), "Update to v9.38.0");
+  assert.equal(btn.disabled, false);
+  assert.ok(btn.classList.contains("is-update"));
+});
+
+test("content header shows 'Downgrade to v{x}' (caution) for an older version", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn);
+  assert.equal(btn.textContent.trim(), "Downgrade to v9.36.0");
+  assert.equal(btn.disabled, false);
+  assert.ok(btn.classList.contains("is-downgrade"));
+});
+
+test("update button click sends apply_update_to_version with the selected version", () => {
+  const { document, controller, sent, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.36.0",
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  btn.click();
+  const applyMessage = sent.find((m) => m.kind === "apply_update_to_version");
+  assert.ok(applyMessage, "apply_update_to_version message must be sent");
+  assert.equal(applyMessage.version, "9.38.0");
+  // The window should close after apply.
+  assert.equal(controller.isOpen(), false);
+});
+
+test("downgrade button click opens an in-app confirm modal and does NOT send apply yet", () => {
+  const { document, controller, sent, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  btn.click();
+  const confirmModal = document.querySelector(".release-notes-downgrade-confirm");
+  assert.ok(confirmModal, "downgrade confirm modal must appear");
+  assert.equal(
+    sent.find((m) => m.kind === "apply_update_to_version"),
+    undefined,
+    "apply must not fire until user confirms downgrade",
+  );
+});
+
+test("downgrade confirm modal Confirm button sends apply_update_to_version", () => {
+  const { document, controller, sent, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  document.querySelector(".release-notes-update-action").click();
+  const confirmBtn = document.querySelector(
+    ".release-notes-downgrade-confirm__confirm",
+  );
+  assert.ok(confirmBtn);
+  confirmBtn.click();
+  const applyMessage = sent.find((m) => m.kind === "apply_update_to_version");
+  assert.ok(applyMessage);
+  assert.equal(applyMessage.version, "9.36.0");
+  assert.equal(controller.isOpen(), false);
+});
+
+test("downgrade confirm modal Cancel button does NOT send and keeps Release Notes open", () => {
+  const { document, controller, sent, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.36.0",
+    current_version: "9.38.0",
+  });
+  document.querySelector(".release-notes-update-action").click();
+  const cancelBtn = document.querySelector(
+    ".release-notes-downgrade-confirm__cancel",
+  );
+  cancelBtn.click();
+  assert.equal(
+    sent.find((m) => m.kind === "apply_update_to_version"),
+    undefined,
+  );
+  assert.equal(controller.isOpen(), true);
+  assert.equal(
+    document.querySelector(".release-notes-downgrade-confirm"),
+    null,
+  );
+});
+
+test("button reflects selection changes via sidebar click", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.37.0",
+  });
+  // Initially newer (9.38.0 > 9.37.0) → Update.
+  let btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn.classList.contains("is-update"));
+
+  // Switch to 9.37.0 (current) → disabled.
+  document
+    .querySelectorAll(".release-notes-sidebar-item")[1]
+    .click();
+  btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn.classList.contains("is-current"));
+  assert.equal(btn.disabled, true);
+
+  // Switch to 9.36.0 (older) → Downgrade.
+  document
+    .querySelectorAll(".release-notes-sidebar-item")[2]
+    .click();
+  btn = document.querySelector(".release-notes-update-action");
+  assert.ok(btn.classList.contains("is-downgrade"));
+});
+
+test("payload without current_version hides the update button (backward-compat)", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: null,
+    // current_version omitted
+  });
+  const btn = document.querySelector(".release-notes-update-action");
+  assert.equal(btn, null, "no current_version → no action button");
+});
