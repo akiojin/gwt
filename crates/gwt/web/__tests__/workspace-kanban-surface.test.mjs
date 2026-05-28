@@ -255,6 +255,34 @@ test("Workspace refresh action rerenders locally without inventing a protocol ev
   assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
 });
 
+test("Workspace renderWindows refreshes legacy workspace preset windows", () => {
+  const fixture = createFixture();
+  let projection = null;
+  const surface = createSurface(fixture, projection, {
+    getActiveWorkProjection: () => projection,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]").length,
+    0,
+  );
+
+  projection = sampleProjection();
+  surface.renderWindows();
+
+  const rows = Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  );
+  assert.deepEqual(
+    rows.map((row) => row.dataset.workspaceId),
+    ["workspace-current", "workspace-done"],
+  );
+});
+
 function sampleProjection() {
   return {
     id: "workspace-current",

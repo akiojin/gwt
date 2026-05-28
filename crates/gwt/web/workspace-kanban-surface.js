@@ -663,7 +663,10 @@ export function createWorkspaceKanbanSurface({
 
   function renderWindows() {
     for (const windowData of activeWorkspace()?.windows || []) {
-      if (workspaceWindowById(windowData.id)?.preset !== "work") continue;
+      const preset = workspaceWindowById(windowData.id)?.preset;
+      if (preset !== "work" && preset !== "workspace" && preset !== "branches") {
+        continue;
+      }
       renderWorkspaceOverviewWindow(windowData.id);
     }
   }
