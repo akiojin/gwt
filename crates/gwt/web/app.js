@@ -5516,6 +5516,7 @@
             selectedProfile: null,
             draft: null,
             saveTimer: null,
+            saveInFlight: false,
           });
         }
         return profileStateMap.get(windowId);
@@ -6623,6 +6624,17 @@
         }
       }
 
+      function profileHasEditableFocus(windowId) {
+        const element = windowMap.get(windowId);
+        const active = document.activeElement;
+        return Boolean(
+          element &&
+            active &&
+            element.contains(active) &&
+            active.matches?.("input, textarea, select"),
+        );
+      }
+
       function flushProfileSave(windowId) {
         const state = ensureProfileState(windowId);
         clearProfileSaveTimer(state);
@@ -6638,6 +6650,7 @@
         }
         state.loading = true;
         state.saving = true;
+        state.saveInFlight = true;
         state.error = "";
         updateProfileStatus(windowId);
         const payload = profileDraftPayload(state.draft);
@@ -6900,7 +6913,7 @@
         envSection.appendChild(createNode("div", "mock-label", "Environment Variables"));
         const envGrid = createNode("div", "profile-env-grid");
         const headerRow = createNode("div", "profile-env-grid-row profile-env-grid-head");
-        for (const label of ["Key", "OS value", "Mode", "Profile value", "Result"]) {
+        for (const label of ["Key", "OS", "Mode", "Profile", "Result"]) {
           headerRow.appendChild(createNode("div", "", label));
         }
         envGrid.appendChild(headerRow);
@@ -6913,7 +6926,9 @@
           );
 
           if (envRow.kind === "os") {
-            row.appendChild(createNode("div", "profile-env-key", envRow.key));
+            const keyCell = createNode("div", "profile-env-key", envRow.key);
+            keyCell.title = envRow.key;
+            row.appendChild(keyCell);
           } else {
             const keyInput = document.createElement("input");
             keyInput.type = "text";
@@ -6946,23 +6961,29 @@
               scheduleProfileSave(windowId);
             });
             keyInput.addEventListener("blur", () => {
-              renderProfile(windowId, true);
               flushProfileSave(windowId);
             });
             row.appendChild(keyInput);
           }
 
-          row.appendChild(
-            createNode("div", "profile-env-os-value", envRow.osValue || "-"),
-          );
+          const osCell = createNode("div", "profile-env-os-value", envRow.osValue || "-");
+          osCell.title = envRow.osValue || "";
+          row.appendChild(osCell);
 
           const modeSelect = document.createElement("select");
           modeSelect.setAttribute("aria-label", `Environment variable mode, row ${index + 1}`);
-          for (const option of [
-            ["use_os", "Use OS"],
-            ["override", "Override"],
-            ["disabled", "Disabled"],
-          ]) {
+          const modeOptions =
+            envRow.kind === "os"
+              ? [
+                  ["use_os", "Use OS"],
+                  ["override", "Override"],
+                  ["disabled", "Disabled"],
+                ]
+              : [
+                  ["override", "Enabled"],
+                  ["disabled", "Disabled"],
+                ];
+          for (const option of modeOptions) {
             const element = document.createElement("option");
             element.value = option[0];
             element.textContent = option[1];
@@ -6988,10 +7009,11 @@
 
           const valueInput = document.createElement("input");
           valueInput.type = "text";
-          valueInput.placeholder = "Value";
+          valueInput.placeholder = "Profile";
           valueInput.value = envRow.profileValue;
           valueInput.setAttribute("aria-label", `Profile value, row ${index + 1}`);
           const resultCell = createNode("div", "profile-env-result", envRow.result);
+          resultCell.title = envRow.result;
           valueInput.addEventListener("input", () => {
             if (envRow.kind === "pending") {
               state.draft.envVars[envRow.draftIndex].value = valueInput.value;
@@ -11546,6 +11568,8 @@
         setActiveProfile,
         flushProfileSave,
         deleteProfile,
+        updateProfileStatus,
+        hasEditableFocus: profileHasEditableFocus,
         syncDraftFromSelection: syncProfileDraftFromSelection,
       });
 
@@ -11924,11 +11948,24 @@
           }
           case "profile_snapshot": {
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
+            const previousProfile = state.selectedProfile;
+            const wasSaveInFlight = state.saveInFlight;
             state.snapshot = event.snapshot || null;
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = "";
             state.selectedProfile = event.snapshot?.selected_profile || null;
+            const selectedProfileUnchanged =
+              !previousProfile || previousProfile === state.selectedProfile;
+            if (
+              wasSaveInFlight &&
+              selectedProfileUnchanged &&
+              frontendUnits.profileSurface.hasEditableFocus(event.id)
+            ) {
+              frontendUnits.profileSurface.updateProfileStatus(event.id);
+              break;
+            }
             frontendUnits.profileSurface.renderProfile(event.id);
             break;
           }
@@ -12237,6 +12274,7 @@
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
             state.loading = false;
             state.saving = Boolean(state.saveTimer);
+            state.saveInFlight = false;
             state.error = event.message;
             frontendUnits.profileSurface.renderProfile(event.id, true);
             break;

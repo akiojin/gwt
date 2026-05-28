@@ -2045,7 +2045,7 @@ body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.28fr);
+  grid-template-columns: minmax(160px, 0.48fr) minmax(0, 1.52fr);
 }
 
 .profile-list-pane,
@@ -2061,10 +2061,11 @@ body {
 }
 
 .profile-editor-pane {
-  overflow: auto;
+  overflow: hidden;
   padding: 12px;
   display: grid;
-  align-content: start;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: stretch;
   gap: 12px;
 }
 
@@ -2203,6 +2204,12 @@ body {
   border-color: var(--color-focus-ring);
 }
 
+.profile-env-grid input,
+.profile-env-grid select {
+  padding: 6px 8px;
+  font-size: var(--type-xs);
+}
+
 .profile-textarea {
   min-height: 88px;
   resize: vertical;
@@ -2233,25 +2240,31 @@ body {
 
 .profile-env-section {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .profile-env-grid {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
+  align-content: start;
 }
 
 .profile-env-grid-row {
   display: grid;
   grid-template-columns:
-    minmax(140px, 0.95fr)
-    minmax(160px, 1fr)
-    minmax(118px, 0.6fr)
-    minmax(160px, 1fr)
-    minmax(160px, 1fr);
-  gap: 8px;
+    minmax(84px, 0.9fr)
+    minmax(72px, 0.75fr)
+    minmax(84px, 0.65fr)
+    minmax(100px, 1fr)
+    minmax(72px, 0.75fr);
+  gap: 6px;
   align-items: center;
-  min-width: 820px;
+  min-width: 0;
 }
 
 .profile-env-grid-head {
@@ -2266,10 +2279,13 @@ body {
   font-weight: 600;
   letter-spacing: 0;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .profile-env-row {
-  padding: 6px;
+  padding: 5px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
@@ -2283,7 +2299,10 @@ body {
 .profile-env-os-value,
 .profile-env-result {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: 0;
@@ -2302,7 +2321,7 @@ body {
 .profile-env-add-row {
   display: block;
   width: 100%;
-  min-width: 820px;
+  min-width: 0;
   padding: 10px 12px;
   border: 1px dashed var(--color-border-strong);
   border-radius: var(--radius-md);

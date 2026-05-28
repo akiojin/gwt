@@ -20,7 +20,22 @@ test.describe("Profile environment variable grid", () => {
     await expect(profile.getByText("Merged preview")).toHaveCount(0);
 
     const pathRow = profile.locator(".profile-env-row", { hasText: "PATH" });
+    const gridMetrics = await profile.locator(".profile-env-grid").evaluate((node) => ({
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+    }));
+    expect(gridMetrics.scrollWidth).toBeLessThanOrEqual(gridMetrics.clientWidth + 1);
+    await expect(pathRow).toHaveCSS("grid-template-columns", /px/);
+    const renderedColumns = await pathRow.evaluate((node) =>
+      getComputedStyle(node).gridTemplateColumns.split(/\s+/).filter(Boolean).length,
+    );
+    expect(renderedColumns).toBe(5);
     await expect(pathRow.locator("select")).toHaveValue("use_os");
+    await expect(pathRow.locator("select option")).toHaveText([
+      "Use OS",
+      "Override",
+      "Disabled",
+    ]);
     await expect(pathRow.locator(".profile-env-result")).toHaveText("/usr/bin");
 
     await pathRow.locator('input[aria-label^="Profile value"]').fill("/custom/bin");
@@ -42,6 +57,9 @@ test.describe("Profile environment variable grid", () => {
     await expect(tokenRow.locator(".profile-env-result")).toHaveText("Disabled");
 
     await profile.getByRole("button", { name: "+ Add variable" }).click();
+    const addedRow = profile.locator(".profile-env-row").last();
+    await expect(addedRow.locator("select")).toHaveValue("override");
+    await expect(addedRow.locator("select option")).toHaveText(["Enabled", "Disabled"]);
     await profile
       .locator('input[aria-label^="Environment variable key"]')
       .last()
@@ -67,6 +85,102 @@ test.describe("Profile environment variable grid", () => {
           ),
       ),
     );
+
+    await addedRow.locator("select").selectOption("disabled");
+    await expect(addedRow.locator(".profile-env-result")).toHaveText("Disabled");
+    await page.waitForFunction(() =>
+      window.__profileFixtureSends.some(
+        (message) =>
+          message.kind === "save_profile" &&
+          message.disabled_env.includes("CUSTOM_FLAG"),
+      ),
+    );
+  });
+
+  test("keeps focus while autosaving a newly added custom variable", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page);
+
+    await page.goto(APP_URL);
+
+    const profile = page.locator(".surface-profile");
+    await expect(profile.getByText("Environment Variables")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await profile.getByRole("button", { name: "+ Add variable" }).click();
+    const keyInput = profile
+      .locator('input[aria-label^="Environment variable key"]')
+      .last();
+    await keyInput.fill("CUSTOM_FOCUS");
+    await page.waitForFunction(() =>
+      window.__profileFixtureSends.some(
+        (message) =>
+          message.kind === "save_profile" &&
+          message.env_vars.some((entry) => entry.key === "CUSTOM_FOCUS"),
+      ),
+    );
+
+    await expect(keyInput).toBeFocused();
+    await page.keyboard.type("_NEXT");
+    await expect(keyInput).toHaveValue("CUSTOM_FOCUS_NEXT");
+  });
+
+  test("keeps metadata fixed while only the environment grid scrolls", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installProfileBackend(page);
+
+    await page.goto(APP_URL);
+
+    const profile = page.locator(".surface-profile");
+    await expect(profile.getByText("Environment Variables")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    const editor = profile.locator(".profile-editor-pane");
+    const metadata = profile.locator(".profile-editor-pane > .profile-section").first();
+    const envSection = profile.locator(".profile-env-section");
+    const envGrid = profile.locator(".profile-env-grid");
+    const metadataName = profile.locator(".profile-field input").first();
+    const metadataBox = await metadata.boundingBox();
+    const envSectionBox = await envSection.boundingBox();
+    const nameBoxBefore = await metadataName.boundingBox();
+
+    expect(metadataBox?.height).toBeGreaterThan(160);
+    expect(envSectionBox?.y || 0).toBeGreaterThan(
+      (metadataBox?.y || 0) + (metadataBox?.height || 0),
+    );
+
+    const editorMetrics = await editor.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      overflowY: getComputedStyle(node).overflowY,
+      scrollHeight: node.scrollHeight,
+      scrollTop: node.scrollTop,
+    }));
+    expect(editorMetrics.overflowY).toBe("hidden");
+    expect(editorMetrics.scrollTop).toBe(0);
+    expect(editorMetrics.scrollHeight).toBeLessThanOrEqual(
+      editorMetrics.clientHeight + 1,
+    );
+
+    const gridMetrics = await envGrid.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      overflowY: getComputedStyle(node).overflowY,
+      scrollHeight: node.scrollHeight,
+    }));
+    expect(gridMetrics.overflowY).toBe("auto");
+    expect(gridMetrics.scrollHeight).toBeGreaterThan(gridMetrics.clientHeight);
+
+    await envGrid.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    const nameBoxAfter = await metadataName.boundingBox();
+    expect(nameBoxAfter?.y).toBeCloseTo(nameBoxBefore?.y || 0, 1);
+    await expect(editor).toHaveJSProperty("scrollTop", 0);
   });
 });
 
@@ -79,7 +193,7 @@ async function installProfileBackend(page) {
       id: "profile-1",
       title: "Profile",
       preset: "profile",
-      geometry: { x: 96, y: 96, width: 1040, height: 680 },
+      geometry: { x: 96, y: 96, width: 720, height: 680 },
       z_index: 1,
       status: "running",
       minimized: false,
@@ -130,6 +244,10 @@ async function installProfileBackend(page) {
       os_env: [
         { key: "GITHUB_TOKEN", value: "fixture-token" },
         { key: "PATH", value: "/usr/bin" },
+        ...Array.from({ length: 36 }, (_, index) => ({
+          key: `FIXTURE_ENV_${String(index).padStart(2, "0")}`,
+          value: `/fixture/${index}`,
+        })),
       ],
       merged_preview: [],
     };
