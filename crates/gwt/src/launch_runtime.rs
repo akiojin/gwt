@@ -774,7 +774,7 @@ struct PackageRunnerProbeOutcome {
 }
 
 impl PackageRunnerProbeOutcome {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     fn success() -> Self {
         Self {
             success: true,
@@ -786,7 +786,7 @@ impl PackageRunnerProbeOutcome {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     fn failure_with_stderr(stderr: &str) -> Self {
         Self {
             success: false,
@@ -1331,7 +1331,7 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    #[cfg(windows)]
     use tempfile::tempdir;
 
     fn test_path(entries: &[&str]) -> String {
@@ -1345,6 +1345,7 @@ mod tests {
         path.split(':').collect()
     }
 
+    #[cfg(windows)]
     fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
