@@ -2991,6 +2991,7 @@
             windowId,
             shouldFocus,
             shouldPersistGeometry,
+            syncGeometryOnGridChange: true,
             sendGeometry,
           });
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
