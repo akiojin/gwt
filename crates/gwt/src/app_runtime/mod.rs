@@ -7492,13 +7492,14 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_host_package_runner_fallback(&mut config)
-            {
-                proxy.send(UserEvent::LaunchProgress {
-                    window_id: window_id.clone(),
-                    message: "bunx unavailable, switching to npx...".to_string(),
-                });
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                let fallback_report = apply_host_package_runner_fallback_checked(&mut config)?;
+                for message in fallback_report.messages {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message,
+                    });
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             apply_windows_host_shell_wrapper(&mut config)?;

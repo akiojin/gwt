@@ -68,19 +68,20 @@ pub(crate) use docker_launch::{
     docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_gwt_binary_setup,
     ensure_docker_launch_service_ready, finalize_docker_agent_launch_config,
     package_runner_version_spec, resolve_docker_launch_plan, resolve_docker_shell_command,
-    strip_package_runner_args, PackageRunnerProgram,
+    strip_package_runner_args,
 };
 #[cfg(test)]
 pub(crate) use docker_launch::{
     compose_workspace_mount_target, docker_bundle_mounts_for_home, docker_bundle_override_content,
     docker_compose_file_for_launch, docker_devcontainer_defaults, is_valid_docker_env_key,
     mount_source_matches_project_root, normalize_docker_launch_action, DockerLaunchServiceAction,
+    PackageRunnerProgram,
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback, apply_windows_host_shell_wrapper,
+    apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
     resolve_launch_worktree, resolve_shell_launch_worktree,
 };
@@ -4630,6 +4631,7 @@ mod tests {
             config.args,
             vec![
                 "/d".to_string(),
+                "/v:on".to_string(),
                 "/k".to_string(),
                 "%GWT_WINDOWS_HOST_SHELL_EXPRESSION%".to_string()
             ]
@@ -4638,11 +4640,19 @@ mod tests {
             config
                 .env_vars
                 .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
-                .map(String::as_str),
-            Some(
-                r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space" & exit"#
-            )
+                .map(|value| value.contains(
+                    r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space""#
+                )),
+            Some(true)
         );
+        let expression = config
+            .env_vars
+            .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
+            .expect("cmd wrapper expression");
+        assert!(expression.contains("[gwt] launching agent"));
+        assert!(expression.contains("[gwt] command:"));
+        assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
+        assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
     }
 
     #[test]
@@ -4661,7 +4671,9 @@ mod tests {
         let script = config.args[3].as_str();
         assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
         assert!(script.contains("'value''s'"));
-        assert!(script.contains("exit $LASTEXITCODE"));
+        assert!(script.contains("[gwt] launching agent"));
+        assert!(script.contains("[gwt] process exited with status"));
+        assert!(script.contains("exit $gwtExitCode"));
     }
 
     #[test]
