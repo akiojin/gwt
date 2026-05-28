@@ -73,44 +73,34 @@ run("release workflow packages gwtd alongside gwt", () => {
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
 });
 
-run("native_window_icon wires tao window icon on Windows and Linux", () => {
-  const nativeApp = fs.readFileSync(
-    path.join(__dirname, "..", "crates", "gwt", "src", "native_app.rs"),
-    "utf8"
-  );
+run("tray icon decoder wires the embedded PNG on every host OS (SPEC #2920)", () => {
+  // SPEC #2920 Phase 4 + 5: the legacy `native_window_icon()` helper
+  // attached the GWT icon to a `tao::Window` for the wry WebView GUI
+  // path. The tray-resident process no longer constructs a Window —
+  // `main.rs` decodes the same `assets/icons/icon.png` into RGBA via
+  // `load_tray_icon_rgba()` and hands it to `tray_icon::Icon::from_rgba`.
+  // Pin both the decoder helper and the asset import so a regression
+  // (renaming the helper or dropping the include_bytes!) is caught at
+  // CI time.
   const mainRs = fs.readFileSync(
     path.join(__dirname, "..", "crates", "gwt", "src", "main.rs"),
     "utf8"
   );
-  const libRs = fs.readFileSync(
-    path.join(__dirname, "..", "crates", "gwt", "src", "lib.rs"),
-    "utf8"
-  );
 
   assert.match(
-    nativeApp,
-    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\npub fn native_window_icon\(\) -> Option<tao::window::Icon>/,
-    "native_app.rs must expose native_window_icon() for Windows and Linux"
+    mainRs,
+    /fn load_tray_icon_rgba\(\) -> Option<\(Vec<u8>, u32, u32\)>/,
+    "main.rs must expose load_tray_icon_rgba() so the tray icon decodes the embedded PNG cross-platform"
   );
   assert.match(
-    nativeApp,
+    mainRs,
     /include_bytes!\("\.\.\/\.\.\/\.\.\/assets\/icons\/icon\.png"\)/,
-    "native_window_icon must embed assets/icons/icon.png at compile time"
-  );
-  assert.match(
-    libRs,
-    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\npub use native_app::native_window_icon;/,
-    "lib.rs must re-export native_window_icon for Windows and Linux"
+    "load_tray_icon_rgba must embed assets/icons/icon.png at compile time"
   );
   assert.match(
     mainRs,
-    /#\[cfg\(any\(target_os = "windows", target_os = "linux"\)\)\]\s*\n\s*let window_icon = gwt::native_window_icon\(\);/,
-    "main.rs must resolve the native_window_icon for Windows and Linux"
-  );
-  assert.match(
-    mainRs,
-    /\.with_window_icon\(window_icon\)/,
-    "main.rs WindowBuilder must call .with_window_icon(window_icon) so Windows and Linux pick up the GWT icon"
+    /tray_icon::Icon::from_rgba/,
+    "main.rs must hand the decoded RGBA bytes to tray_icon::Icon::from_rgba"
   );
 });
 
