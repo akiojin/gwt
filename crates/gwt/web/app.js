@@ -1159,6 +1159,8 @@
       const releaseNotesWindow = createReleaseNotesWindow({
         document,
         send,
+        beginUpdateDownloading: (version) =>
+          updateCtaController.beginDownloadingFor(version),
       });
 
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {

@@ -859,19 +859,104 @@ impl UpdateManager {
             self.owner,
             self.repo
         );
+        self.fetch_release(&url, "latest release")
+    }
+
+    /// SPEC #2780 v2 Amendment (FR-011): fetch a release by its tag name so the
+    /// Release Notes window can request any historical version, not just
+    /// `latest`. The tag is normalized to the `v` prefix that GitHub uses.
+    ///
+    /// `GitHubRelease` is an internal type; external callers should use
+    /// [`Self::resolve_state_for_version`] which returns the public
+    /// [`UpdateState`] type.
+    fn fetch_release_by_tag(&self, tag: &str) -> Result<GitHubRelease, String> {
+        let normalized = tag.trim().trim_start_matches('v');
+        let url = format!(
+            "{}/repos/{}/{}/releases/tags/v{}",
+            self.api_base_url.trim_end_matches('/'),
+            self.owner,
+            self.repo,
+            normalized
+        );
+        self.fetch_release(&url, &format!("release v{normalized}"))
+    }
+
+    fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, String> {
         let res = self
             .client
-            .get(&url)
+            .get(url)
             .send()
-            .map_err(|e| format!("Failed to fetch latest release: {e}"))?;
+            .map_err(|e| format!("Failed to fetch {label}: {e}"))?;
         if !res.status().is_success() {
-            return Err(format!(
-                "Failed to fetch latest release: status {}",
-                res.status()
-            ));
+            return Err(format!("Failed to fetch {label}: status {}", res.status()));
         }
         res.json::<GitHubRelease>()
             .map_err(|e| format!("Failed to parse GitHub release JSON: {e}"))
+    }
+
+    /// SPEC #2780 v2 Amendment (FR-012): build an [`UpdateState::Available`]
+    /// for an arbitrary release tag so the Release Notes window can drive
+    /// the existing apply pipeline (update / downgrade / reinstall).
+    ///
+    /// `latest` in the returned state carries the *requested* version, not the
+    /// current running version. For downgrade flows it may be strictly older
+    /// than `self.current_version`; the apply pipeline only uses `latest` as a
+    /// staging-directory label and progress label, so this is safe.
+    pub fn resolve_state_for_version(
+        &self,
+        version: &str,
+        current_exe: Option<&Path>,
+    ) -> Result<UpdateState, String> {
+        let release = self.fetch_release_by_tag(version)?;
+        // Codex review on PR #2917: refuse to stage a payload under the
+        // caller's chosen version when the server returned an unparseable
+        // or mismatched tag. Matches `check()`'s parse-or-fail behavior so
+        // a single permissive code path can't bypass the safety the rest of
+        // the apply pipeline assumes.
+        let normalized = parse_tag_version(&release.tag_name).ok_or_else(|| {
+            format!(
+                "Failed to parse release tag as version: {}",
+                release.tag_name
+            )
+        })?;
+        let requested = version.trim().trim_start_matches('v');
+        let normalized = normalized.to_string();
+        if normalized != requested {
+            return Err(format!(
+                "Release tag mismatch: requested v{requested} but server returned v{normalized}"
+            ));
+        }
+
+        let platform = Platform::detect();
+        let portable_asset_url = platform
+            .portable_asset_name()
+            .and_then(|name| release.assets.iter().find(|a| a.name == name))
+            .map(|a| a.browser_download_url.clone());
+        let installer_asset_url = find_installer_asset_url(&platform, &release.assets);
+        let asset_url = choose_apply_plan(
+            &platform,
+            current_exe,
+            portable_asset_url.as_deref(),
+            installer_asset_url.as_deref(),
+        )
+        .map(|p| match p {
+            ApplyPlan::Portable { url } => url,
+            ApplyPlan::Installer { url, .. } => url,
+        });
+
+        if asset_url.is_none() {
+            return Err(format!(
+                "No applicable update asset for v{normalized} on this platform."
+            ));
+        }
+
+        Ok(UpdateState::Available {
+            current: self.current_version.to_string(),
+            latest: normalized,
+            release_url: release.html_url,
+            asset_url,
+            checked_at: Utc::now(),
+        })
     }
 
     fn state_from_cache(&self, cache: &UpdateCacheFile, current_exe: Option<&Path>) -> UpdateState {
@@ -3343,6 +3428,206 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("manifest.json"), b"{not json").unwrap();
         assert!(load_pending_update_manifest_in(dir.path()).is_none());
+    }
+
+    // SPEC #2780 v2 Amendment (FR-011): fetch_release_by_tag hits the
+    // tag-specific endpoint and returns the parsed release payload.
+    #[test]
+    fn fetch_release_by_tag_returns_release_for_known_tag() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_body = r#"{
+  "tag_name": "v9.36.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v9.36.0",
+  "assets": [
+    {
+      "name": "gwt-windows-x86_64.zip",
+      "browser_download_url": "https://example.invalid/v9.36.0/gwt-windows-x86_64.zip"
+    }
+  ]
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let release = mgr
+            .fetch_release_by_tag("9.36.0")
+            .expect("fetch_release_by_tag should succeed for known tag");
+        assert_eq!(release.tag_name, "v9.36.0");
+        assert_eq!(release.assets.len(), 1);
+        assert_eq!(release.assets[0].name, "gwt-windows-x86_64.zip");
+    }
+
+    #[test]
+    fn fetch_release_by_tag_returns_error_for_404() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_url = serve_once(
+            "/",
+            "404 Not Found",
+            "application/json",
+            b"{\"message\":\"Not Found\"}".to_vec(),
+        );
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .fetch_release_by_tag("0.0.999")
+            .expect_err("404 must surface as error");
+        assert!(
+            err.to_lowercase().contains("status") || err.to_lowercase().contains("404"),
+            "error message should mention HTTP status: {err}"
+        );
+    }
+
+    // SPEC #2780 v2 Amendment (FR-012): resolve_state_for_version constructs
+    // UpdateState::Available for an arbitrary release tag (including
+    // downgrade targets — latest may be < current).
+    #[test]
+    fn resolve_state_for_version_returns_available_with_platform_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        // Provide every platform's portable asset so the test passes on
+        // whichever host we run on. choose_apply_plan will pick the matching
+        // one via Platform::detect().
+        let release_body = r#"{
+  "tag_name": "v7.0.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v7.0.0",
+  "assets": [
+    {"name": "gwt-windows-x86_64.zip", "browser_download_url": "https://example.invalid/v7.0.0/gwt-windows-x86_64.zip"},
+    {"name": "gwt-windows-aarch64.zip", "browser_download_url": "https://example.invalid/v7.0.0/gwt-windows-aarch64.zip"},
+    {"name": "gwt-macos-x86_64.tar.gz", "browser_download_url": "https://example.invalid/v7.0.0/gwt-macos-x86_64.tar.gz"},
+    {"name": "gwt-macos-aarch64.tar.gz", "browser_download_url": "https://example.invalid/v7.0.0/gwt-macos-aarch64.tar.gz"},
+    {"name": "gwt-macos-universal.dmg", "browser_download_url": "https://example.invalid/v7.0.0/gwt-macos-universal.dmg"},
+    {"name": "gwt-linux-x86_64.tar.gz", "browser_download_url": "https://example.invalid/v7.0.0/gwt-linux-x86_64.tar.gz"},
+    {"name": "gwt-linux-aarch64.tar.gz", "browser_download_url": "https://example.invalid/v7.0.0/gwt-linux-aarch64.tar.gz"}
+  ]
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let state = mgr
+            .resolve_state_for_version("7.0.0", None)
+            .expect("resolve_state_for_version should succeed");
+
+        match state {
+            UpdateState::Available {
+                latest,
+                release_url,
+                asset_url,
+                ..
+            } => {
+                assert_eq!(
+                    latest, "7.0.0",
+                    "`latest` field must carry the requested version (downgrade-friendly semantics)"
+                );
+                assert_eq!(
+                    release_url,
+                    "https://github.com/akiojin/gwt/releases/tag/v7.0.0"
+                );
+                let url = asset_url.expect("asset_url must be resolved for at least one platform");
+                assert!(
+                    url.contains("v7.0.0"),
+                    "platform asset URL must reference v7.0.0 release path: {url}"
+                );
+            }
+            other => panic!("expected UpdateState::Available, got {other:?}"),
+        }
+    }
+
+    // Codex review on PR #2917: reject mismatched / unparseable tags rather
+    // than falling back to the caller's input. `check()` already fails fast
+    // on invalid release tags and `resolve_state_for_version` should match.
+    #[test]
+    fn resolve_state_for_version_rejects_unparseable_tag_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_body = r#"{
+  "tag_name": "totally-not-a-version",
+  "html_url": "https://example.invalid/x",
+  "assets": []
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .resolve_state_for_version("7.0.0", None)
+            .expect_err("malformed tag must not be accepted");
+        assert!(
+            err.to_lowercase().contains("tag") || err.to_lowercase().contains("version"),
+            "error should mention tag/version mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_state_for_version_rejects_mismatched_tag_name() {
+        let temp = tempfile::tempdir().unwrap();
+        // Requested v7.0.0 but server returns v8.0.0 — must reject so we
+        // don't stage v8.0.0 under the user's chosen v7.0.0 label.
+        let release_body = r#"{
+  "tag_name": "v8.0.0",
+  "html_url": "https://example.invalid/v8",
+  "assets": [
+    {"name": "gwt-windows-x86_64.zip", "browser_download_url": "https://example.invalid/v8/win.zip"}
+  ]
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .resolve_state_for_version("7.0.0", None)
+            .expect_err("tag mismatch must be rejected");
+        assert!(
+            err.to_lowercase().contains("tag") || err.to_lowercase().contains("mismatch"),
+            "error should mention tag mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_state_for_version_returns_error_when_no_platform_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        // Only a non-platform asset present; choose_apply_plan returns None.
+        let release_body = r#"{
+  "tag_name": "v6.0.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v6.0.0",
+  "assets": [
+    {"name": "checksums.txt", "browser_download_url": "https://example.invalid/v6.0.0/checksums.txt"}
+  ]
+}"#
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let err = mgr
+            .resolve_state_for_version("6.0.0", None)
+            .expect_err("missing platform asset must surface as error");
+        assert!(
+            err.to_lowercase().contains("asset")
+                || err.to_lowercase().contains("platform")
+                || err.to_lowercase().contains("no applicable"),
+            "error should mention the missing platform asset: {err}"
+        );
     }
 
     #[test]
