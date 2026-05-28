@@ -77,7 +77,7 @@ pub(super) fn collect_quick_start_entries_from_sessions(
             resume_session_id: agent_session_resume_id(&session),
             live_window_id: None,
             skip_permissions: session.skip_permissions,
-            codex_fast_mode: session.codex_fast_mode,
+            codex_fast_mode: session.fast_mode_enabled(),
             runtime_target: session.runtime_target,
             docker_service: session.docker_service.clone(),
             docker_lifecycle_intent: session.docker_lifecycle_intent,

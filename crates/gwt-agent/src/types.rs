@@ -65,6 +65,16 @@ impl AgentId {
     pub fn supports_resume_picker(&self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
+
+    /// Whether this agent exposes a Fast mode launch setting that can be
+    /// enabled before the agent starts.
+    ///
+    /// SPEC-2014 2026-05-27 amendment: Claude Code supports Fast mode through
+    /// session-local settings, while Codex supports it through its service tier
+    /// config override.
+    pub fn supports_fast_mode(&self) -> bool {
+        matches!(self, Self::ClaudeCode | Self::Codex)
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -457,6 +467,25 @@ mod tests {
             assert!(
                 !non_picker.supports_resume_picker(),
                 "{non_picker:?} should not advertise picker support"
+            );
+        }
+    }
+
+    #[test]
+    fn supports_fast_mode_only_for_fast_capable_builtins() {
+        assert!(AgentId::ClaudeCode.supports_fast_mode());
+        assert!(AgentId::Codex.supports_fast_mode());
+        for unsupported in [
+            AgentId::Gemini,
+            AgentId::OpenCode,
+            AgentId::OpenClaw,
+            AgentId::Hermes,
+            AgentId::Copilot,
+            AgentId::Custom("aider".into()),
+        ] {
+            assert!(
+                !unsupported.supports_fast_mode(),
+                "{unsupported:?} should not advertise Fast mode support"
             );
         }
     }

@@ -6172,3 +6172,38 @@ Type: lesson
 Context: リリース作業中に tasks/memory.md の stash pop コンフリクトを解消する際、git status で M (modified/tracked) と表示されていたファイルを「バージョン管理対象外のローカルファイル」と誤認し、--theirs で一方的に上書きした
 Learning: git status の M は tracked file の変更を示す。?? が untracked。ファイルがバージョン管理対象かどうかは git status の表記で判断でき、思い込みで判断してはならない
 Future Action: stash pop コンフリクト解消時は、必ず両側の差分を確認し、tracked file であれば両方の変更を保持するマージを行う。一方的に --theirs / --ours で上書きしない
+
+## 2026-05-26 — Work preset missing in Phase F wizard refactor
+
+Type: lesson
+Context: Work画面のGit BranchesタブからLaunch/Resumeすると Window is not a Work surface エラー。wizard.rsのopen_launch_wizardとresume_branch_latest_agent_eventsがWindowPreset::Branchesのみ許可していた。レガシーのlaunch_wizard_runtime.rsはBranches+Work両方許可。
+Learning: app_runtime Phase F リファクタで旧コード(launch_wizard_runtime.rs)からの移植時にプリセット条件を狭くしたリグレッション。mod.rs:5420のload_branches_eventsは正しく両方許可していたので、同一ファイル内にパターンの不整合があった。
+Future Action: wizard.rsのプリセットチェック変更時はmod.rsの同種チェック(load_branches_events等)と一貫性を確認する。Work surface embedded branches パターンでは WindowPreset::Work も許可が必要。
+
+## 2026-05-27 — collect_resumable_agents excluded running agents causing empty Resume Picker
+
+Type: lesson
+Context: Resume Picker showed 'No resumable agents' even when Codex was Running. Root cause: collect_resumable_agents in wizard.rs filtered out live_session_ids entirely. Also, branch cleanup preset check at mod.rs:6323 only allowed WindowPreset::Branches, missing Work.
+Learning: When adding a new preset check (like the Work surface unification), grep all sites with the same error message string to ensure none are missed. Four sites had 'Window is not a Work surface' but one (branch cleanup) was not updated. Also, filtering running agents from the Resume Picker was a UX anti-pattern — the user sees a Running agent in the workspace card but Resume says none exist.
+Future Action: After any WindowPreset guard change, search all occurrences of the error message to confirm all sites are consistent. For picker/list UIs, prefer including all states with appropriate badges over silently filtering items the user can see elsewhere.
+
+## 2026-05-27 — Do not treat manual visual confirmation as E2E
+
+Type: lesson
+Context: During Claude Code Fast mode startup support, I initially reported completion after Rust tests and user visual confirmation, then admitted no automated E2E had been run when the user asked.
+Learning: Manual visual confirmation is not a substitute for an automated live E2E when the changed behavior crosses Launch Wizard frontend, WebSocket/backend state, and runtime context resolution.
+Future Action: For Launch Wizard or Start Work UI changes, add or run a live Playwright E2E that drives the actual user path before claiming E2E coverage; report manual checks separately from automated E2E.
+
+## 2026-05-27 — Claude Code startup alone is not a billing reason to skip E2E
+
+Type: lesson
+Context: After adding a live E2E for Claude Code Fast mode, I incorrectly justified not launching real Claude Code by saying it could incur billing. The user corrected that starting Claude Code alone does not charge.
+Learning: Do not cite billing as a reason to avoid a Claude Code launch smoke. The valid concerns are environment/auth availability, external process stability, and cleanup; if those are acceptable, launch smoke should be performed.
+Future Action: When explaining why an E2E stops before an external AI tool, separate real constraints from assumptions. For Claude Code startup, prefer an env-gated real-launch smoke with explicit cleanup instead of claiming startup cost risk.
+
+## 2026-05-27 — Resume Picker must filter by workspace_id — headed E2E caught what unit tests missed
+
+Type: lesson
+Context: Resume Picker returned agents from ALL branches instead of the selected Work item. Unit tests passed because they only tested presence/absence of agents, not cross-branch leakage. The bug was only caught when the user asked for a headed browser check.
+Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
+Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.

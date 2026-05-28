@@ -50,7 +50,7 @@ Keep these artifacts throughout the discussion:
 
 `Discussion TODO` is not an implementation task list. It tracks unresolved
 questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
-and the next question to ask.
+the next question to ask, and the depth state for the active proposal.
 
 Evidence is part of the discussion state, not a later implementation detail.
 Do not mark a proposal `[chosen]` until its evidence fields prove the outcome
@@ -69,6 +69,9 @@ Mirror structure for `.gwt/discussion.md`:
 - Coverage Checks:
 - Exit Blockers:
 - Next Question:
+- Depth Mode:
+- Question Ledger:
+- Depth Gate:
 - Implementation Proof:
 - SPEC/Issue Proof:
 - Gap Check Proof:
@@ -101,8 +104,10 @@ SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
 which inspects `.gwt/discussion.md` and blocks Stop (with
 `{"decision":"block","reason":"..."}`) while any proposal is still `[active]`
 with a non-empty `Next Question:`, unresolved `Exit Blockers:`, incomplete
-proof fields, or an `Evidence Gate:` that is not `complete`. To let Stop
-succeed, mark each proposal explicitly using the exit CLI:
+proof fields, incomplete depth fields, or an `Evidence Gate:` that is not
+`complete`. Depth fields are incomplete when `Question Ledger:` is empty,
+`Depth Gate:` is missing/open, or `Depth Gate: deferred(<reason>)` has no
+reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
 
 - `gwtd discuss resolve --proposal "Proposal A"` — active → chosen only after
   `Evidence Gate: complete`
@@ -210,9 +215,40 @@ After each answer:
 
 - update the `Intake Memo`
 - update the `Discussion TODO`
+- append or refine the active proposal's `Question Ledger`
+- update `Depth Gate` only when depth coverage is complete or explicitly
+  deferred with a reason
 - remove or refine the resolved unknown
 - re-rank the remaining unresolved questions
 - Ask the next highest-impact question if any remain
+
+## Depth Interview Loop
+
+Use this loop for every non-trivial discussion, including ordinary
+`gwt-discussion` runs. Do not wait for an explicit `--deepen` flag when the
+latest answer leaves high-impact ambiguity.
+
+After every answer:
+
+1. Record what was learned in the `Question Ledger`.
+2. Re-score unresolved unknowns across scope boundary, ownership/integration,
+   failure/edge cases, migration/compatibility, verification/success signal,
+   and alternatives/assumption challenge.
+3. Ask the next highest-impact question with the platform question tool when
+   any category can still change implementation, routing, ownership, or
+   verification.
+4. Every third question, challenge one premise directly: what breaks if the
+   preferred answer is wrong, delayed, partially implemented, or applied to an
+   adjacent subsystem?
+5. Set `Depth Gate: complete` only when the `Question Ledger` shows all
+   applicable categories are covered. Use `Depth Gate: deferred(<reason>)` only
+   when the remaining depth is intentionally out of scope for the current
+   Action Bundle.
+
+Do not treat a small number of questions as a completion signal. A broad or
+risky discussion may require many rounds. Also do not treat a top-3 priority
+list as the end of deepening; it is only the next batch to discuss before the
+remaining backlog is re-ranked.
 
 ## Discussion Depth Gate
 

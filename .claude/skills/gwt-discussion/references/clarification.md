@@ -70,6 +70,9 @@ Rules:
   exit criteria are satisfied or a real blocker remains.
 - Planning-ready requires covering the applicable categories from the standard
   question checklist.
+- Update the active proposal's `Question Ledger` after each answer and leave
+  `Depth Gate: open` while a category can still change implementation,
+  ownership, routing, failure handling, migration, or verification.
 
 ### Step 5: Update spec.md
 
@@ -134,6 +137,9 @@ All of the following must be true:
 - Ubiquitous Language section is consistent with user stories and FRs.
 - Planning-ready requires covering the applicable categories from the standard
   question checklist.
+- `Question Ledger` records the clarification questions that resolved those
+  categories.
+- `Depth Gate` is `complete` or `deferred(<reason>)`.
 
 ## Output format
 

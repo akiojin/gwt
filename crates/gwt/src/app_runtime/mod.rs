@@ -210,7 +210,7 @@ fn launch_config_from_persisted_session(session: &gwt_agent::Session) -> gwt_age
     if session.skip_permissions {
         builder = builder.skip_permissions(true);
     }
-    if session.codex_fast_mode {
+    if session.fast_mode_enabled() {
         builder = builder.fast_mode(true);
     }
     builder = builder.runtime_target(session.runtime_target);
@@ -730,6 +730,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
                     log = log.count(value.len());
                 }
                 LaunchWizardAction::SetSkipPermissions { enabled }
+                | LaunchWizardAction::SetFastMode { enabled }
                 | LaunchWizardAction::SetCodexFastMode { enabled } => {
                     log = log.force(*enabled);
                 }
@@ -5422,7 +5423,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a Work surface".to_string(),
+                    message: format!("Window preset {:?} is not a Work surface", window.preset),
                 },
             )];
         }
@@ -6320,12 +6321,12 @@ impl AppRuntime {
             )];
         };
 
-        if window.preset != WindowPreset::Branches {
+        if window.preset != WindowPreset::Branches && window.preset != WindowPreset::Work {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: "Window is not a Work surface".to_string(),
+                    message: format!("Window preset {:?} is not a Work surface", window.preset),
                 },
             )];
         }
@@ -7451,6 +7452,7 @@ impl AppRuntime {
             session.reasoning_level = config.reasoning_level.clone();
             session.session_mode = config.session_mode;
             session.skip_permissions = config.skip_permissions;
+            session.fast_mode = config.fast_mode;
             session.codex_fast_mode = config.codex_fast_mode;
             session.runtime_target = config.runtime_target;
             session.docker_service = config.docker_service.clone();
@@ -8196,6 +8198,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
             gwt::LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
             gwt::LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
+            gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::Submit => "submit",
         }
@@ -9636,7 +9639,10 @@ exit 1
         assert_eq!(prepared.agent_path, source.display().to_string());
         assert_eq!(
             super::format_file_attachment_prompt(&[prepared.agent_path]),
-            format!("File: \"{}\"", source.display())
+            format!(
+                "File: {}",
+                super::quote_file_attachment_path(&source.display().to_string())
+            )
         );
     }
 
@@ -11982,6 +11988,79 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_open_launch_wizard_accepts_work_window_preset() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "work-1",
+            repo,
+            WindowPreset::Work,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "work-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenLaunchWizard {
+                id: window_id,
+                branch_name: "main".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        assert!(
+            runtime.launch_wizard.is_some(),
+            "Launch wizard should open from a Work window preset"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(&event.event, BackendEvent::LaunchWizardOpenError { .. })),
+            "Work preset must not be rejected as 'not a Work surface'"
+        );
+    }
+
+    #[test]
+    fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "work-1",
+            repo,
+            WindowPreset::Work,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "work-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeBranchLatestAgent {
+                id: window_id,
+                branch_name: "main".to_string(),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let has_surface_error = events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::BranchError { message, .. }
+                    if message.contains("is not a Work surface")
+            )
+        });
+        assert!(
+            !has_surface_error,
+            "Work preset must not be rejected as 'not a Work surface'"
+        );
+    }
+
+    #[test]
     fn app_runtime_resume_workspace_failure_surfaces_launch_wizard_open_error() {
         // SPEC-2359 / Issue #2757: Resume クリックで `resume_workspace_events`
         // が早期 return / Start Work fallback 失敗を起こした場合、frontend で
@@ -13523,7 +13602,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_list_resumable_agents_excludes_live_session_ids() {
+    fn app_runtime_list_resumable_agents_includes_live_session_as_running() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13548,7 +13627,6 @@ exit 1
 
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        // Register the same session id as live so the picker skips it.
         let mut live = sample_active_agent_session("tab-1", "window-1");
         live.session_id = session_id.to_string();
         runtime
@@ -13562,9 +13640,18 @@ exit 1
 
         match events.first().map(|outbound| &outbound.event) {
             Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
-                assert!(
-                    agents.is_empty(),
-                    "live session must not appear in the Resume picker"
+                assert_eq!(
+                    agents.len(),
+                    1,
+                    "live session should appear with Running status"
+                );
+                assert_eq!(
+                    agents[0].lifecycle_status,
+                    Some(gwt::ResumableAgentLifecycleStatus::Running),
+                );
+                assert_eq!(
+                    agents[0].resume_kind,
+                    gwt::ResumableAgentResumeKind::Session
                 );
             }
             other => panic!("unexpected backend event: {other:?}"),

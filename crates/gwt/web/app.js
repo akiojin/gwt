@@ -7966,9 +7966,13 @@
           (
             launchWizard.show_version ||
             launchWizard.show_skip_permissions ||
+            launchWizard.show_fast_mode ||
             launchWizard.show_codex_fast_mode
           )
         ) {
+          const showFastMode = Boolean(
+            launchWizard.show_fast_mode ?? launchWizard.show_codex_fast_mode,
+          );
           const section = createLaunchSection(
             "Launch settings",
             "Version, permissions, and tool-specific launch behavior.",
@@ -8000,15 +8004,15 @@
                 }),
             );
           }
-          if (launchWizard.show_codex_fast_mode) {
+          if (showFastMode) {
             appendCheckboxField(
               grid,
-              "Codex fast mode",
-              "Use the fast service tier",
-              launchWizard.codex_fast_mode,
+              "Fast mode",
+              "Use the agent's Fast mode",
+              Boolean(launchWizard.fast_mode ?? launchWizard.codex_fast_mode),
               (enabled) =>
                 sendWizardAction({
-                  kind: "set_codex_fast_mode",
+                  kind: "set_fast_mode",
                   enabled,
                 }),
             );

@@ -3968,6 +3968,11 @@ kbd.op-kbd {
   color: rgb(253, 186, 116);
 }
 
+:root[data-theme] .workspace-resume-picker-row-tag.is-running {
+  background: rgba(56, 189, 248, 0.14);
+  color: rgb(125, 211, 252);
+}
+
 :root[data-theme] .workspace-resume-picker-row-meta {
   display: grid;
   grid-template-columns: max-content 1fr;
