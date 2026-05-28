@@ -19,12 +19,14 @@ import {
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
   elementHasLayoutBox,
+  gateTerminalInputForReadiness,
   runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
@@ -217,11 +219,19 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
 
 test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry flags (T-199)", () => {
   const callOrder = [];
+  const parent = {
+    clientWidth: 800,
+    clientHeight: 480,
+    getBoundingClientRect: () => {
+      callOrder.push("flush-layout");
+      return { width: 800, height: 480 };
+    },
+  };
   const runtime = {
     terminal: {
       cols: 100,
       rows: 30,
-      element: { parentElement: null },
+      element: { parentElement: parent },
       refresh: () => callOrder.push("refresh"),
       focus: () => callOrder.push("focus"),
     },
@@ -236,9 +246,8 @@ test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry 
     shouldPersistGeometry: false,
     sendGeometry: () => callOrder.push("sendGeometry"),
   });
-  // No layout flush is recorded because element has no parentElement;
   // sendGeometry / focus are suppressed by the flags.
-  assert.deepEqual(callOrder, ["refresh", "fit"]);
+  assert.deepEqual(callOrder, ["refresh", "flush-layout", "fit"]);
   assert.equal(result.ran, true);
 });
 
@@ -675,5 +684,87 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /lineHeight:\s*isBlinkBrowser/,
     "createTerminalRuntime must use isBlinkBrowser to select lineHeight",
+  );
+
+  // Issue #2924 — stray "C" byte appears in Claude Code prompt buffer on
+  // launch. xterm.js can emit onData firings before the initial-fit
+  // handshake has completed (e.g. application-response sequences echoed
+  // before the deferredWrites flush has even started). The terminal.onData
+  // callback must consult gateTerminalInputForReadiness so pre-ready
+  // input is dropped instead of contaminating Claude Code's stdin.
+  assert.match(
+    appSource,
+    /gateTerminalInputForReadiness/,
+    "terminal.onData must consult gateTerminalInputForReadiness so pre-ready input cannot reach PTY",
+  );
+});
+
+test("app.css recovers terminal cell columns at the gwt default 720x420 window (Issue #2923 follow-up)", () => {
+  // The Claude Code footer (`bypass permissions on (shift+tab to cycle)` +
+  // `◯ <effort> · /effort`) lands at ~77 cells. With the original
+  // `inset: 8px 10px 10px;` and xterm's vendor `overflow-y: scroll`
+  // reserving a scrollbar gutter, the gwt-default 720×420 agent window
+  // shrank the cell grid to ~76 cols and Claude Code's footer wrapped
+  // `/effort` to `/eff` + `ort`. Pin the tighter inset and the
+  // `overflow-y: auto` override so the gutter only steals cells when
+  // scrollback is actually present.
+  assert.match(
+    appCssSource,
+    /\.terminal-root\s*\{[^}]*inset:\s*8px\s+4px\s+4px;/,
+    ".terminal-root must use the tightened 8px/4px/4px inset so the cell grid keeps ~+1 column at 720x420 windows",
+  );
+  assert.match(
+    appCssSource,
+    /\.surface-terminal\s+\.terminal-root\s+\.xterm-viewport\s*\{[^}]*overflow-y:\s*auto;/,
+    "xterm-viewport overflow-y must override the vendor `scroll` so the scrollbar gutter is reclaimed when scrollback is empty",
+  );
+});
+
+test("gateTerminalInputForReadiness drops onData firings before the initial-fit handshake (Issue #2924)", () => {
+  // Pre-ready firings exist because xterm.js emits responses to
+  // application queries (Primary DA, cursor reports, focus tracking)
+  // synchronously inside `terminal.write`, and the deferredWrites flush
+  // is itself called from inside the runtime once handshake completes.
+  // The user did not press a key — these bytes are xterm.js internal
+  // noise that must not reach Claude Code's stdin.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: false }, data: "C" }),
+    { forward: false, reason: "runtime-not-ready" },
+  );
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: false }, data: "\x1b[C" }),
+    { forward: false, reason: "runtime-not-ready" },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards onData firings once the runtime is ready", () => {
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: { isReady: true }, data: "hello" }),
+    { forward: true },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards when no runtime is registered (defensive)", () => {
+  // A missing runtime means the firing was not produced by a gated xterm
+  // instance — preserve the legacy behaviour and forward, so non-PTY
+  // surfaces (e.g. board / static terminals) keep working if they ever
+  // route through the same helper.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: null, data: "C" }),
+    { forward: true },
+  );
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: undefined, data: "C" }),
+    { forward: true },
+  );
+});
+
+test("gateTerminalInputForReadiness forwards when isReady is missing (legacy runtime)", () => {
+  // An older runtime that never set `isReady` should still forward input,
+  // because the gate only takes effect when the SPEC-2008 Phase 26.A
+  // handshake explicitly enrolled the runtime by setting isReady=false.
+  assert.deepEqual(
+    gateTerminalInputForReadiness({ runtime: {}, data: "C" }),
+    { forward: true },
   );
 });

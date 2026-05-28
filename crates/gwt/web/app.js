@@ -44,6 +44,7 @@
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
+        gateTerminalInputForReadiness,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -4578,6 +4579,24 @@
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;
+          // Issue #2924: drop pre-ready onData firings — see
+          // gateTerminalInputForReadiness in terminal-viewport-reflow.js
+          // for the contract. The runtime is fetched fresh each firing so
+          // a late teardown/dispose race resolves cleanly.
+          const gate = gateTerminalInputForReadiness({
+            runtime: terminalMap.get(windowId),
+            data,
+          });
+          if (!gate.forward) {
+            console.debug("[gwt_input_trace:onData:dropped]", {
+              seq: inputTraceSeq,
+              windowId,
+              dataLen: data.length,
+              reason: gate.reason,
+              wsState,
+            });
+            return;
+          }
           console.debug("[gwt_input_trace:onData]", {
             seq: inputTraceSeq,
             windowId,

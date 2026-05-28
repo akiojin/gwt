@@ -960,7 +960,12 @@ body {
 
 .terminal-root {
   position: absolute;
-  inset: 8px 10px 10px;
+  /* Issue #2923 follow-up: the bypass-permissions footer + Claude Code
+   * effort/chrome indicators land at ~77 cells. With the prior 10px
+   * horizontal inset the host shrank to ~76 cols and `/effort` wrapped to
+   * `/eff` + `ort`. Tighten the side / bottom inset so the cell grid
+   * recovers ~1 column without changing the gwt window default size. */
+  inset: 8px 4px 4px;
   padding: 0;
   overflow: hidden;
   background: #0a0d12;
@@ -974,6 +979,18 @@ body {
 .surface-terminal .terminal-root .xterm-helper-textarea {
   background: #0a0d12;
   color: #e8eaed;
+}
+
+/* Issue #2923 follow-up: xterm's vendor css pins `overflow-y: scroll` on
+ * the viewport so a scrollbar gutter is always reserved (~17px on
+ * Windows Blink). gwt drives its own wheel-scroll controller, so the
+ * always-on gutter is purely decorative and costs ~2 cells of cell
+ * grid. Switch to `auto` here so the gutter only appears when scrollback
+ * exists. Combined with the slimmer terminal-root inset above this
+ * keeps the Claude Code footer's `/effort` indicator on a single line
+ * at the gwt-default 720×420 window size. */
+.surface-terminal .terminal-root .xterm-viewport {
+  overflow-y: auto;
 }
 
 .terminal-overlay {
