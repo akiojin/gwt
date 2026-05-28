@@ -6228,3 +6228,10 @@ Type: failure-pattern
 Context: Visual E2E failures after Work unification: Quiet Work rows stayed empty for windows with preset=workspace because workspace-kanban-surface.renderWindows only refreshed preset=work. Branch Cleanup E2E also still targeted the old standalone branches surface while branches now lives under the Work surface tab.
 Learning: When a surface is renamed or consolidated, async rerender paths and E2E selectors must use the same preset alias set as the mount path. It is easy to update initial mount logic while leaving event-driven refresh paths on the new canonical preset only.
 Future Action: For future surface renames, add unit tests for renderWindows/event refresh using legacy preset aliases, then update Playwright fixtures/selectors to navigate through the canonical visible UI rather than stale standalone surface classes.
+
+## 2026-05-28 — Profile visual checks require screenshot inspection
+
+Type: lesson
+Context: Profile env grid UI was changed and headed E2E passed, but the user reported Profile Metadata was not visible. Screenshot inspection showed the metadata section was collapsed to 0px because .profile-editor-pane used a 2-row grid while renderProfile appends actions, metadata, and env sections.
+Learning: Headed browser execution alone is not visual verification. For layout changes, inspect screenshots or pixel/DOM geometry that proves the intended visible regions are actually visible and non-overlapping.
+Future Action: Before reporting UI layout work as visually verified, capture and open screenshots for the relevant state and add assertions for visible geometry/non-overlap, not only DOM presence.
