@@ -1984,9 +1984,9 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // accordingly.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
-    { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
-    { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
-    { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
+    { selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
+    { selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
     { selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
   ];
   for (const { selector, desc } of expected) {

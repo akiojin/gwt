@@ -657,6 +657,17 @@ pub enum FrontendEvent {
         #[serde(default)]
         focus_version: Option<String>,
     },
+    /// SPEC #2780 v2 Amendment (FR-014): user clicked the Update / Downgrade
+    /// action button in the Release Notes window. Backend resolves the
+    /// release-by-tag, builds [`gwt_core::update::UpdateState::Available`]
+    /// with the chosen version's platform-specific asset, then drives the
+    /// existing prepare → apply pipeline. Progress and completion broadcast
+    /// via [`BackendEvent::UpdateProgress`] / [`BackendEvent::UpdateReady`]
+    /// / [`BackendEvent::UpdateApplyError`] (the same modal the standard
+    /// update CTA uses).
+    ApplyUpdateToVersion {
+        version: String,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -794,6 +805,8 @@ pub struct ProfileSnapshotView {
     pub active_profile: String,
     pub selected_profile: String,
     pub profiles: Vec<ProfileEntryView>,
+    #[serde(default)]
+    pub os_env: Vec<ProfileEnvEntryView>,
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
@@ -1438,11 +1451,16 @@ pub enum BackendEvent {
     /// SPEC #2780 Release Notes window payload. Carries the parsed entries
     /// from the bundled `CHANGELOG.md` so the frontend can render the
     /// sidebar + content pane without further round-trips.
+    ///
+    /// `current_version` (SPEC #2780 v2 Amendment / FR-013) lets the frontend
+    /// label the Update / Downgrade / Current action button without a second
+    /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
+        current_version: String,
     },
     /// SPEC #2780 Release Notes window error. Emitted only when the bundled
     /// changelog yielded no entries; the UI renders an error pane pointing
@@ -3098,6 +3116,10 @@ mod tests {
                     is_default: true,
                     is_active: true,
                 }],
+                os_env: vec![ProfileEnvEntryView {
+                    key: "PATH".to_string(),
+                    value: "/usr/bin".to_string(),
+                }],
                 merged_preview: vec![ProfileEnvEntryView {
                     key: "TERM".to_string(),
                     value: "xterm-256color".to_string(),
@@ -3117,6 +3139,10 @@ mod tests {
         assert_eq!(
             value["snapshot"]["profiles"][0]["env_vars"][0]["key"],
             Value::String("TERM".to_string())
+        );
+        assert_eq!(
+            value["snapshot"]["os_env"][0]["value"],
+            Value::String("/usr/bin".to_string())
         );
     }
 

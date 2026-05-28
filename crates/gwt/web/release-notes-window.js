@@ -23,6 +23,13 @@ export function createReleaseNotesWindow({
   document,
   send = () => {},
   generateId = () => `release-notes-${Date.now()}`,
+  // SPEC #2780 v2 Amendment (FR-014, Codex review on PR #2917): the update
+  // CTA modal must be in `downloading` state before `apply_update_to_version`
+  // fires, otherwise UpdateProgress / UpdateReady events arriving from the
+  // backend are dropped by update-cta.js (which gates on `status ===
+  // "applying"`). The host (app.js) wires this to
+  // `updateCtaController.beginDownloadingFor`.
+  beginUpdateDownloading = () => {},
 } = {}) {
   if (!document) {
     throw new Error("createReleaseNotesWindow requires a document");
@@ -38,7 +45,40 @@ export function createReleaseNotesWindow({
     selectedVersion: null,
     pendingFocusVersion: null,
     lastRequestId: null,
+    currentVersion: null,
+    confirmModal: null,
   };
+
+  // SPEC #2780 v2 Amendment (FR-015): minimal `major.minor.patch` comparison.
+  // Returns -1 / 0 / 1; returns null when either value is unparseable so the
+  // caller can fall back to a safe "disabled" state.
+  function compareVersions(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") {
+      return null;
+    }
+    const parse = (v) => {
+      const parts = v.trim().replace(/^v/, "").split(".");
+      if (parts.length < 3) {
+        return null;
+      }
+      const nums = parts.slice(0, 3).map((p) => Number.parseInt(p, 10));
+      return nums.some((n) => Number.isNaN(n)) ? null : nums;
+    };
+    const pa = parse(a);
+    const pb = parse(b);
+    if (!pa || !pb) {
+      return null;
+    }
+    for (let i = 0; i < 3; i++) {
+      if (pa[i] < pb[i]) {
+        return -1;
+      }
+      if (pa[i] > pb[i]) {
+        return 1;
+      }
+    }
+    return 0;
+  }
 
   function clearChildren(node) {
     while (node.firstChild) {
@@ -75,15 +115,25 @@ export function createReleaseNotesWindow({
 
     const header = document.createElement("header");
     header.className = "release-notes-version-header";
+
+    const titleGroup = document.createElement("div");
+    titleGroup.className = "release-notes-version-title";
     const h2 = document.createElement("h2");
     h2.textContent = `v${entry.version}`;
-    header.appendChild(h2);
+    titleGroup.appendChild(h2);
     if (entry.date) {
       const dateEl = document.createElement("span");
       dateEl.className = "release-notes-date";
       dateEl.textContent = entry.date;
-      header.appendChild(dateEl);
+      titleGroup.appendChild(dateEl);
     }
+    header.appendChild(titleGroup);
+
+    const actionBtn = buildUpdateActionButton(entry.version);
+    if (actionBtn) {
+      header.appendChild(actionBtn);
+    }
+
     fragment.appendChild(header);
 
     const sectionsWrap = document.createElement("div");
@@ -109,6 +159,131 @@ export function createReleaseNotesWindow({
     }
     fragment.appendChild(sectionsWrap);
     return fragment;
+  }
+
+  // SPEC #2780 v2 Amendment (FR-015): build the sticky action button rendered
+  // at the top-right of the content pane header. Returns `null` when the
+  // backend payload did not provide `current_version` (older clients), so the
+  // existing read-only Release Notes layout still renders.
+  function buildUpdateActionButton(version) {
+    if (!state.currentVersion) {
+      return null;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "release-notes-update-action";
+
+    const cmp = compareVersions(version, state.currentVersion);
+    if (cmp === 0) {
+      btn.classList.add("is-current");
+      btn.disabled = true;
+      btn.textContent = "Current version";
+      btn.setAttribute("aria-disabled", "true");
+    } else if (cmp === 1) {
+      btn.classList.add("is-update");
+      btn.textContent = `Update to v${version}`;
+      btn.addEventListener("click", () => requestApply(version, false));
+    } else if (cmp === -1) {
+      btn.classList.add("is-downgrade");
+      btn.textContent = `Downgrade to v${version}`;
+      btn.addEventListener("click", () => requestApply(version, true));
+    } else {
+      // Unparseable version — render disabled so we never silently apply a
+      // malformed tag to the update pipeline.
+      btn.classList.add("is-current");
+      btn.disabled = true;
+      btn.textContent = "Unavailable";
+      btn.setAttribute("aria-disabled", "true");
+    }
+    return btn;
+  }
+
+  function requestApply(version, requiresConfirm) {
+    if (requiresConfirm) {
+      showDowngradeConfirm(version);
+      return;
+    }
+    sendApply(version);
+    close();
+  }
+
+  function sendApply(version) {
+    // Open the update modal in `downloading` state BEFORE notifying the
+    // backend so the subsequent UpdateProgress / UpdateReady events land
+    // on a modal that is ready to render them (update-cta.js drops them
+    // when `status !== "applying"`).
+    try {
+      beginUpdateDownloading(version);
+    } catch {
+      // beginUpdateDownloading is a UI hint, not a hard dependency. Apply
+      // proceeds even if it throws so the backend pipeline still runs.
+    }
+    send({ kind: "apply_update_to_version", version });
+  }
+
+  function showDowngradeConfirm(version) {
+    if (state.confirmModal) {
+      return;
+    }
+    const overlay = document.createElement("div");
+    overlay.className = "release-notes-downgrade-confirm";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute(
+      "aria-label",
+      `Confirm downgrade to v${version}`,
+    );
+
+    const dialog = document.createElement("div");
+    dialog.className = "release-notes-downgrade-confirm__dialog";
+
+    const heading = document.createElement("h2");
+    heading.className = "release-notes-downgrade-confirm__title";
+    heading.textContent = `Downgrade to v${version}?`;
+    dialog.appendChild(heading);
+
+    const body = document.createElement("p");
+    body.className = "release-notes-downgrade-confirm__body";
+    body.textContent =
+      "Downgrading installs an older build. Data formats are not guaranteed to be backward-compatible across versions.";
+    dialog.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "release-notes-downgrade-confirm__actions";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "release-notes-downgrade-confirm__cancel";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", () => dismissDowngradeConfirm());
+    actions.appendChild(cancelBtn);
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = "release-notes-downgrade-confirm__confirm";
+    confirmBtn.textContent = "Confirm downgrade";
+    confirmBtn.addEventListener("click", () => {
+      dismissDowngradeConfirm();
+      sendApply(version);
+      close();
+    });
+    actions.appendChild(confirmBtn);
+
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    if (state.root) {
+      state.root.appendChild(overlay);
+    } else {
+      document.body.appendChild(overlay);
+    }
+    state.confirmModal = overlay;
+  }
+
+  function dismissDowngradeConfirm() {
+    if (state.confirmModal && state.confirmModal.parentElement) {
+      state.confirmModal.parentElement.removeChild(state.confirmModal);
+    }
+    state.confirmModal = null;
   }
 
   function buildEmptyStateNode(message) {
@@ -278,6 +453,12 @@ export function createReleaseNotesWindow({
       return;
     }
     state.entries = payload.entries;
+    // SPEC #2780 v2 Amendment (FR-013): payload now carries the running
+    // version so the Update action button can pick the right label.
+    state.currentVersion =
+      typeof payload.current_version === "string"
+        ? payload.current_version
+        : null;
     const requested =
       payload.focus_version ||
       state.pendingFocusVersion ||
@@ -304,6 +485,7 @@ export function createReleaseNotesWindow({
   }
 
   function close() {
+    dismissDowngradeConfirm();
     if (state.keydownHandler) {
       document.removeEventListener("keydown", state.keydownHandler);
     }
