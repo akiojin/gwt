@@ -37,6 +37,7 @@ use tray_icon::{
 use uuid::Uuid;
 
 mod app_runtime;
+mod attachment_upload;
 mod docker_launch;
 mod embedded_server;
 mod embedded_web;
@@ -63,6 +64,7 @@ pub(crate) use app_runtime::{
     DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
     ProjectTabRuntime, WindowAddress,
 };
+pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
     docker_binary_for_launch, docker_compose_exec_env_args, ensure_docker_gwt_binary_setup,
@@ -1048,9 +1050,9 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
-        ProjectTabRuntime, UserEvent, WindowAddress,
+        AttachmentUploadStore, BlockingTaskSpawner, ClientHub, DispatchTarget,
+        KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -2102,6 +2104,7 @@ mod tests {
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
+            attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
@@ -6290,9 +6293,11 @@ fn main() -> std::io::Result<()> {
     }));
     let clients = ClientHub::default();
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let attachment_uploads = AttachmentUploadStore::in_system_temp();
     let mut app = AppRuntime::new(
         proxy.clone(),
         pty_writers.clone(),
+        attachment_uploads.clone(),
         BlockingTaskSpawner::tokio(runtime.handle().clone()),
     )
     .expect("app runtime");
@@ -6352,6 +6357,7 @@ fn main() -> std::io::Result<()> {
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
         pty_writers,
+        attachment_uploads,
     )
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());

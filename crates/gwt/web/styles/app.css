@@ -2660,6 +2660,82 @@ body {
   cursor: pointer;
 }
 
+.attachment-progress {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1001;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 36px));
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-3);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+.attachment-progress[hidden] {
+  display: none;
+}
+
+.attachment-progress[data-state="error"] {
+  border-color: var(--color-danger);
+}
+
+.attachment-progress__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.attachment-progress__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-progress__cancel {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.attachment-progress__cancel[hidden] {
+  display: none;
+}
+
+.attachment-progress__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--color-text-muted) 20%, transparent);
+}
+
+.attachment-progress__bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-focus-ring);
+  transition: width 120ms ease;
+}
+
+.attachment-progress[data-state="error"] .attachment-progress__bar {
+  background: var(--color-danger);
+}
+
 .logs-filter-bar {
   display: flex;
   align-items: flex-end;
