@@ -6214,3 +6214,10 @@ Type: failure-pattern
 Context: Profile window scroll bug (#2916): .profile-root had flex/min-height styles but was not included in the shared .window-body root group that applies position:absolute and inset:0.
 Learning: Child panes with overflow:auto only scroll when their root receives the window-body height constraint. A flex/grid pane can look correct in CSS but still expand past the window when the root is not anchored.
 Future Action: When adding or fixing panel surfaces, verify the surface root participates in the shared root containment rule and add an embedded-web contract test for scroll boundaries.
+
+## 2026-05-28 — Profile grid autosave rows need stable editable keys
+
+Type: lesson
+Context: SPEC-2015 Profile Environment Variables grid implemented row-level autosave and re-rendered rows from normalized profile payload.
+Learning: Editable rows that are keyed by the value being edited can lose subsequent key changes after the first autosave/re-render unless the row-local key mirror and backing draft entry are updated together. Pending added rows should also update visible Result cells immediately while debounce save is pending.
+Future Action: When adding autosaved table rows, test multi-character key edits, pending row value edits, backend roundtrip re-render, and duplicate-key collapse before declaring UI behavior complete.

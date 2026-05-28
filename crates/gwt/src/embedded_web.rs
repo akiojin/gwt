@@ -2725,10 +2725,20 @@ mod tests {
             "expected Profile surface to expose selection, CRUD, active-switch, and save events",
         );
         assert!(
-            html.contains("Merged preview")
-                && html
-                    .contains("The backend computes this preview from the current OS environment",),
-            "expected Profile surface to render the backend-owned merged preview contract",
+            html.contains("Environment Variables")
+                && html.contains("Use OS")
+                && html.contains("Override")
+                && html.contains("Disabled")
+                && html.contains("Result")
+                && html.contains("+ Add variable"),
+            "expected Profile surface to render a single environment variable grid",
+        );
+        assert!(
+            !html.contains("Save now")
+                && !html.contains("Profile variables")
+                && !html.contains("Disabled OS variables")
+                && !html.contains("Merged preview"),
+            "expected Profile Metadata lower content to be unified into the grid",
         );
     }
 

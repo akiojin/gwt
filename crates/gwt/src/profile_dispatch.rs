@@ -277,8 +277,13 @@ where
         })
         .collect();
 
+    let os_env = sorted_env_pairs(base_env);
     let merged_preview = selected
-        .merged_env_pairs(base_env)
+        .merged_env_pairs(
+            os_env
+                .iter()
+                .map(|entry| (entry.key.clone(), entry.value.clone())),
+        )
         .into_iter()
         .map(mask_preview_entry)
         .collect();
@@ -287,6 +292,7 @@ where
         active_profile,
         selected_profile: selected.name.clone(),
         profiles,
+        os_env,
         merged_preview,
     })
 }
@@ -297,6 +303,18 @@ fn sorted_env_entries(
     env_vars
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .map(|(key, value)| ProfileEnvEntryView { key, value })
+        .collect()
+}
+
+fn sorted_env_pairs<I>(env_vars: I) -> Vec<ProfileEnvEntryView>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    env_vars
+        .into_iter()
         .collect::<BTreeMap<_, _>>()
         .into_iter()
         .map(|(key, value)| ProfileEnvEntryView { key, value })
@@ -523,5 +541,63 @@ mod tests {
             .merged_preview
             .iter()
             .any(|entry| entry.key == "PATH" && entry.value == "/usr/bin"));
+    }
+
+    #[test]
+    fn snapshot_from_settings_exposes_plaintext_os_env_and_empty_override() {
+        let temp = tempdir().expect("tempdir");
+        let path = config_path(&temp);
+
+        save_profile_at(
+            &path,
+            "default",
+            "default",
+            "",
+            &[ProfileEnvEntryView {
+                key: "EMPTY_OVERRIDE".to_string(),
+                value: String::new(),
+            }],
+            &["SECRET".to_string()],
+        )
+        .expect("save empty override");
+
+        let mut settings = load_settings_or_default(&path).expect("load settings");
+        let snapshot = snapshot_from_settings(
+            &mut settings,
+            Some("default"),
+            [
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("SECRET".to_string(), "plain-secret".to_string()),
+                ("GITHUB_TOKEN".to_string(), "plain-token".to_string()),
+            ],
+        )
+        .expect("snapshot");
+
+        assert_eq!(
+            snapshot.os_env,
+            vec![
+                ProfileEnvEntryView {
+                    key: "GITHUB_TOKEN".to_string(),
+                    value: "plain-token".to_string(),
+                },
+                ProfileEnvEntryView {
+                    key: "PATH".to_string(),
+                    value: "/usr/bin".to_string(),
+                },
+                ProfileEnvEntryView {
+                    key: "SECRET".to_string(),
+                    value: "plain-secret".to_string(),
+                },
+            ]
+        );
+        assert!(snapshot.profiles.iter().any(|profile| {
+            profile.name == "default"
+                && profile.env_vars
+                    == vec![ProfileEnvEntryView {
+                        key: "EMPTY_OVERRIDE".to_string(),
+                        value: String::new(),
+                    }]
+                && profile.disabled_env == vec!["SECRET".to_string()]
+        }));
     }
 }

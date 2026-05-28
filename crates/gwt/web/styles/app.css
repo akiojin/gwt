@@ -2181,6 +2181,8 @@ body {
 
 .profile-field input,
 .profile-table-row input,
+.profile-env-grid input,
+.profile-env-grid select,
 .profile-textarea {
   width: 100%;
   min-width: 0;
@@ -2194,6 +2196,8 @@ body {
 }
 .profile-field input:focus,
 .profile-table-row input:focus,
+.profile-env-grid input:focus,
+.profile-env-grid select:focus,
 .profile-textarea:focus {
   outline: none;
   border-color: var(--color-focus-ring);
@@ -2225,6 +2229,95 @@ body {
   display: grid;
   gap: 10px;
   padding: 16px 12px;
+}
+
+.profile-env-section {
+  min-width: 0;
+}
+
+.profile-env-grid {
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+}
+
+.profile-env-grid-row {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 0.95fr)
+    minmax(160px, 1fr)
+    minmax(118px, 0.6fr)
+    minmax(160px, 1fr)
+    minmax(160px, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 820px;
+}
+
+.profile-env-grid-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 0;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.profile-env-row {
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.profile-env-row.is-disabled {
+  background: color-mix(in oklab, var(--color-state-blocked) 8%, var(--color-surface));
+}
+
+.profile-env-key,
+.profile-env-os-value,
+.profile-env-result {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+}
+
+.profile-env-key {
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+.profile-env-os-value,
+.profile-env-result {
+  color: var(--color-text-muted);
+}
+
+.profile-env-add-row {
+  display: block;
+  width: 100%;
+  min-width: 820px;
+  padding: 10px 12px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-state-active) 6%, transparent);
+  color: var(--color-state-active);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-env-add-row:hover {
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
 .profile-preview {
