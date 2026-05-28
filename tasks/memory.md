@@ -6207,3 +6207,10 @@ Type: lesson
 Context: Resume Picker returned agents from ALL branches instead of the selected Work item. Unit tests passed because they only tested presence/absence of agents, not cross-branch leakage. The bug was only caught when the user asked for a headed browser check.
 Learning: Unit tests for list/picker UIs must include a negative case: create agents for TWO different workspace_ids and assert that filtering by one excludes the other. Headed E2E is essential for verifying picker scope — automated tests alone cannot catch cross-scope leakage when only one scope is populated in the test fixture.
 Future Action: For any picker/list that accepts a scope filter (workspace_id, branch, etc.), always write a multi-scope unit test that asserts exclusion. Run headed E2E before declaring Resume/Launch picker changes complete.
+
+## 2026-05-28 — Windows Claude Code npx cache can leave claude.exe renamed to .old
+
+Type: failure-pattern
+Context: During SPEC-2809 F4 manual verification on Windows, Claude Code launch through npx failed with '...@anthropic-ai\\claude-code\\bin\\claude.exe is not recognized'. The npm _npx install directory contained claude.exe.old.<timestamp> hardlinks in both @anthropic-ai/claude-code/bin and @anthropic-ai/claude-code-win32-x64, while .bin/claude.cmd still referenced bin/claude.exe.
+Learning: The error can be a corrupted npm _npx ephemeral install, not a gwt quoting/runtime failure. npm cache verify does not necessarily repair _npx directories. Removing the specific resolved _npx package directory and letting npx reinstall restored bin/claude.exe; npx --yes @anthropic-ai/claude-code@latest --version then returned 2.1.153 (Claude Code).
+Future Action: When Windows Claude Code reports claude.exe not recognized from npm-cache\\_npx, inspect the referenced _npx node_modules first. If only claude.exe.old.<timestamp> exists, verify the target path is under npm-cache\\_npx, remove that specific _npx directory or reinstall the package, then verify with npx --yes @anthropic-ai/claude-code@latest --version before changing gwt code.
