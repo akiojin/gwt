@@ -138,6 +138,11 @@ pub struct WindowRuntime {
     status_thread: Option<JoinHandle<()>>,
 }
 
+struct RuntimeStopThreads {
+    output_thread: Option<JoinHandle<()>>,
+    status_thread: Option<JoinHandle<()>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
@@ -7739,48 +7744,75 @@ impl AppRuntime {
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
+        let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
+        Self::join_runtime_stop_threads(threads);
+    }
+
+    fn start_window_runtime_stop(
+        &mut self,
+        window_id: &str,
+        mark_session_stopped: bool,
+    ) -> RuntimeStopThreads {
         if mark_session_stopped {
             self.mark_agent_session_stopped(window_id);
         }
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
+        let mut threads = RuntimeStopThreads {
+            output_thread: None,
+            status_thread: None,
+        };
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
             }
-            if let Some(handle) = runtime.output_thread.take() {
-                // PTY and its process group were already terminated by
-                // `pane.kill()`, so the reader should see EOF quickly. Cap
-                // the wait anyway so shutdown never stalls the event loop
-                // if a stuck syscall keeps the reader in `read`. If the
-                // timeout elapses the reader thread is detached; its Arc
-                // clone of the Pane will still be released when the thread
-                // does finally observe EOF.
-                let (tx, rx) = std_mpsc::channel();
-                thread::spawn(move || {
-                    let _ = handle.join();
-                    let _ = tx.send(());
-                });
-                let _ = rx.recv_timeout(Duration::from_millis(500));
-            }
-            if let Some(handle) = runtime.status_thread.take() {
-                let (tx, rx) = std_mpsc::channel();
-                thread::spawn(move || {
-                    let _ = handle.join();
-                    let _ = tx.send(());
-                });
-                let _ = rx.recv_timeout(Duration::from_millis(500));
-            }
+            threads.output_thread = runtime.output_thread.take();
+            threads.status_thread = runtime.status_thread.take();
         }
         self.window_details.remove(window_id);
+        threads
+    }
+
+    fn join_runtime_stop_threads(mut threads: RuntimeStopThreads) {
+        if let Some(handle) = threads.output_thread.take() {
+            // PTY and its process group were already terminated by
+            // `pane.kill()`, so the reader should see EOF quickly. Cap
+            // the wait anyway so shutdown never stalls the event loop
+            // if a stuck syscall keeps the reader in `read`. If the
+            // timeout elapses the reader thread is detached; its Arc
+            // clone of the Pane will still be released when the thread
+            // does finally observe EOF.
+            let (tx, rx) = std_mpsc::channel();
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+        }
+        if let Some(handle) = threads.status_thread.take() {
+            let (tx, rx) = std_mpsc::channel();
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+        }
     }
 
     /// Stop every active window runtime. Called from the application shutdown
     /// paths so no PTY / agent process outlives the GUI.
     pub(crate) fn stop_all_runtimes(&mut self) {
         let ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        self.stop_runtimes_in_shutdown_order(ids);
+    }
+
+    fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
+        let mut threads = Vec::new();
         for id in ids {
-            self.stop_window_runtime_inner(&id, false);
+            threads.push(self.start_window_runtime_stop(&id, false));
+        }
+        for runtime_threads in threads {
+            Self::join_runtime_stop_threads(runtime_threads);
         }
     }
 
@@ -10051,6 +10083,26 @@ exit 1
         active_tab_id: Option<&str>,
     ) -> AppRuntime {
         sample_runtime_with_events(temp_root, tabs, active_tab_id).0
+    }
+
+    fn long_running_test_pane(id: &str) -> Pane {
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "ping -n 30 127.0.0.1 > nul".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "sleep 30".to_string()],
+            )
+        };
+        Pane::new(id.to_string(), command, args, 80, 24, HashMap::new(), None).expect("test pane")
     }
 
     fn sample_runtime_with_events(
@@ -15471,6 +15523,67 @@ exit 1
             .contains_key(&window_id));
 
         runtime.stop_window_runtime(&window_id);
+    }
+
+    #[test]
+    fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let blocker_id = "a-blocking-runtime".to_string();
+        let observed_id = "b-observed-runtime".to_string();
+        let blocking_pane = Arc::new(Mutex::new(long_running_test_pane(&blocker_id)));
+        let observed_pane = Arc::new(Mutex::new(long_running_test_pane(&observed_id)));
+        let observed_pane_for_assertion = observed_pane.clone();
+        let blocking_join = thread::spawn(|| thread::sleep(Duration::from_secs(2)));
+
+        runtime.runtimes.insert(
+            blocker_id.clone(),
+            WindowRuntime {
+                pane: blocking_pane,
+                output_thread: Some(blocking_join),
+                status_thread: None,
+            },
+        );
+        runtime.runtimes.insert(
+            observed_id.clone(),
+            WindowRuntime {
+                pane: observed_pane,
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+
+        let stop_thread = thread::spawn(move || {
+            runtime.stop_runtimes_in_shutdown_order(vec![blocker_id, observed_id]);
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let mut observed_exited = false;
+        while Instant::now() < deadline {
+            observed_exited = observed_pane_for_assertion
+                .lock()
+                .expect("observed pane")
+                .pty()
+                .try_wait()
+                .expect("observed try_wait")
+                .is_some();
+            if observed_exited {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        if !observed_exited {
+            let _ = observed_pane_for_assertion
+                .lock()
+                .expect("observed pane cleanup")
+                .kill();
+        }
+        stop_thread.join().expect("stop thread");
+
+        assert!(
+            observed_exited,
+            "shutdown must kill all panes before waiting for any runtime join handle"
+        );
     }
 
     #[test]
