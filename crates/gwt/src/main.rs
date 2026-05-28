@@ -4517,6 +4517,7 @@ mod tests {
             config.args,
             vec![
                 "/d".to_string(),
+                "/v:on".to_string(),
                 "/k".to_string(),
                 "%GWT_WINDOWS_HOST_SHELL_EXPRESSION%".to_string()
             ]
@@ -4525,11 +4526,19 @@ mod tests {
             config
                 .env_vars
                 .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
-                .map(String::as_str),
-            Some(
-                r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space" & exit"#
-            )
+                .map(|value| value.contains(
+                    r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space""#
+                )),
+            Some(true)
         );
+        let expression = config
+            .env_vars
+            .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
+            .expect("cmd wrapper expression");
+        assert!(expression.contains("[gwt] launching agent"));
+        assert!(expression.contains("[gwt] command:"));
+        assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
+        assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
     }
 
     #[test]
@@ -4548,7 +4557,9 @@ mod tests {
         let script = config.args[3].as_str();
         assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
         assert!(script.contains("'value''s'"));
-        assert!(script.contains("exit $LASTEXITCODE"));
+        assert!(script.contains("[gwt] launching agent"));
+        assert!(script.contains("[gwt] process exited with status"));
+        assert!(script.contains("exit $gwtExitCode"));
     }
 
     #[test]

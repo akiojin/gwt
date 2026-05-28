@@ -1240,6 +1240,28 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
+test("terminal error and stopped status preserve terminal scrollback instead of showing overlay", () => {
+  const visibleToggle = appSource.match(
+    /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
+  );
+  assert.ok(visibleToggle, "expected terminal overlay visibility toggle");
+  assert.doesNotMatch(
+    visibleToggle[1],
+    /runtimeState\s*===\s*"error"/,
+    "error status must not cover the terminal output with the overlay",
+  );
+  assert.doesNotMatch(
+    visibleToggle[1],
+    /runtimeState\s*===\s*"stopped"/,
+    "stopped status must not cover the terminal output with the overlay",
+  );
+  assert.match(
+    visibleToggle[1],
+    /runtimeState\s*===\s*"running"/,
+    "running startup details may still use the explicit copy overlay",
+  );
+});
+
 test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {
   // Catch the gap where someone adds a new @keyframes + animation without
   // pairing it with a reduced-motion override. Approach: for each

@@ -1,5 +1,7 @@
 use super::*;
 
+use std::io::{BufRead, BufReader, Read};
+
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -329,14 +331,16 @@ fn wrap_windows_host_shell_command(
     args: &[String],
     env: &mut HashMap<String, String>,
 ) -> (String, Vec<String>) {
+    let cwd = env.get("GWT_PROJECT_ROOT").map(String::as_str);
     match shell {
         gwt_agent::WindowsShellKind::CommandPrompt => {
-            let expression = format!("{} & exit", build_cmd_command_expression(command, args));
+            let expression = build_cmd_wrapped_command_expression(command, args, cwd);
             env.insert(WINDOWS_HOST_SHELL_EXPRESSION_ENV.to_string(), expression);
             (
                 windows_shell_process_command(shell).to_string(),
                 vec![
                     "/d".to_string(),
+                    "/v:on".to_string(),
                     "/k".to_string(),
                     format!("%{WINDOWS_HOST_SHELL_EXPRESSION_ENV}%"),
                 ],
@@ -349,14 +353,114 @@ fn wrap_windows_host_shell_command(
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                build_powershell_command_script(command, args),
+                build_powershell_command_script(command, args, cwd),
             ],
         ),
     }
 }
 
+fn sensitive_launch_key(value: &str) -> bool {
+    let normalized = value
+        .trim_start_matches('-')
+        .replace(['-', '_'], "")
+        .to_ascii_lowercase();
+    normalized == "apikey"
+        || normalized == "token"
+        || normalized == "authtoken"
+        || normalized == "hooktoken"
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("token")
+        || normalized.contains("secret")
+}
+
+fn sanitize_launch_display_tokens(command: &str, args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    out.push(command.to_string());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            out.push("[REDACTED]".to_string());
+            redact_next = false;
+            continue;
+        }
+        if let Some((key, _value)) = arg.split_once('=') {
+            if sensitive_launch_key(key) {
+                out.push(format!("{key}=[REDACTED]"));
+                continue;
+            }
+        }
+        if sensitive_launch_key(arg) {
+            out.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+fn quote_display_token_if_needed(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn launch_display_command(command: &str, args: &[String]) -> String {
+    let tokens = sanitize_launch_display_tokens(command, args);
+    tokens
+        .iter()
+        .map(|token| quote_display_token_if_needed(&gwt_core::process_console::redact_line(token)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn launch_banner_lines(command: &str, args: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut lines = vec![
+        "[gwt] launching agent".to_string(),
+        "[gwt] runtime: host".to_string(),
+    ];
+    if let Some(cwd) = cwd.filter(|value| !value.is_empty()) {
+        lines.push(format!("[gwt] cwd: {cwd}"));
+    }
+    lines.push(format!(
+        "[gwt] command: {}",
+        launch_display_command(command, args)
+    ));
+    lines
+}
+
+fn escape_cmd_echo_text(value: &str) -> String {
+    value
+        .replace('^', "^^")
+        .replace('!', "^!")
+        .replace('&', "^&")
+        .replace('|', "^|")
+        .replace('<', "^<")
+        .replace('>', "^>")
+        .replace('%', "^%")
+}
+
+fn build_cmd_wrapped_command_expression(
+    command: &str,
+    args: &[String],
+    cwd: Option<&str>,
+) -> String {
+    let mut parts = launch_banner_lines(command, args, cwd)
+        .into_iter()
+        .map(|line| format!("echo {}", escape_cmd_echo_text(&line)))
+        .collect::<Vec<_>>();
+    parts.push(build_cmd_command_expression(command, args));
+    parts.push("set GWT_AGENT_EXIT=!ERRORLEVEL!".to_string());
+    parts.push("echo.".to_string());
+    parts.push("echo [gwt] process exited with status !GWT_AGENT_EXIT!".to_string());
+    parts.push("exit !GWT_AGENT_EXIT!".to_string());
+    parts.join(" & ")
+}
+
 fn escape_cmd_double_quoted(value: &str) -> String {
-    value.replace('"', "\"\"")
+    value.replace('!', "^!").replace('"', "\"\"")
 }
 
 fn quote_cmd_token_if_needed(value: &str) -> String {
@@ -385,14 +489,23 @@ fn quote_powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn build_powershell_command_script(command: &str, args: &[String]) -> String {
+fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&str>) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(quote_powershell_literal(command));
     parts.extend(args.iter().map(|arg| quote_powershell_literal(arg)));
-    format!(
-        "& {}; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if (-not $?) {{ exit 1 }}",
-        parts.join(" ")
-    )
+    let mut script = launch_banner_lines(command, args, cwd)
+        .into_iter()
+        .map(|line| format!("Write-Host {}", quote_powershell_literal(&line)))
+        .collect::<Vec<_>>();
+    script.push(format!("& {}", parts.join(" ")));
+    script.push(
+        "$gwtExitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }"
+            .to_string(),
+    );
+    script.push("Write-Host ''".to_string());
+    script.push("Write-Host \"[gwt] process exited with status $gwtExitCode\"".to_string());
+    script.push("exit $gwtExitCode".to_string());
+    script.join("; ")
 }
 
 pub fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
@@ -502,11 +615,47 @@ pub fn probe_host_package_runner_with_timeout(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
+    let hub = gwt_core::process_console::global();
+    probe_host_package_runner_with_timeout_and_hub(
+        PackageRunnerProbeRequest {
+            command,
+            args,
+            env_vars,
+            remove_env,
+            cwd,
+            timeout,
+            poll_interval,
+        },
+        &hub,
+    )
+}
+
+struct PackageRunnerProbeRequest<'a> {
+    command: &'a str,
+    args: Vec<String>,
+    env_vars: &'a HashMap<String, String>,
+    remove_env: &'a [String],
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    poll_interval: Duration,
+}
+
+fn probe_host_package_runner_with_timeout_and_hub(
+    request: PackageRunnerProbeRequest<'_>,
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+) -> bool {
+    let PackageRunnerProbeRequest {
+        command,
+        args,
+        env_vars,
+        remove_env,
+        cwd,
+        timeout,
+        poll_interval,
+    } = request;
     // SPEC-1924 FR-039 / SPEC-2809 Phase D-agent — emit summary tracing
-    // around the bounded-poll spawn so the Logs Process facet (kind =
-    // agent) and the Console window see the launch attempt. stdio is
-    // intentionally null because the caller only consumes the timeout +
-    // exit status; nothing to forward to the hub.
+    // around the bounded-poll spawn and forward probe stdout/stderr into
+    // the ProcessConsoleHub so failed package-runner probes are inspectable.
     let agent_spawn_id =
         AGENT_LAUNCH_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let agent_label = format!("{} {}", command, args.join(" "));
@@ -523,8 +672,8 @@ pub fn probe_host_package_runner_with_timeout(
     process
         .args(&args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for key in remove_env {
         process.env_remove(key);
     }
@@ -532,20 +681,45 @@ pub fn probe_host_package_runner_with_timeout(
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
-    let Ok(mut child) = process.spawn() else {
-        tracing::info!(
-            target: "gwt.process.summary",
-            kind = "agent",
-            spawn_id = agent_spawn_id,
-            label = %agent_label,
-            phase = "end",
-            exit_code = None::<i64>,
-            success = false,
-            error = "spawn failed",
-            "process end",
-        );
-        return false;
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            push_probe_console_line(
+                hub,
+                agent_spawn_id,
+                gwt_core::process_console::ProcessStream::Stderr,
+                &format!("[gwt] failed to start package-runner probe: {error}"),
+            );
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "agent",
+                spawn_id = agent_spawn_id,
+                label = %agent_label,
+                phase = "end",
+                exit_code = None::<i64>,
+                success = false,
+                error = "spawn failed",
+                "process end",
+            );
+            return false;
+        }
     };
+    let stdout_forwarder = child.stdout.take().map(|stdout| {
+        forward_probe_stream(
+            stdout,
+            hub.clone(),
+            agent_spawn_id,
+            gwt_core::process_console::ProcessStream::Stdout,
+        )
+    });
+    let stderr_forwarder = child.stderr.take().map(|stderr| {
+        forward_probe_stream(
+            stderr,
+            hub.clone(),
+            agent_spawn_id,
+            gwt_core::process_console::ProcessStream::Stderr,
+        )
+    });
     let start = Instant::now();
     let emit_end = |exit_code: Option<i32>, success: bool, note: Option<&str>| {
         tracing::info!(
@@ -561,9 +735,19 @@ pub fn probe_host_package_runner_with_timeout(
             "process end",
         );
     };
+    let join_forwarders = |stdout_forwarder: Option<JoinHandle<()>>,
+                           stderr_forwarder: Option<JoinHandle<()>>| {
+        if let Some(handle) = stdout_forwarder {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_forwarder {
+            let _ = handle.join();
+        }
+    };
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                join_forwarders(stdout_forwarder, stderr_forwarder);
                 let success = status.success();
                 emit_end(status.code(), success, None);
                 return success;
@@ -585,6 +769,52 @@ pub fn probe_host_package_runner_with_timeout(
             }
         }
     }
+}
+
+fn forward_probe_stream<R>(
+    reader: R,
+    hub: gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: gwt_core::process_console::ProcessStream,
+) -> JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    for piece in line.trim_end_matches(['\r', '\n']).split('\r') {
+                        push_probe_console_line(&hub, spawn_id, stream, piece);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn push_probe_console_line(
+    hub: &gwt_core::process_console::ProcessConsoleHub,
+    spawn_id: u64,
+    stream: gwt_core::process_console::ProcessStream,
+    message: &str,
+) {
+    if message.is_empty() {
+        return;
+    }
+    let stripped = gwt_core::process_console::strip_ansi(message);
+    let redacted = gwt_core::process_console::redact_line(&stripped);
+    hub.push(gwt_core::process_console::ProcessLine::new(
+        gwt_core::process_console::ProcessKind::AgentBootstrap,
+        spawn_id,
+        stream,
+        redacted,
+    ));
 }
 
 static AGENT_LAUNCH_SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
@@ -739,6 +969,123 @@ mod tests {
         assert_eq!(
             interactive_windows_shell_args(gwt_agent::WindowsShellKind::PowerShell7),
             vec!["-NoLogo"]
+        );
+    }
+
+    #[test]
+    fn powershell_agent_wrapper_prints_terminal_launch_banner_and_exit_status() {
+        let mut env = HashMap::from([(
+            "GWT_PROJECT_ROOT".to_string(),
+            r"E:\gwt\work\demo".to_string(),
+        )]);
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--api-key".to_string(),
+            "raw-secret-value".to_string(),
+        ];
+
+        let (command, shell_args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::PowerShell7,
+            r"C:\Program Files\nodejs\npx.cmd",
+            &args,
+            &mut env,
+        );
+
+        assert_eq!(command, "pwsh");
+        let script = shell_args.last().expect("PowerShell command script");
+        assert!(script.contains("[gwt] launching agent"));
+        assert!(script.contains("[gwt] runtime: host"));
+        assert!(script.contains(r"[gwt] cwd: E:\gwt\work\demo"));
+        assert!(script.contains("[gwt] command:"));
+        assert!(script.contains("[REDACTED]"));
+        let display_line = script
+            .split(';')
+            .find(|line| line.contains("[gwt] command:"))
+            .expect("display command banner line");
+        assert!(!display_line.contains("raw-secret-value"));
+        assert!(script.contains("[gwt] process exited with status"));
+        assert!(script.contains("exit $gwtExitCode"));
+    }
+
+    #[test]
+    fn command_prompt_agent_wrapper_prints_terminal_launch_banner_and_exit_status() {
+        let mut env = HashMap::from([(
+            "GWT_PROJECT_ROOT".to_string(),
+            r"E:\gwt\work\demo".to_string(),
+        )]);
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+        ];
+
+        let (command, shell_args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::CommandPrompt,
+            "npx.cmd",
+            &args,
+            &mut env,
+        );
+
+        assert_eq!(command, "cmd.exe");
+        assert_eq!(
+            shell_args,
+            vec![
+                "/d".to_string(),
+                "/v:on".to_string(),
+                "/k".to_string(),
+                format!("%{WINDOWS_HOST_SHELL_EXPRESSION_ENV}%")
+            ],
+        );
+        let expression = env
+            .get(WINDOWS_HOST_SHELL_EXPRESSION_ENV)
+            .expect("cmd shell expression");
+        assert!(expression.contains("[gwt] launching agent"));
+        assert!(expression.contains("[gwt] runtime: host"));
+        assert!(expression.contains(r"[gwt] cwd: E:\gwt\work\demo"));
+        assert!(expression.contains("[gwt] command:"));
+        assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
+        assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
+    }
+
+    #[test]
+    fn package_runner_probe_forwards_failed_stderr_to_agent_console() {
+        let hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/C".to_string(),
+                    "echo probe boom 1>&2 & exit /b 1".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "echo probe boom >&2; exit 1".to_string()],
+            )
+        };
+
+        let ok = probe_host_package_runner_with_timeout_and_hub(
+            PackageRunnerProbeRequest {
+                command: &command,
+                args,
+                env_vars: &HashMap::new(),
+                remove_env: &[],
+                cwd: None,
+                timeout: Duration::from_secs(2),
+                poll_interval: Duration::from_millis(10),
+            },
+            &hub,
+        );
+
+        assert!(!ok);
+        let lines = hub.snapshot_kind(gwt_core::process_console::ProcessKind::AgentBootstrap);
+        assert!(
+            lines.iter().any(|line| {
+                line.stream == gwt_core::process_console::ProcessStream::Stderr
+                    && line.message.contains("probe boom")
+            }),
+            "expected failed probe stderr in agent console lines: {lines:?}",
         );
     }
 

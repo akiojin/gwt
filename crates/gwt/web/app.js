@@ -3555,6 +3555,11 @@
             recomputeOperatorTelemetry();
             label.textContent = windowRuntimeLabel(runtimeState);
             const effectiveDetail = detailMap.get(windowId);
+            const statusTitle = effectiveDetail
+              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
+              : windowRuntimeLabel(runtimeState);
+            chip.title = statusTitle;
+            label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
               if (messageEl) {
@@ -3565,9 +3570,7 @@
               updateTerminalOverlayCopyState(overlay);
               overlay.classList.toggle(
                 "visible",
-                runtimeState === "error" ||
-                  runtimeState === "stopped" ||
-                  (runtimeState === "running" && Boolean(effectiveDetail)),
+                runtimeState === "running" && Boolean(effectiveDetail),
               );
               if (runtimeState === "running" && Boolean(effectiveDetail)) {
                 startSpinnerAnimation(overlay);
