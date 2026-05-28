@@ -513,6 +513,23 @@ export function createUpdateCtaController({
     return `${mb.toFixed(1)} MB`;
   }
 
+  // SPEC #2780 v2 Amendment (FR-014, Codex review on PR #2917): Release
+  // Notes window drives the apply pipeline for an arbitrary version. The
+  // modal must be in `downloading` state before subsequent
+  // `UpdateProgress` / `UpdateReady` events arrive, otherwise the
+  // existing handlers above drop them silently (because `status !==
+  // "applying"`). External callers invoke this to transition the CTA into
+  // the same state `handleClick()` produces for the standard latest-update
+  // path, without sending `apply_update_start` themselves.
+  function beginDownloadingFor(version) {
+    if (!version) return;
+    pendingVersion = null;
+    lastProgress = null;
+    latestVersion = version;
+    renderCta("applying", "Applying update...");
+    renderModalDownloading(version);
+  }
+
   return {
     handleUpdateState,
     handleUpdateProgress,
@@ -522,5 +539,6 @@ export function createUpdateCtaController({
     showAvailable,
     showReadyPending,
     showError,
+    beginDownloadingFor,
   };
 }
