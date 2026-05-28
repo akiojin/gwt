@@ -138,6 +138,11 @@ pub struct WindowRuntime {
     status_thread: Option<JoinHandle<()>>,
 }
 
+struct RuntimeStopThreads {
+    output_thread: Option<JoinHandle<()>>,
+    status_thread: Option<JoinHandle<()>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
@@ -852,6 +857,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::PasteImage { .. }
+        | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachFiles { .. } => return None,
     };
     Some(log)
@@ -936,7 +942,9 @@ impl AgentWindowPlacement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImagePasteFile {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) remove_source_after_save: bool,
     pub(crate) storage_path: PathBuf,
     pub(crate) agent_path: String,
     pub(crate) prompt_text: String,
@@ -963,7 +971,6 @@ impl std::fmt::Display for ImagePasteError {
     }
 }
 
-const IMAGE_PASTE_RELATIVE_DIR: &str = ".gwt/paste-images";
 const IMAGE_PASTE_PROMPT_PREFIX: &str = "Image file: ";
 const FILE_ATTACHMENT_RELATIVE_DIR: &str = ".gwt/drop-files";
 static IMAGE_PASTE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -971,6 +978,8 @@ static IMAGE_PASTE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedFileAttachment {
     pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) source_path: Option<PathBuf>,
+    pub(crate) remove_source_after_save: bool,
     pub(crate) storage_path: Option<PathBuf>,
     pub(crate) agent_path: String,
 }
@@ -984,6 +993,7 @@ pub(crate) enum FileAttachmentError {
     NotAFile(String),
     ReadFailed(String),
     WriteFailed(String),
+    UploadedFileMissing(String),
 }
 
 impl std::fmt::Display for FileAttachmentError {
@@ -1004,6 +1014,12 @@ impl std::fmt::Display for FileAttachmentError {
             Self::ReadFailed(error) => write!(formatter, "failed to read file attachment: {error}"),
             Self::WriteFailed(error) => {
                 write!(formatter, "failed to save file attachment: {error}")
+            }
+            Self::UploadedFileMissing(upload_id) => {
+                write!(
+                    formatter,
+                    "uploaded file attachment is missing: {upload_id}"
+                )
             }
         }
     }
@@ -1068,25 +1084,9 @@ fn sanitize_file_attachment_name(filename: &str) -> String {
     }
 }
 
-fn join_agent_visible_path(agent_project_root: &str, relative_path: &str) -> String {
-    let root = agent_project_root.trim();
-    if root.is_empty() {
-        return relative_path.to_string();
-    }
-    if root.contains('\\') && !root.contains('/') {
-        format!(
-            "{}\\{}",
-            root.trim_end_matches('\\'),
-            relative_path.replace('/', "\\")
-        )
-    } else {
-        format!("{}/{}", root.trim_end_matches('/'), relative_path)
-    }
-}
-
 fn attachment_storage_paths(
     worktree_path: &Path,
-    agent_project_root: &str,
+    _agent_project_root: &str,
     unique_token: &str,
     filename: &str,
 ) -> (PathBuf, String) {
@@ -1097,7 +1097,7 @@ fn attachment_storage_paths(
         .join("drop-files")
         .join(&file_name);
     let relative_path = format!("{FILE_ATTACHMENT_RELATIVE_DIR}/{file_name}");
-    let agent_path = join_agent_visible_path(agent_project_root, &relative_path);
+    let agent_path = relative_path;
     (storage_path, agent_path)
 }
 
@@ -1115,7 +1115,9 @@ pub(crate) fn prepare_file_attachment(
     file: &gwt::FileAttachment,
     unique_token: &str,
     limits: ContentLimits,
+    upload_store: &AttachmentUploadStore,
 ) -> Result<PreparedFileAttachment, FileAttachmentError> {
+    let _ = runtime_target;
     match file {
         gwt::FileAttachment::NativePath { path } => {
             let path = path.trim();
@@ -1128,16 +1130,6 @@ pub(crate) fn prepare_file_attachment(
             if !metadata.is_file() {
                 return Err(FileAttachmentError::NotAFile(path.to_string()));
             }
-            if runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
-                return Ok(PreparedFileAttachment {
-                    bytes: None,
-                    storage_path: None,
-                    agent_path: source.display().to_string(),
-                });
-            }
-            validate_file_attachment_size(metadata.len(), limits.binary_chunk_max_bytes)?;
-            let bytes = std::fs::read(&source)
-                .map_err(|error| FileAttachmentError::ReadFailed(error.to_string()))?;
             let filename = source
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1145,7 +1137,9 @@ pub(crate) fn prepare_file_attachment(
             let (storage_path, agent_path) =
                 attachment_storage_paths(worktree_path, agent_project_root, unique_token, filename);
             Ok(PreparedFileAttachment {
-                bytes: Some(bytes),
+                bytes: None,
+                source_path: Some(source),
+                remove_source_after_save: false,
                 storage_path: Some(storage_path),
                 agent_path,
             })
@@ -1173,6 +1167,39 @@ pub(crate) fn prepare_file_attachment(
                 attachment_storage_paths(worktree_path, agent_project_root, unique_token, filename);
             Ok(PreparedFileAttachment {
                 bytes: Some(bytes),
+                source_path: None,
+                remove_source_after_save: false,
+                storage_path: Some(storage_path),
+                agent_path,
+            })
+        }
+        gwt::FileAttachment::Uploaded {
+            upload_id,
+            filename,
+            size,
+            ..
+        } => {
+            let uploaded = upload_store
+                .take(upload_id)
+                .map_err(FileAttachmentError::ReadFailed)?
+                .ok_or_else(|| FileAttachmentError::UploadedFileMissing(upload_id.clone()))?;
+            if uploaded.size != *size {
+                return Err(FileAttachmentError::SizeMismatch {
+                    declared: *size,
+                    actual: uploaded.size,
+                });
+            }
+            let filename = if filename.trim().is_empty() {
+                uploaded.filename.as_str()
+            } else {
+                filename.as_str()
+            };
+            let (storage_path, agent_path) =
+                attachment_storage_paths(worktree_path, agent_project_root, unique_token, filename);
+            Ok(PreparedFileAttachment {
+                bytes: None,
+                source_path: Some(uploaded.path),
+                remove_source_after_save: true,
                 storage_path: Some(storage_path),
                 agent_path,
             })
@@ -1184,10 +1211,15 @@ fn save_file_attachment(file: &PreparedFileAttachment) -> Result<(), FileAttachm
     let Some(storage_path) = file.storage_path.as_ref() else {
         return Ok(());
     };
-    let Some(bytes) = file.bytes.as_ref() else {
-        return Ok(());
-    };
-    write_attachment_bytes(storage_path, bytes).map_err(FileAttachmentError::WriteFailed)
+    if let Some(bytes) = file.bytes.as_ref() {
+        return write_attachment_bytes(storage_path, bytes)
+            .map_err(FileAttachmentError::WriteFailed);
+    }
+    if let Some(source_path) = file.source_path.as_ref() {
+        copy_attachment_file(source_path, storage_path, file.remove_source_after_save)
+            .map_err(FileAttachmentError::WriteFailed)?;
+    }
+    Ok(())
 }
 
 fn quote_file_attachment_path(path: &str) -> String {
@@ -1240,14 +1272,57 @@ pub(crate) fn prepare_image_paste_file(
     let file_name = format!("{unique_token}-{stem}.{extension}");
     let storage_path = worktree_path
         .join(".gwt")
-        .join("paste-images")
+        .join("drop-files")
         .join(&file_name);
-    let relative_path = format!("{IMAGE_PASTE_RELATIVE_DIR}/{file_name}");
-    let agent_path = join_agent_visible_path(agent_project_root, &relative_path);
+    let relative_path = format!("{FILE_ATTACHMENT_RELATIVE_DIR}/{file_name}");
+    let _ = agent_project_root;
+    let agent_path = relative_path;
     let prompt_text = format!("{IMAGE_PASTE_PROMPT_PREFIX}{agent_path}");
 
     Ok(ImagePasteFile {
-        bytes,
+        bytes: Some(bytes),
+        source_path: None,
+        remove_source_after_save: false,
+        storage_path,
+        agent_path,
+        prompt_text,
+    })
+}
+
+pub(crate) fn prepare_uploaded_image_paste_file(
+    worktree_path: &Path,
+    upload_store: &AttachmentUploadStore,
+    upload_id: &str,
+    mime_type: &str,
+    filename: Option<&str>,
+    declared_size: u64,
+    unique_token: &str,
+) -> Result<ImagePasteFile, ImagePasteError> {
+    let extension = image_extension_for_mime(mime_type)
+        .ok_or_else(|| ImagePasteError::UnsupportedMimeType(mime_type.to_string()))?;
+    let uploaded = upload_store
+        .take(upload_id)
+        .map_err(ImagePasteError::WriteFailed)?
+        .ok_or_else(|| {
+            ImagePasteError::WriteFailed(format!("uploaded image missing: {upload_id}"))
+        })?;
+    if uploaded.size == 0 || declared_size == 0 {
+        return Err(ImagePasteError::EmptyPayload);
+    }
+    let stem = sanitize_image_paste_stem(filename.or(Some(uploaded.filename.as_str())));
+    let file_name = format!("{unique_token}-{stem}.{extension}");
+    let storage_path = worktree_path
+        .join(".gwt")
+        .join("drop-files")
+        .join(&file_name);
+    let relative_path = format!("{FILE_ATTACHMENT_RELATIVE_DIR}/{file_name}");
+    let agent_path = relative_path;
+    let prompt_text = format!("{IMAGE_PASTE_PROMPT_PREFIX}{agent_path}");
+
+    Ok(ImagePasteFile {
+        bytes: None,
+        source_path: Some(uploaded.path),
+        remove_source_after_save: true,
         storage_path,
         agent_path,
         prompt_text,
@@ -1271,8 +1346,36 @@ fn write_attachment_bytes(storage_path: &Path, bytes: &[u8]) -> Result<(), Strin
     std::fs::write(storage_path, bytes).map_err(|error| error.to_string())
 }
 
+fn copy_attachment_file(
+    source_path: &Path,
+    storage_path: &Path,
+    remove_source_after_save: bool,
+) -> Result<(), String> {
+    let Some(parent) = storage_path.parent() else {
+        return Err("attachment path has no parent directory".to_string());
+    };
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    std::fs::copy(source_path, storage_path).map_err(|error| error.to_string())?;
+    if remove_source_after_save {
+        let _ = std::fs::remove_file(source_path);
+    }
+    Ok(())
+}
+
 fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
-    write_attachment_bytes(&image.storage_path, &image.bytes).map_err(ImagePasteError::WriteFailed)
+    if let Some(bytes) = image.bytes.as_ref() {
+        return write_attachment_bytes(&image.storage_path, bytes)
+            .map_err(ImagePasteError::WriteFailed);
+    }
+    if let Some(source_path) = image.source_path.as_ref() {
+        return copy_attachment_file(
+            source_path,
+            &image.storage_path,
+            image.remove_source_after_save,
+        )
+        .map_err(ImagePasteError::WriteFailed);
+    }
+    Err(ImagePasteError::EmptyPayload)
 }
 
 #[derive(Debug, Clone)]
@@ -3092,6 +3195,9 @@ pub struct AppRuntime {
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
     pub(crate) pty_writers: PtyWriterRegistry,
+    /// Browser-uploaded attachment temp files waiting to be staged under the
+    /// active worktree.
+    pub(crate) attachment_uploads: AttachmentUploadStore,
     /// Async writer that flushes session/workspace snapshots off the event
     /// loop thread (Issue #2694 Phase B).
     pub(crate) persist_dispatcher: persist_dispatcher::PersistDispatcher,
@@ -3130,6 +3236,7 @@ impl AppRuntime {
     pub(crate) fn new(
         proxy: EventLoopProxy<UserEvent>,
         pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
@@ -3188,6 +3295,7 @@ impl AppRuntime {
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers,
+            attachment_uploads,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
@@ -3533,6 +3641,19 @@ impl AppRuntime {
                 mime_type,
                 filename,
             } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
+            FrontendEvent::PasteImageUploaded {
+                id,
+                upload_id,
+                mime_type,
+                filename,
+                size,
+            } => self.paste_image_uploaded_events(
+                &id,
+                &upload_id,
+                &mime_type,
+                filename.as_deref(),
+                size,
+            ),
             FrontendEvent::AttachFiles { id, files } => self.attach_files_events(&id, files),
             FrontendEvent::LoadFileTree { id, path } => {
                 let path = path.unwrap_or_default();
@@ -5024,6 +5145,71 @@ impl AppRuntime {
         self.terminal_input_events(id, &image.prompt_text)
     }
 
+    pub(crate) fn paste_image_uploaded_events(
+        &mut self,
+        id: &str,
+        upload_id: &str,
+        mime_type: &str,
+        filename: Option<&str>,
+        size: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
+            return Vec::new();
+        };
+        if self.tab(&address.tab_id).is_none() {
+            tracing::debug!(window_id = %id, "uploaded image paste dropped: project tab not found");
+            return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(id) else {
+            tracing::debug!(
+                window_id = %id,
+                "uploaded image paste dropped: active agent session not found"
+            );
+            return Vec::new();
+        };
+        let worktree_path = session.worktree_path.clone();
+        let runtime_target = session.runtime_target;
+
+        let image = match prepare_uploaded_image_paste_file(
+            &worktree_path,
+            &self.attachment_uploads,
+            upload_id,
+            mime_type,
+            filename,
+            size,
+            &image_paste_unique_token(),
+        ) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::debug!(
+                    window_id = %id,
+                    mime_type,
+                    error = %error,
+                    "uploaded image paste dropped"
+                );
+                return Vec::new();
+            }
+        };
+
+        if let Err(error) = save_image_paste_file(&image) {
+            return self.handle_runtime_status(
+                id.to_string(),
+                WindowProcessStatus::Error,
+                Some(error.to_string()),
+            );
+        }
+
+        tracing::debug!(
+            window_id = %id,
+            runtime_target = ?runtime_target,
+            path = %image.storage_path.display(),
+            agent_path = %image.agent_path,
+            "saved uploaded pasted image"
+        );
+        self.terminal_input_events(id, &image.prompt_text)
+    }
+
     pub(crate) fn attach_files_events(
         &mut self,
         id: &str,
@@ -5063,6 +5249,7 @@ impl AppRuntime {
                 file,
                 &token,
                 limits,
+                &self.attachment_uploads,
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -7487,13 +7674,14 @@ impl AppRuntime {
                 }
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_host_package_runner_fallback(&mut config)
-            {
-                proxy.send(UserEvent::LaunchProgress {
-                    window_id: window_id.clone(),
-                    message: "bunx unavailable, switching to npx...".to_string(),
-                });
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+                let fallback_report = apply_host_package_runner_fallback_checked(&mut config)?;
+                for message in fallback_report.messages {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message,
+                    });
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             apply_windows_host_shell_wrapper(&mut config)?;
@@ -7739,48 +7927,75 @@ impl AppRuntime {
     }
 
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
+        let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
+        Self::join_runtime_stop_threads(threads);
+    }
+
+    fn start_window_runtime_stop(
+        &mut self,
+        window_id: &str,
+        mark_session_stopped: bool,
+    ) -> RuntimeStopThreads {
         if mark_session_stopped {
             self.mark_agent_session_stopped(window_id);
         }
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
+        let mut threads = RuntimeStopThreads {
+            output_thread: None,
+            status_thread: None,
+        };
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
             }
-            if let Some(handle) = runtime.output_thread.take() {
-                // PTY and its process group were already terminated by
-                // `pane.kill()`, so the reader should see EOF quickly. Cap
-                // the wait anyway so shutdown never stalls the event loop
-                // if a stuck syscall keeps the reader in `read`. If the
-                // timeout elapses the reader thread is detached; its Arc
-                // clone of the Pane will still be released when the thread
-                // does finally observe EOF.
-                let (tx, rx) = std_mpsc::channel();
-                thread::spawn(move || {
-                    let _ = handle.join();
-                    let _ = tx.send(());
-                });
-                let _ = rx.recv_timeout(Duration::from_millis(500));
-            }
-            if let Some(handle) = runtime.status_thread.take() {
-                let (tx, rx) = std_mpsc::channel();
-                thread::spawn(move || {
-                    let _ = handle.join();
-                    let _ = tx.send(());
-                });
-                let _ = rx.recv_timeout(Duration::from_millis(500));
-            }
+            threads.output_thread = runtime.output_thread.take();
+            threads.status_thread = runtime.status_thread.take();
         }
         self.window_details.remove(window_id);
+        threads
+    }
+
+    fn join_runtime_stop_threads(mut threads: RuntimeStopThreads) {
+        if let Some(handle) = threads.output_thread.take() {
+            // PTY and its process group were already terminated by
+            // `pane.kill()`, so the reader should see EOF quickly. Cap
+            // the wait anyway so shutdown never stalls the event loop
+            // if a stuck syscall keeps the reader in `read`. If the
+            // timeout elapses the reader thread is detached; its Arc
+            // clone of the Pane will still be released when the thread
+            // does finally observe EOF.
+            let (tx, rx) = std_mpsc::channel();
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+        }
+        if let Some(handle) = threads.status_thread.take() {
+            let (tx, rx) = std_mpsc::channel();
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_millis(500));
+        }
     }
 
     /// Stop every active window runtime. Called from the application shutdown
     /// paths so no PTY / agent process outlives the GUI.
     pub(crate) fn stop_all_runtimes(&mut self) {
         let ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        self.stop_runtimes_in_shutdown_order(ids);
+    }
+
+    fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
+        let mut threads = Vec::new();
         for id in ids {
-            self.stop_window_runtime_inner(&id, false);
+            threads.push(self.start_window_runtime_stop(&id, false));
+        }
+        for runtime_threads in threads {
+            Self::join_runtime_stop_threads(runtime_threads);
         }
     }
 
@@ -8948,7 +9163,10 @@ mod tests {
         LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
         ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
     };
-    use crate::{combined_window_id, geometry_to_pty_size, same_worktree_path, PtyWriterRegistry};
+    use crate::{
+        combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
+        PtyWriterRegistry, UploadedAttachment,
+    };
 
     #[derive(Debug, Clone)]
     struct CapturedTracingEvent {
@@ -9484,7 +9702,7 @@ exit 1
     }
 
     #[test]
-    fn image_paste_prepare_uses_host_absolute_path_reference() {
+    fn image_paste_prepare_uses_drop_files_relative_path_reference() {
         let temp = tempdir().expect("tempdir");
         let payload = base64::engine::general_purpose::STANDARD.encode(b"image-bytes");
         let agent_root = temp.path().display().to_string();
@@ -9501,15 +9719,18 @@ exit 1
         let expected_path = temp
             .path()
             .join(".gwt")
-            .join("paste-images")
+            .join("drop-files")
             .join("20260507-160000-screen-shot.png");
 
-        assert_eq!(prepared.bytes, b"image-bytes");
+        assert_eq!(prepared.bytes.as_deref(), Some(&b"image-bytes"[..]));
         assert_eq!(prepared.storage_path, expected_path);
-        assert_eq!(prepared.agent_path, expected_path.display().to_string());
+        assert_eq!(
+            prepared.agent_path,
+            ".gwt/drop-files/20260507-160000-screen-shot.png"
+        );
         assert_eq!(
             prepared.prompt_text,
-            format!("Image file: {}", expected_path.display())
+            "Image file: .gwt/drop-files/20260507-160000-screen-shot.png"
         );
     }
 
@@ -9532,16 +9753,16 @@ exit 1
             prepared.storage_path,
             temp.path()
                 .join(".gwt")
-                .join("paste-images")
+                .join("drop-files")
                 .join("20260507-160001-clipboard-image.jpg")
         );
         assert_eq!(
             prepared.agent_path,
-            "/workspace/project/.gwt/paste-images/20260507-160001-clipboard-image.jpg"
+            ".gwt/drop-files/20260507-160001-clipboard-image.jpg"
         );
         assert_eq!(
             prepared.prompt_text,
-            "Image file: /workspace/project/.gwt/paste-images/20260507-160001-clipboard-image.jpg"
+            "Image file: .gwt/drop-files/20260507-160001-clipboard-image.jpg"
         );
     }
 
@@ -9618,12 +9839,16 @@ exit 1
         let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
         assert!(events.is_empty());
-        let paste_dir = worktree.join(".gwt").join("paste-images");
-        let files = fs::read_dir(&paste_dir)
-            .expect("read paste dir")
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect paste files");
         assert_eq!(files.len(), 1, "expected one saved image");
+        assert!(
+            !worktree.join(".gwt").join("paste-images").exists(),
+            "new image paste files must not be written to legacy paste-images"
+        );
         let saved_path = files[0].path();
         assert_eq!(
             saved_path.extension().and_then(|ext| ext.to_str()),
@@ -9632,6 +9857,84 @@ exit 1
         assert_eq!(
             fs::read(saved_path).expect("read saved image"),
             b"webp-bytes"
+        );
+    }
+
+    #[test]
+    fn uploaded_image_paste_event_saves_file_under_drop_files() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let uploaded_path = temp.path().join("image-upload.tmp");
+        fs::write(&uploaded_path, b"png-upload").expect("write uploaded image");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime
+            .attachment_uploads
+            .insert(
+                "image-upload-1".to_string(),
+                UploadedAttachment {
+                    path: uploaded_path.clone(),
+                    filename: "Screenshot.png".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                    size: 10,
+                },
+            )
+            .expect("register image upload");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/image-paste".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": window_id,
+            "upload_id": "image-upload-1",
+            "mime_type": "image/png",
+            "filename": "Screenshot.png",
+            "size": 10
+        }))
+        .expect("deserialize uploaded paste image event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(files.len(), 1, "expected one saved uploaded image");
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved image"),
+            b"png-upload"
+        );
+        assert!(
+            !uploaded_path.exists(),
+            "uploaded temp image should be removed"
+        );
+        assert!(
+            !worktree.join(".gwt").join("paste-images").exists(),
+            "uploaded image paste must not create legacy paste-images"
         );
     }
 
@@ -9666,13 +9969,13 @@ exit 1
 
         assert!(events.is_empty());
         assert!(
-            !worktree.join(".gwt").join("paste-images").exists(),
+            !worktree.join(".gwt").join("drop-files").exists(),
             "non-agent terminal paste must not create image files"
         );
     }
 
     #[test]
-    fn file_attachment_prepare_uses_host_native_path_reference() {
+    fn file_attachment_prepare_copies_host_native_path_under_drop_files() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo");
         fs::create_dir_all(&worktree).expect("create worktree");
@@ -9688,18 +9991,27 @@ exit 1
             },
             "20260524-attach",
             ContentLimits::default(),
+            &AttachmentUploadStore::in_system_temp(),
         )
         .expect("prepare host native path attachment");
 
+        let expected_path = worktree
+            .join(".gwt")
+            .join("drop-files")
+            .join("20260524-attach-report.pdf");
         assert_eq!(prepared.bytes, None);
-        assert_eq!(prepared.storage_path, None);
-        assert_eq!(prepared.agent_path, source.display().to_string());
+        assert_eq!(prepared.source_path.as_deref(), Some(source.as_path()));
+        assert_eq!(
+            prepared.storage_path.as_deref(),
+            Some(expected_path.as_path())
+        );
+        assert_eq!(
+            prepared.agent_path,
+            ".gwt/drop-files/20260524-attach-report.pdf"
+        );
         assert_eq!(
             super::format_file_attachment_prompt(&[prepared.agent_path]),
-            format!(
-                "File: {}",
-                super::quote_file_attachment_path(&source.display().to_string())
-            )
+            "File: \".gwt/drop-files/20260524-attach-report.pdf\""
         );
     }
 
@@ -9722,6 +10034,7 @@ exit 1
             },
             "20260524-inline",
             ContentLimits::default(),
+            &AttachmentUploadStore::in_system_temp(),
         )
         .expect("prepare inline file attachment");
 
@@ -9734,7 +10047,10 @@ exit 1
             prepared.storage_path.as_deref(),
             Some(expected_path.as_path())
         );
-        assert_eq!(prepared.agent_path, expected_path.display().to_string());
+        assert_eq!(
+            prepared.agent_path,
+            ".gwt/drop-files/20260524-inline-notes-2026.txt"
+        );
     }
 
     #[test]
@@ -9754,10 +10070,12 @@ exit 1
             },
             "20260524-docker",
             ContentLimits::default(),
+            &AttachmentUploadStore::in_system_temp(),
         )
         .expect("prepare docker native file attachment");
 
-        assert_eq!(prepared.bytes.as_deref(), Some(&b"docker-bytes"[..]));
+        assert_eq!(prepared.bytes, None);
+        assert_eq!(prepared.source_path.as_deref(), Some(source.as_path()));
         assert_eq!(
             prepared.storage_path.as_deref(),
             Some(
@@ -9770,7 +10088,7 @@ exit 1
         );
         assert_eq!(
             prepared.agent_path,
-            "/workspace/project/.gwt/drop-files/20260524-docker-data-set.bin"
+            ".gwt/drop-files/20260524-docker-data-set.bin"
         );
     }
 
@@ -9797,6 +10115,7 @@ exit 1
             },
             "20260524-large",
             limits,
+            &AttachmentUploadStore::in_system_temp(),
         );
         assert!(matches!(
             too_large,
@@ -9812,6 +10131,7 @@ exit 1
             },
             "20260524-dir",
             ContentLimits::default(),
+            &AttachmentUploadStore::in_system_temp(),
         );
         assert!(matches!(
             directory,
@@ -9901,6 +10221,152 @@ exit 1
         assert_eq!(
             fs::read(files[0].path()).expect("read saved file"),
             b"text-bytes"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_saves_native_path_under_drop_files() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let source = temp.path().join("large-host-file.bin");
+        fs::write(&source, b"native-bytes").expect("write native source");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": source.display().to_string()
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(files.len(), 1, "expected one saved native file");
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved file"),
+            b"native-bytes"
+        );
+        assert!(
+            files[0]
+                .file_name()
+                .to_string_lossy()
+                .ends_with("large-host-file.bin"),
+            "saved native file should keep sanitized source basename"
+        );
+    }
+
+    #[test]
+    fn file_attachment_event_saves_uploaded_file_under_drop_files() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let uploaded_path = temp.path().join("upload.tmp");
+        fs::write(&uploaded_path, b"uploaded-bytes").expect("write uploaded temp");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime
+            .attachment_uploads
+            .insert(
+                "upload-1".to_string(),
+                UploadedAttachment {
+                    path: uploaded_path.clone(),
+                    filename: "Browser Large.bin".to_string(),
+                    mime_type: Some("application/octet-stream".to_string()),
+                    size: 14,
+                },
+            )
+            .expect("register upload");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "uploaded",
+                    "upload_id": "upload-1",
+                    "filename": "Browser Large.bin",
+                    "mime_type": "application/octet-stream",
+                    "size": 14
+                }
+            ]
+        }))
+        .expect("deserialize attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        let drop_dir = worktree.join(".gwt").join("drop-files");
+        let files = fs::read_dir(&drop_dir)
+            .expect("read drop dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect drop files");
+        assert_eq!(files.len(), 1, "expected one saved uploaded file");
+        assert_eq!(
+            fs::read(files[0].path()).expect("read saved file"),
+            b"uploaded-bytes"
+        );
+        assert!(
+            !uploaded_path.exists(),
+            "uploaded temp file should be removed after staging"
         );
     }
 
@@ -10053,6 +10519,26 @@ exit 1
         sample_runtime_with_events(temp_root, tabs, active_tab_id).0
     }
 
+    fn long_running_test_pane(id: &str) -> Pane {
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "ping -n 30 127.0.0.1 > nul".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "sleep 30".to_string()],
+            )
+        };
+        Pane::new(id.to_string(), command, args, 80, 24, HashMap::new(), None).expect("test pane")
+    }
+
     fn sample_runtime_with_events(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
@@ -10096,6 +10582,7 @@ exit 1
             issue_link_cache_dir: gwt_cache_dir(),
             pending_update: None,
             pty_writers,
+            attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
@@ -15471,6 +15958,67 @@ exit 1
             .contains_key(&window_id));
 
         runtime.stop_window_runtime(&window_id);
+    }
+
+    #[test]
+    fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
+        let temp = tempdir().expect("tempdir");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let blocker_id = "a-blocking-runtime".to_string();
+        let observed_id = "b-observed-runtime".to_string();
+        let blocking_pane = Arc::new(Mutex::new(long_running_test_pane(&blocker_id)));
+        let observed_pane = Arc::new(Mutex::new(long_running_test_pane(&observed_id)));
+        let observed_pane_for_assertion = observed_pane.clone();
+        let blocking_join = thread::spawn(|| thread::sleep(Duration::from_secs(2)));
+
+        runtime.runtimes.insert(
+            blocker_id.clone(),
+            WindowRuntime {
+                pane: blocking_pane,
+                output_thread: Some(blocking_join),
+                status_thread: None,
+            },
+        );
+        runtime.runtimes.insert(
+            observed_id.clone(),
+            WindowRuntime {
+                pane: observed_pane,
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+
+        let stop_thread = thread::spawn(move || {
+            runtime.stop_runtimes_in_shutdown_order(vec![blocker_id, observed_id]);
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let mut observed_exited = false;
+        while Instant::now() < deadline {
+            observed_exited = observed_pane_for_assertion
+                .lock()
+                .expect("observed pane")
+                .pty()
+                .try_wait()
+                .expect("observed try_wait")
+                .is_some();
+            if observed_exited {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        if !observed_exited {
+            let _ = observed_pane_for_assertion
+                .lock()
+                .expect("observed pane cleanup")
+                .kill();
+        }
+        stop_thread.join().expect("stop thread");
+
+        assert!(
+            observed_exited,
+            "shutdown must kill all panes before waiting for any runtime join handle"
+        );
     }
 
     #[test]

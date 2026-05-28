@@ -41,7 +41,6 @@ test("terminal context menu prefers clipboard images before text fallback", asyn
         getType: async (type) => ({ type }),
       },
     ],
-    blobToBase64: async () => "aW1hZ2U=",
     readClipboardText: async () => {
       readTextCount += 1;
       return "plain text";
@@ -56,7 +55,9 @@ test("terminal context menu prefers clipboard images before text fallback", asyn
   assert.deepEqual(fixture.pastedText, []);
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.pastedImages)), [
     {
-      dataBase64: "aW1hZ2U=",
+      blob: {
+        type: "image/png",
+      },
       mimeType: "image/png",
       filename: null,
     },
@@ -125,7 +126,6 @@ function mountFixture(overrides = {}) {
     terminalRoot,
     readClipboardText: async () => "",
     readClipboardItems: async () => [],
-    blobToBase64: async () => null,
     pasteText: (text) => pastedText.push(text),
     pasteImage: (payload) => pastedImages.push(payload),
     focusTerminal: () => {

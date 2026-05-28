@@ -6,7 +6,6 @@ export function createTerminalContextMenuController({
   terminalRoot,
   readClipboardText = async () => "",
   readClipboardItems = async () => [],
-  blobToBase64 = async () => null,
   pasteText = () => {},
   pasteImage = () => {},
   focusTerminal = () => {},
@@ -48,7 +47,6 @@ export function createTerminalContextMenuController({
     try {
       const image = await readClipboardImage({
         readClipboardItems,
-        blobToBase64,
         supportedImageTypes,
       });
       if (image) {
@@ -120,7 +118,6 @@ export function createTerminalContextMenuController({
 
 async function readClipboardImage({
   readClipboardItems,
-  blobToBase64,
   supportedImageTypes,
 }) {
   let items = [];
@@ -138,12 +135,8 @@ async function readClipboardImage({
       if (!blob) {
         continue;
       }
-      const dataBase64 = await blobToBase64(blob);
-      if (!dataBase64) {
-        continue;
-      }
       return {
-        dataBase64,
+        blob,
         mimeType,
         filename: null,
       };

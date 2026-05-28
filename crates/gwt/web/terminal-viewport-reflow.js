@@ -208,6 +208,7 @@ export function runTerminalActivationSequence({
   windowId,
   shouldFocus = true,
   shouldPersistGeometry = true,
+  syncGeometryOnGridChange = false,
   sendGeometry,
 }) {
   if (!runtime || !runtime.terminal || !runtime.fitAddon) {
@@ -216,33 +217,31 @@ export function runTerminalActivationSequence({
   const { terminal, fitAddon } = runtime;
   const currentGrid = currentTerminalGrid(terminal);
   const parent = terminal.element && terminal.element.parentElement;
-  // Issue #2923: the previous gate (`parent && !elementHasLayoutBox(parent)`)
-  // silently skipped when `parent` was null and let fit resolve against an
-  // unknown layout reference. A null parent at activation time means the
-  // terminal host is not attached, so `fitAddon.fit()` would fall back to
-  // xterm's default 80×24 grid and `isReady` would flip true on that
-  // wrong grid — the exact regression signature ("Welcome back Akio!"
-  // splash fragmented, recovers on resize). Require a real parent with a
-  // measurable layout box before continuing.
-  if (!parent || !elementHasLayoutBox(parent)) {
+  if (parent && !elementHasLayoutBox(parent)) {
     return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   const rowsForRefresh = Math.max((terminal.rows || 1) - 1, 0);
   terminal.refresh(0, rowsForRefresh);
-  if (typeof parent.getBoundingClientRect === "function") {
+  if (parent && typeof parent.getBoundingClientRect === "function") {
     parent.getBoundingClientRect();
   }
   if (!fitAddonCanResolveDimensions(fitAddon)) {
     return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
   }
   fitAddon.fit();
-  if (shouldPersistGeometry && typeof sendGeometry === "function") {
-    sendGeometry(windowId, terminal.cols, terminal.rows);
+  const fittedGrid = currentTerminalGrid(terminal);
+  const gridChanged =
+    fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;
+  if (
+    (shouldPersistGeometry || (syncGeometryOnGridChange && gridChanged)) &&
+    typeof sendGeometry === "function"
+  ) {
+    sendGeometry(windowId, fittedGrid.cols, fittedGrid.rows);
   }
   if (shouldFocus && typeof terminal.focus === "function") {
     terminal.focus();
   }
-  return { ran: true, cols: terminal.cols, rows: terminal.rows };
+  return { ran: true, cols: fittedGrid.cols, rows: fittedGrid.rows };
 }
 
 /**

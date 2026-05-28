@@ -102,34 +102,45 @@ Linux desktop builds also require WebKitGTK-related system packages. See
 
 ## Usage
 
-Launch the native GUI:
+Launching `gwt` installs a system-tray icon (macOS menubar / Windows
+notification area / Linux StatusNotifierItem-capable DE). Drive it from
+the tray menu:
+
+- **Open in browser** — launches the OS default browser at
+  `http://127.0.0.1:<port>/`. The same URL can be opened in any other
+  browser too.
+- **Start at login** — checking it installs an OS-native autostart
+  entry (macOS LaunchAgent / Windows HKCU Run / Linux XDG autostart)
+  via the `auto-launch` crate, so `gwt` resumes at the next login
+  (SPEC #2920).
+- **Quit** — gracefully shuts the tray icon, embedded server, and
+  PTY children down in order.
 
 ```bash
-gwt
+gwt                                 # install tray + start embedded server
+gwt open                            # open the running tray's URL in the OS default browser
 ```
 
-At startup you can restore the previous session or open a new project
-directory. The app also starts a local HTTP/WebSocket server for the WebView
-surface and prints a URL such as `http://127.0.0.1:<port>/` to stderr. You can
-open that URL in a regular browser while the native app is running.
+`gwt open` is the Linux fallback for desktops that do not run a
+StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
+extension). The embedded server still starts and prints
+`gwt browser URL: ...` to stderr, so you can open the URL by hand or
+through `gwt open`.
 
-### Headless / Browser-only mode
+The tray-resident process is one per OS-login user. Launching `gwt`
+twice for the same user makes the second invocation print the
+existing URL to stderr and exit 0 instead of starting a second
+server.
 
-`gwt serve` (equivalent alias: `gwt --headless`) launches the same UI without
-opening a native window. The embedded HTTP / WebSocket server stays up and
-the operator opens the printed URL in any browser instead.
+### `gwt serve` removal
 
-```bash
-gwt serve                              # 127.0.0.1, random port, auto-open browser
-gwt serve --no-open                    # same, but suppress the browser launch (CI / scripts)
-gwt serve --port 8787                  # fixed port + auto-open browser
-gwt serve --bind 0.0.0.0 --port 8787   # share with the LAN (VPN-extended), auto-open browser
-gwt --headless --port 8787             # same as `gwt serve --port 8787`
-```
-
-The system browser is opened automatically by default. Pass `--no-open` for
-CI / automation use cases that only need the server running. `--open` is kept
-as a no-op flag for backward compatibility with existing scripts.
+The legacy `gwt serve` / `gwt --headless` verbs were removed in
+v10.0.0 (SPEC #2920 Q9). CI / automation scripts that relied on
+`gwt serve --no-open` can keep using the current `gwt` invocation:
+`gwt browser URL: ...` is still written to stderr and
+`GWT_BROWSER_URL_FILE` still receives the bound URL. When the tray
+host is unavailable (e.g. headless CI runners), tray initialisation
+fails silently and the embedded server continues to run.
 
 Trust boundary: **LAN only** (including VPN-extended LAN). `gwt serve` does
 not ship TLS termination, an authentication gate, or rate limiting. Anyone
