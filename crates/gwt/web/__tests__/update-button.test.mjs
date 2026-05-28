@@ -244,6 +244,13 @@ function createFixture({ confirmResult = true } = {}) {
   };
 }
 
+function cssRule(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = componentsCss.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`));
+  assert.ok(match, `expected ${selector} rule inside components.css`);
+  return match[1];
+}
+
 // SPEC-2041 Phase 19 (FR-052..066) — Post-click modal & restart UX.
 //
 // These tests pin the modal-driven state machine before implementation.
@@ -412,6 +419,53 @@ test("SPEC-2780: ready modal exposes 'View release notes' when openReleaseNotes 
   assert.ok(link, "release notes link must be present when wired");
   link.click();
   assert.deepEqual(releaseNotesCalls, ["9.40.0"]);
+});
+
+test("phase20: ready modal copy names gwt and keeps release notes out of the action group", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController({
+    ...fixture.options,
+    openReleaseNotes: () => {},
+  });
+  controller.showAvailable("9.48.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.48.0", asset_path: "/x" });
+
+  const modal = fixture.document.getElementById("update-modal");
+  const version = modal.querySelector(".update-modal__version");
+  const releaseNotes = modal.querySelector("[data-update-modal-release-notes]");
+  const actions = modal.querySelector(".update-modal__actions");
+
+  assert.equal(version.textContent, "gwt v9.48.0 is ready to install.");
+  assert.ok(releaseNotes, "release notes action must be present");
+  assert.equal(releaseNotes.className, "update-modal__link");
+  assert.equal(
+    actions.contains(releaseNotes),
+    false,
+    "release notes must not be grouped with Later / Restart now buttons",
+  );
+  assert.deepEqual(
+    [...actions.children].map((node) => node.textContent),
+    ["Later", "Restart now"],
+  );
+});
+
+test("phase20: update modal css defines compact panel and link-style release notes action", () => {
+  const modalRule = cssRule(".update-modal");
+  const panelRule = cssRule(".update-modal__panel");
+  const actionRule = cssRule(".update-modal__actions");
+  const buttonRule = cssRule(".update-modal__btn");
+  const linkRule = cssRule(".update-modal__link");
+
+  assert.match(modalRule, /background:\s*var\(--color-scrim/);
+  assert.match(panelRule, /width:\s*min\(420px,\s*calc\(100vw - 32px\)\)/);
+  assert.match(panelRule, /padding:\s*var\(--space-6\)/);
+  assert.match(actionRule, /align-items:\s*center/);
+  assert.match(buttonRule, /min-height:\s*36px/);
+  assert.match(buttonRule, /font-size:\s*var\(--type-sm\)/);
+  assert.match(linkRule, /border:\s*0/);
+  assert.match(linkRule, /background:\s*transparent/);
+  assert.match(linkRule, /color:\s*var\(--color-link\)/);
 });
 
 test("SPEC-2780: ready modal omits release notes link when openReleaseNotes is absent", () => {
