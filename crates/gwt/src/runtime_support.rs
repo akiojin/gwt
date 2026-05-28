@@ -514,7 +514,23 @@ pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
             debug_assert!(matches!(
                 top_verb,
-                "board" | "index" | "hook" | "discuss" | "plan" | "build" | "update" | "__internal"
+                "board"
+                    | "index"
+                    | "hook"
+                    | "discuss"
+                    | "plan"
+                    | "build"
+                    | "update"
+                    | "__internal"
+                    | "memory"
+                    | "lessons"
+                    | "discussion"
+                    | "register"
+                    | "daemon"
+                    | "workspace"
+                    | "work"
+                    | "pane"
+                    | "open"
             ));
             FrontDoorRoute::DetachedCli
         }

@@ -142,6 +142,10 @@ pub enum CliCommand {
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Pane(PaneCommand),
+    /// SPEC #2920 FR-006: `gwt open` reads the tray-resident process's
+    /// single-instance lock and launches the OS default browser at the
+    /// embedded server URL. Self-contained — no extra parsed state.
+    Open(open::OpenArgs),
 }
 
 /// SPEC-2077 family enum for `gwtd daemon ...`.
@@ -548,6 +552,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "workspace"
                     | "work"
                     | "pane"
+                    | "open"
             )
         })
         .unwrap_or(false)
@@ -770,6 +775,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Open(args) => open::run(env, args, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
