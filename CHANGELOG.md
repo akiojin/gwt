@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.48.0] - 2026-05-28
+
+### Bug Fixes
+
+- **launch:** Accept Work window preset for Launch/Resume from Git Branches tab
+- Restore unix knowledge bridge test import
+- **gui:** Show running agents in Resume Picker and improve launch preset diagnostics
+- **launch-wizard:** Preserve claude fast mode through runtime resolution
+- **gui:** Filter Resume Picker agents by workspace_id
+- **gui:** Filter Resume Picker by Work item session_ids instead of workspace_id
+
+### Features
+
+- Deepen gwt-discussion depth gate
+- Support claude fast mode at launch
+
+### Miscellaneous Tasks
+
+- Record memory for Work preset launch fix
+- Apply cargo fmt to test assertion
+- Record Resume Picker running agent memory entry
+- Merge origin develop
+- Resolve merge conflict in tasks/memory.md
+
+### Testing
+
+- **playwright:** Cover claude fast mode launch wizard path
+- **playwright:** Launch claude fast mode smoke
+
 ## [9.47.0] - 2026-05-26
 
 ### Bug Fixes
