@@ -6221,3 +6221,10 @@ Type: lesson
 Context: SPEC-2015 Profile Environment Variables grid implemented row-level autosave and re-rendered rows from normalized profile payload.
 Learning: Editable rows that are keyed by the value being edited can lose subsequent key changes after the first autosave/re-render unless the row-local key mirror and backing draft entry are updated together. Pending added rows should also update visible Result cells immediately while debounce save is pending.
 Future Action: When adding autosaved table rows, test multi-character key edits, pending row value edits, backend roundtrip re-render, and duplicate-key collapse before declaring UI behavior complete.
+
+## 2026-05-28 — Work surface rerender must honor legacy preset aliases
+
+Type: failure-pattern
+Context: Visual E2E failures after Work unification: Quiet Work rows stayed empty for windows with preset=workspace because workspace-kanban-surface.renderWindows only refreshed preset=work. Branch Cleanup E2E also still targeted the old standalone branches surface while branches now lives under the Work surface tab.
+Learning: When a surface is renamed or consolidated, async rerender paths and E2E selectors must use the same preset alias set as the mount path. It is easy to update initial mount logic while leaving event-driven refresh paths on the new canonical preset only.
+Future Action: For future surface renames, add unit tests for renderWindows/event refresh using legacy preset aliases, then update Playwright fixtures/selectors to navigate through the canonical visible UI rather than stale standalone surface classes.
