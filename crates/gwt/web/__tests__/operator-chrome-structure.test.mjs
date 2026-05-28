@@ -1240,6 +1240,42 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
+test("terminal error overlay is limited to pre-output startup failures", () => {
+  const visibleToggle = appSource.match(
+    /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
+  );
+  assert.ok(visibleToggle, "expected terminal overlay visibility toggle");
+  assert.match(
+    visibleToggle[1],
+    /shouldShowOverlay/,
+    "expected terminal overlay visibility to be driven by the named guard",
+  );
+  const overlayVisibilitySource = appSource.match(
+    /const\s+shouldShowOverlay\s*=\s*([\s\S]*?);\s*const\s+shouldSpin/,
+  );
+  assert.ok(overlayVisibilitySource, "expected shouldShowOverlay guard");
+  assert.match(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"error"[\s\S]*!terminalHasOutput\(windowId\)/,
+    "error overlay must only be visible for startup failures before terminal output exists",
+  );
+  assert.doesNotMatch(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"stopped"/,
+    "stopped status must not cover the terminal output with the overlay",
+  );
+  assert.match(
+    overlayVisibilitySource[1],
+    /runtimeState\s*===\s*"running"/,
+    "running startup details may still use the explicit copy overlay",
+  );
+  assert.match(
+    appSource,
+    /function\s+terminalHasOutput\(windowId\)[\s\S]+pendingOutputMap[\s\S]+pendingSnapshotMap/,
+    "pre-output detection must include pending writes and snapshots, not just rendered terminal state",
+  );
+});
+
 test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {
   // Catch the gap where someone adds a new @keyframes + animation without
   // pairing it with a reduced-motion override. Approach: for each

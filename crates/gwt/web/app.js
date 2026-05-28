@@ -3558,6 +3558,11 @@
             recomputeOperatorTelemetry();
             label.textContent = windowRuntimeLabel(runtimeState);
             const effectiveDetail = detailMap.get(windowId);
+            const statusTitle = effectiveDetail
+              ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
+              : windowRuntimeLabel(runtimeState);
+            chip.title = statusTitle;
+            label.title = statusTitle;
             if (overlay) {
               const messageEl = overlay.querySelector(".overlay-message");
               if (messageEl) {
@@ -3566,13 +3571,18 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              overlay.classList.toggle(
-                "visible",
-                runtimeState === "error" ||
-                  runtimeState === "stopped" ||
-                  (runtimeState === "running" && Boolean(effectiveDetail)),
-              );
-              if (runtimeState === "running" && Boolean(effectiveDetail)) {
+              const hasDetail = Boolean(effectiveDetail);
+              const shouldShowOverlay =
+                hasDetail &&
+                (runtimeState === "running" ||
+                  (runtimeState === "error" && !terminalHasOutput(windowId)));
+              const shouldSpin = shouldShowOverlay && runtimeState === "running";
+              const spinner = overlay.querySelector(".overlay-spinner");
+              if (spinner) {
+                spinner.hidden = !shouldSpin;
+              }
+              overlay.classList.toggle("visible", shouldShowOverlay);
+              if (shouldSpin) {
                 startSpinnerAnimation(overlay);
               } else {
                 stopSpinnerAnimation(overlay);
@@ -3960,6 +3970,16 @@
         button.disabled = !hasMessage;
       }
 
+      function terminalHasOutput(windowId) {
+        if (terminalMap.get(windowId)?.hasOutput) {
+          return true;
+        }
+        if ((pendingOutputMap.get(windowId)?.length || 0) > 0) {
+          return true;
+        }
+        return pendingSnapshotMap.has(windowId);
+      }
+
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {
         const copyState = {
           mouseDown: false,
@@ -4311,6 +4331,7 @@
           // producing the post-launch corruption symptom.
           isReady: false,
           deferredWrites: [],
+          hasOutput: false,
           // Issue #2832: see completeInitialFitHandshake.
           handshakeAttempts: 0,
         };
@@ -4417,6 +4438,9 @@
               pendingOutputMap.set(windowId, queue);
               return;
             }
+            if (base64) {
+              runtime.hasOutput = true;
+            }
             // SPEC-2008 Phase 26.A / FR-057: if the terminal has not yet
             // completed its initial fit, hold the chunk in the runtime's
             // deferred queue. The createTerminalRuntime rAF flushes this
@@ -4439,6 +4463,9 @@
         if (!runtime) {
           pendingSnapshotMap.set(windowId, base64);
           return;
+        }
+        if (base64) {
+          runtime.hasOutput = true;
         }
         // SPEC-2008 Phase 26.A / FR-057: snapshots that arrive before
         // the initial fit are held in pendingSnapshotMap and replayed
