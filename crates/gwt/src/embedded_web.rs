@@ -1020,6 +1020,34 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
+        // Issue #2937 (#2832 parity for the focus trigger): the focus-change
+        // reflow path must not be a one-shot silent no-op. When
+        // runTerminalActivationSequence returns { ran: false } — e.g. a
+        // tab-group member revealed before its container layout box settles —
+        // scheduleTerminalFocusActivation must re-arm a bounded rAF retry
+        // (activationAttempts capped by HANDSHAKE_RETRY_LIMIT), exactly like
+        // completeInitialFitHandshake does for the initial fit. Without this
+        // the revealed terminal keeps the stale grid until a manual resize.
+        let html = frontend_bundle_source();
+        let focus_retry = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
+        )
+        .expect("valid regex");
+        assert!(
+            focus_retry.is_match(html),
+            "expected scheduleTerminalFocusActivation to re-arm a bounded retry (activationAttempts <= HANDSHAKE_RETRY_LIMIT) when runTerminalActivationSequence returns !ran (Issue #2937)",
+        );
+        let runtime_init =
+            regex::Regex::new(r#"(?s)activationFrame: null,[\s\S]*?activationAttempts: 0,"#)
+                .expect("valid regex");
+        assert!(
+            runtime_init.is_match(html),
+            "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
+        );
+    }
+
+    #[test]
     fn embedded_web_window_pointer_events_force_reset_on_mismatch() {
         // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
         // emits pointerup / pointercancel with a pointerId that does not

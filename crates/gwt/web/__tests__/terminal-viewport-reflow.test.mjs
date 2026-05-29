@@ -641,6 +641,29 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     "focus activation must opt into grid-change geometry sync while keeping caller-owned persistence",
   );
 
+  // Issue #2937 — the focus-change reflow path must not give up after one
+  // frame. When runTerminalActivationSequence can't resolve a real grid yet
+  // (a revealed tab-group member whose container is still 0-size),
+  // scheduleTerminalFocusActivation must re-arm a bounded retry
+  // (activationAttempts <= HANDSHAKE_RETRY_LIMIT), mirroring the
+  // initial-fit handshake. Wiring detection only; the {ran:false} contract
+  // itself is covered by the unit tests above.
+  assert.match(
+    appSource,
+    /const activation = runTerminalActivationSequence\(\{/,
+    "focus activation must capture the activation result to detect !ran",
+  );
+  assert.match(
+    appSource,
+    /if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;/,
+    "focus activation must re-arm a bounded retry when the activation did not run (#2937)",
+  );
+  assert.match(
+    appSource,
+    /activationAttempts: 0,/,
+    "createTerminalRuntime must initialize activationAttempts for the focus-path retry counter (#2937)",
+  );
+
   // Issue #2832 — SPEC-2008 Phase 26.A regression fix: completeInitialFitHandshake
   // must defer (and retry via rAF) while the container has no layout box,
   // so deferredWrites do not flush into xterm's default 80x24 grid before

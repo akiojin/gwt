@@ -9132,11 +9132,11 @@ mod tests {
     use base64::Engine;
     use chrono::{TimeZone, Utc};
     use gwt::{
-        empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
-        BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits, FocusCycleDirection,
-        FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-        ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowGeometry, WindowPreset,
-        WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
+        BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
+        FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext,
+        LaunchWizardState, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowGeometry,
+        WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -10539,6 +10539,17 @@ exit 1
         Pane::new(id.to_string(), command, args, 80, 24, HashMap::new(), None).expect("test pane")
     }
 
+    fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
+        runtime.runtimes.insert(
+            window_id.to_string(),
+            WindowRuntime {
+                pane: Arc::new(Mutex::new(long_running_test_pane(window_id))),
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+    }
+
     fn sample_runtime_with_events(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
@@ -11335,7 +11346,11 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_cycle_focus_resizes_restored_source_runtime() {
+    fn app_runtime_cycle_focus_restores_maximized_source_geometry() {
+        // Switching focus away from a maximized window restores its
+        // pre-maximize geometry (workspace.cycle_focus behavior, surfaced
+        // at the app_runtime integration level). The PTY is intentionally
+        // NOT resized here anymore — the frontend real fit owns PTY size.
         let temp = tempdir().expect("tempdir");
         let bounds = canvas_bounds();
         let tab = sample_project_tab(
@@ -11346,37 +11361,8 @@ exit 1
             &[WindowPreset::Shell, WindowPreset::Claude],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let shell_id = combined_window_id("tab-1", "shell-1");
         let claude_id = combined_window_id("tab-1", "claude-1");
-        for window_id in [&shell_id, &claude_id] {
-            let pane = Pane::new(
-                window_id.clone(),
-                if cfg!(windows) { "cmd" } else { "/bin/sh" }.to_string(),
-                if cfg!(windows) {
-                    vec![
-                        "/d".to_string(),
-                        "/s".to_string(),
-                        "/c".to_string(),
-                        "exit /b 0".to_string(),
-                    ]
-                } else {
-                    vec!["-lc".to_string(), "exit 0".to_string()]
-                },
-                80,
-                24,
-                HashMap::new(),
-                None,
-            )
-            .expect("pane");
-            runtime.runtimes.insert(
-                window_id.clone(),
-                WindowRuntime {
-                    pane: Arc::new(Mutex::new(pane)),
-                    output_thread: None,
-                    status_thread: None,
-                },
-            );
-        }
+
         let original_claude_geometry = runtime
             .tab("tab-1")
             .expect("tab")
@@ -11385,7 +11371,6 @@ exit 1
             .expect("claude")
             .geometry
             .clone();
-        let (expected_cols, expected_rows) = geometry_to_pty_size(&original_claude_geometry);
 
         assert_eq!(
             runtime
@@ -11408,14 +11393,143 @@ exit 1
             .expect("claude");
         assert_eq!(claude_window.geometry, original_claude_geometry);
         assert!(!claude_window.maximized);
-        let pane = runtime
-            .runtimes
-            .get(&claude_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane");
-        assert_eq!(pane.screen().size(), (expected_rows, expected_cols));
+    }
+
+    #[test]
+    fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
+        // Issue #2937: cycle_focus must NOT clobber the PTY size that the
+        // frontend established via its real xterm fit. The backend's
+        // geometry_to_pty_size approximation is only a spawn bootstrap;
+        // reverting an already-fitted PTY back to it on every window switch
+        // is what desyncs the child's grid from xterm and corrupts the
+        // rendered terminal (recovers on manual resize).
+        let temp = tempdir().expect("tempdir");
+        let bounds = canvas_bounds();
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().to_path_buf(),
+            ProjectKind::Git,
+            &[WindowPreset::Shell, WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let shell_id = combined_window_id("tab-1", "shell-1");
+        let claude_id = combined_window_id("tab-1", "claude-1");
+        insert_test_pane_runtime(&mut runtime, &shell_id);
+        insert_test_pane_runtime(&mut runtime, &claude_id);
+
+        // Sentinel that differs from geometry_to_pty_size for any open
+        // window, so a clobber via the approximation is detectable.
+        const REAL_COLS: u16 = 137;
+        const REAL_ROWS: u16 = 41;
+        for raw_id in ["shell-1", "claude-1"] {
+            let geometry = runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(raw_id)
+                .expect("window")
+                .geometry
+                .clone();
+            assert_ne!(
+                geometry_to_pty_size(&geometry),
+                (REAL_COLS, REAL_ROWS),
+                "sentinel must differ from the approximation to be meaningful",
+            );
+        }
+
+        // Simulate the frontend's real xterm fit having sized each PTY.
+        for window_id in [&shell_id, &claude_id] {
+            runtime
+                .runtimes
+                .get(window_id)
+                .expect("runtime")
+                .pane
+                .lock()
+                .expect("pane")
+                .resize(REAL_COLS, REAL_ROWS)
+                .expect("resize");
+        }
+
+        assert_eq!(
+            runtime
+                .cycle_focus_events(FocusCycleDirection::Forward, bounds)
+                .len(),
+            1
+        );
+
+        for window_id in [&shell_id, &claude_id] {
+            let pane = runtime
+                .runtimes
+                .get(window_id)
+                .expect("runtime")
+                .pane
+                .lock()
+                .expect("pane");
+            assert_eq!(
+                pane.screen().size(),
+                (REAL_ROWS, REAL_COLS),
+                "cycle_focus must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+            );
+        }
+    }
+
+    #[test]
+    fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
+        // Issue #2937 companion: arrange_windows shares the same all-window
+        // resize fan-out as cycle_focus. The frontend re-fit (driven by the
+        // geometry_revision bump) is the single source of truth for PTY
+        // size; the backend must not revert PTYs to the approximation here.
+        let temp = tempdir().expect("tempdir");
+        let bounds = canvas_bounds();
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().to_path_buf(),
+            ProjectKind::Git,
+            &[WindowPreset::Shell, WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let shell_id = combined_window_id("tab-1", "shell-1");
+        let claude_id = combined_window_id("tab-1", "claude-1");
+        insert_test_pane_runtime(&mut runtime, &shell_id);
+        insert_test_pane_runtime(&mut runtime, &claude_id);
+
+        const REAL_COLS: u16 = 151;
+        const REAL_ROWS: u16 = 47;
+        for window_id in [&shell_id, &claude_id] {
+            runtime
+                .runtimes
+                .get(window_id)
+                .expect("runtime")
+                .pane
+                .lock()
+                .expect("pane")
+                .resize(REAL_COLS, REAL_ROWS)
+                .expect("resize");
+        }
+
+        assert_eq!(
+            runtime
+                .arrange_windows_events(ArrangeMode::Tile, bounds)
+                .len(),
+            1
+        );
+
+        for window_id in [&shell_id, &claude_id] {
+            let pane = runtime
+                .runtimes
+                .get(window_id)
+                .expect("runtime")
+                .pane
+                .lock()
+                .expect("pane");
+            assert_eq!(
+                pane.screen().size(),
+                (REAL_ROWS, REAL_COLS),
+                "arrange_windows must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+            );
+        }
     }
 
     #[test]
