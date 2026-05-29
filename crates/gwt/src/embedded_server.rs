@@ -1338,6 +1338,57 @@ mod tests {
         server.shutdown();
     }
 
+    /// SPEC #2920 Phase 4 partial — end-to-end coverage that mirrors how
+    /// `main.rs` wires the GUI route after the `--bind`/`--port` restore:
+    /// argv tokens → `parse_tray_argv` → `TrayArgs` → `start_with_bind` →
+    /// served URL. The full main bootstrap blocks on the per-worktree
+    /// project-index runtime, so we cannot exercise it inline, but this
+    /// composes the pieces that actually deliver VPN-reachable bind.
+    #[test]
+    fn parsed_tray_argv_drives_embedded_server_bind_end_to_end() {
+        let argv: Vec<String> = [
+            "gwt",
+            "--bind",
+            "0.0.0.0",
+            "--port",
+            "0",
+            "--no-tray",
+            "--no-open",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let tray_args =
+            gwt::cli::tray::parse_tray_argv(&argv).expect("argv with --bind / --port parses");
+        assert_eq!(
+            tray_args.bind,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
+        assert_eq!(tray_args.port, 0);
+
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start_with_bind(
+            &runtime,
+            tray_args.bind,
+            tray_args.port,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("start_with_bind succeeds for parsed TrayArgs");
+
+        let url = server.url().to_string();
+        assert!(
+            url.starts_with("http://0.0.0.0:"),
+            "parsed `--bind 0.0.0.0` must surface a 0.0.0.0 URL, got {url}",
+        );
+        server.shutdown();
+    }
+
     #[test]
     fn access_log_layer_records_http_request_with_method_path_status_and_peer() {
         let runtime = Runtime::new().expect("tokio runtime");
