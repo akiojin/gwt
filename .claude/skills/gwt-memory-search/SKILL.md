@@ -50,8 +50,11 @@ automatically:
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
 - `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
 
-If you invoke the runner outside the gwt app, recompute them as shown in
-`gwt-search` (the runner accepts the same flags for all scopes).
+> The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` and
+> `GWT_WORKTREE_HASH` are unset or passed empty, the runner derives them from
+> `--project-root` automatically (Issue #2933). A search therefore needs only
+> `--project-root`, and works in any shell on any platform — no manual hash
+> recomputation is required.
 
 ## Memory search command
 

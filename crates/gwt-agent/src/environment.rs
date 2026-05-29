@@ -236,6 +236,14 @@ impl LaunchEnvironment {
     }
 
     /// Set the project root as a launch-derived override.
+    ///
+    /// Also exports `GWT_REPO_HASH` and `GWT_WORKTREE_HASH` derived from the
+    /// same resolved path. These travel with `GWT_PROJECT_ROOT` so that
+    /// skill-driven index runner calls can reconstruct the on-disk DB path
+    /// without re-deriving the hashes on every invocation (Issue #2933 /
+    /// SPEC-1939 US-2 AC-11). This is the canonical injection point after the
+    /// worktree is resolved; the hashes are omitted (rather than blanked) when
+    /// the path has no `origin` remote or cannot be canonicalized.
     pub fn with_project_root(mut self, project_root: impl AsRef<Path>) -> Self {
         let project_root =
             gwt_core::paths::normalize_windows_child_process_path(project_root.as_ref());
@@ -243,6 +251,16 @@ impl LaunchEnvironment {
             GWT_PROJECT_ROOT_ENV.to_string(),
             project_root.display().to_string(),
         );
+        if let Some(repo_hash) = gwt_core::repo_hash::detect_repo_hash(&project_root) {
+            self.override_env
+                .insert(GWT_REPO_HASH_ENV.to_string(), repo_hash.as_str().to_string());
+        }
+        if let Ok(worktree_hash) = gwt_core::worktree_hash::compute_worktree_hash(&project_root) {
+            self.override_env.insert(
+                GWT_WORKTREE_HASH_ENV.to_string(),
+                worktree_hash.as_str().to_string(),
+            );
+        }
         self
     }
 
@@ -536,6 +554,55 @@ mod tests {
                 "SECRET".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn with_project_root_exports_repo_and_worktree_hashes() {
+        // Issue #2933 / SPEC-1939 US-2 AC-11: with_project_root must export
+        // GWT_REPO_HASH and GWT_WORKTREE_HASH alongside GWT_PROJECT_ROOT so the
+        // skill-driven index runner can reconstruct the DB path. A bare
+        // `.git/config` with an origin remote is enough — detect_repo_hash reads
+        // it directly without invoking the git binary.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n    url = https://github.com/akiojin/gwt.git\n",
+        )
+        .unwrap();
+
+        let (env, _) = LaunchEnvironment::empty().with_project_root(&repo).into_parts();
+
+        assert!(env.contains_key(GWT_PROJECT_ROOT_ENV));
+
+        let normalized = gwt_core::paths::normalize_windows_child_process_path(&repo);
+        let expected_repo =
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/akiojin/gwt.git");
+        assert_eq!(
+            env.get(GWT_REPO_HASH_ENV).map(String::as_str),
+            Some(expected_repo.as_str())
+        );
+        let expected_wt =
+            gwt_core::worktree_hash::compute_worktree_hash(&normalized).unwrap();
+        assert_eq!(
+            env.get(GWT_WORKTREE_HASH_ENV).map(String::as_str),
+            Some(expected_wt.as_str())
+        );
+    }
+
+    #[test]
+    fn with_project_root_omits_hashes_without_git_repo() {
+        // A non-git directory has no origin: GWT_PROJECT_ROOT is still set, but
+        // the hashes are simply omitted (no panic, no empty values).
+        let dir = tempfile::tempdir().unwrap();
+        let (env, _) = LaunchEnvironment::empty()
+            .with_project_root(dir.path())
+            .into_parts();
+
+        assert!(env.contains_key(GWT_PROJECT_ROOT_ENV));
+        assert!(!env.contains_key(GWT_REPO_HASH_ENV));
     }
 
     #[test]

@@ -632,6 +632,114 @@ def _search_file_collection(db_path: str, query: str, n_results: int, collection
     return {"ok": True, "results": items}
 
 
+def _finalize_normalized_origin(host: str, path: str) -> str:
+    """Mirror gwt_core::repo_hash::finalize_normalized: lowercase host + path,
+    trim surrounding slashes from the path, and strip a single `.git` suffix."""
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    return f"{host.lower()}/{path.lower()}"
+
+
+def normalize_origin_url(url: str) -> str:
+    """Byte-for-byte port of gwt_core::repo_hash::normalize_origin_url.
+
+    All of these produce `github.com/akiojin/gwt`:
+      - https://github.com/akiojin/gwt.git
+      - https://github.com/Akiojin/gwt
+      - git@github.com:akiojin/gwt.git
+      - ssh://git@github.com:22/akiojin/gwt.git
+    """
+    s = url.strip()
+    while s.endswith("/"):
+        s = s[:-1]
+
+    # 1. SSH shorthand: git@host:user/repo[.git]
+    if s.startswith("git@"):
+        rest = s[len("git@"):]
+        idx = rest.find(":")
+        if idx != -1:
+            return _finalize_normalized_origin(rest[:idx], rest[idx + 1:])
+
+    # 2. scheme://[user[:pass]@]host[:port]/path
+    scheme_end = s.find("://")
+    if scheme_end != -1:
+        after_scheme = s[scheme_end + 3:]
+        at = after_scheme.find("@")
+        after_user = after_scheme[at + 1:] if at != -1 else after_scheme
+        slash = after_user.find("/")
+        if slash != -1:
+            host_port = after_user[:slash]
+            host = host_port.split(":", 1)[0]
+            return _finalize_normalized_origin(host, after_user[slash + 1:])
+
+    # 3. Bare host/path form (already mostly normalized).
+    slash = s.find("/")
+    if slash != -1:
+        return _finalize_normalized_origin(s[:slash], s[slash + 1:])
+
+    return s.lower()
+
+
+def compute_repo_hash(origin_url: str) -> str:
+    """SHA256[:16] of the normalized origin URL (matches Rust RepoHash)."""
+    return hashlib.sha256(
+        normalize_origin_url(origin_url).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def compute_worktree_hash(worktree_path: str) -> str:
+    """SHA256[:16] of the canonicalized worktree path (matches Rust WorktreeHash)."""
+    return hashlib.sha256(
+        str(Path(worktree_path).resolve()).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _git_origin_url(project_root: str) -> Optional[str]:
+    """Return the configured `origin` remote URL for `project_root`, or None.
+
+    Uses `git remote get-url origin` (which applies any `url.*.insteadOf`
+    rewrites), matching the Rust launch-time `detect_repo_hash_for_dir`.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(project_root),
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    url = result.stdout.strip()
+    return url or None
+
+
+def _derive_hashes_from_project_root(project_root: str) -> Optional[Dict[str, str]]:
+    """Derive (repo_hash, worktree_hash) from a worktree path.
+
+    Used when the caller omitted --repo-hash/--worktree-hash (e.g. an agent
+    pane whose launch environment did not export GWT_REPO_HASH /
+    GWT_WORKTREE_HASH). The derived hashes match the Rust canonical
+    implementations so they address the same on-disk index the gwt app builds.
+
+    Returns None when project_root is empty or no `origin` remote is found.
+    """
+    if not project_root:
+        return None
+    url = _git_origin_url(project_root)
+    if not url:
+        return None
+    try:
+        worktree_hash = compute_worktree_hash(project_root)
+    except OSError:
+        return None
+    return {
+        "repo_hash": compute_repo_hash(url),
+        "worktree_hash": worktree_hash,
+    }
+
+
 def _legacy_to_v2_args(db_path: str) -> Optional[Dict[str, str]]:
     """Derive (repo_hash, worktree_hash, project_root) from a legacy
     `--db-path = $WORKTREE/.gwt/index` argument so the legacy entrypoints
@@ -649,46 +757,14 @@ def _legacy_to_v2_args(db_path: str) -> Optional[Dict[str, str]]:
     worktree = parent.parent
     if not worktree.is_dir():
         return None
-    # Compute repo hash via origin URL.
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(worktree),
-            capture_output=True,
-            encoding="utf-8",
-            check=True,
-        )
-        url = result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return None
+    url = _git_origin_url(str(worktree))
     if not url:
         return None
-
-    # Normalize: git@host:path → host/path; scheme://[user@]host[:port]/path → host/path;
-    # strip trailing .git, lowercase.
-    normalized = url
-    if normalized.startswith("git@"):
-        rest = normalized[len("git@"):]
-        if ":" in rest:
-            host, path = rest.split(":", 1)
-            normalized = f"{host}/{path}"
-    elif "://" in normalized:
-        after = normalized.split("://", 1)[1]
-        if "@" in after:
-            after = after.split("@", 1)[1]
-        if "/" in after:
-            host_port, path = after.split("/", 1)
-            host = host_port.split(":", 1)[0]
-            normalized = f"{host}/{path}"
-    if normalized.endswith(".git"):
-        normalized = normalized[: -len(".git")]
-    normalized = normalized.rstrip("/").lower()
-
-    repo_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    worktree_hash = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:16]
     return {
-        "repo_hash": repo_hash,
-        "worktree_hash": worktree_hash,
+        "repo_hash": compute_repo_hash(url),
+        "worktree_hash": hashlib.sha256(
+            str(worktree).encode("utf-8")
+        ).hexdigest()[:16],
         "project_root": str(worktree),
     }
 
@@ -3880,6 +3956,17 @@ def main() -> int:
             "index": "index-files",
             "search": "search-files",
         }.get(args.action, args.action)
+
+        # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
+        # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
+        # but did pass --project-root, derive the hashes here so the v2 search
+        # pipeline engages instead of failing with "--db-path is required".
+        if not args.repo_hash and args.project_root:
+            derived = _derive_hashes_from_project_root(args.project_root)
+            if derived:
+                args.repo_hash = derived["repo_hash"]
+                if not args.worktree_hash:
+                    args.worktree_hash = derived["worktree_hash"]
 
         # Phase 8: when --repo-hash is supplied, dispatch the v2 action layer.
         if args.repo_hash:
