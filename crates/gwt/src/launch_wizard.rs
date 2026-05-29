@@ -3438,7 +3438,7 @@ fn default_launch_path(
     }
 }
 
-const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.7)";
+const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.8)";
 
 fn is_claude_opus_model(model: &str) -> bool {
     model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus"
@@ -3557,7 +3557,7 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 6] = [
     ReasoningDisplayOption {
         label: "xHigh",
         stored_value: "xhigh",
-        description: "Best results for most coding tasks (Opus 4.7 default)",
+        description: "Best results for most coding tasks (Opus 4.8 default)",
         is_default: true,
     },
     ReasoningDisplayOption {
@@ -4971,7 +4971,7 @@ mod tests {
     fn start_with_last_settings_runtime_confirmation_stays_enabled_without_quick_start_entry() {
         let previous = LaunchWizardPreviousProfile {
             agent_id: "claude".to_string(),
-            model: Some("Default (Opus 4.7)".to_string()),
+            model: Some("Default (Opus 4.8)".to_string()),
             reasoning: Some("max".to_string()),
             version: Some("latest".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
@@ -7585,6 +7585,7 @@ mod tests {
             .any(|option| option.value == "continue"));
 
         assert!(current_model_options("claude").contains(&"sonnet"));
+        assert!(current_model_options("claude").contains(&"Default (Opus 4.8)"));
         assert_eq!(
             current_model_options("codex"),
             vec![
