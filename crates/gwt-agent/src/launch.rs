@@ -1063,11 +1063,11 @@ mod tests {
     #[test]
     fn build_claude_with_model() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .model("claude-opus-4-7")
+            .model("claude-opus-4-8")
             .build();
 
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config.args.contains(&"claude-opus-4-7".to_string()));
+        assert!(config.args.contains(&"claude-opus-4-8".to_string()));
     }
 
     #[test]
