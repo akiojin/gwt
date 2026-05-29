@@ -6183,6 +6183,20 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // SPEC #2920 Phase 4 partial — restore `--bind`/`--port` on the GUI
+    // (tray-resident) route so VPN-reachable hosts can run
+    // `gwt --bind 0.0.0.0 --port <n>` without falling back to SSH local
+    // port forwarding. `--no-tray`/`--no-open` are accepted today but
+    // still no-op; the full Tray route takeover lands in the rest of
+    // Phase 4. Parse errors render the canonical usage hint and exit 2.
+    let tray_args = match gwt::cli::tray::parse_tray_argv(&argv) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+
     // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
     // update manifest (via the post-click modal's Later flow, or because the
     // user killed gwt before clicking Restart now), hand off to the helper
@@ -6345,11 +6359,11 @@ fn main() -> std::io::Result<()> {
         }));
     }
 
-    // SPEC #2920: bind defaults follow the GUI route (loopback + random
-    // port) now that `gwt serve --bind`/`--port` is gone. Phase 4 will
-    // restore `--bind` / `--port` parsing on the tray route via
-    // `TrayArgs`.
-    let (bind_addr, bind_port) = (std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0_u16);
+    // SPEC #2920 Phase 4 partial — `--bind` / `--port` are now honoured
+    // on the GUI route via `gwt::cli::tray::parse_tray_argv` (above).
+    // Defaults preserve the documented loopback + ephemeral behaviour
+    // (see README trust-boundary note).
+    let (bind_addr, bind_port) = (tray_args.bind, tray_args.port);
     let mut server = EmbeddedServer::start_with_bind(
         &runtime,
         bind_addr,
