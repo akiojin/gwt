@@ -4167,6 +4167,207 @@ body {
   margin: 0;
 }
 
+/* SPEC-2014 2026-05-29 amendment — operation-appropriate launch controls.
+   All styling consumes SPEC-2356 design tokens so the new slider / segmented
+   / toggle controls follow both dark and light themes automatically. */
+
+/* Segmented control — Target / Runtime / Execution mode / Windows shell /
+   Agent (while the candidate count stays within the segmented budget). */
+.launch-segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.launch-segmented__option {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-curve),
+    color var(--motion-fast) var(--motion-curve);
+}
+
+.launch-segmented__option:hover {
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
+}
+
+.launch-segmented__option[aria-checked="true"] {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-state-active) 16%, var(--color-surface));
+  border-color: var(--color-focus-ring);
+}
+
+.launch-segmented__option:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Toggle switch — Skip permissions / Fast mode / reasoning Auto. Keeps a real
+   <input type="checkbox"> for accessibility; only the track/knob are styled. */
+.launch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text);
+  user-select: none;
+}
+
+/* The real checkbox overlays the track at full size with opacity 0 so it keeps
+   native semantics and stays click/setChecked-actionable while the styled
+   track/knob render behind it. */
+.launch-toggle__control {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 18px;
+}
+
+.launch-toggle__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.launch-toggle__track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-border-strong);
+  transition: background var(--motion-fast) var(--motion-curve);
+  pointer-events: none;
+}
+
+.launch-toggle__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  transition: transform var(--motion-fast) var(--motion-curve);
+}
+
+.launch-toggle__input:checked + .launch-toggle__track {
+  background: var(--color-state-active);
+}
+
+.launch-toggle__input:checked + .launch-toggle__track .launch-toggle__knob {
+  transform: translateX(16px);
+}
+
+.launch-toggle__input:focus-visible + .launch-toggle__track {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.launch-toggle--auto {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.launch-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Reasoning slider — ordinal effort stops with a live description. */
+.launch-range {
+  display: grid;
+  gap: 8px;
+  padding: 4px 2px 0;
+}
+
+.launch-range[data-suspended="true"] {
+  opacity: 0.45;
+}
+
+.launch-range__input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-state-active);
+  cursor: pointer;
+}
+
+.launch-range__input:disabled {
+  cursor: not-allowed;
+}
+
+.launch-range__input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.launch-range__ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.launch-range__tick {
+  flex: 1 1 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.launch-range__tick:first-child {
+  text-align: left;
+}
+
+.launch-range__tick:last-child {
+  text-align: right;
+}
+
+.launch-range__tick[data-active="true"] {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+.launch-range__description {
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  min-height: 1.2em;
+}
+
 .wizard-error {
   margin-bottom: 12px;
   padding: 10px 12px;

@@ -40,6 +40,11 @@
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
+        buildChoiceOrSelectField,
+        buildReasoningField,
+        buildToggleField,
+      } from "/launch-controls.js";
+      import {
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
@@ -7898,6 +7903,52 @@
         return field;
       }
 
+      // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
+      // These delegate to the standalone launch-controls.js builders so the
+      // control logic stays unit-testable; the wizard action payloads are
+      // unchanged from the prior native <select> / checkbox controls.
+      function appendReasoningField(parent, label, options, selectedValue, onChange) {
+        const field = buildReasoningField(document, {
+          label,
+          options,
+          selectedValue,
+          onChange,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendToggleField(parent, label, copy, checked, onChange, wide = false) {
+        const field = buildToggleField(document, {
+          label,
+          copy,
+          checked,
+          onChange,
+          wide,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendChoiceOrSelectField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onChange,
+        wide = false,
+      ) {
+        const field = buildChoiceOrSelectField(document, {
+          label,
+          options,
+          selectedValue,
+          onChange,
+          wide,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
       function runtimeTargetPayload(value) {
         return value === "docker" ? "Docker" : "Host";
       }
@@ -8394,7 +8445,7 @@
             "Choose what to launch on the selected branch.",
           );
           const grid = createNode("div", "launch-form-grid");
-          appendSelectField(
+          appendChoiceOrSelectField(
             grid,
             "Target",
             launchWizard.launch_target_options || [],
@@ -8406,7 +8457,7 @@
               }),
           );
           if (launchWizard.show_agent_settings) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Agent",
               launchWizard.agent_options || [],
@@ -8431,7 +8482,7 @@
               );
             }
             if (launchWizard.show_reasoning) {
-              appendSelectField(
+              appendReasoningField(
                 grid,
                 "Reasoning",
                 launchWizard.reasoning_options || [],
@@ -8444,7 +8495,7 @@
               );
             }
             if (launchWizard.show_execution_mode) {
-              appendSelectField(
+              appendChoiceOrSelectField(
                 grid,
                 "Execution mode",
                 launchWizard.execution_mode_options || [],
@@ -8468,7 +8519,7 @@
             grid.appendChild(note);
           }
           if (launchWizard.show_windows_shell) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Shell",
               launchWizard.windows_shell_options || [],
@@ -8515,7 +8566,7 @@
             );
           }
           if (launchWizard.show_skip_permissions) {
-            appendCheckboxField(
+            appendToggleField(
               grid,
               "Permissions",
               "Skip permission prompts",
@@ -8528,7 +8579,7 @@
             );
           }
           if (showFastMode) {
-            appendCheckboxField(
+            appendToggleField(
               grid,
               "Fast mode",
               "Use the agent's Fast mode",
@@ -8583,7 +8634,7 @@
           const grid = createNode("div", "launch-form-grid");
           let appendedRuntimeControl = false;
           if (launchWizard.show_runtime_target) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Runtime target",
               launchWizard.runtime_target_options || [],

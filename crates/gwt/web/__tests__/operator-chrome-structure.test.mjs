@@ -1696,9 +1696,12 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
     /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
     "expected Launch settings controls to be part of setup forms only",
   );
+  // SPEC-2014 2026-05-29 amendment (FR-109): Fast mode is now a toggle switch
+  // (appendToggleField) instead of a checkbox, but stays provider-neutral —
+  // wired to launchWizard.fast_mode + set_fast_mode, not Codex-only state.
   assert.match(
     appSource,
-    /appendCheckboxField\(\s*grid,\s*"Fast mode"[\s\S]*?launchWizard\.fast_mode[\s\S]*?kind:\s*"set_fast_mode"/,
+    /appendToggleField\(\s*grid,\s*"Fast mode"[\s\S]*?launchWizard\.fast_mode[\s\S]*?kind:\s*"set_fast_mode"/,
     "expected Launch settings to wire provider-neutral Fast mode controls",
   );
   assert.doesNotMatch(
