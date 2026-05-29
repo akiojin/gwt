@@ -252,8 +252,10 @@ impl LaunchEnvironment {
             project_root.display().to_string(),
         );
         if let Some(repo_hash) = gwt_core::repo_hash::detect_repo_hash(&project_root) {
-            self.override_env
-                .insert(GWT_REPO_HASH_ENV.to_string(), repo_hash.as_str().to_string());
+            self.override_env.insert(
+                GWT_REPO_HASH_ENV.to_string(),
+                repo_hash.as_str().to_string(),
+            );
         }
         if let Ok(worktree_hash) = gwt_core::worktree_hash::compute_worktree_hash(&project_root) {
             self.override_env.insert(
@@ -573,7 +575,9 @@ mod tests {
         )
         .unwrap();
 
-        let (env, _) = LaunchEnvironment::empty().with_project_root(&repo).into_parts();
+        let (env, _) = LaunchEnvironment::empty()
+            .with_project_root(&repo)
+            .into_parts();
 
         assert!(env.contains_key(GWT_PROJECT_ROOT_ENV));
 
@@ -584,8 +588,7 @@ mod tests {
             env.get(GWT_REPO_HASH_ENV).map(String::as_str),
             Some(expected_repo.as_str())
         );
-        let expected_wt =
-            gwt_core::worktree_hash::compute_worktree_hash(&normalized).unwrap();
+        let expected_wt = gwt_core::worktree_hash::compute_worktree_hash(&normalized).unwrap();
         assert_eq!(
             env.get(GWT_WORKTREE_HASH_ENV).map(String::as_str),
             Some(expected_wt.as_str())
