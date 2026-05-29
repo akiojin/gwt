@@ -6278,6 +6278,13 @@ Context: While fixing Claude Code launch regressions (#2923, #2924), I reported 
 Learning: When AGENTS.md or the user demands a Headed visual E2E check, do not substitute it with DOM metric reads, calculation, or computed-style assertions. The Ready PR Gate requires that the agent actually opened a headed browser, navigated to the served URL, positioned the relevant window into the viewport, and captured / observed a real screenshot of the rendered state. Pixel-level corruption (font fragmentation, wrap of a single character, stray byte echoes) only surfaces in the real rendering pipeline; calculations are necessary but not sufficient.
 Future Action: Before declaring User Verification done, run a Headed Playwright session and (1) navigate to the URL, (2) resize the browser to a viewport larger than the agent window, (3) scrollIntoView / reset zoom so the target window is fully visible inside the viewport, (4) take a screenshot, (5) Read the screenshot file in the conversation and inspect it visually. Use textual symbol-string assertions ONLY as supporting evidence, never as a replacement. If a metric measurement disagrees with a visual rendering, trust the visual.
 
+## 2026-05-29 — index 検索が pane で使えない時はハッシュ env export を疑う (GWT_REPO_HASH/GWT_WORKTREE_HASH)
+
+Type: lesson
+Context: File Index が使われていないとの報告。実機調査で index 自体は構築済み・最新だが、agent pane env に GWT_REPO_HASH/GWT_WORKTREE_HASH が無く、skill の検索コマンドが runner で {ok:false, --db-path is required} となり全スコープ失敗していた (#2933 / SPEC-1939 US-2 AC-11)。
+Learning: GWT_PROJECT_ROOT は worktree 解決後の with_project_root() で再注入されるが、ハッシュは LaunchConfigBuilder::build() 時点 (working_dir=None) でしか挿入を試みず後段注入点が無いため欠落していた。chroma_index_runner は main() で --repo-hash 非空のときだけ v2 dispatch に入る設計で、空だとレガシー経路の --db-path 必須に落ちる。
+Future Action: ハッシュ系 env は GWT_PROJECT_ROOT と同じ with_project_root に同伴させる。runner は --repo-hash/--worktree-hash 未指定でも --project-root から自己導出する (Rust の repo_hash::normalize_origin_url / worktree_hash とバイト一致で移植)。索引デバッグはまず実機で空ハッシュ再現→正しいハッシュで成功確認→env export 経路を追う順で行う。
+
 ## 2026-05-29 — VPN 越し gwt アクセスは loopback 固定 bind が直接の原因 — Phase 4 partial で --bind/--port を復活
 
 Type: lesson

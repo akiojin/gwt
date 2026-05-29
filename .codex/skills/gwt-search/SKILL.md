@@ -80,15 +80,12 @@ automatically:
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
 - `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
 
-If you launch outside the gwt app, recompute them:
-
-```bash
-GWT_PROJECT_ROOT="$(pwd)"
-GWT_REPO_HASH=$(git remote get-url origin 2>/dev/null \
-  | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#^https?://##' \
-  | tr 'A-Z' 'a-z' | tr -d '\n' | sha256sum | cut -c1-16)
-GWT_WORKTREE_HASH=$(printf '%s' "$(cd "$GWT_PROJECT_ROOT" && pwd -P)" | sha256sum | cut -c1-16)
-```
+The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` /
+`GWT_WORKTREE_HASH` are unset or passed empty (e.g. when the launch environment
+did not export them), the runner derives them from `--project-root`
+automatically (Issue #2933). A search therefore needs only `--project-root`,
+and works in any shell on any platform — no manual hash recomputation, and no
+dependency on `sha256sum` (which is absent on stock macOS).
 
 ## Search commands
 
