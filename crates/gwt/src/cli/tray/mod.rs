@@ -117,9 +117,9 @@ impl std::error::Error for TrayArgParseError {}
 /// port forwarding.
 ///
 /// Accepted flags:
-/// - `--bind <ip>`: parsed via [`IpAddr::from_str`]. Defaults to
+/// - `--bind <ip>`: parsed via `IpAddr::from_str`. Defaults to
 ///   `127.0.0.1` (matches the documented trust boundary).
-/// - `--port <n>`: parsed via [`u16::from_str`]. Defaults to `0`
+/// - `--port <n>`: parsed via `u16::from_str`. Defaults to `0`
 ///   (ephemeral).
 /// - `--no-tray` / `--no-open`: recognised so the README hint does not
 ///   fail today, but their behaviour stays out of scope for this slice.
