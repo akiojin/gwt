@@ -803,7 +803,7 @@ display_name = "Claude Code"
         );
         legacy.insert(
             "status".into(),
-            toml::Value::try_from(&session.status).unwrap(),
+            toml::Value::try_from(session.status).unwrap(),
         );
         legacy.insert("codex_fast_mode".into(), toml::Value::Boolean(true));
         legacy.insert(
