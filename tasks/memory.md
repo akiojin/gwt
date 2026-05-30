@@ -6298,3 +6298,24 @@ Type: lesson
 Context: SPEC-2014 で frontend のスライダー (自分のブランチ) と Ultracode reasoning level の backend (別 Agent の work/20260529-0217, d72415b4e) が別ブランチに分かれていた。自分のクリーンブランチ単独では Ultracode が出ず user が『対応できていない』と指摘。データ駆動の主張 (max=stops.length-1) だけでは不十分で、end-to-end の実機証明が必要だった。
 Learning: 別 Agent の push 済み commit を git fetch → git cherry-pick -n <sha> で自分の working tree に重ねれば、両者を結合したビルドで end-to-end を実機検証できる (別ファイルなら競合なし)。検証後は git reset --hard HEAD + 新規ファイル rm で完全 revert し、相手の作業を自分のブランチにコミットしない。今回 my slider + their backend で Claude Opus に Ultracode 6 段描画・ドラッグで ultracode コミット・Sonnet 非表示 (version gating 2.1.158>=2.1.154) を確認できた。
 Future Action: frontend/backend が別 Agent・別ブランチに分かれる機能では、(1) 役割境界 (別ファイル) を Board で確認、(2) 相手の push 済み backend を cherry-pick -n で重ねた結合ビルドで end-to-end を Playwright 実駆動検証、(3) git reset --hard で revert、の手順で『自分の担当部分が相手の成果と結合して動く』ことを証明してから PR にする。データ駆動の理屈だけで完了報告しない。
+
+## 2026-05-29 — index 検索が pane で使えない時はハッシュ env export を疑う (GWT_REPO_HASH/GWT_WORKTREE_HASH)
+
+Type: lesson
+Context: File Index が使われていないとの報告。実機調査で index 自体は構築済み・最新だが、agent pane env に GWT_REPO_HASH/GWT_WORKTREE_HASH が無く、skill の検索コマンドが runner で {ok:false, --db-path is required} となり全スコープ失敗していた (#2933 / SPEC-1939 US-2 AC-11)。
+Learning: GWT_PROJECT_ROOT は worktree 解決後の with_project_root() で再注入されるが、ハッシュは LaunchConfigBuilder::build() 時点 (working_dir=None) でしか挿入を試みず後段注入点が無いため欠落していた。chroma_index_runner は main() で --repo-hash 非空のときだけ v2 dispatch に入る設計で、空だとレガシー経路の --db-path 必須に落ちる。
+Future Action: ハッシュ系 env は GWT_PROJECT_ROOT と同じ with_project_root に同伴させる。runner は --repo-hash/--worktree-hash 未指定でも --project-root から自己導出する (Rust の repo_hash::normalize_origin_url / worktree_hash とバイト一致で移植)。索引デバッグはまず実機で空ハッシュ再現→正しいハッシュで成功確認→env export 経路を追う順で行う。
+
+## 2026-05-29 — VPN 越し gwt アクセスは loopback 固定 bind が直接の原因 — Phase 4 partial で --bind/--port を復活
+
+Type: lesson
+Context: リモート機で起動した gwt に VPN 越しで届かない、と user が報告。実証で ping は通る (RTT 8-9ms) が TCP target port は timeout (silent drop)。コード読みで main.rs:6352 が hardcoded loopback bind であることを確認。SPEC #2920 FR-013 / README は --bind/--port を約束しているが Phase 4 未着手だった。
+Learning: VPN 越し / LAN 別端末からの gwt アクセス不可は、loopback bind が直接の原因である可能性が高い。RST ではなく timeout なら loopback または firewall drop。TCP RST なら別の犯人 (service down 等) を疑う。手元 PC からの ping/nc/curl と remote 機の lsof|ss listener 確認で 1 ターンで切り分けられる。一時的な workaround は SSH local port forward (ssh -L <port>:127.0.0.1:<port> user@host)。
+Future Action: 同種の質問が出たら、まず (1) ping (2) nc/curl (3) リモートで lsof|ss listener の 3 ステップで切り分けを user に依頼するか、可能なら手元 PC から自分で実行する。loopback 固定が確定したら、Phase 4 partial 実装 (SPEC #2920 の TrayArgs/parse_tray_argv 経路) を案内する。--no-tray / --no-open は parser 受け入れるが no-op の状態を明示する。
+
+## 2026-05-30 — Launch Wizard の installed_version は production で常に None
+
+Type: lesson
+Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
+Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
+Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。

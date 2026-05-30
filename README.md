@@ -117,9 +117,12 @@ the tray menu:
   PTY children down in order.
 
 ```bash
-gwt                                 # install tray + start embedded server
+gwt                                 # install tray + start embedded server (loopback)
+gwt --bind 0.0.0.0 --port 60745     # bind the embedded server to a LAN/VPN-reachable address
 gwt open                            # open the running tray's URL in the OS default browser
 ```
+
+`--bind <ip>` and `--port <n>` default to `127.0.0.1` and `0` (ephemeral). Pass `--bind 0.0.0.0` to make the embedded UI reachable from other hosts on the same LAN or VPN-extended LAN; pair it with `--port` when you need a stable, well-known port. `--no-tray` and `--no-open` are accepted today but currently no-op while the rest of SPEC #2920 Phase 4 lands.
 
 `gwt open` is the Linux fallback for desktops that do not run a
 StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
