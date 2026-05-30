@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.50.0] - 2026-05-30
+
+### Bug Fixes
+
+- **gui:** Shift+Cmd+Arrow ウィンドウ切替時のターミナル文字崩れを修正 (#2937)
+- **gui:** Launch Agent reasoning スライダーがドラッグで操作できない問題を修正 (SPEC-2014)
+- Agent pane に repo/worktree ハッシュを export し runner が project-root から自己導出
+
+### Documentation
+
+- **memory:** Record GUI 視覚検証 tray-singleton blocker lesson (SPEC-2014)
+- **memory:** Record embedded-frontend rebuild-before-verify lesson (SPEC-2014)
+- **memory:** Record cross-branch combined verification technique (SPEC-2014)
+- **memory:** Index 検索の env export 欠落に関する再発防止メモを追加
+- **gwt:** Replace broken rustdoc intra-doc links with plain code spans
+- **memory:** Fix markdownlint MD037 (web/* glob を code span 化)
+
+### Features
+
+- **gui:** Launch Agent 設定を操作最適なコントロールへ刷新 (SPEC-2014)
+- **launch-wizard:** Claude デフォルトモデルラベルを Opus 4.8 に更新
+- **launch-wizard:** Claude Code Ultracode reasoning level を起動時に選択可能にする
+- **gwt:** Restore `--bind`/`--port` CLI on the GUI route (SPEC #2920 Phase 4 partial)
+
+### Miscellaneous Tasks
+
+- **agent:** Session.rs の needless_borrows clippy lint を解消
+- **memory:** Record Launch Wizard installed_version=None gating lesson
+- 既存の needless borrow clippy 警告を解消 (session legacy status)
+
+### Styling
+
+- Environment.rs に cargo fmt を適用
+
+### Testing
+
+- **gui:** Reasoning スライダーが backend 段数(Ultracode 含む)にデータ駆動で追従することを固定 (SPEC-2014)
+- **gwt:** Add end-to-end coverage from parsed TrayArgs to EmbeddedServer URL
+
 ## [9.49.0] - 2026-05-28
 
 ### Bug Fixes
