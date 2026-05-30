@@ -120,11 +120,14 @@ impl AppRuntime {
         if focused.is_none() {
             return Vec::new();
         }
-        if let Some(tab) = self.tab(&tab_id) {
-            for window in &tab.workspace.persisted().windows {
-                self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
-            }
-        }
+        // Issue #2937: do NOT resize PTYs here. PTY size is owned by the
+        // frontend's real xterm fit (sendGeometry → update_window_geometry_events).
+        // The frontend re-fits the focused window (scheduleTerminalFocusActivation)
+        // and any geometry-changed window (applyWorkspaceGeometry on the
+        // geometry_revision bump from a maximize-restore) on the resulting
+        // workspace_state render. Re-running geometry_to_pty_size here only
+        // clobbered the accurate cols/rows back to the spawn-time approximation
+        // on every window switch, desyncing the child's grid from xterm.
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
@@ -158,11 +161,12 @@ impl AppRuntime {
         if !arranged {
             return Vec::new();
         }
-        if let Some(tab) = self.tab(&tab_id) {
-            for window in &tab.workspace.persisted().windows {
-                self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
-            }
-        }
+        // Issue #2937: do NOT resize PTYs here (same rationale as
+        // cycle_focus_events). arrange_windows bumps geometry_revision for
+        // every window it moves, so the frontend re-fits each affected
+        // terminal (applyWorkspaceGeometry → fitTerminal → sendGeometry) on
+        // the resulting workspace_state render. The backend approximation
+        // must not clobber those frontend-fitted cols/rows.
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }

@@ -40,10 +40,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await expect(wizard).toBeVisible();
     await wizard.getByRole("button", { name: "Configure and start" }).click();
 
-    const agentSelect = wizard.getByLabel("Agent", { exact: true });
-    await expect(agentSelect).toBeVisible();
-    await agentSelect.selectOption("claude");
-    await expect(agentSelect).toHaveValue("claude");
+    await selectWizardAgent(page, "claude");
 
     const fastMode = wizard.getByLabel("Use the agent's Fast mode", {
       exact: true,
@@ -80,9 +77,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
       await expect(wizard).toBeVisible();
       await chooseConfigureAndStart(page);
 
-      const agentSelect = wizard.getByLabel("Agent", { exact: true });
-      await expect(agentSelect).toBeVisible();
-      await agentSelect.selectOption("claude");
+      await selectWizardAgent(page, "claude");
       await wizard
         .getByLabel("Use the agent's Fast mode", { exact: true })
         .setChecked(true);
@@ -133,6 +128,26 @@ async function keepLaunchWizardModalVisible(page: Page): Promise<void> {
       }
     `,
   });
+}
+
+// SPEC-2014 2026-05-29 — Agent renders as a segmented radiogroup when the
+// detected-agent count is small, and falls back to a <select> when custom
+// agents push the count past the budget. Select control-agnostically.
+async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  const agentField = wizard.getByLabel("Agent", { exact: true });
+  await expect(agentField).toBeVisible();
+  const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
+  if (tag === "select") {
+    await agentField.selectOption(agentId);
+    await expect(agentField).toHaveValue(agentId);
+    return;
+  }
+  const option = wizard.locator(
+    `.launch-segmented__option[data-value="${agentId}"]`,
+  );
+  await option.click();
+  await expect(option).toHaveAttribute("aria-checked", "true");
 }
 
 function fastModeSummaryValue(page: Page) {

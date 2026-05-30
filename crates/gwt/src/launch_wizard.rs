@@ -730,6 +730,13 @@ pub struct LaunchWizardContext {
     /// Source kind of the SPEC/Issue knowledge bridge that opened this wizard.
     /// `None` for Branches-window callers, preserving non-breaking behavior.
     pub linked_issue_kind: Option<LinkedIssueKind>,
+    /// Whether the locally installed Claude Code can offer the opt-in
+    /// `ultracode` reasoning option: dynamic workflows enabled (env
+    /// `CLAUDE_CODE_DISABLE_WORKFLOWS` + user `~/.claude/settings.json`) AND
+    /// installed version >= 2.1.154. Captured once at wizard open via
+    /// `gwt_agent::claude_ultracode_supported()` because the wizard has no
+    /// reliable installed-version field at render time. Defaults to `false`.
+    pub ultracode_supported: bool,
 }
 
 impl LaunchWizardContext {
@@ -3096,16 +3103,27 @@ impl LaunchWizardState {
         }
     }
 
-    fn current_reasoning_options(&self) -> &'static [ReasoningDisplayOption] {
+    fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
         if self.agent_is_codex() {
-            &CODEX_REASONING_OPTIONS
+            CODEX_REASONING_OPTIONS.to_vec()
         } else if self.effective_agent_id() == "claude" && is_claude_opus_model(self.model.as_str())
         {
-            &CLAUDE_OPUS_REASONING_OPTIONS
+            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
+            // `ultracode` is opt-in and only usable on Opus 4.7/4.8 with a
+            // recent Claude Code (>= 2.1.154) and workflows enabled. The
+            // combined gate is captured once at wizard open (the wizard has no
+            // reliable installed-version field at render time). Hide ultracode
+            // otherwise so the wizard never offers an unusable option. It is
+            // the last (non-default) row, so removing it keeps every other
+            // index stable.
+            if !self.context.ultracode_supported {
+                options.retain(|option| option.stored_value != "ultracode");
+            }
+            options
         } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
-            &CLAUDE_SONNET_REASONING_OPTIONS
+            CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
         } else {
-            &[]
+            Vec::new()
         }
     }
 
@@ -3438,7 +3456,7 @@ fn default_launch_path(
     }
 }
 
-const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.7)";
+const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.8)";
 
 fn is_claude_opus_model(model: &str) -> bool {
     model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus"
@@ -3529,7 +3547,7 @@ const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     },
 ];
 
-const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 6] = [
+const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
@@ -3557,13 +3575,19 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 6] = [
     ReasoningDisplayOption {
         label: "xHigh",
         stored_value: "xhigh",
-        description: "Best results for most coding tasks (Opus 4.7 default)",
+        description: "Best results for most coding tasks (Opus 4.8 default)",
         is_default: true,
     },
     ReasoningDisplayOption {
         label: "Max",
         stored_value: "max",
         description: "Deepest reasoning with no token-spending constraint",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Ultracode",
+        stored_value: "ultracode",
+        description: "Top-tier effort plus dynamic workflow orchestration (Opus only)",
         is_default: false,
     },
 ];
@@ -4548,6 +4572,7 @@ mod tests {
             docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
             linked_issue_number: None,
             linked_issue_kind: None,
+            ultracode_supported: false,
         }
     }
 
@@ -4971,7 +4996,7 @@ mod tests {
     fn start_with_last_settings_runtime_confirmation_stays_enabled_without_quick_start_entry() {
         let previous = LaunchWizardPreviousProfile {
             agent_id: "claude".to_string(),
-            model: Some("Default (Opus 4.7)".to_string()),
+            model: Some("Default (Opus 4.8)".to_string()),
             reasoning: Some("max".to_string()),
             version: Some("latest".to_string()),
             session_mode: gwt_agent::SessionMode::Normal,
@@ -7585,6 +7610,7 @@ mod tests {
             .any(|option| option.value == "continue"));
 
         assert!(current_model_options("claude").contains(&"sonnet"));
+        assert!(current_model_options("claude").contains(&"Default (Opus 4.8)"));
         assert_eq!(
             current_model_options("codex"),
             vec![
@@ -8009,7 +8035,51 @@ mod tests {
             .iter()
             .map(|option| option.stored_value)
             .collect();
-        assert_eq!(values, ["auto", "low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            values,
+            ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]
+        );
+    }
+
+    #[test]
+    fn claude_opus_reasoning_options_include_ultracode_after_max() {
+        let values: Vec<&str> = super::CLAUDE_OPUS_REASONING_OPTIONS
+            .iter()
+            .map(|option| option.stored_value)
+            .collect();
+        assert_eq!(values.last(), Some(&"ultracode"));
+        let max_idx = values.iter().position(|value| *value == "max").unwrap();
+        let ultra_idx = values
+            .iter()
+            .position(|value| *value == "ultracode")
+            .unwrap();
+        assert!(ultra_idx > max_idx, "ultracode must follow max");
+    }
+
+    #[test]
+    fn claude_opus_ultracode_is_not_default() {
+        let ultra = super::CLAUDE_OPUS_REASONING_OPTIONS
+            .iter()
+            .find(|option| option.stored_value == "ultracode")
+            .expect("opus options must contain ultracode");
+        assert!(
+            !ultra.is_default,
+            "ultracode must be opt-in; xhigh stays the Opus default"
+        );
+    }
+
+    #[test]
+    fn claude_sonnet_and_codex_reasoning_options_exclude_ultracode() {
+        let sonnet: Vec<&str> = super::CLAUDE_SONNET_REASONING_OPTIONS
+            .iter()
+            .map(|option| option.stored_value)
+            .collect();
+        let codex: Vec<&str> = super::CODEX_REASONING_OPTIONS
+            .iter()
+            .map(|option| option.stored_value)
+            .collect();
+        assert!(!sonnet.contains(&"ultracode"));
+        assert!(!codex.contains(&"ultracode"));
     }
 
     #[test]
@@ -8019,6 +8089,51 @@ mod tests {
             .find(|option| option.is_default)
             .expect("Opus reasoning options must have a default row");
         assert_eq!(default.stored_value, "xhigh");
+    }
+
+    fn opus_state(ultracode_supported: bool) -> LaunchWizardState {
+        let agent_options = vec![AgentOption {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            available: true,
+            installed_version: Some("2.1.156 (Claude Code)".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        }];
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        // The combined version+workflows gate is captured at wizard open; tests
+        // inject it directly (the wizard has no reliable installed-version
+        // field at render time — see `current_reasoning_options`).
+        ctx.ultracode_supported = ultracode_supported;
+        let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
+        // Drive current_reasoning_options() down the Claude Opus branch.
+        state.agent_id = "claude".to_string();
+        state.model = "opus".to_string();
+        state
+    }
+
+    fn opus_reasoning_values(state: &LaunchWizardState) -> Vec<&'static str> {
+        state
+            .current_reasoning_options()
+            .iter()
+            .map(|option| option.stored_value)
+            .collect()
+    }
+
+    #[test]
+    fn opus_reasoning_includes_ultracode_when_supported() {
+        let values = opus_reasoning_values(&opus_state(true));
+        assert!(values.contains(&"ultracode"));
+        assert_eq!(values.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn opus_reasoning_excludes_ultracode_when_unsupported() {
+        let values = opus_reasoning_values(&opus_state(false));
+        assert!(!values.contains(&"ultracode"));
+        // Common levels remain intact when ultracode is gated out.
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
     }
 
     #[test]

@@ -207,6 +207,14 @@ pub fn console_window_js() -> &'static str {
     include_str!("../web/console-window.js")
 }
 
+// SPEC-2014 2026-05-29 amendment — Launch Agent setting controls (reasoning
+// slider + Auto toggle, count-adaptive segmented/select, boolean toggle).
+// app.js imports these builders at module top level, so the asset MUST be
+// registered here or the ES module load fails and the splash hangs.
+pub fn launch_controls_js() -> &'static str {
+    include_str!("../web/launch-controls.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -367,6 +375,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/console-window.js",
         source: console_window_js,
         marker: "createConsoleWindow",
+    },
+    RootJsModuleAsset {
+        path: "/launch-controls.js",
+        source: launch_controls_js,
+        marker: "buildReasoningField",
     },
 ];
 
@@ -1016,6 +1029,34 @@ mod tests {
         assert!(
             html.contains("const HANDSHAKE_RETRY_LIMIT ="),
             "expected app.js to declare HANDSHAKE_RETRY_LIMIT so the retry loop has a ceiling (Issue #2832)",
+        );
+    }
+
+    #[test]
+    fn embedded_web_focus_activation_retries_on_unsettled_layout_box() {
+        // Issue #2937 (#2832 parity for the focus trigger): the focus-change
+        // reflow path must not be a one-shot silent no-op. When
+        // runTerminalActivationSequence returns { ran: false } — e.g. a
+        // tab-group member revealed before its container layout box settles —
+        // scheduleTerminalFocusActivation must re-arm a bounded rAF retry
+        // (activationAttempts capped by HANDSHAKE_RETRY_LIMIT), exactly like
+        // completeInitialFitHandshake does for the initial fit. Without this
+        // the revealed terminal keeps the stale grid until a manual resize.
+        let html = frontend_bundle_source();
+        let focus_retry = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\([\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?activationAttempts[\s\S]*?HANDSHAKE_RETRY_LIMIT[\s\S]*?scheduleTerminalFocusActivation\(windowId,[\s\S]*?return;\s*\}"#,
+        )
+        .expect("valid regex");
+        assert!(
+            focus_retry.is_match(html),
+            "expected scheduleTerminalFocusActivation to re-arm a bounded retry (activationAttempts <= HANDSHAKE_RETRY_LIMIT) when runTerminalActivationSequence returns !ran (Issue #2937)",
+        );
+        let runtime_init =
+            regex::Regex::new(r#"(?s)activationFrame: null,[\s\S]*?activationAttempts: 0,"#)
+                .expect("valid regex");
+        assert!(
+            runtime_init.is_match(html),
+            "expected createTerminalRuntime to initialize activationAttempts so the focus-path retry has a bounded counter (Issue #2937)",
         );
     }
 

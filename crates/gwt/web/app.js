@@ -40,6 +40,11 @@
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
+        buildChoiceOrSelectField,
+        buildReasoningField,
+        buildToggleField,
+      } from "/launch-controls.js";
+      import {
         applyVisibilityTransition,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
@@ -2987,7 +2992,15 @@
           // whenever the terminal had been display:none — proposeDimensions
           // returns undefined when cell.width === 0, leaving the viewport
           // stuck on the pre-hidden cols/rows until the next OS resize.
-          runTerminalActivationSequence({
+          // Issue #2937: capture the activation result. When the focus
+          // reflow can't resolve a real grid yet — e.g. a tab-group member
+          // revealed before its flex/grid layout settles, so the container
+          // still has a 0-size layout box — runTerminalActivationSequence
+          // returns { ran: false } and leaves the PTY at its stale grid.
+          // Mirror completeInitialFitHandshake's bounded rAF retry instead
+          // of giving up after one frame, so the focus path is not a
+          // one-shot silent no-op (#2832 parity for the focus trigger).
+          const activation = runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
             shouldFocus,
@@ -2995,6 +3008,17 @@
             syncGeometryOnGridChange: true,
             sendGeometry,
           });
+          if (!activation.ran) {
+            activeRuntime.activationAttempts =
+              (activeRuntime.activationAttempts || 0) + 1;
+            if (activeRuntime.activationAttempts <= HANDSHAKE_RETRY_LIMIT) {
+              scheduleTerminalFocusActivation(windowId, {
+                shouldPersistGeometry,
+              });
+            }
+            return;
+          }
+          activeRuntime.activationAttempts = 0;
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
           // a hidden state, its initial fit handshake never completed
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
@@ -4625,6 +4649,10 @@
           isReady: false,
           deferredWrites: [],
           hasOutput: false,
+          // Issue #2937: bounds the focus-path reflow retry in
+          // scheduleTerminalFocusActivation when the revealed container's
+          // layout box has not settled yet (mirrors handshakeAttempts).
+          activationAttempts: 0,
           // Issue #2832: see completeInitialFitHandshake.
           handshakeAttempts: 0,
         };
@@ -7898,6 +7926,52 @@
         return field;
       }
 
+      // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
+      // These delegate to the standalone launch-controls.js builders so the
+      // control logic stays unit-testable; the wizard action payloads are
+      // unchanged from the prior native <select> / checkbox controls.
+      function appendReasoningField(parent, label, options, selectedValue, onChange) {
+        const field = buildReasoningField(document, {
+          label,
+          options,
+          selectedValue,
+          onChange,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendToggleField(parent, label, copy, checked, onChange, wide = false) {
+        const field = buildToggleField(document, {
+          label,
+          copy,
+          checked,
+          onChange,
+          wide,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendChoiceOrSelectField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onChange,
+        wide = false,
+      ) {
+        const field = buildChoiceOrSelectField(document, {
+          label,
+          options,
+          selectedValue,
+          onChange,
+          wide,
+        });
+        parent.appendChild(field);
+        return field;
+      }
+
       function runtimeTargetPayload(value) {
         return value === "docker" ? "Docker" : "Host";
       }
@@ -8394,7 +8468,7 @@
             "Choose what to launch on the selected branch.",
           );
           const grid = createNode("div", "launch-form-grid");
-          appendSelectField(
+          appendChoiceOrSelectField(
             grid,
             "Target",
             launchWizard.launch_target_options || [],
@@ -8406,7 +8480,7 @@
               }),
           );
           if (launchWizard.show_agent_settings) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Agent",
               launchWizard.agent_options || [],
@@ -8431,7 +8505,7 @@
               );
             }
             if (launchWizard.show_reasoning) {
-              appendSelectField(
+              appendReasoningField(
                 grid,
                 "Reasoning",
                 launchWizard.reasoning_options || [],
@@ -8444,7 +8518,7 @@
               );
             }
             if (launchWizard.show_execution_mode) {
-              appendSelectField(
+              appendChoiceOrSelectField(
                 grid,
                 "Execution mode",
                 launchWizard.execution_mode_options || [],
@@ -8468,7 +8542,7 @@
             grid.appendChild(note);
           }
           if (launchWizard.show_windows_shell) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Shell",
               launchWizard.windows_shell_options || [],
@@ -8515,7 +8589,7 @@
             );
           }
           if (launchWizard.show_skip_permissions) {
-            appendCheckboxField(
+            appendToggleField(
               grid,
               "Permissions",
               "Skip permission prompts",
@@ -8528,7 +8602,7 @@
             );
           }
           if (showFastMode) {
-            appendCheckboxField(
+            appendToggleField(
               grid,
               "Fast mode",
               "Use the agent's Fast mode",
@@ -8583,7 +8657,7 @@
           const grid = createNode("div", "launch-form-grid");
           let appendedRuntimeControl = false;
           if (launchWizard.show_runtime_target) {
-            appendSelectField(
+            appendChoiceOrSelectField(
               grid,
               "Runtime target",
               launchWizard.runtime_target_options || [],
@@ -13607,21 +13681,37 @@
       // pointerdown matches when the OS overlay opens; release on
       // `change` (commit), `focusout` (cancel), and `Escape` covers
       // every common termination path.
+      // SPEC-2014 2026-05-29: the reasoning slider (`.launch-range__input`)
+      // needs the same guard. Each value change commits set_reasoning, and the
+      // backend echoes launch_wizard_state; without deferral that re-render
+      // destroys and recreates the slider mid-drag (breaking the drag) and
+      // drops keyboard focus between Arrow steps. Activate on focusin (covers
+      // mouse press and keyboard tab-in) and release on focusout so re-renders
+      // are coalesced for the whole interaction, not committed on every step.
+      const isGuardedRange = (el) =>
+        Boolean(el && el.classList && el.classList.contains("launch-range__input"));
       wizardBody.addEventListener("pointerdown", (event) => {
         const target = event.target;
-        if (target && target.tagName === "SELECT") {
+        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
+          wizardInteractionGuard.activate();
+        }
+      });
+      wizardBody.addEventListener("focusin", (event) => {
+        if (isGuardedRange(event.target)) {
           wizardInteractionGuard.activate();
         }
       });
       wizardBody.addEventListener("change", (event) => {
         const target = event.target;
+        // <select> commits on change; the range keeps the guard active across
+        // multiple Arrow steps / the post-drag focused state until focusout.
         if (target && target.tagName === "SELECT") {
           wizardInteractionGuard.release();
         }
       });
       wizardBody.addEventListener("focusout", (event) => {
         const target = event.target;
-        if (target && target.tagName === "SELECT") {
+        if (target && (target.tagName === "SELECT" || isGuardedRange(target))) {
           wizardInteractionGuard.release();
         }
       });
