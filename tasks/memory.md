@@ -6289,7 +6289,7 @@ Future Action: GUI frontend 変更の視覚検証は、(1) 自動検証 (linkedo
 
 Type: lesson
 Context: SPEC-2014 Launch Agent コントロール刷新の headed 検証中、隔離 HOME で serve した dev バイナリ (11:01 ビルド) が、その後 11:08 に編集した launch-controls.js の makeSwitch リファクタを含んでおらず、旧版 (sr-only 1px の checkbox) を配信していた。Playwright で toggle が 1x1・クリック intercept され、curl /launch-controls.js で makeSwitch 0 hit を確認して stale と判明。cargo build -p gwt --bin gwt でリビュルド後、toggle が 34x18・overlay input が最上位ヒットになりクリック可能に修正された。
-Learning: crates/gwt/web/* (app.js/launch-controls.js/styles/*.css) は embedded_web.rs の include_str! でコンパイル時にバイナリへ焼き込まれる。.js/.css を編集しても target/debug/gwt をリビルドしない限り serve される frontend は変わらない。cargo test/clippy はテストバイナリを作るが gwt bin の frontend は更新しない。linkedom unit test はファイル直読みなので GREEN でも binary は古いことがある。駆動検証 (Playwright で実際に操作) しないと、ビルド済み binary の stale frontend や CSS の崩れ (inline span への width/height 無効化など) を見逃す。
+Learning: `crates/gwt/web/` 配下の frontend asset (app.js, launch-controls.js, styles/app.css 等) は embedded_web.rs の include_str! でコンパイル時にバイナリへ焼き込まれる。.js/.css を編集しても target/debug/gwt をリビルドしない限り serve される frontend は変わらない。cargo test/clippy はテストバイナリを作るが gwt bin の frontend は更新しない。linkedom unit test はファイル直読みなので GREEN でも binary は古いことがある。駆動検証 (Playwright で実際に操作) しないと、ビルド済み binary の stale frontend や CSS の崩れ (inline span への width/height 無効化など) を見逃す。
 Future Action: headed/Playwright 検証の前に必ず cargo build -p gwt --bin gwt を実行し、serve 後 curl <url>/launch-controls.js 等で最新マーカー (今回は makeSwitch) が配信されているか確認してから UI 駆動する。headless-browser-check skill の『freshly edited code はビルドしてから』に従う。toggle 等のカスタムコントロールは getBoundingClientRect と elementFromPoint で実寸・ヒット対象を検証し、見た目だけでなくクリック可能性まで Playwright で確認する。
 
 ## 2026-05-30 — frontend/backend が別ブランチに分かれた機能は cherry-pick -n で結合ビルド検証してから revert する
