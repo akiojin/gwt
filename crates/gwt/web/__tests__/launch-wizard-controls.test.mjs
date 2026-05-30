@@ -8,6 +8,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import {
   chooseLaunchControlKind,
@@ -93,9 +96,9 @@ function keydown(doc, target, key) {
   target.dispatchEvent(ev);
 }
 
-function changeRange(doc, input, value) {
+function dispatchRange(doc, input, value, type = "input") {
   input.value = String(value);
-  const ev = new doc.defaultView.Event("input", { bubbles: true, cancelable: true });
+  const ev = new doc.defaultView.Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(ev, "target", { value: input, configurable: true });
   input.dispatchEvent(ev);
 }
@@ -181,10 +184,17 @@ test("buildReasoningField renders a snapped range over ordinal stops", () => {
   // No Auto toggle for Codex (no auto option).
   assert.equal(field.querySelector('[data-reasoning-auto]'), null);
 
-  changeRange(doc, range, 2);
-  assert.deepEqual(sent, ["high"], "moving the slider sends the stop's stored value");
+  // `input` (dragging) previews locally only — it must NOT commit to the
+  // backend, or the resulting wizard re-render would destroy the slider
+  // mid-drag and break the drag (regression: slider "uns operable").
+  dispatchRange(doc, range, 2, "input");
+  assert.deepEqual(sent, [], "input (drag) previews locally without committing");
   const desc = field.querySelector("[data-reasoning-description]");
-  assert.equal(desc.textContent, "Greater reasoning depth", "description follows the slider");
+  assert.equal(desc.textContent, "Greater reasoning depth", "description previews live during drag");
+
+  // `change` (release / keyboard step) commits the stop's stored value once.
+  dispatchRange(doc, range, 2, "change");
+  assert.deepEqual(sent, ["high"], "change commits the stop's stored value");
 });
 
 test("buildReasoningField exposes an Auto toggle that suspends the slider for Claude", () => {
@@ -296,4 +306,33 @@ test("buildChoiceOrSelectField falls back to a dropdown when options overflow", 
   });
   assert.ok(field.querySelector("select"), "overflowing agent list falls back to a dropdown");
   assert.equal(field.querySelector('[role="radiogroup"]'), null);
+});
+
+// --- app.js wiring: interaction guard covers the slider -------------------
+
+const appSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../app.js"),
+  "utf8",
+);
+
+test("app.js extends the wizard interaction guard to the reasoning slider", () => {
+  // The guard previously covered only native <select> (Issue #2698). The
+  // slider must be guarded too, or its set_reasoning re-render destroys the
+  // slider mid-drag. Activation is on focusin (mouse + keyboard) and release
+  // on focusout so the whole interaction is coalesced.
+  assert.match(
+    appSource,
+    /isGuardedRange\s*=\s*\(el\)\s*=>[\s\S]*?launch-range__input/,
+    "expected a guarded-range predicate keyed on .launch-range__input",
+  );
+  assert.match(
+    appSource,
+    /addEventListener\(\s*"focusin"[\s\S]*?isGuardedRange\(event\.target\)[\s\S]*?wizardInteractionGuard\.activate\(\)/,
+    "expected focusin on the slider to activate the wizard interaction guard",
+  );
+  assert.match(
+    appSource,
+    /addEventListener\(\s*"focusout"[\s\S]*?isGuardedRange\(target\)[\s\S]*?wizardInteractionGuard\.release\(\)/,
+    "expected focusout on the slider to release the wizard interaction guard",
+  );
 });

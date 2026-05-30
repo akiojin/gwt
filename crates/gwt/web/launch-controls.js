@@ -278,14 +278,24 @@ export function buildReasoningField(doc, { label, options, selectedValue, onChan
   const stopValue = (index) => model.stops[index]?.value ?? null;
   const stopDescription = (index) => model.stops[index]?.description ?? "";
 
-  range.addEventListener("input", () => {
+  // `input` fires continuously while dragging; `change` fires once the value
+  // settles (mouse release / each keyboard step). onChange triggers a full
+  // wizard re-render on the backend, which would destroy and recreate this
+  // slider mid-drag and break the drag. So preview locally on `input` (no
+  // backend round-trip) and only commit to the backend on `change`.
+  const previewIndex = () => {
     currentIndex = Number(range.value) || 0;
     range.setAttribute("aria-valuetext", model.stops[currentIndex]?.label ?? "");
     setDescription(stopDescription(currentIndex));
     syncTicks();
+  };
+  const commitIndex = () => {
+    previewIndex();
     const value = stopValue(currentIndex);
     if (value != null) onChange(value);
-  });
+  };
+  range.addEventListener("input", previewIndex);
+  range.addEventListener("change", commitIndex);
 
   if (field.__autoInput) {
     field.__autoInput.addEventListener("change", () => {
