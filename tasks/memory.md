@@ -6291,3 +6291,10 @@ Type: lesson
 Context: リモート機で起動した gwt に VPN 越しで届かない、と user が報告。実証で ping は通る (RTT 8-9ms) が TCP target port は timeout (silent drop)。コード読みで main.rs:6352 が hardcoded loopback bind であることを確認。SPEC #2920 FR-013 / README は --bind/--port を約束しているが Phase 4 未着手だった。
 Learning: VPN 越し / LAN 別端末からの gwt アクセス不可は、loopback bind が直接の原因である可能性が高い。RST ではなく timeout なら loopback または firewall drop。TCP RST なら別の犯人 (service down 等) を疑う。手元 PC からの ping/nc/curl と remote 機の lsof|ss listener 確認で 1 ターンで切り分けられる。一時的な workaround は SSH local port forward (ssh -L <port>:127.0.0.1:<port> user@host)。
 Future Action: 同種の質問が出たら、まず (1) ping (2) nc/curl (3) リモートで lsof|ss listener の 3 ステップで切り分けを user に依頼するか、可能なら手元 PC から自分で実行する。loopback 固定が確定したら、Phase 4 partial 実装 (SPEC #2920 の TrayArgs/parse_tray_argv 経路) を案内する。--no-tray / --no-open は parser 受け入れるが no-op の状態を明示する。
+
+## 2026-05-30 — Launch Wizard の installed_version は production で常に None
+
+Type: lesson
+Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
+Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
+Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。
