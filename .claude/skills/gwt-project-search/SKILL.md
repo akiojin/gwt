@@ -15,6 +15,11 @@ When the gwt GUI app launches an agent pane, the following env vars are exported
 - `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
 - `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
 
+> The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` and
+> `GWT_WORKTREE_HASH` are unset or passed empty, the runner derives them from
+> `--project-root` automatically (Issue #2933). A search therefore needs only
+> `--project-root`, and works in any shell on any platform.
+
 ## File search command (code)
 
 ```bash

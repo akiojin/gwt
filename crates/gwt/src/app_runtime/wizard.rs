@@ -204,6 +204,7 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number,
                 linked_issue_kind,
+                ultracode_supported: gwt_agent::claude_ultracode_supported(),
             },
             agent_options,
             quick_start_entries,
@@ -250,6 +251,7 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number: Some(issue_number),
                 linked_issue_kind: Some(linked_issue_kind),
+                ultracode_supported: gwt_agent::claude_ultracode_supported(),
             },
             base_branch_name,
             agent_options,
@@ -875,6 +877,7 @@ impl AppRuntime {
                     workspace_resume_owner_issue_number(context.owner.as_deref())
                 }),
                 linked_issue_kind: None,
+                ultracode_supported: gwt_agent::claude_ultracode_supported(),
             },
             base_branch,
             agent_options,
