@@ -2992,7 +2992,15 @@
           // whenever the terminal had been display:none — proposeDimensions
           // returns undefined when cell.width === 0, leaving the viewport
           // stuck on the pre-hidden cols/rows until the next OS resize.
-          runTerminalActivationSequence({
+          // Issue #2937: capture the activation result. When the focus
+          // reflow can't resolve a real grid yet — e.g. a tab-group member
+          // revealed before its flex/grid layout settles, so the container
+          // still has a 0-size layout box — runTerminalActivationSequence
+          // returns { ran: false } and leaves the PTY at its stale grid.
+          // Mirror completeInitialFitHandshake's bounded rAF retry instead
+          // of giving up after one frame, so the focus path is not a
+          // one-shot silent no-op (#2832 parity for the focus trigger).
+          const activation = runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
             shouldFocus,
@@ -3000,6 +3008,17 @@
             syncGeometryOnGridChange: true,
             sendGeometry,
           });
+          if (!activation.ran) {
+            activeRuntime.activationAttempts =
+              (activeRuntime.activationAttempts || 0) + 1;
+            if (activeRuntime.activationAttempts <= HANDSHAKE_RETRY_LIMIT) {
+              scheduleTerminalFocusActivation(windowId, {
+                shouldPersistGeometry,
+              });
+            }
+            return;
+          }
+          activeRuntime.activationAttempts = 0;
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
           // a hidden state, its initial fit handshake never completed
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
@@ -4630,6 +4649,10 @@
           isReady: false,
           deferredWrites: [],
           hasOutput: false,
+          // Issue #2937: bounds the focus-path reflow retry in
+          // scheduleTerminalFocusActivation when the revealed container's
+          // layout box has not settled yet (mirrors handshakeAttempts).
+          activationAttempts: 0,
           // Issue #2832: see completeInitialFitHandshake.
           handshakeAttempts: 0,
         };
