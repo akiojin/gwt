@@ -12,7 +12,26 @@ use crate::{
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
 
-const CLAUDE_FAST_MODE_SETTINGS_JSON: &str = r#"{"fastMode":true}"#;
+/// Build the Claude Code `--settings` inline JSON for session-level toggles.
+///
+/// Both `fastMode` and `ultracode` ride the single `--settings` channel
+/// because Claude Code's handling of multiple `--settings` flags is
+/// undocumented. Key order is fixed (`fastMode` then `ultracode`) so the
+/// emitted string is deterministic and testable. Returns `None` when no toggle
+/// is active so the caller emits no flag.
+fn claude_session_settings_json(fast_mode: bool, ultracode: bool) -> Option<String> {
+    let mut entries: Vec<&str> = Vec::new();
+    if fast_mode {
+        entries.push(r#""fastMode":true"#);
+    }
+    if ultracode {
+        entries.push(r#""ultracode":true"#);
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(format!("{{{}}}", entries.join(",")))
+}
 
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
@@ -664,9 +683,15 @@ impl AgentLaunchBuilder {
             args.push("--dangerously-skip-permissions".to_string());
         }
 
-        if self.fast_mode {
+        // Session-level settings overrides (fast mode and/or ultracode) are
+        // merged into a single `--settings` flag. `ultracode` is selected via
+        // the reasoning level but activated here as a Claude Code session
+        // setting (it implies xhigh + workflow orchestration), never as an
+        // effort-level value.
+        let ultracode = self.reasoning_level.as_deref() == Some("ultracode");
+        if let Some(settings) = claude_session_settings_json(self.fast_mode, ultracode) {
             args.push("--settings".to_string());
-            args.push(CLAUDE_FAST_MODE_SETTINGS_JSON.to_string());
+            args.push(settings);
         }
 
         // Session mode
@@ -687,7 +712,10 @@ impl AgentLaunchBuilder {
         }
 
         if let Some(ref level) = self.reasoning_level {
-            if level != "auto" {
+            // "auto" lets the model choose; "ultracode" is delivered via
+            // --settings above (and implies xhigh), not a valid
+            // CLAUDE_CODE_EFFORT_LEVEL value.
+            if level != "auto" && level != "ultracode" {
                 env_vars.insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), level.clone());
             }
         }
@@ -755,12 +783,17 @@ impl AgentLaunchBuilder {
             args.push(format!("--model={model}"));
         }
 
-        // Reasoning level (Codex-specific)
+        // Reasoning level (Codex-specific). `ultracode` is a Claude-only
+        // session setting and not a valid Codex reasoning effort, so skip the
+        // override defensively (Codex falls back to its own default) instead of
+        // emitting `model_reasoning_effort=ultracode`, which would fail to start.
         if let Some(ref level) = self.reasoning_level {
-            args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort={level}"));
-            args.push("-c".to_string());
-            args.push("model_reasoning_summaries=detailed".to_string());
+            if level != "ultracode" {
+                args.push("-c".to_string());
+                args.push(format!("model_reasoning_effort={level}"));
+                args.push("-c".to_string());
+                args.push("model_reasoning_summaries=detailed".to_string());
+            }
         }
 
         // Version-dependent flags
@@ -1157,6 +1190,78 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--settings" && pair[1].contains("fastMode")));
+    }
+
+    #[test]
+    fn build_claude_with_ultracode_sets_settings_and_skips_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("ultracode")
+            .build();
+
+        // ultracode rides --settings, never CLAUDE_CODE_EFFORT_LEVEL.
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"ultracode":true}"#));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert!(!config.args.contains(&"--effort".to_string()));
+        // reasoning_level still round-trips for persistence/display.
+        assert_eq!(config.reasoning_level.as_deref(), Some("ultracode"));
+    }
+
+    #[test]
+    fn build_claude_fast_mode_and_ultracode_combine_settings() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .fast_mode(true)
+            .reasoning_level("ultracode")
+            .build();
+
+        // Exactly one --settings flag carrying a deterministic combined object.
+        let settings_count = config
+            .args
+            .iter()
+            .filter(|arg| *arg == "--settings")
+            .count();
+        assert_eq!(
+            settings_count, 1,
+            "must combine into a single --settings flag"
+        );
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--settings"
+                && pair[1] == r#"{"fastMode":true,"ultracode":true}"#));
+        assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn build_codex_ultracode_does_not_emit_reasoning_effort() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .reasoning_level("ultracode")
+            .build();
+
+        // ultracode is Claude-only; Codex must not receive it as an effort.
+        assert!(!config
+            .args
+            .iter()
+            .any(|arg| arg == "model_reasoning_effort=ultracode"));
+        assert!(!config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1].starts_with("model_reasoning_effort=")));
+    }
+
+    #[test]
+    fn build_codex_with_xhigh_still_emits_reasoning_effort() {
+        // Regression guard: the ultracode skip must not affect valid Codex levels.
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .reasoning_level("xhigh")
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=xhigh"));
     }
 
     #[test]
