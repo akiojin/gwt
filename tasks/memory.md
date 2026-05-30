@@ -6278,6 +6278,27 @@ Context: While fixing Claude Code launch regressions (#2923, #2924), I reported 
 Learning: When AGENTS.md or the user demands a Headed visual E2E check, do not substitute it with DOM metric reads, calculation, or computed-style assertions. The Ready PR Gate requires that the agent actually opened a headed browser, navigated to the served URL, positioned the relevant window into the viewport, and captured / observed a real screenshot of the rendered state. Pixel-level corruption (font fragmentation, wrap of a single character, stray byte echoes) only surfaces in the real rendering pipeline; calculations are necessary but not sufficient.
 Future Action: Before declaring User Verification done, run a Headed Playwright session and (1) navigate to the URL, (2) resize the browser to a viewport larger than the agent window, (3) scrollIntoView / reset zoom so the target window is fully visible inside the viewport, (4) take a screenshot, (5) Read the screenshot file in the conversation and inspect it visually. Use textual symbol-string assertions ONLY as supporting evidence, never as a replacement. If a metric measurement disagrees with a visual rendering, trust the visual.
 
+## 2026-05-29 — GUI 視覚検証は稼働中 tray インスタンスが旧アセットを serve するため新ビルドが見えない
+
+Type: lesson
+Context: SPEC-2014 Launch Agent コントロール刷新 (frontend app.js/launch-controls.js/app.css) を実装後、headed 視覚検証を試みた。稼働中の GWT.app(v9.49.0) が per-user tray singleton lock (gwt::cli::tray::lock, gwt_home 由来) を保持し、target/debug の新ビルドを --no-tray --no-open でも並行起動できず、稼働インスタンスの URL(旧アセット)が返るだけだった (新 module /launch-controls.js が稼働 URL で 404 で確定)。GWT_FORCE_NEW_INSTANCE は GUI lock 用で tray-resident guard には効かない。HOME を分離すると tray lock は回避できるが、プロジェクト文脈が無く Launch Agent 動線に到達できず first-run runtime セットアップで stall した。
+Learning: SPEC-2920 以降 gwt は per-user tray singleton。新ビルドの GUI 視覚検証には稼働インスタンスの停止が前提で、エージェント session が gwt-managed pane の場合は停止で session も落ちる。embedded asset は include_str! でビルド時固定のため、稼働中インスタンスを再起動しない限り新 frontend は反映されない。HTTP 層の配線確認 (curl /launch-controls.js, /styles/app.css の新クラス) は serve できれば可能だが、wizard の UI 操作確認には実プロジェクトを開いた新ビルドインスタンスが必須。
+Future Action: GUI frontend 変更の視覚検証は、(1) 自動検証 (linkedom unit + cargo + clippy/fmt) を先に green にし commit/push、(2) 視覚検証は『稼働 GWT.app 停止 → cd worktree && ./target/debug/gwt 起動 → browser URL → プロジェクト/ブランチ → 対象 UI』の 導線で user に依頼、(3) session-kill リスクがある場合は user が別ターミナルで実施し結果報告を待つ、という handoff にする。PR は視覚検証 confirmed 後に作成 (PR gate)。分離 HOME 単独起動は project 文脈不足で UI 動線検証には不向き。
+
+## 2026-05-30 — GUI frontend 変更後は target/debug/gwt をリビルドしてから serve/視覚検証する (embedded asset はコンパイル時固定)
+
+Type: lesson
+Context: SPEC-2014 Launch Agent コントロール刷新の headed 検証中、隔離 HOME で serve した dev バイナリ (11:01 ビルド) が、その後 11:08 に編集した launch-controls.js の makeSwitch リファクタを含んでおらず、旧版 (sr-only 1px の checkbox) を配信していた。Playwright で toggle が 1x1・クリック intercept され、curl /launch-controls.js で makeSwitch 0 hit を確認して stale と判明。cargo build -p gwt --bin gwt でリビュルド後、toggle が 34x18・overlay input が最上位ヒットになりクリック可能に修正された。
+Learning: `crates/gwt/web/` 配下の frontend asset (app.js, launch-controls.js, styles/app.css 等) は embedded_web.rs の include_str! でコンパイル時にバイナリへ焼き込まれる。.js/.css を編集しても target/debug/gwt をリビルドしない限り serve される frontend は変わらない。cargo test/clippy はテストバイナリを作るが gwt bin の frontend は更新しない。linkedom unit test はファイル直読みなので GREEN でも binary は古いことがある。駆動検証 (Playwright で実際に操作) しないと、ビルド済み binary の stale frontend や CSS の崩れ (inline span への width/height 無効化など) を見逃す。
+Future Action: headed/Playwright 検証の前に必ず cargo build -p gwt --bin gwt を実行し、serve 後 curl <url>/launch-controls.js 等で最新マーカー (今回は makeSwitch) が配信されているか確認してから UI 駆動する。headless-browser-check skill の『freshly edited code はビルドしてから』に従う。toggle 等のカスタムコントロールは getBoundingClientRect と elementFromPoint で実寸・ヒット対象を検証し、見た目だけでなくクリック可能性まで Playwright で確認する。
+
+## 2026-05-30 — frontend/backend が別ブランチに分かれた機能は cherry-pick -n で結合ビルド検証してから revert する
+
+Type: lesson
+Context: SPEC-2014 で frontend のスライダー (自分のブランチ) と Ultracode reasoning level の backend (別 Agent の work/20260529-0217, d72415b4e) が別ブランチに分かれていた。自分のクリーンブランチ単独では Ultracode が出ず user が『対応できていない』と指摘。データ駆動の主張 (max=stops.length-1) だけでは不十分で、end-to-end の実機証明が必要だった。
+Learning: 別 Agent の push 済み commit を git fetch → git cherry-pick -n <sha> で自分の working tree に重ねれば、両者を結合したビルドで end-to-end を実機検証できる (別ファイルなら競合なし)。検証後は git reset --hard HEAD + 新規ファイル rm で完全 revert し、相手の作業を自分のブランチにコミットしない。今回 my slider + their backend で Claude Opus に Ultracode 6 段描画・ドラッグで ultracode コミット・Sonnet 非表示 (version gating 2.1.158>=2.1.154) を確認できた。
+Future Action: frontend/backend が別 Agent・別ブランチに分かれる機能では、(1) 役割境界 (別ファイル) を Board で確認、(2) 相手の push 済み backend を cherry-pick -n で重ねた結合ビルドで end-to-end を Playwright 実駆動検証、(3) git reset --hard で revert、の手順で『自分の担当部分が相手の成果と結合して動く』ことを証明してから PR にする。データ駆動の理屈だけで完了報告しない。
+
 ## 2026-05-29 — index 検索が pane で使えない時はハッシュ env export を疑う (GWT_REPO_HASH/GWT_WORKTREE_HASH)
 
 Type: lesson

@@ -207,6 +207,14 @@ pub fn console_window_js() -> &'static str {
     include_str!("../web/console-window.js")
 }
 
+// SPEC-2014 2026-05-29 amendment — Launch Agent setting controls (reasoning
+// slider + Auto toggle, count-adaptive segmented/select, boolean toggle).
+// app.js imports these builders at module top level, so the asset MUST be
+// registered here or the ES module load fails and the splash hangs.
+pub fn launch_controls_js() -> &'static str {
+    include_str!("../web/launch-controls.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -367,6 +375,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/console-window.js",
         source: console_window_js,
         marker: "createConsoleWindow",
+    },
+    RootJsModuleAsset {
+        path: "/launch-controls.js",
+        source: launch_controls_js,
+        marker: "buildReasoningField",
     },
 ];
 
