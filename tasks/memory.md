@@ -6291,3 +6291,10 @@ Type: lesson
 Context: SPEC-2014 Launch Agent コントロール刷新の headed 検証中、隔離 HOME で serve した dev バイナリ (11:01 ビルド) が、その後 11:08 に編集した launch-controls.js の makeSwitch リファクタを含んでおらず、旧版 (sr-only 1px の checkbox) を配信していた。Playwright で toggle が 1x1・クリック intercept され、curl /launch-controls.js で makeSwitch 0 hit を確認して stale と判明。cargo build -p gwt --bin gwt でリビュルド後、toggle が 34x18・overlay input が最上位ヒットになりクリック可能に修正された。
 Learning: crates/gwt/web/* (app.js/launch-controls.js/styles/*.css) は embedded_web.rs の include_str! でコンパイル時にバイナリへ焼き込まれる。.js/.css を編集しても target/debug/gwt をリビルドしない限り serve される frontend は変わらない。cargo test/clippy はテストバイナリを作るが gwt bin の frontend は更新しない。linkedom unit test はファイル直読みなので GREEN でも binary は古いことがある。駆動検証 (Playwright で実際に操作) しないと、ビルド済み binary の stale frontend や CSS の崩れ (inline span への width/height 無効化など) を見逃す。
 Future Action: headed/Playwright 検証の前に必ず cargo build -p gwt --bin gwt を実行し、serve 後 curl <url>/launch-controls.js 等で最新マーカー (今回は makeSwitch) が配信されているか確認してから UI 駆動する。headless-browser-check skill の『freshly edited code はビルドしてから』に従う。toggle 等のカスタムコントロールは getBoundingClientRect と elementFromPoint で実寸・ヒット対象を検証し、見た目だけでなくクリック可能性まで Playwright で確認する。
+
+## 2026-05-30 — frontend/backend が別ブランチに分かれた機能は cherry-pick -n で結合ビルド検証してから revert する
+
+Type: lesson
+Context: SPEC-2014 で frontend のスライダー (自分のブランチ) と Ultracode reasoning level の backend (別 Agent の work/20260529-0217, d72415b4e) が別ブランチに分かれていた。自分のクリーンブランチ単独では Ultracode が出ず user が『対応できていない』と指摘。データ駆動の主張 (max=stops.length-1) だけでは不十分で、end-to-end の実機証明が必要だった。
+Learning: 別 Agent の push 済み commit を git fetch → git cherry-pick -n <sha> で自分の working tree に重ねれば、両者を結合したビルドで end-to-end を実機検証できる (別ファイルなら競合なし)。検証後は git reset --hard HEAD + 新規ファイル rm で完全 revert し、相手の作業を自分のブランチにコミットしない。今回 my slider + their backend で Claude Opus に Ultracode 6 段描画・ドラッグで ultracode コミット・Sonnet 非表示 (version gating 2.1.158>=2.1.154) を確認できた。
+Future Action: frontend/backend が別 Agent・別ブランチに分かれる機能では、(1) 役割境界 (別ファイル) を Board で確認、(2) 相手の push 済み backend を cherry-pick -n で重ねた結合ビルドで end-to-end を Playwright 実駆動検証、(3) git reset --hard で revert、の手順で『自分の担当部分が相手の成果と結合して動く』ことを証明してから PR にする。データ駆動の理屈だけで完了報告しない。
