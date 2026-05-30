@@ -197,6 +197,34 @@ test("buildReasoningField renders a snapped range over ordinal stops", () => {
   assert.deepEqual(sent, ["high"], "change commits the stop's stored value");
 });
 
+test("buildReasoningField is data-driven: any backend stop count (e.g. Ultracode above Max) is rendered", () => {
+  // SPEC-2014 US-34 (handled in the backend by another agent) adds a Claude
+  // "Ultracode" reasoning level above Max. The slider must render whatever
+  // ordinal stops the backend sends with no frontend change — proving the
+  // data-driven contract for this and any future level.
+  const doc = bootDom();
+  const sent = [];
+  const OPUS_WITH_ULTRACODE = [
+    ...CLAUDE_OPUS_REASONING, // auto, low, medium, high, xhigh, max
+    { value: "ultracode", label: "Ultracode", description: "Maximum effort with extended workflows" },
+  ];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: OPUS_WITH_ULTRACODE,
+    selectedValue: "max",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  // Auto is lifted out -> 6 ordinal stops (low..ultracode); max index = 5.
+  assert.equal(range.getAttribute("max"), "5", "slider scales to the backend stop count");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "xHigh", "Max", "Ultracode"]);
+  assert.equal(ticks.at(-1), "Ultracode", "Ultracode renders as the top stop, above Max");
+  // Committing the top stop sends the backend stored value verbatim.
+  dispatchRange(doc, range, 5, "change");
+  assert.deepEqual(sent, ["ultracode"], "selecting the top stop commits 'ultracode'");
+});
+
 test("buildReasoningField exposes an Auto toggle that suspends the slider for Claude", () => {
   const doc = bootDom();
   const sent = [];
