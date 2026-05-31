@@ -6319,3 +6319,10 @@ Type: lesson
 Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
 Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
 Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。
+
+## 2026-05-31 — startup auto-resume: linked worktree の agent session が workspace-home tab に紐付かず resume されない (#2942)
+
+Type: lesson
+Context: 前回終了していないセッションの復元が Stopped のまま起動されない。当初 open_project 経路未配線と誤診したが、実フローは ~/.gwt/session.json の tab 復元 (bootstrap 経路) であり open_project_path は通らない。
+Learning: auto_resume_tab_id_for_session が project_scope_hash 一致のみでタブ照合していたが、gwt 管理レイアウトでは workspace home (親 project_root) と linked worktree で repo_hash/scope_hash が異なる (例: 親=b19aac, worktree=99a866) ため worktree 由来の agent session を親 tab に紐付けられず queue されなかった。session 状態の正本は session-state.json ではなく ~/.gwt/session.json (gwt_session_state_path)。
+Future Action: worktree とプロジェクトの関連付けは repo_hash/project_scope_hash 比較ではなく gwt_git::worktree::main_worktree_root() の一致で判定する。復元/resume バグ調査では、静的推測でなくライブで各ゲートの発火 (DEBUGQ ログ) を確認して実際に skip しているゲートを特定してから修正する。
