@@ -60,7 +60,7 @@ encoding_rs.workspace = true
 pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
-tray-icon = "0.19"
+tray-icon = "0.24"
 auto-launch = "0.5"
 whoami = "1.5"
 # SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
