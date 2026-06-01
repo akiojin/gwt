@@ -6417,3 +6417,10 @@ Type: lesson
 Context: SPEC-2359 Phase W-10: gwtd workspace update --agent-session was writing title/focus into the linked worktree Project State root while the live GUI watched the Workspace Home Project State root.
 Learning: Do not use an agent worktree path as the implicit Project State identity. Persist Session.project_state_root during GUI launch, route CLI/hook reads and writes through that canonical root, and repair old split same-session projection data by updated_at.
 Future Action: Before changing Agent title, Workspace, hook, or Project State behavior, add a regression test with a Workspace Home project root and a linked worktree agent so canonical-root and worktree-root writes cannot diverge again.
+
+## 2026-06-01 — Fresh browser checks must never share production gwt URLs
+
+Type: lesson
+Context: User corrected the headless-browser-check workflow after it printed an existing tray-resident production URL. The desired verification URL must come from the modified checkout's own freshly launched server.
+Learning: Browser verification skills for gwt must isolate HOME/USERPROFILE, launch the current checkout's target/debug/gwt with --no-tray --no-open, seed session.json for the checkout, and reject any URL reported after an existing tray instance warning.
+Future Action: When providing a gwt verification URL, use the renamed gwt-fresh-browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
