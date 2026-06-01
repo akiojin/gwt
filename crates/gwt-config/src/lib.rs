@@ -15,7 +15,7 @@ pub mod voice_config;
 
 pub use agent_config::AgentConfig;
 pub use ai_settings::AISettings;
-pub use board_config::{BoardConfig, BoardProviderKind};
+pub use board_config::{BoardConfig, BoardProviderKind, SlackConfig, TeamsConfig};
 pub use error::{ConfigError, Result};
 pub use locale::{
     detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,

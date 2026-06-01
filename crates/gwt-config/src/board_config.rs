@@ -4,6 +4,8 @@
 //! default and the only implemented provider; `slack` / `teams` are reserved
 //! for a future adapter (Issue #2960) and currently fall back to `local`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Which backend serves the Board.
@@ -52,12 +54,43 @@ impl<'de> Deserialize<'de> for BoardProviderKind {
     }
 }
 
+/// Non-secret Slack provider settings (SPEC-2963). OAuth tokens and any
+/// client secret live in the token store, never in `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SlackConfig {
+    /// OAuth client id (non-secret).
+    pub client_id: Option<String>,
+    /// Channel id used when a Work has no explicit mapping.
+    pub default_channel: Option<String>,
+    /// `workspace_id` → Slack channel id mapping (FR-007).
+    pub channel_map: BTreeMap<String, String>,
+}
+
+/// Non-secret Microsoft Teams provider settings (SPEC-2963).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct TeamsConfig {
+    /// OAuth client (application) id (non-secret).
+    pub client_id: Option<String>,
+    /// Entra tenant id (or `organizations` / `common`).
+    pub tenant_id: Option<String>,
+    /// Default `team_id/channel_id` target when a Work has no mapping.
+    pub default_channel: Option<String>,
+    /// `workspace_id` → `team_id/channel_id` mapping (FR-007).
+    pub channel_map: BTreeMap<String, String>,
+}
+
 /// Board configuration block, persisted under `[board]` in `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct BoardConfig {
     /// Selected Board provider. Defaults to `local`.
     pub provider: BoardProviderKind,
+    /// Non-secret Slack settings (SPEC-2963).
+    pub slack: SlackConfig,
+    /// Non-secret Teams settings (SPEC-2963).
+    pub teams: TeamsConfig,
 }
 
 #[cfg(test)]
@@ -88,7 +121,10 @@ mod tests {
             BoardProviderKind::Slack,
             BoardProviderKind::Teams,
         ] {
-            let cfg = BoardConfig { provider: kind };
+            let cfg = BoardConfig {
+                provider: kind,
+                ..Default::default()
+            };
             let serialized = toml::to_string(&cfg).unwrap();
             let restored: BoardConfig = toml::from_str(&serialized).unwrap();
             assert_eq!(restored.provider, kind, "round-trip failed for {kind:?}");
@@ -100,5 +136,46 @@ mod tests {
         assert!(BoardProviderKind::Local.is_implemented());
         assert!(!BoardProviderKind::Slack.is_implemented());
         assert!(!BoardProviderKind::Teams.is_implemented());
+    }
+
+    #[test]
+    fn board_config_defaults_have_empty_remote_settings() {
+        let cfg = BoardConfig::default();
+        assert!(cfg.slack.client_id.is_none());
+        assert!(cfg.slack.channel_map.is_empty());
+        assert!(cfg.teams.client_id.is_none());
+        assert!(cfg.teams.channel_map.is_empty());
+    }
+
+    #[test]
+    fn board_config_carries_slack_teams_non_secret_settings() {
+        let toml_src = r#"
+provider = "slack"
+
+[slack]
+client_id = "C123"
+default_channel = "CHGEN"
+channel_map = { "ws-a" = "CH-A" }
+
+[teams]
+client_id = "T123"
+tenant_id = "tenant-1"
+"#;
+        let cfg: BoardConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.provider, BoardProviderKind::Slack);
+        assert_eq!(cfg.slack.client_id.as_deref(), Some("C123"));
+        assert_eq!(cfg.slack.default_channel.as_deref(), Some("CHGEN"));
+        assert_eq!(
+            cfg.slack.channel_map.get("ws-a").map(String::as_str),
+            Some("CH-A"),
+        );
+        assert_eq!(cfg.teams.client_id.as_deref(), Some("T123"));
+        assert_eq!(cfg.teams.tenant_id.as_deref(), Some("tenant-1"));
+
+        // Round-trip preserves the non-secret settings.
+        let serialized = toml::to_string(&cfg).unwrap();
+        let restored: BoardConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.slack, cfg.slack);
+        assert_eq!(restored.teams, cfg.teams);
     }
 }
