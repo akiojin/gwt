@@ -43,6 +43,11 @@ pub struct BoardPostRequest {
     pub(crate) owners: Vec<String>,
     pub(crate) targets: Vec<String>,
     pub(crate) mentions: Vec<BoardMention>,
+    /// SPEC-2959: composer "To:" target Work (workspace id), or `None` for the
+    /// active-workspace default.
+    pub(crate) target_workspace: Option<String>,
+    /// SPEC-2959: post to the General lane (broadcast, empty audience).
+    pub(crate) broadcast: bool,
 }
 
 impl AppRuntime {
@@ -60,6 +65,8 @@ impl AppRuntime {
             owners,
             targets,
             mentions,
+            target_workspace,
+            broadcast,
         } = request;
 
         let Some(address) = self.window_lookup.get(&id) else {
@@ -163,7 +170,12 @@ impl AppRuntime {
         if !mentions.is_empty() {
             entry = entry.with_mentions(mentions);
         }
-        let audience = match post_audience_for_gui(&tab.project_root, &entry.mentions) {
+        let audience = match post_audience_for_gui(
+            &tab.project_root,
+            &entry.mentions,
+            target_workspace.as_deref(),
+            broadcast,
+        ) {
             Ok(audience) => audience,
             Err(error) => {
                 return vec![OutboundEvent::reply(

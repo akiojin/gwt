@@ -4003,6 +4003,8 @@ impl AppRuntime {
                 owners,
                 targets,
                 mentions,
+                target_workspace,
+                broadcast,
             } => self.post_board_entry_events(
                 &client_id,
                 BoardPostRequest {
@@ -4014,6 +4016,8 @@ impl AppRuntime {
                     owners,
                     targets,
                     mentions,
+                    target_workspace,
+                    broadcast,
                 },
             ),
             FrontendEvent::OpenBoardOriginAgent {
@@ -18328,6 +18332,8 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "I will take the next slice".to_string(),
+                target_workspace: None,
+                broadcast: false,
                 parent_id: Some(parent.id.clone()),
                 topics: vec!["coordination".to_string(), "phase-1b".to_string()],
                 owners: vec!["2018".to_string()],
@@ -18425,6 +18431,8 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "Reply to older context".to_string(),
+                target_workspace: None,
+                broadcast: false,
                 parent_id: Some(parent_id.clone()),
                 topics: vec![],
                 owners: vec![],
@@ -18473,6 +18481,8 @@ exit 1
                 id: window_id,
                 entry_kind: BoardEntryKind::Next,
                 body: "Run final verification".to_string(),
+                target_workspace: None,
+                broadcast: false,
                 parent_id: None,
                 topics: vec!["start-work".to_string()],
                 owners: vec!["SPEC-2359".to_string()],
@@ -20459,8 +20469,8 @@ exit 1
 
         let scope = super::board::gui_default_board_scope_for_project(&repo)
             .expect("resolve GUI board scope");
-        let post_audience =
-            gwt::board_audience::post_audience_for_gui(&repo, &[]).expect("resolve post audience");
+        let post_audience = gwt::board_audience::post_audience_for_gui(&repo, &[], None, false)
+            .expect("resolve post audience");
 
         assert_eq!(
             scope,

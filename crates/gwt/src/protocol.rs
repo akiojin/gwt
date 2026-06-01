@@ -433,6 +433,14 @@ pub enum FrontendEvent {
         targets: Vec<String>,
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
+        /// SPEC-2959: composer "To:" selection. Pins the post to a specific
+        /// Work lane (its workspace id). `None` uses the active-workspace default.
+        #[serde(default)]
+        target_workspace: Option<String>,
+        /// SPEC-2959: when `true`, post to the General lane (empty audience)
+        /// regardless of `target_workspace` or the active workspace.
+        #[serde(default)]
+        broadcast: bool,
     },
     OpenBoardOriginAgent {
         id: String,

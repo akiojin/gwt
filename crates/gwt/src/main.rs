@@ -1264,6 +1264,8 @@ mod tests {
                 owners: Vec::new(),
                 targets: Vec::new(),
                 mentions: Vec::new(),
+                target_workspace: None,
+                broadcast: false,
             }
         ));
     }
