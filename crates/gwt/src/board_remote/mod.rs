@@ -9,5 +9,6 @@ pub mod cache;
 pub mod http;
 pub mod mapping;
 pub mod oauth;
+pub mod oauth_session;
 pub mod slack;
 pub mod token_store;
