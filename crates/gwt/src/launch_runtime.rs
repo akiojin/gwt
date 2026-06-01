@@ -722,19 +722,72 @@ fn probe_host_package_runner_outcome(
     remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> PackageRunnerProbeOutcome {
-    let hub = gwt_core::process_console::global();
-    probe_host_package_runner_with_timeout_and_hub(
-        PackageRunnerProbeRequest {
-            command,
-            args,
-            env_vars,
-            remove_env,
-            cwd,
-            timeout: Duration::from_secs(5),
-            poll_interval: Duration::from_millis(50),
-        },
-        &hub,
-    )
+    #[cfg(windows)]
+    {
+        // Windows keeps executing the target package so the corrupt npm `_npx`
+        // cache auto-repair (`895ccadce`) can inspect the failed runner output.
+        let hub = gwt_core::process_console::global();
+        probe_host_package_runner_with_timeout_and_hub(
+            PackageRunnerProbeRequest {
+                command,
+                args,
+                env_vars,
+                remove_env,
+                cwd,
+                timeout: Duration::from_secs(5),
+                poll_interval: Duration::from_millis(50),
+            },
+            &hub,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        // Non-Windows only verifies that the runner *binary* resolves. Running
+        // `<runner> <package> --version` to "validate" the runner downloads the
+        // whole package; on a cold/slow first run that exceeds any probe budget
+        // and aborts the launch with a misleading error card (issue #2948).
+        // A binary-availability check is instant and never blocks, so the real
+        // package download and any genuine runner error surface in the agent's
+        // raw TTY instead of a preparation-error card.
+        let _ = (args, remove_env, cwd);
+        host_package_runner_binary_outcome(command, env_vars)
+    }
+}
+
+/// Build a probe outcome from runner *binary* availability without executing
+/// the target package. `success` means the runner resolves on PATH; it never
+/// reports `timed_out`, so a slow package download can no longer fail the probe.
+#[cfg(not(windows))]
+fn host_package_runner_binary_outcome(
+    command: &str,
+    env_vars: &HashMap<String, String>,
+) -> PackageRunnerProbeOutcome {
+    let available = runner_binary_available(command, env_vars);
+    PackageRunnerProbeOutcome {
+        success: available,
+        exit_code: Some(if available { 0 } else { 127 }),
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        error: None,
+    }
+}
+
+/// Resolve whether a package-runner binary exists in the launch environment.
+/// Absolute paths are trusted by existence; bare names are resolved against the
+/// launch env `PATH` (mirroring the PTY spawn) so the decision matches what the
+/// real launch will execute.
+#[cfg(not(windows))]
+fn runner_binary_available(command: &str, env_vars: &HashMap<String, String>) -> bool {
+    let candidate = Path::new(command);
+    if candidate.is_absolute() {
+        return candidate.exists();
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match env_vars.get("PATH") {
+        Some(path) => which::which_in(command, Some(path.as_str()), &cwd).is_ok(),
+        None => which::which(command).is_ok(),
+    }
 }
 
 #[cfg(test)]
@@ -837,6 +890,10 @@ fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
     }
 }
 
+// Only Windows still executes the package runner during launch (for `_npx`
+// cache repair); other platforms resolve by binary availability (#2948), so the
+// bounded-poll probe machinery below is unused on non-Windows non-test builds.
+#[allow(dead_code)]
 struct PackageRunnerProbeRequest<'a> {
     command: &'a str,
     args: Vec<String>,
@@ -847,6 +904,7 @@ struct PackageRunnerProbeRequest<'a> {
     poll_interval: Duration,
 }
 
+#[allow(dead_code)]
 fn probe_host_package_runner_with_timeout_and_hub(
     request: PackageRunnerProbeRequest<'_>,
     hub: &gwt_core::process_console::ProcessConsoleHub,
@@ -1011,6 +1069,7 @@ fn probe_host_package_runner_with_timeout_and_hub(
     }
 }
 
+#[allow(dead_code)]
 fn forward_probe_stream<R>(
     reader: R,
     hub: gwt_core::process_console::ProcessConsoleHub,
@@ -1043,6 +1102,7 @@ where
     })
 }
 
+#[allow(dead_code)]
 fn captured_string(captured: &Arc<Mutex<String>>) -> String {
     captured
         .lock()
@@ -1050,6 +1110,7 @@ fn captured_string(captured: &Arc<Mutex<String>>) -> String {
         .unwrap_or_else(|_| String::new())
 }
 
+#[allow(dead_code)]
 fn push_probe_console_line(
     hub: &gwt_core::process_console::ProcessConsoleHub,
     spawn_id: u64,
@@ -1219,6 +1280,7 @@ fn repair_windows_npx_cache(candidate: &WindowsNpxCacheRepairCandidate) -> Resul
     fs::remove_dir_all(&candidate.npx_root).map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 static AGENT_LAUNCH_SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -1331,7 +1393,6 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
     use tempfile::tempdir;
 
     fn test_path(entries: &[&str]) -> String {
@@ -1345,7 +1406,6 @@ mod tests {
         path.split(':').collect()
     }
 
-    #[cfg(windows)]
     fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
@@ -1716,6 +1776,92 @@ mod tests {
         assert_eq!(repair_calls, 0);
         assert!(error.contains("npx package-runner probe failed"));
         assert!(error.contains("registry timeout"));
+    }
+
+    // Issue #2948 — non-Windows host launches must decide the package runner by
+    // *binary availability* only, never by executing `<runner> <pkg> --version`
+    // (a cold first-run download exceeds the probe budget, times out, and aborts
+    // the launch with an error card instead of showing the raw TTY download).
+
+    #[cfg(not(windows))]
+    fn write_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, "#!/bin/sh\nexit 1\n").expect("write executable");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn runner_binary_available_trusts_existing_absolute_path() {
+        let temp = tempdir().expect("tempdir");
+        let bin = temp.path().join("bunx");
+        write_executable(&bin);
+        let env = HashMap::new();
+        assert!(runner_binary_available(bin.to_str().unwrap(), &env));
+        let missing = temp.path().join("does-not-exist");
+        assert!(!runner_binary_available(missing.to_str().unwrap(), &env));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn runner_binary_available_resolves_bare_name_via_env_path() {
+        let temp = tempdir().expect("tempdir");
+        write_executable(&temp.path().join("bunx"));
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+        assert!(runner_binary_available("bunx", &env));
+        assert!(!runner_binary_available("npx", &env));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_package_runner_binary_outcome_succeeds_from_existence_without_executing() {
+        // /bin/sh exists but is not a package runner; success comes purely from
+        // binary existence, proving no `<runner> <pkg> --version` is executed.
+        let env = HashMap::new();
+        let outcome = host_package_runner_binary_outcome("/bin/sh", &env);
+        assert!(outcome.success);
+        assert!(!outcome.timed_out);
+
+        let missing = host_package_runner_binary_outcome("/no/such/runner-xyz", &env);
+        assert!(!missing.success);
+        assert!(!missing.timed_out);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_launch_keeps_bunx_when_binary_resolves_and_never_aborts() {
+        let temp = tempdir().expect("tempdir");
+        // A "bunx" that fails (`exit 1`) if executed — proving the launch path
+        // only checks existence and keeps bunx, where the old execution probe
+        // would reject it and fall through to an abort.
+        let bunx = temp.path().join("bunx");
+        write_executable(&bunx);
+        let mut config = sample_versioned_launch_config();
+        config.command = bunx.display().to_string();
+        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let report = apply_host_package_runner_fallback_checked(&mut config)
+            .expect("binary-availability resolution must never abort the launch");
+
+        assert!(!report.switched_to_fallback);
+        assert_eq!(config.command, bunx.display().to_string());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_launch_switches_to_npx_when_bunx_absent_but_npx_present() {
+        let temp = tempdir().expect("tempdir");
+        write_executable(&temp.path().join("npx"));
+        let mut config = sample_versioned_launch_config();
+        config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
+        config.env_vars = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let report = apply_host_package_runner_fallback_checked(&mut config)
+            .expect("resolution must never abort the launch");
+
+        assert!(report.switched_to_fallback);
+        assert_eq!(config.command, "npx");
+        assert_eq!(config.args.first().map(String::as_str), Some("--yes"));
     }
 
     // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
