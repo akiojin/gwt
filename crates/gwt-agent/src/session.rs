@@ -40,6 +40,14 @@ pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 pub struct Session {
     pub id: String,
     pub worktree_path: PathBuf,
+    /// Canonical Project State root for Workspace / Agent projection data.
+    ///
+    /// `worktree_path` is the process cwd, but gwt-managed worktrees may share
+    /// one Workspace Home Project State. Agent title updates must write to that
+    /// canonical root so GUI panes and `gwtd workspace update` observe the same
+    /// projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_state_root: Option<PathBuf>,
     #[serde(default)]
     pub repo_hash: Option<String>,
     pub branch: String,
@@ -144,6 +152,7 @@ impl Session {
         Self {
             id: Uuid::new_v4().to_string(),
             worktree_path,
+            project_state_root: None,
             repo_hash,
             branch: branch.into(),
             agent_id,
@@ -605,6 +614,7 @@ mod tests {
         assert_eq!(session.agent_id, AgentId::Codex);
         assert_eq!(session.display_name, "Codex");
         assert!(session.agent_session_id.is_none());
+        assert!(session.project_state_root.is_none());
         assert!(session.tool_version.is_none());
         assert!(session.model.is_none());
         assert!(session.reasoning_level.is_none());
@@ -653,6 +663,41 @@ display_name = "Codex"
         assert!(serialized.contains("restore_window_on_startup = true"));
         let parsed: Session = toml::from_str(&serialized).expect("deserialize");
         assert!(parsed.restore_window_on_startup);
+    }
+
+    #[test]
+    fn project_state_root_round_trips() {
+        let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
+        session.project_state_root = Some(PathBuf::from("/tmp/workspace-home"));
+
+        let serialized = toml::to_string(&session).expect("serialize");
+        assert!(serialized.contains("project_state_root = \"/tmp/workspace-home\""));
+        let parsed: Session = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(
+            parsed.project_state_root.as_deref(),
+            Some(Path::new("/tmp/workspace-home"))
+        );
+    }
+
+    #[test]
+    fn legacy_session_toml_without_project_state_root_defaults_to_none() {
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-999999999999"
+worktree_path = "/tmp/wt"
+branch = "main"
+agent_id = { type = "Codex" }
+agent_session_id = "abc"
+status = "WaitingInput"
+launch_command = "codex"
+launch_args = []
+created_at = "2026-06-01T00:00:00Z"
+updated_at = "2026-06-01T00:00:00Z"
+last_activity_at = "2026-06-01T00:00:00Z"
+display_name = "Codex"
+"#;
+        let session: Session = toml::from_str(legacy).expect("deserialize legacy");
+
+        assert!(session.project_state_root.is_none());
     }
 
     #[test]
