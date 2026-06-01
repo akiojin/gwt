@@ -3173,6 +3173,7 @@ pub struct AppRuntime {
     pub(crate) profile_config_path: Option<PathBuf>,
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
     pub(crate) window_details: HashMap<String, String>,
+    pub(crate) launch_error_terminal_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
     pub(crate) board_all_view_windows: HashSet<String>,
     pub(crate) session_state_path: PathBuf,
@@ -3275,6 +3276,7 @@ impl AppRuntime {
             profile_config_path: None,
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: HashSet::new(),
             session_state_path,
@@ -4606,7 +4608,7 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
-        let terminal_snapshots = self
+        let mut terminal_snapshots = self
             .runtimes
             .iter()
             .filter_map(|(id, runtime)| {
@@ -4624,7 +4626,18 @@ impl AppRuntime {
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let runtime_snapshot_ids = terminal_snapshots
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (id, detail) in &self.launch_error_terminal_details {
+            if !runtime_snapshot_ids.contains(id)
+                && self.window_status(id) == Some(WindowProcessStatus::Error)
+            {
+                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+            }
+        }
 
         let mut events = build_frontend_sync_events(
             client_id,
@@ -7302,6 +7315,7 @@ impl AppRuntime {
                             }
                         }
                         let _ = self.persist();
+                        self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
@@ -7387,6 +7401,7 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
+                        self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         let composed_status = self
                             .window_status(&window_id)
@@ -8773,11 +8788,18 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
+        let terminal_output = Self::launch_error_terminal_output_event(window_id.clone(), &detail);
         if self.tracked_window_exists(&window_id) {
-            return self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+            self.launch_error_terminal_details
+                .insert(window_id.clone(), detail.clone());
+            let mut events =
+                self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+            events.push(terminal_output);
+            return events;
         }
         let mut events =
             Self::status_events(window_id, WindowProcessStatus::Error, Some(detail.clone()));
+        events.push(terminal_output);
         if let Some(context) = launch_feedback_context {
             events.push(OutboundEvent::reply(
                 context.client_id,
@@ -8788,6 +8810,25 @@ impl AppRuntime {
             ));
         }
         events
+    }
+
+    fn launch_error_terminal_bytes(detail: &str) -> Vec<u8> {
+        let mut message = String::from("\r\n[gwt] Launch failed before PTY started.\r\n");
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            message.push_str("[gwt] ");
+            message.push_str(detail);
+            message.push_str("\r\n");
+        }
+        message.into_bytes()
+    }
+
+    fn launch_error_terminal_output_event(window_id: String, detail: &str) -> OutboundEvent {
+        OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+            id: window_id,
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(Self::launch_error_terminal_bytes(detail)),
+        })
     }
 
     fn status_events(
@@ -10740,6 +10781,7 @@ exit 1
             profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
@@ -13132,6 +13174,95 @@ exit 1
         assert_eq!(
             event.fields.get("error").map(String::as_str),
             Some("launch failed before process spawn")
+        );
+    }
+
+    #[test]
+    fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+
+        let events = runtime.handle_launch_complete(
+            window_id.clone(),
+            Err("launch failed before process spawn".to_string()),
+        );
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { id, status, detail }
+                    if id == &window_id
+                        && *status == WindowProcessStatus::Error
+                        && detail.as_deref() == Some("launch failed before process spawn")
+            )
+        }));
+        let diagnostic = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalOutput { id, data_base64 } if id == &window_id => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .expect("decode terminal diagnostic");
+                    Some(String::from_utf8_lossy(&decoded).to_string())
+                }
+                _ => None,
+            })
+            .expect("launch failure diagnostic terminal output");
+        assert!(
+            diagnostic.contains("Launch failed before PTY started"),
+            "diagnostic must explain that no PTY output exists yet: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("launch failed before process spawn"),
+            "diagnostic must include the launch error detail: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_runtime() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let _ = runtime.handle_launch_complete(
+            window_id.clone(),
+            Err("launch failed before process spawn".to_string()),
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let snapshot = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .expect("decode terminal diagnostic snapshot");
+                    Some(String::from_utf8_lossy(&decoded).to_string())
+                }
+                _ => None,
+            })
+            .expect("launch failure diagnostic terminal snapshot");
+        assert!(
+            snapshot.contains("Launch failed before PTY started"),
+            "snapshot must replay the launch diagnostic after reconnect: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("launch failed before process spawn"),
+            "snapshot must include the launch error detail: {snapshot:?}"
         );
     }
 

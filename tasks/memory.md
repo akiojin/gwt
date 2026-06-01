@@ -6389,3 +6389,10 @@ Type: lesson
 Context: The local headless-browser-check skill still instructed agents to run the removed gwt serve command, which caused a failed verification launch after SPEC #2920 removed that route.
 Learning: Generated or local skills can outlive product CLI changes. When a command is removed, update the skills, README, diagnostics, live-test comments, and memory entries that agents may reuse, not only production code and tests.
 Future Action: Before using a remembered launch command for gwt UI verification, search the current checkout for the command and prefer the canonical README/runtime usage hint; never run gwt serve or gwt --headless except in removal regression tests.
+
+## 2026-06-01 — Pre-PTY launch errors must enter the terminal transcript
+
+Type: failure-pattern
+Context: Agent TTY overlay had been intentionally disabled, but Launch completion errors before PTY spawn were only sent as TerminalStatus detail. The UI then showed an Error badge while xterm remained blank.
+Learning: When a process fails before a PTY exists, status/detail chrome is not enough. Emit a normal terminal_output diagnostic and replay it through terminal_snapshot on frontend reconnect; do not reintroduce foreground overlays.
+Future Action: For any future launch/startup failure path that can happen before PTY output, add tests for both immediate TerminalOutput and reconnect TerminalSnapshot visibility.
