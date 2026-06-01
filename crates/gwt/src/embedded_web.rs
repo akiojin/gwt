@@ -880,19 +880,16 @@ mod tests {
         )
         .expect("valid regex");
         // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
-        // activation sequence (refresh → fit → sendGeometry) before
-        // scheduling the deferred viewport refresh, otherwise the hidden
+        // activation sequence (refresh -> fit -> sendGeometry) or mark a
+        // pending refresh if the terminal is hidden, otherwise the hidden
         // short-circuit on a background tab leaves xterm with stale cell
         // metrics and dead scrollback wheel until the next OS resize.
-        // The regex now allows a `runTerminalActivationSequence({...})`
-        // call (guarded by `canRefreshTerminalViewport`) before the
-        // existing `scheduleTerminalViewportRefresh` call.
         let snapshot_write = regex::Regex::new(
-            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{(?:[^}]*\})*?[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{[\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);[\s\S]*?\}\s*\);",
         )
         .expect("valid regex");
         let snapshot_activation = regex::Regex::new(
-            r"(?s)runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),[\s\S]*?if \(canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?\}\);[\s\S]*?\}\s*scheduleTerminalViewportRefresh\(windowId\);",
+            r"(?s)function forceTerminalViewportRefresh\(windowId,[\s\S]*?viewportRefreshPending = true[\s\S]*?runTerminalActivationSequence\(\{[\s\S]*?shouldFocus:\s*false,[\s\S]*?shouldPersistGeometry,[\s\S]*?sendGeometry,[\s\S]*?\}\);",
         )
         .expect("valid regex");
         let refresh_call = regex::Regex::new(
@@ -918,7 +915,19 @@ mod tests {
         );
         assert!(
             snapshot_activation.is_match(html),
-            "expected terminal snapshots to force runTerminalActivationSequence under canRefreshTerminalViewport before scheduleTerminalViewportRefresh (FR-056)",
+            "expected terminal snapshots to force runTerminalActivationSequence when visible and mark pending while hidden (FR-056)",
+        );
+        assert!(
+            html.contains("viewportRefreshPending: false")
+                && html.contains("runtime.viewportRefreshPending = true")
+                && html.contains("rearmPendingTerminalViewportRefresh")
+                && html.contains("rearmRefreshOnVisible({"),
+            "expected hidden viewport refreshes to stay pending and re-arm on visible transition",
+        );
+        assert!(
+            html.contains("document.addEventListener(\"visibilitychange\"")
+                && html.contains("rearmVisibleTerminalViewportRefreshes();"),
+            "expected document visibility restore to re-arm visible terminal refreshes",
         );
         assert!(
             html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),

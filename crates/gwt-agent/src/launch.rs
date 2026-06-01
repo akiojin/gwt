@@ -677,6 +677,11 @@ impl AgentLaunchBuilder {
         env_vars.insert("DISABLE_ERROR_REPORTING".into(), "1".into());
         env_vars.insert("DISABLE_FEEDBACK_COMMAND".into(), "1".into());
         env_vars.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".into(), "1".into());
+        // Claude Code's fullscreen/no-flicker renderer keeps virtualized
+        // history inside Claude instead of xterm, so gwt agent windows have no
+        // normal scrollback to wheel/trackpad through.
+        env_vars.insert("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".into(), "1".into());
+        env_vars.insert("CLAUDE_CODE_NO_FLICKER".into(), "0".into());
 
         // SPEC-1921 FR-100 (2026-05-18 amendment): Backend Override env
         // injection. When the launch carries a `[builtinAgents.claudeCode.
@@ -1093,6 +1098,28 @@ mod tests {
         assert_eq!(
             config.env_vars.get("GWT_PROJECT_ROOT"),
             Some(&"/tmp/project".to_string())
+        );
+    }
+
+    #[test]
+    fn build_claude_uses_classic_main_screen_renderer_for_scrollback() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                .map(String::as_str),
+            Some("1"),
+            "Claude Code must use the classic main-screen renderer so xterm owns normal scrollback"
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_NO_FLICKER")
+                .map(String::as_str),
+            Some("0"),
+            "gwt must explicitly disable Claude Code's fullscreen/no-flicker renderer"
         );
     }
 
@@ -1673,9 +1700,13 @@ mod tests {
     fn build_claude_has_telemetry_disable_vars() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
 
-        assert!(
-            !config.env_vars.contains_key("CLAUDE_CODE_NO_FLICKER"),
-            "Claude Code launches must not force the legacy no-flicker renderer"
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_NO_FLICKER")
+                .map(String::as_str),
+            Some("0"),
+            "Claude Code launches must default to the classic renderer"
         );
         assert_eq!(
             config.env_vars.get("DISABLE_TELEMETRY"),
@@ -2108,12 +2139,12 @@ mod tests {
     }
 
     #[test]
-    fn custom_agent_env_can_still_export_claude_no_flicker() {
+    fn custom_agent_env_can_still_override_claude_no_flicker() {
         // If a user somehow applies custom_agent_env to a built-in Claude
-        // launch, an explicit value should still be forwarded even though gwt
-        // no longer sets the legacy no-flicker flag by default.
+        // launch, an explicit value should still override gwt's renderer
+        // default.
         let mut env = HashMap::new();
-        env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "0".to_string());
+        env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
 
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .custom_agent_env(env)
@@ -2124,7 +2155,7 @@ mod tests {
                 .env_vars
                 .get("CLAUDE_CODE_NO_FLICKER")
                 .map(String::as_str),
-            Some("0"),
+            Some("1"),
             "custom_agent_env must remain able to pass explicit Claude env"
         );
     }
