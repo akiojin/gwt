@@ -6410,3 +6410,10 @@ Type: lesson
 Context: Launch Wizard close recovery after heavy Launch Agent processing / Event Hub queue overflow investigation on 2026-06-01.
 Learning: A successful mutation can emit a close event, but bounded ClientHub overflow may disconnect a slow WebView before it receives the frame. Reconnect recovery must be authoritative for latest-wins nullable singleton state; omitting None/tombstone payloads leaves stale frontend UI.
 Future Action: When adding nullable latest-wins frontend state, make FrontendReady reply with both Some(current state) and None(tombstone), and add RED reconnect-sync coverage before relying on one-shot broadcast close events.
+
+## 2026-06-01 — User-accepted visual verification for rare load-only UI failures
+
+Type: lesson
+Context: Launch Wizard close recovery after reconnect depended on an extreme terminal load condition that was hard for the user to reproduce manually after live E2E RED/GREEN coverage existed.
+Learning: When a UI failure is rare and load-dependent, deterministic E2E evidence can be the strongest practical proof; if the user explicitly accepts that evidence, record the acceptance in the SPEC instead of keeping the work blocked on manual reproduction.
+Future Action: For future rare load-only UI bugs, add a deterministic E2E that models the lost or delayed event path, record RED/GREEN evidence, then ask the user whether that evidence is sufficient when manual reproduction is impractical.
