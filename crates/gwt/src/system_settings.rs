@@ -124,9 +124,9 @@ pub fn write_settings(
     }
     if let Some((_, kind)) = provider {
         settings.board.provider = kind;
-        // Reflect the change in the live provider cache so subsequent Board
-        // operations in this process honor it without a restart (FR-008).
-        crate::board_provider::set_provider_kind(kind);
+        // No in-memory cache to update: `board_provider::provider()` reads the
+        // selection fresh from config on each call, so the persisted value
+        // takes effect immediately (FR-008).
     }
     settings
         .save(path)

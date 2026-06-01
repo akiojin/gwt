@@ -12,64 +12,144 @@
 //! A future Slack/Teams adapter (Issue #2960) plugs in via [`resolve`].
 
 use std::path::Path;
-use std::sync::RwLock;
 
 use chrono::{DateTime, Utc};
-use gwt_config::{BoardProviderKind, Settings};
+use gwt_config::{BoardProviderKind, Settings, SlackConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProvider,
     CoordinationSnapshot, LocalProvider,
 };
-use gwt_core::Result;
-use tracing::warn;
+use gwt_core::{GwtError, Result};
 
-/// Process-wide cached provider selection. Lazily initialized from `Settings`
-/// on first use and refreshed by the settings-save path (FR-008).
-static PROVIDER_KIND: RwLock<Option<BoardProviderKind>> = RwLock::new(None);
+use crate::board_remote::http::ReqwestHttpClient;
+use crate::board_remote::slack::SlackProvider;
+use crate::board_remote::token_store::{self, TokenSet};
 
-/// Override the active provider selection (e.g. after the settings UI saves a
-/// new value). Takes effect for subsequent [`provider`] calls in this process.
-pub fn set_provider_kind(kind: BoardProviderKind) {
-    if let Ok(mut guard) = PROVIDER_KIND.write() {
-        *guard = Some(kind);
-    }
-}
-
-/// The currently selected provider kind, loading from `Settings` once and
-/// caching the result. Unreadable config falls back to `local` (FR-004).
+/// The currently selected provider kind, read fresh from `Settings`. Reading
+/// per call (rather than caching a process global) keeps a settings change
+/// effective immediately (FR-008) and avoids cross-call/test state leakage.
+/// Unreadable config falls back to `local` (FR-004).
 pub fn current_kind() -> BoardProviderKind {
-    if let Ok(guard) = PROVIDER_KIND.read() {
-        if let Some(kind) = *guard {
-            return kind;
-        }
-    }
-    let kind = Settings::load()
+    Settings::load()
         .map(|s| s.board.provider)
-        .unwrap_or_default();
-    if let Ok(mut guard) = PROVIDER_KIND.write() {
-        *guard = Some(kind);
-    }
-    kind
+        .unwrap_or_default()
 }
 
-/// Build a provider for `kind`. Unimplemented remote providers warn once and
-/// fall back to `LocalProvider` so the Board keeps working (FR-004).
-pub fn resolve(kind: BoardProviderKind) -> Box<dyn BoardProvider> {
+/// A provider that fails every operation with a clear reason. Returned when a
+/// remote provider is selected but not usable yet (not signed in,
+/// misconfigured, or not implemented). Per FR-010 we surface the reason rather
+/// than silently falling back to local.
+struct UnconfiguredProvider {
+    reason: String,
+}
+
+impl UnconfiguredProvider {
+    fn boxed(reason: impl Into<String>) -> Box<dyn BoardProvider> {
+        Box::new(Self {
+            reason: reason.into(),
+        })
+    }
+
+    fn err<T>(&self) -> Result<T> {
+        Err(GwtError::Other(self.reason.clone()))
+    }
+}
+
+impl BoardProvider for UnconfiguredProvider {
+    fn post_entry(&self, _: &Path, _: BoardEntry) -> Result<CoordinationSnapshot> {
+        self.err()
+    }
+    fn load_snapshot(&self, _: &Path) -> Result<CoordinationSnapshot> {
+        self.err()
+    }
+    fn load_snapshot_for_scope(
+        &self,
+        _: &Path,
+        _: &BoardAudienceScope,
+    ) -> Result<CoordinationSnapshot> {
+        self.err()
+    }
+    fn load_entries_since(&self, _: &Path, _: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+        self.err()
+    }
+    fn load_entries_since_for_scope(
+        &self,
+        _: &Path,
+        _: DateTime<Utc>,
+        _: &BoardAudienceScope,
+    ) -> Result<Vec<BoardEntry>> {
+        self.err()
+    }
+    fn has_recent_post_by(
+        &self,
+        _: &Path,
+        _: &str,
+        _: &BoardEntryKind,
+        _: chrono::Duration,
+    ) -> Result<bool> {
+        self.err()
+    }
+    fn board_entry_exists(&self, _: &Path, _: &str) -> Result<bool> {
+        self.err()
+    }
+    fn load_entries_before(&self, _: &Path, _: Option<&str>, _: usize) -> Result<BoardHistoryPage> {
+        self.err()
+    }
+    fn load_entries_before_for_scope(
+        &self,
+        _: &Path,
+        _: Option<&str>,
+        _: usize,
+        _: &BoardAudienceScope,
+    ) -> Result<BoardHistoryPage> {
+        self.err()
+    }
+}
+
+/// Build the Slack provider from its config and a stored token. Returns a clear
+/// error reason when not usable yet (FR-010 — no silent local fallback).
+fn build_slack(
+    config: &SlackConfig,
+    token: Option<TokenSet>,
+) -> std::result::Result<Box<dyn BoardProvider>, String> {
+    let default_channel = config
+        .default_channel
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Slack default channel is not configured".to_string())?;
+    let token = token.ok_or_else(|| "Slack is not signed in".to_string())?;
+    Ok(Box::new(SlackProvider::new(
+        token.access_token,
+        default_channel,
+        config.channel_map.clone(),
+        Box::new(ReqwestHttpClient::new()),
+        60,
+    )))
+}
+
+/// Build the active remote provider from settings + stored credentials.
+fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardProvider> {
     match kind {
         BoardProviderKind::Local => Box::new(LocalProvider),
-        other => {
-            warn!(
-                provider = other.as_str(),
-                "board provider not implemented yet; falling back to local"
-            );
-            Box::new(LocalProvider)
+        BoardProviderKind::Slack => {
+            let token = token_store::load("slack").ok().flatten();
+            build_slack(&settings.board.slack, token).unwrap_or_else(UnconfiguredProvider::boxed)
+        }
+        BoardProviderKind::Teams => {
+            UnconfiguredProvider::boxed("Teams provider is not implemented yet (SPEC-2963 Phase 6)")
         }
     }
 }
 
-/// The active provider, resolved from the cached configuration.
+/// The active provider, resolved from current settings. `local` stays on the
+/// zero-cost fast path; remote providers load settings + credentials.
 pub fn provider() -> Box<dyn BoardProvider> {
-    resolve(current_kind())
+    let settings = Settings::load().unwrap_or_default();
+    match settings.board.provider {
+        BoardProviderKind::Local => Box::new(LocalProvider),
+        kind => build_remote(kind, &settings),
+    }
 }
 
 // --- Free-function shims (same signatures as `gwt_core::coordination`) -------
@@ -145,24 +225,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_local_and_unimplemented_fall_back_to_local() {
-        // Local resolves; Slack/Teams fall back to local (FR-004). We can only
-        // assert they produce a working provider that reads an empty board.
+    fn build_remote_local_reads_empty_board() {
         let dir = tempfile::tempdir().unwrap();
-        for kind in [
-            BoardProviderKind::Local,
-            BoardProviderKind::Slack,
-            BoardProviderKind::Teams,
-        ] {
-            let provider = resolve(kind);
-            let snapshot = provider.load_snapshot(dir.path()).unwrap();
-            assert!(snapshot.board.entries.is_empty());
-        }
+        let provider = build_remote(BoardProviderKind::Local, &Settings::default());
+        assert!(provider
+            .load_snapshot(dir.path())
+            .unwrap()
+            .board
+            .entries
+            .is_empty());
     }
 
     #[test]
-    fn set_provider_kind_is_reflected_by_current_kind() {
-        set_provider_kind(BoardProviderKind::Local);
-        assert_eq!(current_kind(), BoardProviderKind::Local);
+    fn build_remote_slack_without_config_is_unconfigured() {
+        // SPEC-2959/2963 FR-010: a selected-but-unusable remote surfaces an
+        // error rather than silently serving local. Default settings have no
+        // Slack channel, so the provider is Unconfigured regardless of tokens.
+        let dir = tempfile::tempdir().unwrap();
+        let provider = build_remote(BoardProviderKind::Slack, &Settings::default());
+        assert!(provider.load_snapshot(dir.path()).is_err());
+    }
+
+    #[test]
+    fn build_remote_teams_is_unconfigured_until_phase_6() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = build_remote(BoardProviderKind::Teams, &Settings::default());
+        let err = provider.load_snapshot(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("Teams"));
+    }
+
+    #[test]
+    fn build_slack_requires_channel_and_token() {
+        assert!(build_slack(&SlackConfig::default(), None).is_err());
+
+        let with_channel = SlackConfig {
+            default_channel: Some("CH".to_string()),
+            ..Default::default()
+        };
+        // channel but no token → still an error.
+        assert!(build_slack(&with_channel, None).is_err());
+
+        let token = TokenSet {
+            access_token: "xoxb".to_string(),
+            refresh_token: None,
+            expires_at: None,
+        };
+        assert!(build_slack(&with_channel, Some(token)).is_ok());
     }
 }

@@ -6,6 +6,7 @@
 //! implementations of [`gwt_core::coordination::BoardProvider`].
 
 pub mod cache;
+pub mod http;
 pub mod mapping;
 pub mod oauth;
 pub mod slack;
