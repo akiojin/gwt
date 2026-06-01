@@ -400,6 +400,8 @@
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -413,6 +415,8 @@
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -10894,6 +10898,9 @@
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        // SPEC-2959: selected Board backend. Only `local` is implemented;
+        // `slack` / `teams` are shown as disabled "coming soon" options.
+        boardProvider: "local",
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -11252,6 +11259,53 @@
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        // SPEC-2959: Board provider selector. `local` is the only implemented
+        // backend; `slack` / `teams` are reserved (Issue #2960) and rendered
+        // disabled so the option set advertises the roadmap without letting
+        // the user pick an unimplemented provider.
+        const boardSection = createDiv("settings-section");
+        const boardLabel = document.createElement("label");
+        boardLabel.className = "settings-label";
+        boardLabel.setAttribute("for", "settings-system-board-provider");
+        boardLabel.textContent = "Board provider";
+        boardSection.appendChild(boardLabel);
+
+        const boardSelect = document.createElement("select");
+        boardSelect.className = "settings-select";
+        boardSelect.id = "settings-system-board-provider";
+        for (const opt of [
+          { value: "local", text: "Local (offline)", disabled: false },
+          { value: "slack", text: "Slack (coming soon)", disabled: true },
+          { value: "teams", text: "Teams (coming soon)", disabled: true },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          option.disabled = opt.disabled;
+          boardSelect.appendChild(option);
+        }
+        boardSelect.value = systemSettingsState.boardProvider || "local";
+        boardSelect.addEventListener("change", (e) => {
+          const next = e.target.value;
+          systemSettingsState.boardProvider = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({
+            kind: "update_system_settings",
+            language: systemSettingsState.language || "auto",
+            board_provider: next,
+          });
+        });
+        boardSection.appendChild(boardSelect);
+
+        const boardHelp = document.createElement("p");
+        boardHelp.className = "settings-help";
+        boardHelp.textContent =
+          "Where the coordination Board is stored. Local keeps the Board offline and " +
+          "on this machine. Slack / Teams are not available yet.";
+        boardSection.appendChild(boardHelp);
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
@@ -11259,6 +11313,7 @@
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(boardSection);
         renderSystemPanelStatus(panel);
       }
 
@@ -12946,6 +13001,7 @@
                 kind: "system_settings",
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
+                board_provider: event.board_provider,
               })
             ) {
               break;
@@ -12953,6 +13009,8 @@
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -12969,6 +13027,7 @@
                 kind: "system_settings_updated",
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
+                board_provider: event.board_provider,
               })
             ) {
               break;
@@ -12976,6 +13035,8 @@
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();

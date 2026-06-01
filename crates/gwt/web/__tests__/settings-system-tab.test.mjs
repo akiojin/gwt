@@ -150,6 +150,36 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
 });
 
+test("System tab Board provider select offers Local with Slack/Teams disabled (SPEC-2959)", () => {
+  // The selector id and the three options must exist; slack/teams are
+  // advertised but disabled until an adapter ships (Issue #2960).
+  assert.match(
+    appSource,
+    /id\s*=\s*"settings-system-board-provider"/,
+    "expected a Board provider select with the canonical id",
+  );
+  assert.match(
+    appSource,
+    /value:\s*"local"[\s\S]*?disabled:\s*false/,
+    "Local must be a selectable Board provider option",
+  );
+  for (const provider of ["slack", "teams"]) {
+    assert.match(
+      appSource,
+      new RegExp(`value:\\s*"${provider}"[\\s\\S]*?disabled:\\s*true`),
+      `${provider} must be rendered as a disabled "coming soon" option`,
+    );
+  }
+});
+
+test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
+  assert.match(
+    appSource,
+    /kind:\s*"update_system_settings",[\s\S]*?board_provider:\s*next/,
+    "Board provider select onChange must send update_system_settings with board_provider",
+  );
+});
+
 test("renderSettingsWindow requests current settings via get_system_settings", () => {
   assert.match(
     appSource,

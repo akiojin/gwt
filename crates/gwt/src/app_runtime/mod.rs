@@ -829,6 +829,7 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
+            ..
         } => FrontendUserActionLog::new("update_system_settings", "settings")
             .target(language)
             .force(codex_trust_managed_hooks.unwrap_or(false)),
@@ -4153,7 +4154,13 @@ impl AppRuntime {
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
-            } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
+                board_provider,
+            } => self.system_settings_update_events(
+                client_id,
+                language,
+                codex_trust_managed_hooks,
+                board_provider,
+            ),
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
@@ -4342,6 +4349,7 @@ impl AppRuntime {
         client_id: ClientId,
         language: String,
         codex_trust_managed_hooks: Option<bool>,
+        board_provider: Option<String>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -4357,7 +4365,12 @@ impl AppRuntime {
         };
         vec![OutboundEvent::reply(
             client_id,
-            gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
+            gwt::system_settings::update_event(
+                &path,
+                language,
+                codex_trust_managed_hooks,
+                board_provider,
+            ),
         )]
     }
 

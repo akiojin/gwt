@@ -642,6 +642,10 @@ pub enum FrontendEvent {
         language: String,
         #[serde(default)]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: Board provider selection (`local` / `slack` / `teams`).
+        /// `None` leaves the persisted value unchanged.
+        #[serde(default)]
+        board_provider: Option<String>,
     },
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
@@ -1418,6 +1422,9 @@ pub enum BackendEvent {
         language: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_provider: Option<String>,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -1427,6 +1434,9 @@ pub enum BackendEvent {
         language: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: persisted Board provider echoed back for reconciliation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_provider: Option<String>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is

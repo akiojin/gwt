@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use gwt_config::Settings;
+use gwt_config::{BoardProviderKind, Settings};
 
 use crate::protocol::BackendEvent;
 
@@ -26,6 +26,8 @@ use crate::protocol::BackendEvent;
 pub enum SystemSettingsError {
     #[error("invalid language `{0}`: expected `auto`, `en`, or `ja`")]
     InvalidLanguage(String),
+    #[error("invalid board provider `{0}`: expected `local`, `slack`, or `teams`")]
+    InvalidBoardProvider(String),
     #[error("config storage error: {0}")]
     Storage(String),
 }
@@ -34,10 +36,28 @@ pub enum SystemSettingsError {
 /// constant so the dispatch validator and (future) tests share it.
 pub const ALLOWED_LANGUAGES: &[&str] = &["auto", "en", "ja"];
 
+/// Whitelist of Board provider values the System tab can persist (SPEC-2959).
+pub const ALLOWED_BOARD_PROVIDERS: &[&str] = &["local", "slack", "teams"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemSettingsSnapshot {
     pub language: String,
     pub codex_trust_managed_hooks: Option<bool>,
+    pub board_provider: String,
+}
+
+/// Validate that `value` is one of [`ALLOWED_BOARD_PROVIDERS`] (case-insensitive,
+/// trimmed) and return the canonical lowercase form plus its [`BoardProviderKind`].
+pub fn validate_board_provider(
+    value: &str,
+) -> Result<(String, BoardProviderKind), SystemSettingsError> {
+    let trimmed = value.trim().to_lowercase();
+    match trimmed.as_str() {
+        "local" => Ok((trimmed, BoardProviderKind::Local)),
+        "slack" => Ok((trimmed, BoardProviderKind::Slack)),
+        "teams" => Ok((trimmed, BoardProviderKind::Teams)),
+        _ => Err(SystemSettingsError::InvalidBoardProvider(value.to_string())),
+    }
 }
 
 /// Validate that `value` is one of [`ALLOWED_LANGUAGES`] (case-insensitive,
@@ -71,6 +91,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
             .clone()
             .unwrap_or_else(|| "auto".to_string()),
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
+        board_provider: settings.board.provider.as_str().to_string(),
     })
 }
 
@@ -78,15 +99,19 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
 /// canonical value that was written so the dispatch layer can echo it
 /// back to the frontend.
 pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSettingsError> {
-    Ok(write_settings(path, language, None)?.language)
+    Ok(write_settings(path, language, None, None)?.language)
 }
 
 pub fn write_settings(
     path: &Path,
     language: &str,
     codex_trust_managed_hooks: Option<bool>,
+    board_provider: Option<&str>,
 ) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let canonical = validate_language(language)?;
+    // Validate the provider (if supplied) before touching disk so an invalid
+    // value never half-writes config.
+    let provider = board_provider.map(validate_board_provider).transpose()?;
     let mut settings = if path.exists() {
         Settings::load_from_path(path)
             .map_err(|err| SystemSettingsError::Storage(err.to_string()))?
@@ -97,12 +122,19 @@ pub fn write_settings(
     if let Some(value) = codex_trust_managed_hooks {
         settings.agent.codex_trust_managed_hooks = Some(value);
     }
+    if let Some((_, kind)) = provider {
+        settings.board.provider = kind;
+        // Reflect the change in the live provider cache so subsequent Board
+        // operations in this process honor it without a restart (FR-008).
+        crate::board_provider::set_provider_kind(kind);
+    }
     settings
         .save(path)
         .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
     Ok(SystemSettingsSnapshot {
         language: canonical,
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
+        board_provider: settings.board.provider.as_str().to_string(),
     })
 }
 
@@ -116,6 +148,7 @@ pub fn get_event(path: &Path) -> BackendEvent {
         Ok(snapshot) => BackendEvent::SystemSettings {
             language: snapshot.language,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
+            board_provider: Some(snapshot.board_provider),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -128,11 +161,18 @@ pub fn update_event(
     path: &Path,
     language: String,
     codex_trust_managed_hooks: Option<bool>,
+    board_provider: Option<String>,
 ) -> BackendEvent {
-    match write_settings(path, &language, codex_trust_managed_hooks) {
+    match write_settings(
+        path,
+        &language,
+        codex_trust_managed_hooks,
+        board_provider.as_deref(),
+    ) {
         Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
             language: snapshot.language,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
+            board_provider: Some(snapshot.board_provider),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -218,7 +258,7 @@ mod tests {
             "missing config should render System Settings as enabled by default"
         );
 
-        let snapshot = write_settings(&path, "en", Some(false)).unwrap();
+        let snapshot = write_settings(&path, "en", Some(false), None).unwrap();
         assert_eq!(snapshot.language, "en");
         assert_eq!(snapshot.codex_trust_managed_hooks, Some(false));
 
@@ -230,11 +270,12 @@ mod tests {
     fn update_event_returns_updated_on_success() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "ja".to_string(), Some(true));
+        let event = update_event(&path, "ja".to_string(), Some(true), None);
         match event {
             BackendEvent::SystemSettingsUpdated {
                 language,
                 codex_trust_managed_hooks,
+                ..
             } => {
                 assert_eq!(language, "ja");
                 assert_eq!(codex_trust_managed_hooks, Some(true));
@@ -247,7 +288,7 @@ mod tests {
     fn update_event_returns_error_for_invalid_language() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "zh".to_string(), None);
+        let event = update_event(&path, "zh".to_string(), None, None);
         match event {
             BackendEvent::SystemSettingsError { message } => {
                 assert!(message.contains("invalid language"));
@@ -266,11 +307,53 @@ mod tests {
             BackendEvent::SystemSettings {
                 language,
                 codex_trust_managed_hooks,
+                ..
             } => {
                 assert_eq!(language, "ja");
                 assert_eq!(codex_trust_managed_hooks, Some(true));
             }
             other => panic!("expected SystemSettings, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn board_provider_defaults_to_local_and_roundtrips() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        // Missing config → local default.
+        assert_eq!(read_settings(&path).unwrap().board_provider, "local");
+
+        // Persist slack and read it back; language is unchanged.
+        let snapshot = write_settings(&path, "auto", None, Some("slack")).unwrap();
+        assert_eq!(snapshot.board_provider, "slack");
+        assert_eq!(read_settings(&path).unwrap().board_provider, "slack");
+
+        // None leaves the persisted provider unchanged.
+        let snapshot = write_settings(&path, "en", None, None).unwrap();
+        assert_eq!(snapshot.board_provider, "slack");
+    }
+
+    #[test]
+    fn validate_board_provider_accepts_canonical_and_rejects_unknown() {
+        assert_eq!(validate_board_provider(" Local ").unwrap().0, "local");
+        assert_eq!(validate_board_provider("SLACK").unwrap().0, "slack");
+        assert_eq!(validate_board_provider("teams").unwrap().0, "teams");
+        assert!(validate_board_provider("discord").is_err());
+    }
+
+    #[test]
+    fn update_event_persists_board_provider() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let event = update_event(&path, "auto".to_string(), None, Some("teams".to_string()));
+        match event {
+            BackendEvent::SystemSettingsUpdated { board_provider, .. } => {
+                assert_eq!(board_provider.as_deref(), Some("teams"))
+            }
+            other => panic!("expected SystemSettingsUpdated, got {other:?}"),
+        }
+        let reloaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(reloaded.board.provider, BoardProviderKind::Teams);
     }
 }
