@@ -136,8 +136,12 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
 }
 
 fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
+    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
+        session,
+        &session.worktree_path,
+    );
     let Some(projection) =
-        gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?
+        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?
     else {
         return Ok(false);
     };
@@ -357,8 +361,12 @@ pub fn compute_plan(
         &language,
     );
 
+    let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
+        session,
+        &session.worktree_path,
+    );
     let projection_for_stale =
-        gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?;
+        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
     let (stale, updated_state) = compute_title_summary_stale_state(
         intent_event,
         projection_for_stale.as_ref(),
@@ -610,6 +618,46 @@ mod tests {
         assert!(
             !agent_title_summary_missing(&session).expect("title check"),
             "saved non-empty title_summary must satisfy the guard"
+        );
+    }
+
+    #[test]
+    fn agent_title_summary_missing_reads_canonical_project_state_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let mut session = make_session(&worktree, "work/title", "Codex");
+        session.project_state_root = Some(project_root.clone());
+
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: session.id.clone(),
+                window_id: Some("project::agent-1".to_string()),
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Implement canonical title guard".to_string()),
+                title_summary: Some("Canonical title guard".to_string()),
+                worktree_path: Some(worktree.clone()),
+                branch: Some("work/title".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
+                updated_at: Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save projection");
+
+        assert!(
+            !agent_title_summary_missing(&session).expect("title check"),
+            "title guard must read the canonical Project State root, not the worktree root"
         );
     }
 
