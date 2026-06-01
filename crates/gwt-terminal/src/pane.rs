@@ -145,8 +145,9 @@ impl Pane {
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         let mut snapshot = Vec::new();
         let scrollback_len = self.scrollback.len();
-        let visible_completed_lines = usize::from(self.parser.screen().cursor_position().0);
-        let replayable_len = scrollback_len.saturating_sub(visible_completed_lines);
+        let visible_overlap =
+            visible_scrollback_overlap_len(&self.scrollback, self.parser.screen());
+        let replayable_len = scrollback_len.saturating_sub(visible_overlap);
         let start = replayable_len.saturating_sub(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
 
         for line in self.scrollback.get_lines(start, replayable_len - start) {
@@ -232,6 +233,38 @@ impl Pane {
     pub fn reader(&self) -> Result<Box<dyn std::io::Read + Send>, TerminalError> {
         self.pty.reader()
     }
+}
+
+fn visible_scrollback_overlap_len(scrollback: &ScrollbackStorage, screen: &vt100::Screen) -> usize {
+    let scrollback_len = scrollback.len();
+    if scrollback_len == 0 {
+        return 0;
+    }
+
+    let (_, cols) = screen.size();
+    let visible_rows: Vec<String> = screen.rows(0, cols).collect();
+    let max_overlap = scrollback_len.min(visible_rows.len());
+    let scrollback_tail: Vec<String> = scrollback
+        .get_lines(scrollback_len - max_overlap, max_overlap)
+        .into_iter()
+        .map(normalized_scrollback_text)
+        .collect();
+
+    for overlap in (1..=max_overlap).rev() {
+        let scrollback_suffix = &scrollback_tail[max_overlap - overlap..];
+        if visible_rows
+            .windows(overlap)
+            .any(|window| window == scrollback_suffix)
+        {
+            return overlap;
+        }
+    }
+
+    0
+}
+
+fn normalized_scrollback_text(line: &ScrollbackLine) -> String {
+    line.text.trim_end_matches('\r').to_string()
 }
 
 fn append_snapshot_scrollback_line(snapshot: &mut Vec<u8>, line: &ScrollbackLine) {
@@ -402,6 +435,25 @@ mod tests {
         assert!(
             snapshot.contains("line-13"),
             "snapshot should include the boundary scrollback line; got: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_bytes_uses_visible_rows_for_scrollback_overlap() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-visible-overlap", 6, sleep_command("60"));
+
+        for line in 1..=18 {
+            pane.process_bytes(format!("line-{line:02}\r\n").as_bytes());
+        }
+        pane.process_bytes(b"\x1b[2;1H");
+
+        let snapshot = String::from_utf8_lossy(&pane.snapshot_bytes()).into_owned();
+        let repeated_visible_line = snapshot.matches("line-14").count();
+
+        assert_eq!(
+            repeated_visible_line, 1,
+            "snapshot should not replay visible scrollback lines when cursor moves; got: {snapshot:?}"
         );
     }
 
