@@ -19,8 +19,10 @@ test.describe.serial("Launch Wizard reconnect recovery (live backend)", () => {
       testInfo.project.name !== "chromium-dark",
       "live Launch Wizard reconnect E2E runs once against the shared backend",
     );
+    await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
     await keepLaunchWizardModalVisibilityDeterministic(page);
+    await clearBackendLaunchWizard(page);
   });
 
   test("FrontendReady tombstone closes a stale Launch Wizard after reconnect", async ({
@@ -53,6 +55,39 @@ async function keepLaunchWizardModalVisibilityDeterministic(page: Page): Promise
       }
     `,
   });
+}
+
+async function suppressInitialFrontendReady(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function sendWithInitialReadySuppressed(data) {
+      try {
+        const payload = typeof data === "string" ? JSON.parse(data) : null;
+        if (
+          payload?.kind === "frontend_ready" &&
+          (window as any).__gwtDropInitialFrontendReady !== false
+        ) {
+          (window as any).__gwtDropInitialFrontendReady = false;
+          return;
+        }
+      } catch {
+        /* no-op */
+      }
+      return originalSend.call(this, data);
+    };
+  });
+}
+
+async function clearBackendLaunchWizard(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  await sendLiveGwtEvent(page, {
+    kind: "launch_wizard_action",
+    action: { kind: "cancel" },
+    bounds: null,
+  });
+  await expect(wizard).toBeHidden();
+  await expect(wizard.locator(".wizard-summary-item")).toHaveCount(0);
+  await expect(wizard).not.toContainText("Work launch");
 }
 
 async function injectStaleLaunchWizard(page: Page): Promise<void> {
