@@ -6368,3 +6368,10 @@ Type: lesson
 Context: /release 実行中、pull 後に別Agentが PR #2950 を develop にマージし origin/develop が前進。最初のリリースコミット(古い develop ベース)は #2950 の fix を含まず、push も non-fast-forward で不成立だった。
 Learning: リリースコミットは push 直前時点の origin/develop に直接乗っている必要がある。origin が動いたら release commit を reset → origin/develop に --ff-only → version/CHANGELOG を git-cliff で再生成 → 再コミット、で新規マージ分を取り込む。背景 git push は完了報告が遅延するため push 後に必ず origin/develop == HEAD を fetch 確認してから成功宣言する。
 Future Action: /release の push 前に git fetch + 'HEAD~1 == origin/develop' を確認し、不一致なら reset+ff+再生成。push 後も fetch で origin/develop が release commit と一致するまで成功を宣言しない。
+
+## 2026-06-01 — Claude Code latest should prefer npx over bunx on non-Windows
+
+Type: lesson
+Context: Claude Code @anthropic-ai/claude-code@latest failed to launch from GWT when selected as latest because bunx one-shot package execution resolved dependencies but left Claude Code's postinstall-managed native binary as a stub, producing could not determine executable / EEXIST style launch failures.
+Learning: For built-in Claude Code npm-backed launches on non-Windows, npx --yes is the reliable package runner while bunx remains a fallback; Codex and custom Bunx flows should keep their existing bunx-first behavior.
+Future Action: When changing package-runner launch code, add agent-aware tests that cover Claude Code npx preference, bunx fallback, and Codex/custom Bunx compatibility before touching production runner selection.
