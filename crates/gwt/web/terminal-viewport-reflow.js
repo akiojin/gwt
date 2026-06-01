@@ -51,6 +51,84 @@ export function attachHostResizeReflow({
 }
 
 /**
+ * Re-fit a terminal whenever its CONTAINER element actually changes size.
+ *
+ * Reflow used to be wired only to specific lifecycle events: the manual
+ * drag-resize handler, the host `window.resize` fan-out, and tab/focus
+ * activation. Any size change that does NOT go through one of those paths —
+ * maximize / restore driven by a server `workspace_state`, restore-from-
+ * minimize at the same stored geometry, tile / stack / align, or a
+ * `runTerminalActivationSequence` that silently no-opped because it ran
+ * against an unsettled (0-size) layout box — left the xterm grid at its old
+ * row count. The grown container then renders the xterm background as a black
+ * band below the last row (and the backend PTY never learns the new size).
+ *
+ * A `ResizeObserver` fires AFTER layout settles for ANY cause, so routing it
+ * through `fitTerminal` (which already gates on `elementHasLayoutBox` and
+ * resyncs the PTY) closes every such gap with a single observer instead of
+ * patching each lifecycle event. Notifications coalesce through one animation
+ * frame, and an unchanged-size guard prevents the initial `observe()` callback
+ * (and any spurious notification) from triggering a redundant fit.
+ *
+ * `shouldSkip()` lets the caller defer to a bespoke path that already owns
+ * reflow — the manual drag-resize handler fits per frame and sends the final
+ * geometry on pointer-up, so the observer should not also resync the PTY on
+ * every frame while a window is being dragged by its resize handle.
+ *
+ * Returns a `dispose` function that cancels any pending frame and disconnects
+ * the observer.
+ */
+export function attachContainerResizeReflow({
+  element,
+  windowId,
+  fitTerminal,
+  shouldSkip,
+  ResizeObserverImpl = typeof ResizeObserver === "function" ? ResizeObserver : null,
+  requestFrame,
+  cancelFrame,
+}) {
+  if (!element || typeof ResizeObserverImpl !== "function" || typeof fitTerminal !== "function") {
+    return () => {};
+  }
+  const schedule =
+    typeof requestFrame === "function"
+      ? requestFrame
+      : typeof requestAnimationFrame === "function"
+        ? (cb) => requestAnimationFrame(cb)
+        : (cb) => {
+            cb();
+            return null;
+          };
+  const unschedule =
+    typeof cancelFrame === "function"
+      ? cancelFrame
+      : typeof cancelAnimationFrame === "function"
+        ? (id) => cancelAnimationFrame(id)
+        : () => {};
+  let frame = null;
+  let lastWidth = element.clientWidth;
+  let lastHeight = element.clientHeight;
+  const observer = new ResizeObserverImpl(() => {
+    const width = element.clientWidth;
+    const height = element.clientHeight;
+    if (width === lastWidth && height === lastHeight) return;
+    lastWidth = width;
+    lastHeight = height;
+    if (typeof shouldSkip === "function" && shouldSkip()) return;
+    if (frame !== null) return;
+    frame = schedule(() => {
+      frame = null;
+      fitTerminal(windowId, true);
+    });
+  });
+  observer.observe(element);
+  return () => {
+    if (frame !== null) unschedule(frame);
+    observer.disconnect();
+  };
+}
+
+/**
  * Apply the `.hidden` mutation for a single tab and notify the caller when
  * a hidden -> visible transition occurs against a terminal-bearing window.
  * Returns `true` if the activation hook was fired.
