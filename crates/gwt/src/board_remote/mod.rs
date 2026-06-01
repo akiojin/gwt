@@ -12,4 +12,5 @@ pub mod oauth;
 pub mod oauth_session;
 pub mod signin;
 pub mod slack;
+pub mod teams;
 pub mod token_store;

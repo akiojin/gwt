@@ -50,6 +50,17 @@ pub trait HttpClient: Send + Sync {
         bearer: &str,
         params: &[(&str, &str)],
     ) -> std::result::Result<HttpResponse, String>;
+    /// POST a raw JSON `body` with a bearer token (used by the Microsoft Graph
+    /// Teams provider). Defaults to unsupported so form-only clients/mocks need
+    /// not implement it.
+    fn post_json(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        _body: &str,
+    ) -> std::result::Result<HttpResponse, String> {
+        Err("post_json is not supported by this HTTP client".to_string())
+    }
 }
 
 /// Slack-backed Board provider.

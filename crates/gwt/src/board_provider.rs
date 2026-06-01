@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use gwt_config::{BoardProviderKind, Settings, SlackConfig};
+use gwt_config::{BoardProviderKind, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProvider,
     CoordinationSnapshot, LocalProvider,
@@ -23,6 +23,7 @@ use gwt_core::{GwtError, Result};
 
 use crate::board_remote::http::ReqwestHttpClient;
 use crate::board_remote::slack::SlackProvider;
+use crate::board_remote::teams::TeamsProvider;
 use crate::board_remote::token_store::{self, TokenSet};
 
 /// The currently selected provider kind, read fresh from `Settings`. Reading
@@ -128,6 +129,29 @@ fn build_slack(
     )))
 }
 
+/// Build the Teams provider from its config and a stored token (FR-010).
+fn build_teams(
+    config: &TeamsConfig,
+    token: Option<TokenSet>,
+) -> std::result::Result<Box<dyn BoardProvider>, String> {
+    let default_channel = config
+        .default_channel
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Teams default channel (team_id/channel_id) is not configured".to_string()
+        })?;
+    let token = token.ok_or_else(|| "Teams is not signed in".to_string())?;
+    Ok(Box::new(TeamsProvider::new(
+        token.access_token,
+        default_channel,
+        config.channel_map.clone(),
+        Box::new(ReqwestHttpClient::new()),
+        60,
+    )))
+}
+
 /// Build the active remote provider from settings + stored credentials.
 fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardProvider> {
     match kind {
@@ -137,7 +161,8 @@ fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardPr
             build_slack(&settings.board.slack, token).unwrap_or_else(UnconfiguredProvider::boxed)
         }
         BoardProviderKind::Teams => {
-            UnconfiguredProvider::boxed("Teams provider is not implemented yet (SPEC-2963 Phase 6)")
+            let token = token_store::load("teams").ok().flatten();
+            build_teams(&settings.board.teams, token).unwrap_or_else(UnconfiguredProvider::boxed)
         }
     }
 }
