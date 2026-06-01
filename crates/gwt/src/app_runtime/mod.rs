@@ -3376,14 +3376,29 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
-            if !startup_auto_resume_window_was_open(&session) {
-                continue;
-            }
-            if !session.exact_auto_resume_candidate() {
-                continue;
-            }
-            if !startup_auto_resume_is_fresh(&session, now) {
-                continue;
+            // Issue #2942: a persisted Stopped agent placeholder means the user
+            // did not explicitly close the window (closing removes it from the
+            // workspace). Such "still open" windows must restore regardless of
+            // the session's status drift (e.g. idle-timeout -> Stopped) or age,
+            // honoring "restore everything not explicitly closed". Sessions with
+            // no placeholder are orphans (the workspace lost the window); keep
+            // the conservative status / freshness gates so old, windowless
+            // sessions are not resurrected at startup.
+            let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
+            if placeholder_tab.is_some() {
+                if !session.worktree_path.exists() {
+                    continue;
+                }
+            } else {
+                if !startup_auto_resume_window_was_open(&session) {
+                    continue;
+                }
+                if !session.exact_auto_resume_candidate() {
+                    continue;
+                }
+                if !startup_auto_resume_is_fresh(&session, now) {
+                    continue;
+                }
             }
             let Some(native_session_id) = session.exact_resume_session_id() else {
                 continue;
@@ -3398,7 +3413,9 @@ impl AppRuntime {
             {
                 continue;
             }
-            let Some(tab_id) = self.auto_resume_tab_id_for_session(&session) else {
+            let Some(tab_id) =
+                placeholder_tab.or_else(|| self.auto_resume_tab_id_for_session(&session))
+            else {
                 continue;
             };
             let Some(tab) = self.tab(&tab_id) else {
@@ -3581,6 +3598,24 @@ impl AppRuntime {
             }
         }
         events
+    }
+
+    /// Find the tab holding a persisted, paused (`Stopped`) agent placeholder
+    /// window backed by `session_id`. Its presence proves the user did not
+    /// explicitly close that window (Issue #2942), so the session must restore
+    /// regardless of status drift or age.
+    fn paused_placeholder_tab_for_session(&self, session_id: &str) -> Option<String> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .find(|tab| {
+                tab.workspace.persisted().windows.iter().any(|window| {
+                    window.status == WindowProcessStatus::Stopped
+                        && crate::runtime_support::window_is_agent_pane(window)
+                        && window.session_id.as_deref() == Some(session_id)
+                })
+            })
+            .map(|tab| tab.id.clone())
     }
 
     fn remove_stale_paused_agent_window(
@@ -14854,6 +14889,98 @@ exit 1
         assert_eq!(
             agent_windows, 1,
             "a session in a linked worktree must resume into the workspace-home tab"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age() {
+        // Issue #2942: a session whose status drifted to Stopped (idle timeout)
+        // AND is older than the 24h freshness window must STILL resume on
+        // startup when its agent window is still present in the workspace (the
+        // user did not explicitly close it). Both the status-candidate gate and
+        // the freshness gate would exclude this session on the orphan path; only
+        // the "unclosed placeholder" path can restore it.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("unclosed-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/unclosed-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+
+        // Tab still holds the paused agent placeholder (not closed by the user).
+        let mut persisted = empty_workspace_state();
+        let mut agent_window =
+            sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+        agent_window.agent_id = Some("claude".to_string());
+        agent_window.session_id = Some("sess-unclosed".to_string());
+        persisted.windows.push(agent_window);
+        persisted.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-unclosed".to_string(),
+            title: "Unclosed".to_string(),
+            project_root: worktree.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-unclosed"));
+
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/unclosed-resume",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.id = "sess-unclosed".to_string();
+        session.agent_session_id = Some("native-unclosed".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        // Status drifted to Stopped (would fail the candidate gate)...
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        // ...and the session is older than the 24h freshness window.
+        session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save stale stopped session");
+
+        runtime.bootstrap();
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::StartupAutoResumeReady {
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let agent_windows = runtime
+            .tab("tab-unclosed")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 1,
+            "an unclosed agent window must resume despite Stopped status and >24h age"
+        );
+        assert_eq!(
+            runtime.pending_auto_resume_sources.len(),
+            1,
+            "the resumed unclosed window must track its source session"
         );
     }
 
