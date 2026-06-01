@@ -109,12 +109,15 @@ the tray menu:
 - **Open in browser** — launches the OS default browser at
   `http://127.0.0.1:<port>/`. The same URL can be opened in any other
   browser too.
-- **Start at login** — checking it installs an OS-native autostart
-  entry (macOS LaunchAgent / Windows HKCU Run / Linux XDG autostart)
-  via the `auto-launch` crate, so `gwt` resumes at the next login
-  (SPEC #2920).
+- **About GWT** — opens the browser About / Version surface for the
+  running tray process.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
+
+Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
+installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
+Linux XDG autostart) via the `auto-launch` crate, so `gwt` resumes at the next
+OS login as a tray-resident process. The browser is not opened automatically.
 
 ```bash
 gwt                                 # install tray + start embedded server (loopback)

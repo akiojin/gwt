@@ -47,6 +47,9 @@ export function createReleaseNotesWindow({
     lastRequestId: null,
     currentVersion: null,
     confirmModal: null,
+    mode: "release_notes",
+    titleEl: null,
+    closeBtn: null,
   };
 
   // SPEC #2780 v2 Amendment (FR-015): minimal `major.minor.patch` comparison.
@@ -83,6 +86,24 @@ export function createReleaseNotesWindow({
   function clearChildren(node) {
     while (node.firstChild) {
       node.removeChild(node.firstChild);
+    }
+  }
+
+  function windowTitle() {
+    return state.mode === "about" ? "About GWT" : "Release notes";
+  }
+
+  function applyWindowChrome() {
+    if (!state.root) {
+      return;
+    }
+    const title = windowTitle();
+    state.root.setAttribute("aria-label", title);
+    if (state.titleEl) {
+      state.titleEl.textContent = title;
+    }
+    if (state.closeBtn) {
+      state.closeBtn.setAttribute("aria-label", `Close ${title}`);
     }
   }
 
@@ -323,14 +344,14 @@ export function createReleaseNotesWindow({
     header.className = "op-global-window__titlebar release-notes-window-header";
     const title = document.createElement("h1");
     title.className = "op-global-window__title";
-    title.textContent = "Release notes";
+    title.textContent = windowTitle();
     header.appendChild(title);
     const actions = document.createElement("div");
     actions.className = "op-global-window__actions";
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = "icon-button release-notes-close";
-    closeBtn.setAttribute("aria-label", "Close release notes");
+    closeBtn.setAttribute("aria-label", `Close ${windowTitle()}`);
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", () => close());
     actions.appendChild(closeBtn);
@@ -356,6 +377,8 @@ export function createReleaseNotesWindow({
     state.root = root;
     state.sidebar = sidebar;
     state.content = content;
+    state.titleEl = title;
+    state.closeBtn = closeBtn;
     state.keydownHandler = (event) => {
       if (event.key === "Escape") {
         event.preventDefault?.();
@@ -364,6 +387,7 @@ export function createReleaseNotesWindow({
     };
     document.addEventListener("keydown", state.keydownHandler);
     document.body.appendChild(root);
+    applyWindowChrome();
     try {
       root.focus({ preventScroll: true });
     } catch {
@@ -437,6 +461,16 @@ export function createReleaseNotesWindow({
   }
 
   function open(focusVersion = null) {
+    state.mode = "release_notes";
+    requestReleaseNotes(focusVersion);
+  }
+
+  function openAbout(focusVersion = null) {
+    state.mode = "about";
+    requestReleaseNotes(focusVersion);
+  }
+
+  function requestReleaseNotes(focusVersion = null) {
     state.pendingFocusVersion = focusVersion;
     state.focusReturn = document.activeElement;
     const id = generateId();
@@ -466,6 +500,7 @@ export function createReleaseNotesWindow({
       null;
     state.selectedVersion = requested;
     ensureWindow();
+    applyWindowChrome();
     renderSidebar();
     renderContent();
     state.pendingFocusVersion = null;
@@ -475,6 +510,7 @@ export function createReleaseNotesWindow({
     state.entries = [];
     state.selectedVersion = null;
     ensureWindow();
+    applyWindowChrome();
     renderSidebar();
     if (state.content) {
       clearChildren(state.content);
@@ -496,6 +532,8 @@ export function createReleaseNotesWindow({
     state.root = null;
     state.sidebar = null;
     state.content = null;
+    state.titleEl = null;
+    state.closeBtn = null;
     state.keydownHandler = null;
     state.focusReturn = null;
     if (focusReturn && typeof focusReturn.focus === "function") {
@@ -517,6 +555,7 @@ export function createReleaseNotesWindow({
 
   return {
     open,
+    openAbout,
     handlePayload,
     handleError,
     close,
