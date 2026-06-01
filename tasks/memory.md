@@ -6414,7 +6414,7 @@ Future Action: Before final verification for app.js root imports, run scripts/ru
 ## 2026-06-01 — Isolated HOME live checks must avoid Start Work auth traps
 
 Type: lesson
-Context: During SPEC-2008 manual visual verification, current checkout was launched with isolated HOME to avoid tray lock collisions. The empty or partially linked HOME caused Start Work to attempt git push origin origin/develop:refs/heads/work/... without usable GitHub credentials, yielding fatal: could not read Username for https://github.com: terminal prompts disabled before the intended scroll check.
+Context: During SPEC-2008 manual visual verification, current checkout was launched with isolated HOME to avoid tray lock collisions. The empty or partially linked HOME caused Start Work to attempt git push origin origin/develop:refs/heads/work/... without usable GitHub credentials, yielding fatal: could not read Username for `https://github.com`: terminal prompts disabled before the intended scroll check.
 Learning: For UI verification that only needs an existing worktree, do not drive Start Work in an isolated HOME unless Git/GitHub credentials are fully available and noninteractive. Prefer seeding session.json for the current worktree and using OpenActiveWorkLaunchWizard on the existing branch, or explicitly link required agent/git config while avoiding remote branch creation.
 Future Action: When preparing manual verification URLs with isolated HOME, document that the user should not use Start Work/Open Project for the check, close any failed remote-branch windows, and provide a pre-launched running agent or deterministic fixture for the exact UI behavior under test.
 
