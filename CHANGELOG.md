@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.50.1] - 2026-06-01
+
+### Bug Fixes
+
+- **launch:** Package-runner probe を binary 存在確認に置換し起動中断を解消
+- **gui:** Restore unclosed agent/process windows on startup & open project (#2942)
+- **gui:** Unclosed agent window が status drift / 24h 超過でも復元されるよう修正 (#2942)
+- **gui:** Resolve --font-mono for xterm so canvas measurement matches the rendered font
+- **gui:** Re-fit terminal on container resize via ResizeObserver
+- **gui:** Apply zoom-corrected screen inset for maximized windows
+
+### Miscellaneous Tasks
+
+- **memory:** GUI 修正の視覚検証は HOME 隔離 dev build + lsof 確認の lesson を記録
+- **memory:** Record PR Gate workflow correction (#2942)
+- **memory:** Record real-env GUI verification technique (#2942)
+- **memory:** Record serve+remote-browser Open Project (rfd) freeze workaround
+
 ## [9.50.0] - 2026-05-30
 
 ### Bug Fixes
