@@ -3046,6 +3046,10 @@ body {
   color: var(--color-text-muted);
 }
 
+.branch-cleanup-toggle.unknown {
+  color: var(--color-text-muted);
+}
+
 .branch-cleanup-toggle.selected {
   background: var(--color-button-bg);
   border-color: var(--color-button-bg);
@@ -3237,6 +3241,12 @@ body {
 .branch-cleanup-badge.loading {
   background: color-mix(in oklab, var(--color-text-muted) 12%, transparent);
   color: var(--color-text-muted);
+  animation: branch-cleanup-checking-pulse 1400ms ease-in-out infinite;
+}
+
+.branch-cleanup-badge.unknown {
+  background: color-mix(in oklab, var(--agent-claude) 12%, transparent);
+  color: var(--agent-claude);
 }
 
 .branch-summary {
@@ -3247,13 +3257,100 @@ body {
 }
 
 .branch-notice {
+  position: relative;
+  display: grid;
+  gap: 3px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--color-border);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
   color: var(--agent-claude);
   background: color-mix(in oklab, var(--agent-claude) 10%, transparent);
+  overflow: hidden;
+}
+
+.branch-notice[hidden] {
+  display: none;
+}
+
+.branch-notice[data-branch-status="checking"] {
+  color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 10%, transparent);
+}
+
+.branch-notice[data-branch-status="checking"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    color-mix(in oklab, var(--color-state-active) 24%, transparent) 48%,
+    transparent 72%
+  );
+  transform: translateX(-100%);
+  animation: branch-detail-check-sweep 1800ms ease-in-out infinite;
+}
+
+.branch-notice > * {
+  position: relative;
+  z-index: 1;
+}
+
+.branch-notice-title {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+}
+
+.branch-notice-detail,
+.branch-notice-hint {
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+}
+
+.branch-notice-detail {
+  color: var(--color-text);
+}
+
+.branch-notice-hint {
+  color: var(--color-text-muted);
+}
+
+@keyframes branch-detail-check-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+
+  35% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+@keyframes branch-cleanup-checking-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-text-muted) 0%, transparent);
+  }
+
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .branch-notice[data-branch-status="checking"]::before,
+  .branch-cleanup-badge.loading {
+    animation: none;
+  }
 }
 
 .branch-cleanup-list {
