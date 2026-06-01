@@ -43,6 +43,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2809 — Console window per-kind tab live tail.
   "console-window.js",
   "socket-receive-dispatcher.js",
+  "terminal-copy-shortcut.js",
   "terminal-context-menu.js",
   "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",

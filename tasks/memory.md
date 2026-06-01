@@ -6396,3 +6396,10 @@ Type: failure-pattern
 Context: Agent TTY overlay had been intentionally disabled, but Launch completion errors before PTY spawn were only sent as TerminalStatus detail. The UI then showed an Error badge while xterm remained blank.
 Learning: When a process fails before a PTY exists, status/detail chrome is not enough. Emit a normal terminal_output diagnostic and replay it through terminal_snapshot on frontend reconnect; do not reintroduce foreground overlays.
 Future Action: For any future launch/startup failure path that can happen before PTY output, add tests for both immediate TerminalOutput and reconnect TerminalSnapshot visibility.
+
+## 2026-06-01 — frontend root module route parity
+
+Type: lesson
+Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
+Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
+Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.

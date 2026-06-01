@@ -62,6 +62,10 @@ pub fn terminal_context_menu_js() -> &'static str {
     include_str!("../web/terminal-context-menu.js")
 }
 
+pub fn terminal_copy_shortcut_js() -> &'static str {
+    include_str!("../web/terminal-copy-shortcut.js")
+}
+
 pub fn terminal_wheel_scroll_js() -> &'static str {
     include_str!("../web/terminal-wheel-scroll.js")
 }
@@ -265,6 +269,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-context-menu.js",
         source: terminal_context_menu_js,
         marker: "createTerminalContextMenuController",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-copy-shortcut.js",
+        source: terminal_copy_shortcut_js,
+        marker: "classifyTerminalCopyKeyEvent",
     },
     RootJsModuleAsset {
         path: "/terminal-wheel-scroll.js",
@@ -622,6 +631,40 @@ mod tests {
         assert!(
             html.contains("event.shiftKey"),
             "expected Shift modifier handling in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_copy_shortcut_module_is_registered() {
+        let paths: Vec<&str> = root_js_module_assets()
+            .iter()
+            .map(|asset| asset.path)
+            .collect();
+        assert!(
+            paths.contains(&"/terminal-copy-shortcut.js"),
+            "expected terminal copy shortcut helper to be served as a root JS module",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_windows_ctrl_c_copy_clears_selection() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("from \"/terminal-copy-shortcut.js\""),
+            "expected app.js to import the terminal copy shortcut classifier",
+        );
+        assert!(
+            html.contains("classifyTerminalCopyKeyEvent"),
+            "expected app.js to classify Windows Ctrl+C terminal copy before xterm handles input",
+        );
+        assert!(
+            html.contains("clearSelectionAfterCopy"),
+            "expected Windows Ctrl+C terminal copy to carry a selection-clear decision",
+        );
+        assert!(
+            html.contains("terminal.clearSelection"),
+            "expected Windows Ctrl+C terminal copy to clear the terminal selection after copying",
         );
     }
 
@@ -2204,6 +2247,7 @@ mod tests {
             "/operator-shell.js",
             "/focus-trap.js",
             "/terminal-context-menu.js",
+            "/terminal-copy-shortcut.js",
             "/terminal-wheel-scroll.js",
             "/custom-agent-env-editor.js",
         ] {

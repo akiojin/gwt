@@ -244,8 +244,9 @@ PowerShell, or PowerShell 7. Docker launches continue to use the container
 shell.
 
 In terminal windows, drag to select text and release the mouse button to copy.
-On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
-selection. `Ctrl+C` stays mapped to the running terminal process.
+On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
+selection exists, `Ctrl+C` stays mapped to the running terminal process. On
+Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Knowledge, Search, and Managed Skills
 
