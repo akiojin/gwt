@@ -826,6 +826,15 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::GetSystemSettings => {
             FrontendUserActionLog::new("get_system_settings", "settings")
         }
+        FrontendEvent::GetBoardAuthStatus => {
+            FrontendUserActionLog::new("get_board_auth_status", "settings")
+        }
+        FrontendEvent::BoardProviderSignIn { provider } => {
+            FrontendUserActionLog::new("board_provider_sign_in", "settings").target(provider)
+        }
+        FrontendEvent::BoardProviderSignOut { provider } => {
+            FrontendUserActionLog::new("board_provider_sign_out", "settings").target(provider)
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
@@ -4155,6 +4164,13 @@ impl AppRuntime {
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
+            FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
+            FrontendEvent::BoardProviderSignIn { provider } => {
+                self.board_provider_sign_in_events(client_id, &provider)
+            }
+            FrontendEvent::BoardProviderSignOut { provider } => {
+                self.board_provider_sign_out_events(client_id, &provider)
+            }
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
@@ -4327,6 +4343,82 @@ impl AppRuntime {
                 },
             )],
         }
+    }
+
+    /// SPEC-2963: reply with remote Board provider sign-in state.
+    fn board_auth_status_events(
+        &self,
+        client_id: ClientId,
+        message: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::BoardAuthStatus {
+                slack: gwt::board_remote::signin::is_signed_in("slack"),
+                teams: gwt::board_remote::signin::is_signed_in("teams"),
+                message,
+            },
+        )]
+    }
+
+    /// SPEC-2963: begin OAuth sign-in for a remote Board provider by opening the
+    /// browser to the authorize URL (redirect back to the embedded server).
+    fn board_provider_sign_in_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+    ) -> Vec<OutboundEvent> {
+        let kind = match provider.trim().to_ascii_lowercase().as_str() {
+            "slack" => gwt_config::BoardProviderKind::Slack,
+            "teams" => gwt_config::BoardProviderKind::Teams,
+            other => {
+                return self.board_auth_status_events(
+                    client_id,
+                    Some(format!("Unknown provider '{other}'")),
+                );
+            }
+        };
+        let Some(redirect_base) = self.server_url.clone() else {
+            return self.board_auth_status_events(
+                client_id,
+                Some("Server URL is not available yet; retry shortly.".to_string()),
+            );
+        };
+        let settings = gwt_config::Settings::load().unwrap_or_default();
+        let message = match gwt::board_remote::signin::begin_signin(kind, &settings, &redirect_base)
+        {
+            Ok(authorize_url) => match open_url_with_os_default(&authorize_url) {
+                Ok(()) => Some(format!(
+                    "Opened the browser to sign in to {provider}. Complete it, then Refresh."
+                )),
+                Err(error) => Some(format!("Failed to open browser: {error}")),
+            },
+            Err(reason) => Some(reason),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
+    /// SPEC-2963: clear stored credentials for a remote Board provider.
+    fn board_provider_sign_out_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+    ) -> Vec<OutboundEvent> {
+        let key = match provider.trim().to_ascii_lowercase().as_str() {
+            "slack" => "slack",
+            "teams" => "teams",
+            other => {
+                return self.board_auth_status_events(
+                    client_id,
+                    Some(format!("Unknown provider '{other}'")),
+                );
+            }
+        };
+        let message = match gwt::board_remote::signin::sign_out(key) {
+            Ok(()) => Some(format!("Signed out of {provider}.")),
+            Err(error) => Some(format!("Failed to sign out: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
     }
 
     fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {

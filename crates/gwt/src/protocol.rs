@@ -642,6 +642,19 @@ pub enum FrontendEvent {
     /// [`BackendEvent::SystemSettings`] containing the current global
     /// `[ai].language` value (`auto` / `en` / `ja`).
     GetSystemSettings,
+    /// SPEC-2963: query remote Board provider sign-in state. Backend replies
+    /// with [`BackendEvent::BoardAuthStatus`].
+    GetBoardAuthStatus,
+    /// SPEC-2963: begin OAuth sign-in for a remote Board provider
+    /// (`slack` / `teams`). Backend opens the browser and replies with
+    /// [`BackendEvent::BoardAuthStatus`] (message describes next steps).
+    BoardProviderSignIn {
+        provider: String,
+    },
+    /// SPEC-2963: clear stored credentials for a remote Board provider.
+    BoardProviderSignOut {
+        provider: String,
+    },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
     /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
@@ -1434,6 +1447,14 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
     },
+    /// SPEC-2963: remote Board provider sign-in state + an optional status
+    /// message (e.g. after starting sign-in).
+    BoardAuthStatus {
+        slack: bool,
+        teams: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
     /// `language` echoes the saved value so the frontend can reconcile
@@ -2023,6 +2044,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::SystemSettings { .. } => "system_settings",
+            BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
             BackendEvent::WorkspaceProjectionPruneResult { .. } => {

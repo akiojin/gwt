@@ -11037,9 +11037,11 @@
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
-        // SPEC-2959: selected Board backend. Only `local` is implemented;
-        // `slack` / `teams` are shown as disabled "coming soon" options.
+        // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
+        // SPEC-2963: remote provider sign-in state + last sign-in message.
+        boardAuth: { slack: false, teams: false },
+        boardAuthMessage: "",
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -11145,6 +11147,8 @@
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
         send({ kind: "get_system_settings" });
+        // SPEC-2963: also fetch remote Board provider sign-in state.
+        send({ kind: "get_board_auth_status" });
 
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
@@ -11413,14 +11417,13 @@
         boardSelect.className = "settings-select";
         boardSelect.id = "settings-system-board-provider";
         for (const opt of [
-          { value: "local", text: "Local (offline)", disabled: false },
-          { value: "slack", text: "Slack (coming soon)", disabled: true },
-          { value: "teams", text: "Teams (coming soon)", disabled: true },
+          { value: "local", text: "Local (offline)" },
+          { value: "slack", text: "Slack" },
+          { value: "teams", text: "Teams" },
         ]) {
           const option = document.createElement("option");
           option.value = opt.value;
           option.textContent = opt.text;
-          option.disabled = opt.disabled;
           boardSelect.appendChild(option);
         }
         boardSelect.value = systemSettingsState.boardProvider || "local";
@@ -11435,6 +11438,7 @@
             language: systemSettingsState.language || "auto",
             board_provider: next,
           });
+          renderSystemPanelInAllSettingsWindows();
         });
         boardSection.appendChild(boardSelect);
 
@@ -11442,8 +11446,60 @@
         boardHelp.className = "settings-help";
         boardHelp.textContent =
           "Where the coordination Board is stored. Local keeps the Board offline and " +
-          "on this machine. Slack / Teams are not available yet.";
+          "on this machine. Slack / Teams require sign-in and are network-backed.";
         boardSection.appendChild(boardHelp);
+
+        // SPEC-2963 FR-011/FR-012: sign-in affordance + auth status for the
+        // selected remote provider. Local needs no sign-in.
+        const selectedProvider = systemSettingsState.boardProvider || "local";
+        if (selectedProvider === "slack" || selectedProvider === "teams") {
+          const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
+          const signedIn = auth[selectedProvider] === true;
+          const authRow = createDiv("settings-section board-auth-row");
+          const statusText = createNode(
+            "span",
+            "board-auth-status",
+            signedIn
+              ? `Signed in to ${selectedProvider}`
+              : `Not signed in to ${selectedProvider}`,
+          );
+          statusText.dataset.signedIn = signedIn ? "true" : "false";
+          authRow.appendChild(statusText);
+
+          const signInBtn = createNode(
+            "button",
+            "wizard-button",
+            signedIn ? "Re-sign in" : "Sign in",
+          );
+          signInBtn.type = "button";
+          signInBtn.addEventListener("click", () => {
+            send({ kind: "board_provider_sign_in", provider: selectedProvider });
+          });
+          authRow.appendChild(signInBtn);
+
+          if (signedIn) {
+            const signOutBtn = createNode("button", "text-button", "Sign out");
+            signOutBtn.type = "button";
+            signOutBtn.addEventListener("click", () => {
+              send({ kind: "board_provider_sign_out", provider: selectedProvider });
+            });
+            authRow.appendChild(signOutBtn);
+          }
+
+          const refreshBtn = createNode("button", "text-button", "Refresh");
+          refreshBtn.type = "button";
+          refreshBtn.addEventListener("click", () => {
+            send({ kind: "get_board_auth_status" });
+          });
+          authRow.appendChild(refreshBtn);
+          boardSection.appendChild(authRow);
+
+          if (systemSettingsState.boardAuthMessage) {
+            boardSection.appendChild(
+              createNode("p", "settings-help", systemSettingsState.boardAuthMessage),
+            );
+          }
+        }
 
         const status = document.createElement("p");
         status.className = "settings-status";
@@ -13131,6 +13187,15 @@
               editingCustomAgentId = null;
             }
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
+            break;
+          case "board_auth_status":
+            // SPEC-2963: remote provider sign-in state.
+            systemSettingsState.boardAuth = {
+              slack: event.slack === true,
+              teams: event.teams === true,
+            };
+            systemSettingsState.boardAuthMessage = event.message || "";
+            renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.

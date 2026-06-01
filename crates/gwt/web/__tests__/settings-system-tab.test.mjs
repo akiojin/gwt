@@ -150,26 +150,45 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
 });
 
-test("System tab Board provider select offers Local with Slack/Teams disabled (SPEC-2959)", () => {
-  // The selector id and the three options must exist; slack/teams are
-  // advertised but disabled until an adapter ships (Issue #2960).
+test("System tab Board provider select offers Local/Slack/Teams as selectable (SPEC-2963)", () => {
+  // SPEC-2963 Phase 5: slack/teams are now real, selectable options (sign-in
+  // gated rather than disabled "coming soon").
   assert.match(
     appSource,
     /id\s*=\s*"settings-system-board-provider"/,
     "expected a Board provider select with the canonical id",
   );
-  assert.match(
-    appSource,
-    /value:\s*"local"[\s\S]*?disabled:\s*false/,
-    "Local must be a selectable Board provider option",
-  );
-  for (const provider of ["slack", "teams"]) {
+  for (const provider of ["local", "slack", "teams"]) {
     assert.match(
       appSource,
-      new RegExp(`value:\\s*"${provider}"[\\s\\S]*?disabled:\\s*true`),
-      `${provider} must be rendered as a disabled "coming soon" option`,
+      new RegExp(`value:\\s*"${provider}"`),
+      `${provider} must be a Board provider option`,
     );
   }
+});
+
+test("System tab exposes remote provider sign-in affordance + auth status (SPEC-2963)", () => {
+  assert.match(appSource, /"board-auth-status"/, "expected an auth status element");
+  assert.match(
+    appSource,
+    /kind:\s*"board_provider_sign_in",\s*provider:\s*selectedProvider/,
+    "Sign in button must send board_provider_sign_in",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"board_provider_sign_out",\s*provider:\s*selectedProvider/,
+    "Sign out button must send board_provider_sign_out",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"get_board_auth_status"/,
+    "panel must fetch board auth status",
+  );
+  assert.match(
+    appSource,
+    /case\s+"board_auth_status":/,
+    "dispatch must handle board_auth_status",
+  );
 });
 
 test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
