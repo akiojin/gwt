@@ -1590,6 +1590,139 @@ pub fn load_entries_before_for_scope(
     })
 }
 
+/// Backend that serves the coordination Board (SPEC-2959).
+///
+/// The trait mirrors the existing free-function read/write surface so that
+/// call sites can route through a configured provider. `LocalProvider` is the
+/// only implementation today and delegates to the filesystem free functions,
+/// preserving current behavior exactly. A future Slack/Teams adapter
+/// (Issue #2960) implements this same trait.
+pub trait BoardProvider {
+    /// Append a Board entry and return the refreshed snapshot.
+    fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot>;
+    /// Load the hot projection snapshot.
+    fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
+    /// Load the snapshot filtered to an audience scope.
+    fn load_snapshot_for_scope(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+    ) -> Result<CoordinationSnapshot>;
+    /// Load entries updated strictly after `since`.
+    fn load_entries_since(
+        &self,
+        worktree_root: &Path,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<BoardEntry>>;
+    /// Load entries updated strictly after `since`, filtered to a scope.
+    fn load_entries_since_for_scope(
+        &self,
+        worktree_root: &Path,
+        since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+    ) -> Result<Vec<BoardEntry>>;
+    /// Whether `author` posted a message of `kind` within `within`.
+    fn has_recent_post_by(
+        &self,
+        worktree_root: &Path,
+        author: &str,
+        kind: &BoardEntryKind,
+        within: chrono::Duration,
+    ) -> Result<bool>;
+    /// Whether an entry with `entry_id` exists.
+    fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool>;
+    /// Load a page of older entries before `before_entry_id`.
+    fn load_entries_before(
+        &self,
+        worktree_root: &Path,
+        before_entry_id: Option<&str>,
+        limit: usize,
+    ) -> Result<BoardHistoryPage>;
+    /// Load a page of older entries before `before_entry_id`, filtered to a scope.
+    fn load_entries_before_for_scope(
+        &self,
+        worktree_root: &Path,
+        before_entry_id: Option<&str>,
+        limit: usize,
+        scope: &BoardAudienceScope,
+    ) -> Result<BoardHistoryPage>;
+}
+
+/// Filesystem-backed Board provider (offline, default).
+///
+/// Delegates to the segmented JSONL event log + hot projection free functions,
+/// so its behavior is identical to the pre-abstraction code path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LocalProvider;
+
+impl BoardProvider for LocalProvider {
+    fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+        post_entry(worktree_root, entry)
+    }
+
+    fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+        load_snapshot(worktree_root)
+    }
+
+    fn load_snapshot_for_scope(
+        &self,
+        worktree_root: &Path,
+        scope: &BoardAudienceScope,
+    ) -> Result<CoordinationSnapshot> {
+        load_snapshot_for_scope(worktree_root, scope)
+    }
+
+    fn load_entries_since(
+        &self,
+        worktree_root: &Path,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<BoardEntry>> {
+        load_entries_since(worktree_root, since)
+    }
+
+    fn load_entries_since_for_scope(
+        &self,
+        worktree_root: &Path,
+        since: DateTime<Utc>,
+        scope: &BoardAudienceScope,
+    ) -> Result<Vec<BoardEntry>> {
+        load_entries_since_for_scope(worktree_root, since, scope)
+    }
+
+    fn has_recent_post_by(
+        &self,
+        worktree_root: &Path,
+        author: &str,
+        kind: &BoardEntryKind,
+        within: chrono::Duration,
+    ) -> Result<bool> {
+        has_recent_post_by(worktree_root, author, kind, within)
+    }
+
+    fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
+        board_entry_exists(worktree_root, entry_id)
+    }
+
+    fn load_entries_before(
+        &self,
+        worktree_root: &Path,
+        before_entry_id: Option<&str>,
+        limit: usize,
+    ) -> Result<BoardHistoryPage> {
+        load_entries_before(worktree_root, before_entry_id, limit)
+    }
+
+    fn load_entries_before_for_scope(
+        &self,
+        worktree_root: &Path,
+        before_entry_id: Option<&str>,
+        limit: usize,
+        scope: &BoardAudienceScope,
+    ) -> Result<BoardHistoryPage> {
+        load_entries_before_for_scope(worktree_root, before_entry_id, limit, scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{str::FromStr, sync::Arc, thread};
@@ -1599,6 +1732,82 @@ mod tests {
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
+
+    #[test]
+    fn local_provider_matches_free_functions() {
+        // SPEC-2959 FR-002/FR-003: LocalProvider must behave identically to the
+        // filesystem free functions it delegates to.
+        let provider = LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+
+        let parent = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "root",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let parent_id = parent.id.clone();
+
+        // post_entry via provider, then verify via both provider and free fn.
+        let posted = provider.post_entry(dir.path(), parent).unwrap();
+        assert_eq!(posted.board.entries.len(), 1);
+
+        let via_provider = provider.load_snapshot(dir.path()).unwrap();
+        let via_free = load_snapshot(dir.path()).unwrap();
+        assert_eq!(via_provider.board.entries, via_free.board.entries);
+
+        assert_eq!(
+            provider.board_entry_exists(dir.path(), &parent_id).unwrap(),
+            board_entry_exists(dir.path(), &parent_id).unwrap(),
+        );
+        assert!(provider.board_entry_exists(dir.path(), &parent_id).unwrap());
+        assert!(!provider.board_entry_exists(dir.path(), "missing").unwrap());
+
+        let reply = BoardEntry::new(
+            AuthorKind::User,
+            "You",
+            BoardEntryKind::Status,
+            "reply",
+            None,
+            Some(parent_id.clone()),
+            vec![],
+            vec![],
+        );
+        provider.post_entry(dir.path(), reply).unwrap();
+
+        let since = Utc.timestamp_opt(0, 0).unwrap();
+        assert_eq!(
+            provider.load_entries_since(dir.path(), since).unwrap(),
+            load_entries_since(dir.path(), since).unwrap(),
+        );
+
+        let page_provider = provider.load_entries_before(dir.path(), None, 10).unwrap();
+        let page_free = load_entries_before(dir.path(), None, 10).unwrap();
+        assert_eq!(page_provider.entries, page_free.entries);
+        assert_eq!(page_provider.has_more_before, page_free.has_more_before);
+
+        assert_eq!(
+            provider
+                .has_recent_post_by(
+                    dir.path(),
+                    "You",
+                    &BoardEntryKind::Status,
+                    chrono::Duration::hours(1)
+                )
+                .unwrap(),
+            has_recent_post_by(
+                dir.path(),
+                "You",
+                &BoardEntryKind::Status,
+                chrono::Duration::hours(1)
+            )
+            .unwrap(),
+        );
+    }
 
     #[test]
     fn load_snapshot_bootstraps_empty_files() {

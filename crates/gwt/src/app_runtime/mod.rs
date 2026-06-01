@@ -5928,9 +5928,9 @@ impl AppRuntime {
             }
         };
         let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_snapshot(&project_root)
+            gwt::board_provider::load_snapshot(&project_root)
         } else {
-            gwt_core::coordination::load_snapshot_for_scope(&project_root, &scope)
+            gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
         };
         match snapshot_result {
             Ok(snapshot) => vec![OutboundEvent::reply(
@@ -6019,9 +6019,9 @@ impl AppRuntime {
             }
         };
         let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_entries_before(&project_root, before_entry_id, limit)
+            gwt::board_provider::load_entries_before(&project_root, before_entry_id, limit)
         } else {
-            gwt_core::coordination::load_entries_before_for_scope(
+            gwt::board_provider::load_entries_before_for_scope(
                 &project_root,
                 before_entry_id,
                 limit,
@@ -6118,7 +6118,7 @@ impl AppRuntime {
         &mut self,
         project_root: &Path,
     ) -> Vec<OutboundEvent> {
-        let Ok(snapshot) = gwt_core::coordination::load_snapshot(project_root) else {
+        let Ok(snapshot) = gwt::board_provider::load_snapshot(project_root) else {
             return Vec::new();
         };
 
@@ -6142,7 +6142,7 @@ impl AppRuntime {
                 let board = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
                     snapshot.board.clone()
                 } else {
-                    gwt_core::coordination::load_snapshot_for_scope(&tab.project_root, &scope)
+                    gwt::board_provider::load_snapshot_for_scope(&tab.project_root, &scope)
                         .map(|snapshot| snapshot.board)
                         .unwrap_or_else(|_| snapshot.board.clone())
                 };

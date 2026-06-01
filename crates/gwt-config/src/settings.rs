@@ -12,6 +12,7 @@ use crate::{
     agent_config::AgentConfig,
     ai_settings::AISettings,
     atomic::write_atomic,
+    board_config::BoardConfig,
     error::{ConfigError, Result},
     profile::ProfilesConfig,
     voice_config::VoiceConfig,
@@ -44,6 +45,8 @@ pub struct Settings {
     /// Currently the only reader is [`AISettings::effective_language`] for
     /// narrative output language resolution (SPEC-1933 FR-009 / FR-010).
     pub ai: AISettings,
+    /// Board provider selection (SPEC-2959). Defaults to `local`.
+    pub board: BoardConfig,
 }
 
 impl Default for Settings {
@@ -62,6 +65,7 @@ impl Default for Settings {
             voice: VoiceConfig::default(),
             agent: AgentConfig::default(),
             ai: AISettings::default(),
+            board: BoardConfig::default(),
         }
     }
 }

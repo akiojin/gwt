@@ -123,19 +123,19 @@ impl AppRuntime {
         let mentions = coordination::normalize_board_mentions(&mentions);
 
         if let Some(parent_id) = parent_id.as_deref() {
-            let parent_exists = match coordination::board_entry_exists(&tab.project_root, parent_id)
-            {
-                Ok(parent_exists) => parent_exists,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id,
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            };
+            let parent_exists =
+                match gwt::board_provider::board_entry_exists(&tab.project_root, parent_id) {
+                    Ok(parent_exists) => parent_exists,
+                    Err(error) => {
+                        return vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::BoardError {
+                                id,
+                                message: error.to_string(),
+                            },
+                        )];
+                    }
+                };
             if !parent_exists {
                 return vec![OutboundEvent::reply(
                     client_id,
@@ -178,7 +178,7 @@ impl AppRuntime {
         if let Some(audience) = audience {
             entry = entry.with_audience(audience);
         }
-        match coordination::post_entry(&tab.project_root, entry) {
+        match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
                 let latest_entry = snapshot.board.entries.last().cloned();

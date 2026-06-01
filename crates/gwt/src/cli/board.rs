@@ -3,8 +3,8 @@ use std::io;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
-        load_snapshot, load_snapshot_for_scope, normalize_board_audience, normalize_board_mentions,
-        post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardMention,
+        normalize_board_audience, normalize_board_mentions, AuthorKind, BoardAudienceScope,
+        BoardEntry, BoardMention,
     },
     paths::gwt_sessions_dir,
 };
@@ -14,6 +14,7 @@ use crate::{
     board_audience::{
         current_session_board_scope, gui_default_board_scope, post_audience_for_session,
     },
+    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry},
     cli::{CliEnv, CliParseError},
 };
 
