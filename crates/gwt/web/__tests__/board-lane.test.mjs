@@ -109,6 +109,27 @@ test("unknown audience workspace id falls back to using the id as the label", ()
   assert.equal(lanes[0].label, "ws-ghost");
 });
 
+test("legacy entries (parent_id, no audience) still group into General (SPEC-2959 FR-023)", () => {
+  // Pre-threading entries carry no audience and may be replies. They must
+  // render in the General lane without being dropped, and the card builder
+  // keeps the reply quote (asserted via source below).
+  const lanes = groupBoardLanes(
+    [
+      entry({ id: "root", created_at: "2026-06-01T10:00:00Z" }),
+      { ...entry({ id: "reply", created_at: "2026-06-01T10:01:00Z" }), parent_id: "root" },
+    ],
+    { workspaces },
+  );
+  assert.equal(lanes.length, 1);
+  assert.equal(lanes[0].key, GENERAL_LANE_KEY);
+  assert.deepEqual(
+    lanes[0].entries.map((e) => e.id),
+    ["root", "reply"],
+  );
+  // The card builder preserves the reply quote affordance for parent_id.
+  assert.match(appSource, /if \(entry\.parent_id\) \{[\s\S]{0,200}?board-reply-quote/);
+});
+
 test("renderBoard groups entries into lanes via groupBoardLanes (SPEC-2959)", () => {
   assert.match(appSource, /groupBoardLanes\(visibleEntries,\s*\{/);
   assert.match(appSource, /"board-lane-header"/);
