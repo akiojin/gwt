@@ -885,6 +885,23 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   assert.equal(clockCell.getAttribute("aria-hidden"), "true");
 });
 
+test("Status Strip omits the retired server URL cell", () => {
+  assert.equal(document.getElementById("op-strip-server-url"), null);
+  assert.equal(document.getElementById("op-strip-server-url-copy"), null);
+  assert.equal(document.querySelector(".op-status-strip__cell--server-url"), null);
+  assert.doesNotMatch(appSource, /op-strip-server-url/);
+  assert.doesNotMatch(appSource, /kind:\s*"open_server_url"/);
+});
+
+test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () => {
+  const strip = document.getElementById("op-status-strip");
+  const connectionLabel = strip?.querySelector("[data-role='connection-label']");
+  assert.ok(connectionLabel, "expected a connection label in the status strip");
+  assert.equal(connectionLabel.textContent?.trim(), "ONLINE");
+  assert.doesNotMatch(html, />\s*LIVE\s*</);
+  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
+});
+
 test("Sidebar Quick rows expose aria-keyshortcuts and kbd badges", () => {
   for (const [cmd, key] of [
     ["open-board", "B"],
