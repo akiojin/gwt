@@ -6423,7 +6423,7 @@ Future Action: Before changing Agent title, Workspace, hook, or Project State be
 Type: lesson
 Context: User corrected the headless-browser-check workflow after it printed an existing tray-resident production URL. The desired verification URL must come from the modified checkout's own freshly launched server.
 Learning: Browser verification skills for gwt must isolate HOME/USERPROFILE, launch the current checkout's target/debug/gwt with --no-tray --no-open, seed session.json for the checkout, and reject any URL reported after an existing tray instance warning.
-Future Action: When providing a gwt verification URL, use the renamed gwt-fresh-browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
+Future Action: When providing a gwt verification URL, use the browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
 
 ## 2026-06-01 — Fresh browser verification should not use Start Work unless credentials are proven
 
@@ -6445,3 +6445,24 @@ Type: workflow
 Context: After removing the project-local gwt- prefix, the skill was still named fresh-browser-check. The user clarified that browser-check is sufficient.
 Learning: When the skill's behavior already says it must launch a fresh isolated server, the public skill name does not need to include implementation qualifiers like fresh. Prefer the concise user-facing trigger name.
 Future Action: Name this browser verification skill browser-check in project-local skill directories, with freshness and isolation requirements documented inside SKILL.md rather than encoded in the skill name.
+
+## 2026-06-01 — Hidden attribute can be overridden by component display rules
+
+Type: lesson
+Context: SPEC-2009 Branches notice hotfix: .branch-notice used display:grid, so a hidden notice still rendered as an empty red band after branch detail checking completed.
+Learning: When a component class sets display explicitly, hidden elements need an explicit selector such as .component[hidden] { display: none; } and a visual regression contract, because the class rule can override the UA hidden style.
+Future Action: For UI surfaces with reusable notice/banner components, add hidden-state display contracts in both static CSS tests and browser/UI tests whenever the component sets display.
+
+## 2026-06-01 — FrontendReady must replay nullable singleton tombstones
+
+Type: lesson
+Context: Launch Wizard close recovery after heavy Launch Agent processing / Event Hub queue overflow investigation on 2026-06-01.
+Learning: A successful mutation can emit a close event, but bounded ClientHub overflow may disconnect a slow WebView before it receives the frame. Reconnect recovery must be authoritative for latest-wins nullable singleton state; omitting None/tombstone payloads leaves stale frontend UI.
+Future Action: When adding nullable latest-wins frontend state, make FrontendReady reply with both Some(current state) and None(tombstone), and add RED reconnect-sync coverage before relying on one-shot broadcast close events.
+
+## 2026-06-01 — User-accepted visual verification for rare load-only UI failures
+
+Type: lesson
+Context: Launch Wizard close recovery after reconnect depended on an extreme terminal load condition that was hard for the user to reproduce manually after live E2E RED/GREEN coverage existed.
+Learning: When a UI failure is rare and load-dependent, deterministic E2E evidence can be the strongest practical proof; if the user explicitly accepts that evidence, record the acceptance in the SPEC instead of keeping the work blocked on manual reproduction.
+Future Action: For future rare load-only UI bugs, add a deterministic E2E that models the lost or delayed event path, record RED/GREEN evidence, then ask the user whether that evidence is sufficient when manual reproduction is impractical.

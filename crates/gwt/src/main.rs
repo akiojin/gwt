@@ -1775,7 +1775,7 @@ mod tests {
             Some(UpdateState::UpToDate { checked_at: None }),
         );
 
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert!(events.iter().all(|event| {
             matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "browser-1")
         }));
@@ -1794,6 +1794,10 @@ mod tests {
             &event.event,
             gwt::BackendEvent::TerminalSnapshot { id, data_base64 }
                 if id == "tab-1::shell-1" && data_base64 == &expected_snapshot
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::LaunchWizardState { wizard: None }
         )));
         assert!(events.iter().any(|event| matches!(
             &event.event,
@@ -1826,11 +1830,14 @@ mod tests {
         let primary_payloads = drain_client_payloads(&mut primary);
         let secondary_payloads = drain_client_payloads(&mut secondary);
 
-        assert_eq!(primary_payloads.len(), 2);
+        assert_eq!(primary_payloads.len(), 3);
         assert_eq!(secondary_payloads.len(), 1);
         assert!(primary_payloads
             .iter()
             .any(|payload| payload.contains("\"kind\":\"workspace_state\"")));
+        assert!(primary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"launch_wizard_state\"")));
         assert!(primary_payloads
             .iter()
             .any(|payload| payload.contains("\"kind\":\"project_open_error\"")));
