@@ -16,6 +16,7 @@ import { parseHTML } from "linkedom";
 
 import {
   applyVisibilityTransition,
+  attachContainerResizeReflow,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
   elementHasLayoutBox,
@@ -789,5 +790,152 @@ test("gateTerminalInputForReadiness forwards when isReady is missing (legacy run
   assert.deepEqual(
     gateTerminalInputForReadiness({ runtime: {}, data: "C" }),
     { forward: true },
+  );
+});
+
+// --- attachContainerResizeReflow: re-fit when the terminal CONTAINER size
+// actually changes (maximize/restore/tile/server-geometry/no-op-fit gaps that
+// the per-lifecycle-event wiring misses, leaving a black band below the grid).
+function makeContainerResizeHarness(initial = { clientWidth: 800, clientHeight: 400 }) {
+  const element = { ...initial };
+  const observerInstances = [];
+  class FakeResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.observed = [];
+      this.disconnected = false;
+      observerInstances.push(this);
+    }
+    observe(target) {
+      this.observed.push(target);
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+  }
+  const fitCalls = [];
+  let pendingFrame = null;
+  const dispose = attachContainerResizeReflow({
+    element,
+    windowId: "win-1",
+    fitTerminal: (id, persist) => fitCalls.push({ id, persist }),
+    ResizeObserverImpl: FakeResizeObserver,
+    requestFrame: (cb) => {
+      pendingFrame = cb;
+      return 7;
+    },
+    cancelFrame: () => {
+      pendingFrame = null;
+    },
+  });
+  const observer = observerInstances[0];
+  return {
+    element,
+    observer,
+    fitCalls,
+    dispose,
+    fire: () => observer.callback(),
+    runFrame: () => {
+      const cb = pendingFrame;
+      pendingFrame = null;
+      if (cb) cb();
+    },
+    pending: () => pendingFrame,
+  };
+}
+
+test("attachContainerResizeReflow refits with persisted geometry once per coalesced size change", () => {
+  const h = makeContainerResizeHarness();
+  assert.ok(h.observer, "a ResizeObserver is constructed and observes the container");
+  assert.deepEqual(h.observer.observed, [h.element], "observes the terminal container element");
+
+  // Initial observation with unchanged size must NOT schedule a redundant fit
+  // (createTerminalRuntime already runs the initial-fit handshake).
+  h.fire();
+  assert.equal(h.pending(), null, "no fit scheduled when the container size is unchanged");
+
+  // Container grows (e.g. maximize): two rapid notifications coalesce to one fit.
+  h.element.clientHeight = 900;
+  h.fire();
+  h.fire();
+  assert.ok(h.pending(), "a frame is scheduled once the container size changes");
+  h.runFrame();
+  assert.deepEqual(
+    h.fitCalls,
+    [{ id: "win-1", persist: true }],
+    "coalesced into a single fit that persists geometry to the PTY",
+  );
+});
+
+test("attachContainerResizeReflow defers to the manual drag-resize path via shouldSkip", () => {
+  const element = { clientWidth: 800, clientHeight: 400 };
+  let cb;
+  class FakeResizeObserver {
+    constructor(callback) {
+      cb = callback;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  const fitCalls = [];
+  let pendingFrame = null;
+  let skip = true;
+  attachContainerResizeReflow({
+    element,
+    windowId: "win-1",
+    fitTerminal: (id, persist) => fitCalls.push({ id, persist }),
+    shouldSkip: () => skip,
+    ResizeObserverImpl: FakeResizeObserver,
+    requestFrame: (fn) => {
+      pendingFrame = fn;
+      return 1;
+    },
+    cancelFrame: () => {
+      pendingFrame = null;
+    },
+  });
+  element.clientHeight = 600;
+  cb();
+  assert.equal(pendingFrame, null, "no fit scheduled while a manual resize owns reflow");
+  assert.equal(fitCalls.length, 0);
+  // Once the manual resize ends, a later container change refits normally.
+  skip = false;
+  element.clientHeight = 650;
+  cb();
+  assert.ok(pendingFrame, "fit scheduled after the manual resize releases");
+  pendingFrame();
+  assert.deepEqual(fitCalls, [{ id: "win-1", persist: true }]);
+});
+
+test("attachContainerResizeReflow dispose disconnects the observer and cancels pending frame", () => {
+  const h = makeContainerResizeHarness();
+  h.element.clientWidth = 1200;
+  h.fire();
+  assert.ok(h.pending(), "frame pending before dispose");
+  h.dispose();
+  assert.equal(h.observer.disconnected, true, "observer disconnected on dispose");
+  assert.equal(h.pending(), null, "pending frame cancelled on dispose");
+});
+
+test("attachContainerResizeReflow is a no-op when ResizeObserver is unavailable", () => {
+  const dispose = attachContainerResizeReflow({
+    element: { clientWidth: 10, clientHeight: 10 },
+    windowId: "win-1",
+    fitTerminal: () => {
+      throw new Error("must not fit without a ResizeObserver");
+    },
+    ResizeObserverImpl: null,
+  });
+  assert.equal(typeof dispose, "function");
+  dispose();
+});
+
+test("app.js wires attachContainerResizeReflow on the terminal container", () => {
+  // Source-string contract: the container reflow controller must be imported
+  // and attached in createTerminalRuntime, and disposed in cleanup.
+  assert.match(
+    appSource,
+    /attachContainerResizeReflow/,
+    "app.js must import + use attachContainerResizeReflow",
   );
 });

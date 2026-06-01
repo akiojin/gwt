@@ -46,6 +46,7 @@
       } from "/launch-controls.js";
       import {
         applyVisibilityTransition,
+        attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
@@ -4609,6 +4610,19 @@
           window,
         });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
+        // Re-fit whenever the terminal container actually changes size. Covers
+        // size changes that bypass the per-event reflow wiring (maximize /
+        // restore via server geometry, restore-from-minimize, tile/stack, or a
+        // fit that no-opped against an unsettled layout box) which otherwise
+        // leave the grown container showing a black band below the grid. The
+        // manual drag-resize handler already owns reflow + final geometry, so
+        // skip while it is active to avoid a redundant per-frame PTY resync.
+        const containerResizeCleanup = attachContainerResizeReflow({
+          element: terminalContainer,
+          windowId,
+          fitTerminal,
+          shouldSkip: () => !!resizeState && resizeState.id === windowId,
+        });
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
@@ -4616,6 +4630,7 @@
           contextMenuCleanup();
           wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
+          containerResizeCleanup();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
