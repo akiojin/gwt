@@ -6397,6 +6397,13 @@ Context: Agent TTY overlay had been intentionally disabled, but Launch completio
 Learning: When a process fails before a PTY exists, status/detail chrome is not enough. Emit a normal terminal_output diagnostic and replay it through terminal_snapshot on frontend reconnect; do not reintroduce foreground overlays.
 Future Action: For any future launch/startup failure path that can happen before PTY output, add tests for both immediate TerminalOutput and reconnect TerminalSnapshot visibility.
 
+## 2026-06-01 — Seed project tabs for isolated HOME visual verification
+
+Type: failure-pattern
+Context: SPEC-2785 status strip visual verification launched target/debug/gwt with a temporary HOME to avoid the user production GWT.app tray lock. The server was reachable, but the UI stopped at Open Project because the isolated HOME had an empty ~/.gwt/session.json.
+Learning: A reachable fresh gwt URL is not enough for visual verification when HOME is isolated. If the target UI surface requires an opened project, the isolated session.json must contain the current checkout project tab before asking the user to verify.
+Future Action: For headless-browser-check or fresh checkout UI verification with temporary HOME, pre-seed ~/.gwt/session.json with the current worktree project tab, then verify via browser automation that the page is past Open Project and the requested UI surface is visible before sharing the URL.
+
 ## 2026-06-01 — frontend root module route parity
 
 Type: lesson
