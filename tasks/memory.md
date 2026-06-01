@@ -6375,3 +6375,10 @@ Type: lesson
 Context: Claude Code @anthropic-ai/claude-code@latest failed to launch from GWT when selected as latest because bunx one-shot package execution resolved dependencies but left Claude Code's postinstall-managed native binary as a stub, producing could not determine executable / EEXIST style launch failures.
 Learning: For built-in Claude Code npm-backed launches on non-Windows, npx --yes is the reliable package runner while bunx remains a fallback; Codex and custom Bunx flows should keep their existing bunx-first behavior.
 Future Action: When changing package-runner launch code, add agent-aware tests that cover Claude Code npx preference, bunx fallback, and Codex/custom Bunx compatibility before touching production runner selection.
+
+## 2026-06-01 — Agent terminal overlays must stay disabled
+
+Type: lesson
+Context: A user-reported Agent window showed a white foreground terminal overlay after prior work intended raw TTY display. The leftover pre-output error path still toggled .terminal-overlay.visible.
+Learning: When the product decision says Agent terminals show raw TTY, do not keep exception paths for running or pre-output error overlays. Status details belong in chrome/logs/banners, not xterm foreground overlays.
+Future Action: For terminal UI changes, assert shouldShowOverlay is false for Agent status details and check both running and error paths before claiming the overlay is removed.

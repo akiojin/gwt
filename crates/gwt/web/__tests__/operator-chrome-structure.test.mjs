@@ -1267,7 +1267,7 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
-test("terminal error overlay is limited to pre-output startup failures", () => {
+test("terminal overlay never covers raw terminal status details", () => {
   const visibleToggle = appSource.match(
     /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
   );
@@ -1281,25 +1281,39 @@ test("terminal error overlay is limited to pre-output startup failures", () => {
     /const\s+shouldShowOverlay\s*=\s*([\s\S]*?);\s*const\s+shouldSpin/,
   );
   assert.ok(overlayVisibilitySource, "expected shouldShowOverlay guard");
-  assert.match(
-    overlayVisibilitySource[1],
-    /runtimeState\s*===\s*"error"[\s\S]*!terminalHasOutput\(windowId\)/,
-    "error overlay must only be visible for startup failures before terminal output exists",
+  assert.equal(
+    overlayVisibilitySource[1].trim(),
+    "false",
+    "terminal status details must never add a foreground overlay over the raw TTY",
   );
   assert.doesNotMatch(
     overlayVisibilitySource[1],
-    /runtimeState\s*===\s*"stopped"/,
-    "stopped status must not cover the terminal output with the overlay",
+    /runtimeState\s*===\s*"error"/,
+    "error status details must stay in terminal status surfaces instead of an overlay",
   );
-  assert.match(
+  assert.doesNotMatch(
     overlayVisibilitySource[1],
     /runtimeState\s*===\s*"running"/,
-    "running startup details may still use the explicit copy overlay",
+    "running launch details must not cover the raw terminal TTY with an overlay",
   );
-  assert.match(
-    appSource,
-    /function\s+terminalHasOutput\(windowId\)[\s\S]+pendingOutputMap[\s\S]+pendingSnapshotMap/,
-    "pre-output detection must include pending writes and snapshots, not just rendered terminal state",
+  const spinnerSource = appSource.match(
+    /const\s+shouldSpin\s*=\s*([\s\S]*?);\s*const\s+spinner/,
+  );
+  assert.ok(spinnerSource, "expected shouldSpin guard");
+  assert.equal(
+    spinnerSource[1].trim(),
+    "false",
+    "hidden terminal overlays must never run a foreground startup spinner",
+  );
+  assert.doesNotMatch(
+    spinnerSource[1],
+    /runtimeState\s*===\s*"error"/,
+    "error status details must not start a foreground terminal overlay spinner",
+  );
+  assert.doesNotMatch(
+    spinnerSource[1],
+    /runtimeState\s*===\s*"running"/,
+    "running launch details must not start a foreground terminal overlay spinner",
   );
 });
 
