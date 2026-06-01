@@ -5,4 +5,5 @@
 //! token storage, response caching, field mapping, and the provider
 //! implementations of [`gwt_core::coordination::BoardProvider`].
 
+pub mod oauth;
 pub mod token_store;
