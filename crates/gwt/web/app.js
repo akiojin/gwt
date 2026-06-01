@@ -9057,11 +9057,7 @@
           cleanupButton.textContent =
             selectedCount === 0 ? "Clean Up" : `Clean Up (${selectedCount})`;
         }
-        if (notice) {
-          const noticeText = state.notice || branchLoadingNoticeText(state);
-          notice.hidden = !noticeText;
-          notice.textContent = noticeText || "";
-        }
+        renderBranchLoadStatusSummary(notice, branchLoadStatusSummary(state));
 
         if (state.error) {
           setBranchListPlaceholder(list, state.error);
@@ -9808,11 +9804,77 @@
         return target.reference ? `merged to ${target.reference}` : "";
       }
 
-      function branchLoadingNoticeText(state) {
-        if (!state.loading) {
-          return "";
+      const BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE = "Branch detail check interrupted";
+
+      function branchLoadStatusSummary(state) {
+        if (!state) {
+          return null;
         }
-        return state.entries.length === 0 ? "" : "Loading branch details";
+        if (state.error) {
+          return {
+            kind: "error",
+            title: "Branches unavailable",
+            detail: state.error,
+            hint: "Refresh to try again.",
+          };
+        }
+        if (state.loading && state.entries.length > 0) {
+          return {
+            kind: "checking",
+            title: "Checking branch details",
+            detail: "Loading branch details while cleanup safety is checked.",
+            hint: "Cleanup selection unlocks after verification.",
+          };
+        }
+        if (state.notice === BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE) {
+          return {
+            kind: "interrupted",
+            title: BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE,
+            detail: "Branch names are available, but cleanup safety was not verified.",
+            hint: "Refresh to verify cleanup safety.",
+          };
+        }
+        if (state.notice) {
+          return {
+            kind: "notice",
+            title: "Branch notice",
+            detail: state.notice,
+            hint: "",
+          };
+        }
+        return null;
+      }
+
+      function renderBranchLoadStatusSummary(notice, summary) {
+        if (!notice) {
+          return;
+        }
+        notice.textContent = "";
+        notice.hidden = !summary;
+        if (!summary) {
+          notice.removeAttribute("data-branch-status");
+          return;
+        }
+        notice.dataset.branchStatus = summary.kind;
+
+        const title = document.createElement("div");
+        title.className = "branch-notice-title";
+        title.textContent = summary.title;
+        notice.appendChild(title);
+
+        if (summary.detail) {
+          const detail = document.createElement("div");
+          detail.className = "branch-notice-detail";
+          detail.textContent = summary.detail;
+          notice.appendChild(detail);
+        }
+
+        if (summary.hint) {
+          const hint = document.createElement("div");
+          hint.className = "branch-notice-hint";
+          hint.textContent = summary.hint;
+          notice.appendChild(hint);
+        }
       }
 
       function failLoadingBranchesOnConnectionLoss(windowId, state) {
@@ -9826,22 +9888,28 @@
           state.notice = "";
         } else {
           state.error = "";
-          state.notice = "Connection lost while loading branch details";
+          state.notice = BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE;
         }
         syncBranchSelectionState(state);
         return true;
       }
 
       function branchCleanupPendingText(state) {
-        return state.loading ? "Loading cleanup status" : "Cleanup status unavailable";
+        return state.loading ? "Checking cleanup safety" : "Refresh to verify cleanup safety";
       }
 
       function cleanupAvailabilityForRender(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : "loading";
+        if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        if (state.loading) {
+          return "loading";
+        }
+        return "unknown";
       }
 
       function cleanupBadgeText(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "loading" : "unknown";
+        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "checking" : "Safety unknown";
       }
 
       function toggleBranchCleanupSelection(windowId, branchName) {

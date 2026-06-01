@@ -2281,6 +2281,49 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_branches_surface_explains_detail_check_state() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("branchLoadStatusSummary"),
+            "expected Branches bundle to derive a compact load status summary",
+        );
+        for expected in [
+            "Checking branch details",
+            "Branch detail check interrupted",
+            "Safety unknown",
+            "Refresh to verify cleanup safety",
+        ] {
+            assert!(
+                html.contains(expected),
+                "expected Branches bundle to include clarity copy: {expected}",
+            );
+        }
+        assert!(
+            !html.contains("Cleanup status unavailable"),
+            "expected Branches bundle to avoid ambiguous cleanup unavailable copy",
+        );
+    }
+
+    #[test]
+    fn embedded_web_branches_surface_animates_only_checking_detail_state() {
+        let html = frontend_bundle_source();
+
+        for expected in [
+            "@keyframes branch-detail-check-sweep",
+            "@keyframes branch-cleanup-checking-pulse",
+            r#".branch-notice[data-branch-status="checking"]::before"#,
+            ".branch-cleanup-badge.loading",
+            "prefers-reduced-motion: reduce",
+        ] {
+            assert!(
+                html.contains(expected),
+                "expected Branches bundle to include checking animation contract: {expected}",
+            );
+        }
+    }
+
+    #[test]
     fn embedded_web_branches_surface_keeps_inventory_failures_blocking_until_fresh_rows_arrive() {
         let html = frontend_bundle_source();
 
