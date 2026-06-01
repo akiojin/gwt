@@ -235,8 +235,9 @@ Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerS
 PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ内のシェルを使います。
 
 ターミナルウィンドウでは、テキストをドラッグ選択してマウスボタンを離すとコピー
-できます。Windows / Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
-`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
+できます。Windows では `Ctrl+C` で現在の選択をコピーして選択を解除します。
+選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
+Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 ## Knowledge、Search、Managed Skills
 

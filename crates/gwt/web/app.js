@@ -30,6 +30,7 @@
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
@@ -3782,28 +3783,9 @@
         return Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       }
 
-      function isMacPlatform() {
-        const platform = navigator.userAgentData?.platform || navigator.platform || "";
-        return /mac|iphone|ipad|ipod/i.test(platform);
-      }
-
       function isBlinkBrowser() {
         const ua = navigator.userAgent || "";
         return /Chrome\//.test(ua);
-      }
-
-      function isTerminalCopyShortcut(event) {
-        if (isMacPlatform()) {
-          return false;
-        }
-        const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
-        return (
-          event.ctrlKey &&
-          event.shiftKey &&
-          !event.altKey &&
-          !event.metaKey &&
-          key === "c"
-        );
       }
 
       const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
@@ -4154,7 +4136,7 @@
         }
       }
 
-      async function copyTerminalSelection(windowId) {
+      async function copyTerminalSelection(windowId, { clearSelectionAfterCopy = false } = {}) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || !runtime.terminal.hasSelection()) {
           return false;
@@ -4163,7 +4145,11 @@
         if (!selection) {
           return false;
         }
-        return writeClipboardText(selection, () => runtime.terminal.focus());
+        const copied = await writeClipboardText(selection, () => runtime.terminal.focus());
+        if (copied && clearSelectionAfterCopy) {
+          runtime.terminal.clearSelection();
+        }
+        return copied;
       }
 
       async function copyTerminalOverlayMessage(windowId) {
@@ -4249,7 +4235,10 @@
         };
 
         terminal.attachCustomKeyEventHandler((event) => {
-          if (!isTerminalCopyShortcut(event)) {
+          const copyDecision = classifyTerminalCopyKeyEvent(event, {
+            hasSelection: terminal.hasSelection(),
+          });
+          if (!copyDecision.copy) {
             return true;
           }
           event.preventDefault();
@@ -4257,7 +4246,9 @@
           if (!terminal.hasSelection()) {
             return false;
           }
-          void copyTerminalSelection(windowId);
+          void copyTerminalSelection(windowId, {
+            clearSelectionAfterCopy: copyDecision.clearSelectionAfterCopy,
+          });
           return false;
         });
 
