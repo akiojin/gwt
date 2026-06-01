@@ -6333,3 +6333,10 @@ Type: lesson
 Context: #2942 で、ユーザーが視覚検証スクショ送信後に『何が残っているのですか？』と質問。これを承認と解釈して PR #2947 を作成したが、明示的な『OK/問題なし』は未取得だった（PR Gate 手順違反、PR #2857 と同型）。
 Learning: 『何が残っているのか』『これで合っているのか』等の曖昧な質問・確認要求は User Verification Result: confirmed ではない。PR Gate は『confirmed』または『n/a』、もしくはユーザーが明示的に skip を選んだ場合のみ満たされる。解釈による前倒しは違反。
 Future Action: PR create/update は、ユーザーが literal に『OK / 問題なし / confirmed / skip 承認』を述べるまで実行しない。曖昧な質問には『PR 作成には明示的な OK が必要』と返し、承認を待つ。誤って作成したら即 [DO NOT MERGE — user verification pending] をタイトルに付与しブロック comment、confirmed 後にタイトル復元。
+
+## 2026-06-01 — 実環境 GUI 検証: GWT.app と共存起動するには debug ビルドで single-instance lock を一時無効化＋実 HOME（claude 認証は Keychain）
+
+Type: lesson
+Context: #2942 で、隔離 HOME の gwt は claude 認証が通らず（token は macOS Keychain にあり HOME 非依存だが、隔離 HOME 起動の claude は 'Not logged in' / 'No conversation found' になる）クリーンな視覚検証ができなかった。実 HOME は per-user single-instance tray lock（main.rs 6273、--no-tray でも無条件）で GWT.app と共存できず即終了。
+Learning: 実環境でクリーンに認証された GUI 検証をするには、(1) debug ビルドで single-instance lock を一時 cfg(debug_assertions) skip（別パス debug-coexist で handle 取得）し GWT.app と共存、(2) 実 HOME で起動して実 ~/.claude + Keychain 認証を効かせる。ただし実 HOME 起動は session.json の全タブ・全ペインを resume するため、他の稼働中エージェントのセッションも claude --resume で二重起動し干渉しうる。検証専用変更はコミットしない。
+Future Action: GUI の実環境視覚検証が必要で GWT.app を閉じられない場合: debug-only の lock-skip を一時適用→実 HOME で起動→目視→即停止→lock-skip を revert。他エージェントの session を巻き込むため最短時間で停止する。検証コードは PR に含めない（revert 必須）。debug ビルドでの恒久 lock-skip は別 Issue で検討。
