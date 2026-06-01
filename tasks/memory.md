@@ -6361,3 +6361,10 @@ Type: lesson
 Context: #2948 検証で ./target/debug/gwt を起動したら single-instance lock($HOME/.gwt キー)で既存 tray インスタンス(installed /Applications/GWT.app)を検知し、既存 URL(53425)を表示して自身は終了していた。lsof で 53425 の listener が installed app(修正なし)と判明。ユーザーに『その URL に修正は入っていないのでは』と的確に指摘された。
 Learning: 2つ目の gwt は single-instance lock(main.rs: gui_single_instance + cli::tray::lock, どちらも gwt_home=$HOME/.gwt キー)により installed app へ defer し、自分のバックエンドを配信しない。dev build を独立起動するには HOME を隔離(例: worktree 内 ./.gwt-verify-home)して gwt_home を分離する。隔離 HOME は ~/.bun ~/.npm cache も空=cold になるので cold 再現検証にも使える。プロジェクトは ReopenRecentProject(任意パス)で WS 経由で開け、Start Work は git origin remote を要求する。関連: 同 single-instance lock を debug build の lock-skip + 実 HOME で回避する手法も別 entry にあり(認証が必要な検証向け)。
 Future Action: GUI 修正の視覚検証で dev build を案内する前に、必ず HOME 隔離起動し『lsof -nP -iTCP:<port> -sTCP:LISTEN』で listener PID=自分の ./target/debug/gwt であることを確認してから URL を共有する。installed app と同居する素の起動は修正が反映されない。
+
+## 2026-06-01 — リリース中に origin/develop が他Agentマージで移動した場合は ff 後に CHANGELOG/version を再生成する
+
+Type: lesson
+Context: /release 実行中、pull 後に別Agentが PR #2950 を develop にマージし origin/develop が前進。最初のリリースコミット(古い develop ベース)は #2950 の fix を含まず、push も non-fast-forward で不成立だった。
+Learning: リリースコミットは push 直前時点の origin/develop に直接乗っている必要がある。origin が動いたら release commit を reset → origin/develop に --ff-only → version/CHANGELOG を git-cliff で再生成 → 再コミット、で新規マージ分を取り込む。背景 git push は完了報告が遅延するため push 後に必ず origin/develop == HEAD を fetch 確認してから成功宣言する。
+Future Action: /release の push 前に git fetch + 'HEAD~1 == origin/develop' を確認し、不一致なら reset+ff+再生成。push 後も fetch で origin/develop が release commit と一致するまで成功を宣言しない。
