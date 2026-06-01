@@ -145,8 +145,8 @@ impl Pane {
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         let mut snapshot = Vec::new();
         let scrollback_len = self.scrollback.len();
-        let visible_rows = usize::from(self.parser.screen().size().0);
-        let replayable_len = scrollback_len.saturating_sub(visible_rows);
+        let visible_completed_lines = usize::from(self.parser.screen().cursor_position().0);
+        let replayable_len = scrollback_len.saturating_sub(visible_completed_lines);
         let start = replayable_len.saturating_sub(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
 
         for line in self.scrollback.get_lines(start, replayable_len - start) {
@@ -334,6 +334,19 @@ mod tests {
         .expect("Pane creation failed")
     }
 
+    fn test_pane_with_rows(id: &str, rows: u16, command: TestCommand) -> Pane {
+        Pane::new(
+            id.to_string(),
+            command.command,
+            command.args,
+            80,
+            rows,
+            HashMap::new(),
+            None,
+        )
+        .expect("Pane creation failed")
+    }
+
     #[test]
     fn test_pane_creation() {
         let _pty_guard = lock_pty_test();
@@ -372,6 +385,23 @@ mod tests {
             String::from_utf8_lossy(&output),
             "\x1b[31;1mALERT\x1b[0m",
             "scrollback replay must keep styling but not cursor moves or clears"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_bytes_preserves_boundary_scrollback_line() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-boundary", 6, sleep_command("60"));
+
+        for line in 1..=18 {
+            pane.process_bytes(format!("line-{line:02}\r\n").as_bytes());
+        }
+
+        let snapshot = String::from_utf8_lossy(&pane.snapshot_bytes()).into_owned();
+
+        assert!(
+            snapshot.contains("line-13"),
+            "snapshot should include the boundary scrollback line; got: {snapshot:?}"
         );
     }
 
