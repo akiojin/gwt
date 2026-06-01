@@ -2964,9 +2964,10 @@ mod tests {
         // Issue #2698 PR 1 (B7) — the launch_wizard_state case now
         // also defers via `wizardInteractionGuard.defer(...)` before
         // mutating launchWizard, so the regex permits an optional
-        // guard preamble between the case label and the assignment.
+        // guard preamble between the case label and the assignment. A
+        // null tombstone must not clear an open-error modal during reconnect.
         let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
         )
         .expect("valid regex");
         assert!(
@@ -3161,9 +3162,10 @@ mod tests {
         // Issue #2698 PR 1 (B7) — wizard_state / wizard_open_error
         // now defer through `wizardInteractionGuard.defer(...)` before
         // mutating module state, so the regex tolerates an optional
-        // guard preamble between the case label and the mutation.
+        // guard preamble between the case label and the mutation. A
+        // null tombstone must not clear an open-error modal during reconnect.
         let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?launchWizard\s*=\s*event\.wizard;\s*launchWizardOpenError\s*=\s*null;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
         let wizard_open_error_event = regex::Regex::new(
