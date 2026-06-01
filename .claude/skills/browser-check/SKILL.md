@@ -1,9 +1,9 @@
 ---
-name: fresh-browser-check
+name: browser-check
 description: Use when a user needs browser verification of this gwt checkout, a served URL for the code just edited, or visual confirmation that must not reuse a production or already-running gwt instance.
 ---
 
-# Fresh Browser Check
+# Browser Check
 
 Launch a fresh browser-served gwt process from the current checkout and give
 the user only that fresh server URL. This skill is for verifying edited code,

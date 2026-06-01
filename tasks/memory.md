@@ -6438,3 +6438,10 @@ Type: workflow
 Context: The browser verification skill was renamed to gwt-fresh-browser-check even though it lives inside this gwt repository's project-local skill set. The user corrected that gwt-* prefixes are redundant for gwt development skills.
 Learning: For project-local skills, the repository context already supplies the namespace. Use concise action/domain names and keep the directory name, frontmatter name, and in-skill title aligned.
 Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as gwt-* unless the user explicitly requests one.
+
+## 2026-06-01 — Use concise browser-check skill name
+
+Type: workflow
+Context: After removing the project-local gwt- prefix, the skill was still named fresh-browser-check. The user clarified that browser-check is sufficient.
+Learning: When the skill's behavior already says it must launch a fresh isolated server, the public skill name does not need to include implementation qualifiers like fresh. Prefer the concise user-facing trigger name.
+Future Action: Name this browser verification skill browser-check in project-local skill directories, with freshness and isolation requirements documented inside SKILL.md rather than encoded in the skill name.
