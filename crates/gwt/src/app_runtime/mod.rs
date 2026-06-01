@@ -1667,14 +1667,12 @@ pub fn build_frontend_sync_events(
         ));
     }
 
-    if let Some(wizard) = launch_wizard {
-        events.push(OutboundEvent::reply(
-            client_id,
-            BackendEvent::LaunchWizardState {
-                wizard: Some(Box::new(wizard)),
-            },
-        ));
-    }
+    events.push(OutboundEvent::reply(
+        client_id,
+        BackendEvent::LaunchWizardState {
+            wizard: launch_wizard.map(Box::new),
+        },
+    ));
 
     if let Some(state) = pending_update {
         events.push(OutboundEvent::reply(
@@ -11265,6 +11263,35 @@ exit 1
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let tombstone = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.event,
+                    BackendEvent::LaunchWizardState { wizard: None }
+                )
+            })
+            .expect("FrontendReady must clear stale Launch Wizard state after reconnect");
+        assert!(
+            matches!(&tombstone.target, DispatchTarget::Client(client_id) if client_id == "client-1"),
+            "Launch Wizard tombstone must be scoped to the reconnecting client"
+        );
     }
 
     #[test]
