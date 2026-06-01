@@ -4553,6 +4553,24 @@
         brightWhite: "#f8fafc",
       };
 
+      // xterm 6.0.0 measures the character cell via an OffscreenCanvas strategy
+      // (`ctx.font = `${fontSize}px ${fontFamily}``). Canvas 2D `ctx.font` does
+      // NOT resolve CSS custom properties, so a `var(--font-mono)` family token
+      // is dropped and the SHORTER system fallback (SF Mono / Menlo) is measured,
+      // while the rendered rows resolve var() to the TALLER JetBrains Mono — a
+      // permanent measure-vs-render mismatch that clips glyphs vertically. Resolve
+      // --font-mono here (keeping typography.css as the single source of truth) so
+      // the measured font equals the rendered font.
+      function resolveTerminalFontFamily() {
+        const resolved = getComputedStyle(document.documentElement)
+          .getPropertyValue("--font-mono")
+          .trim();
+        return (
+          resolved ||
+          '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+        );
+      }
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
@@ -4561,8 +4579,7 @@
           cursorBlink: true,
           convertEol: true,
           theme: XTERM_THEME_DARK,
-          fontFamily:
-            "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          fontFamily: resolveTerminalFontFamily(),
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,

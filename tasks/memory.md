@@ -6319,3 +6319,10 @@ Type: lesson
 Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
 Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
 Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。
+
+## 2026-06-01 — xterm fontFamily に CSS var() を渡すと canvas 測定が 10px sans-serif に化けて見切れる
+
+Type: lesson
+Context: ターミナル文字の縦見切れを lineHeight 1.2→1.28→1.35 と上げ続けても直らなかった (#2903 系譜)。xterm.js 6.0.0 は OffscreenCanvas で ctx.font=`${fontSize}px ${fontFamily}` を設定しセル高を測定するが、fontFamily が 'var(--font-mono), …' だった。
+Learning: Canvas 2D の ctx.font は CSS custom property を解決できず、var() を含む font 文字列は丸ごと無効として無視され ctx.font は初期値 '10px sans-serif' のままになる (Playwright 実機計測: varString.normalized='10px sans-serif' boxHeight=10、resolved --font-mono='14px JetBrains Mono Variable…' boxHeight=18 で JBM ground truth と一致)。一方 DOM 行は style.fontFamily で var() を解決し 18px の JBM を描画するため、測定(10)<描画(18) の恒久的不一致で overflow:hidden 行が glyph を切る。lineHeight 倍率は誤った base を倍率するため何度上げても収束しない。
+Future Action: xterm の fontFamily オプションには var() を含めない。getComputedStyle(:root).getPropertyValue('--font-mono') で解決した実フォントスタックを渡し、測定フォント==描画フォントに揃える。canvas/OffscreenCanvas に渡す font 文字列全般で CSS 変数を使わない。
