@@ -6403,3 +6403,10 @@ Type: lesson
 Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
+
+## 2026-06-01 — FrontendReady must replay nullable singleton tombstones
+
+Type: lesson
+Context: Launch Wizard close recovery after heavy Launch Agent processing / Event Hub queue overflow investigation on 2026-06-01.
+Learning: A successful mutation can emit a close event, but bounded ClientHub overflow may disconnect a slow WebView before it receives the frame. Reconnect recovery must be authoritative for latest-wins nullable singleton state; omitting None/tombstone payloads leaves stale frontend UI.
+Future Action: When adding nullable latest-wins frontend state, make FrontendReady reply with both Some(current state) and None(tombstone), and add RED reconnect-sync coverage before relying on one-shot broadcast close events.
