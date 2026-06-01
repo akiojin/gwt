@@ -369,8 +369,10 @@
           }
           if (deferred.kind === "launch_wizard_state") {
             clearLaunchWizardPendingAction();
+            if (deferred.wizard) {
+              launchWizardOpenError = null;
+            }
             launchWizard = deferred.wizard;
-            launchWizardOpenError = null;
           } else if (deferred.kind === "launch_wizard_open_error") {
             clearLaunchWizardPendingAction();
             launchWizard = null;
@@ -12890,8 +12892,10 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            if (event.wizard) {
+              launchWizardOpenError = null;
+            }
             launchWizard = event.wizard;
-            launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
             break;
           case "runtime_hook_event":

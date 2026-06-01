@@ -1603,6 +1603,19 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
   );
 });
 
+test("Launch wizard tombstone does not dismiss open-error modal state", () => {
+  assert.match(
+    appSource,
+    /if\s*\(deferred\.kind\s*===\s*"launch_wizard_state"\)[\s\S]{0,500}?if\s*\(deferred\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*deferred\.wizard/,
+    "expected deferred launch_wizard_state tombstones to preserve launchWizardOpenError",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,900}?if\s*\(event\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*event\.wizard/,
+    "expected launch_wizard_state tombstones to clear stale wizard state without clearing launchWizardOpenError",
+  );
+});
+
 test("Launch wizard removes duplicate header close button", () => {
   assert.equal(
     document.getElementById("wizard-close-button"),
