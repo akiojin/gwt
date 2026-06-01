@@ -25,8 +25,9 @@ const STALE_LOCK_HINT_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// SPEC-1942 US-14 / FR-099: which kind of front-door process holds the
 /// single-instance lock. Each kind gets its own subdirectory under
-/// `~/.gwt/projects/<repo-hash>/runtime/`, so a Gui session and a Headless
-/// `gwt serve` session can co-exist in the same worktree without colliding.
+/// `~/.gwt/projects/<repo-hash>/runtime/`. The `Headless` variant is retained
+/// for legacy migration tests and old runtime directories after the removed
+/// browser-server front door was folded back into the normal `gwt` route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LockKind {
     Gui,
@@ -117,8 +118,8 @@ pub fn gui_instance_lock_path(
 
 /// SPEC-1942 FR-099: resolve the on-disk lock file for a given front-door
 /// `kind`. Both kinds share the same `(repo-hash, worktree-hash)` scope but
-/// live under separate `runtime/<kind>/` subdirectories so a Gui session and
-/// a `gwt serve` session for the same worktree do not contend.
+/// live under separate `runtime/<kind>/` subdirectories so legacy front-door
+/// lock scopes do not contend during migration tests.
 pub fn instance_lock_path(
     gwt_home: &Path,
     project_root: &Path,

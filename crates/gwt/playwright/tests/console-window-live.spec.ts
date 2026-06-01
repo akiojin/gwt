@@ -1,7 +1,7 @@
 /**
  * SPEC-2809 — Console window live E2E.
  *
- * Drives a real `gwt --headless --no-open` instance through the Add Window
+ * Drives a real gwt browser-server instance through the Add Window
  * picker into the Console preset, then asserts:
  *
  *   - The Console window mounts with the five fixed kind tabs (gh / git /

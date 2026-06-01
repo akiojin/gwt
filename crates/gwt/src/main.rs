@@ -2098,6 +2098,7 @@ mod tests {
             profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),

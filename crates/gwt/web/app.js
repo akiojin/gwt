@@ -3590,12 +3590,8 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              const hasDetail = Boolean(effectiveDetail);
-              const shouldShowOverlay =
-                hasDetail &&
-                (runtimeState === "running" ||
-                  (runtimeState === "error" && !terminalHasOutput(windowId)));
-              const shouldSpin = shouldShowOverlay && runtimeState === "running";
+              const shouldShowOverlay = false;
+              const shouldSpin = false;
               const spinner = overlay.querySelector(".overlay-spinner");
               if (spinner) {
                 spinner.hidden = !shouldSpin;
@@ -4190,16 +4186,6 @@
         const hasMessage = Boolean(messageEl.textContent);
         button.hidden = !hasMessage;
         button.disabled = !hasMessage;
-      }
-
-      function terminalHasOutput(windowId) {
-        if (terminalMap.get(windowId)?.hasOutput) {
-          return true;
-        }
-        if ((pendingOutputMap.get(windowId)?.length || 0) > 0) {
-          return true;
-        }
-        return pendingSnapshotMap.has(windowId);
       }
 
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {

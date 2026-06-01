@@ -74,7 +74,7 @@ pub enum TrayError {
 
 /// SPEC #2920 Phase 4 partial — argv parse errors for the tray-resident
 /// front door. `main()` renders the `Display` impl to stderr and exits 2,
-/// matching the legacy `gwt serve` parser's contract.
+/// matching the removed browser-server parser's contract.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrayArgParseError {
     MissingValue(String),

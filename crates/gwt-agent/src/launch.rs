@@ -148,6 +148,15 @@ pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<S
 /// - `"installed"` → use the agent's direct command (must be in PATH).
 /// - `"latest"` or a semver string → use bunx/npx with `@package@version`.
 pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
+    let env = host_process_env();
+    resolve_runner_with_env(agent_id, version, &env)
+}
+
+fn resolve_runner_with_env(
+    agent_id: &AgentId,
+    version: &str,
+    env: &HashMap<String, String>,
+) -> ResolvedRunner {
     if version == "installed" || version.is_empty() {
         return ResolvedRunner {
             executable: agent_id.command().to_string(),
@@ -169,7 +178,7 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
         format!("{package}@{version}")
     };
 
-    let (executable, needs_yes) = find_bunx_or_npx();
+    let (executable, needs_yes) = find_bunx_or_npx_for_agent_with_env(agent_id, env);
     let mut base_args = Vec::new();
     if needs_yes {
         base_args.push("--yes".to_string());
@@ -237,12 +246,55 @@ fn find_bunx_or_npx() -> (String, bool) {
 }
 
 fn find_bunx_or_npx_with_env(env: &HashMap<String, String>) -> (String, bool) {
+    find_package_runner_with_env(package_runner_candidates(), env)
+}
+
+fn find_bunx_or_npx_for_agent_with_env(
+    agent_id: &AgentId,
+    env: &HashMap<String, String>,
+) -> (String, bool) {
+    find_package_runner_with_env(package_runner_candidates_for_agent(agent_id), env)
+}
+
+fn package_runner_candidates_for_agent(agent_id: &AgentId) -> &'static [(&'static str, bool)] {
+    #[cfg(windows)]
+    {
+        let _ = agent_id;
+        package_runner_candidates()
+    }
+    #[cfg(not(windows))]
+    {
+        if matches!(agent_id, AgentId::ClaudeCode) {
+            // Bun can leave Claude Code's postinstall-managed native binary as a stub
+            // in one-shot package runs; npx executes the published package reliably.
+            &[("npx", true), ("bunx", false)]
+        } else {
+            package_runner_candidates()
+        }
+    }
+}
+
+fn find_package_runner_with_env(
+    candidates: &'static [(&'static str, bool)],
+    env: &HashMap<String, String>,
+) -> (String, bool) {
     let env = hydrate_host_base_env(env.clone());
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let path = env.get("PATH").map(String::as_str);
-    for (name, needs_yes) in package_runner_candidates() {
+    find_package_runner_in_path(candidates, path, &cwd).unwrap_or_else(|| {
+        // Last resort: assume bunx is available
+        ("bunx".to_string(), false)
+    })
+}
+
+fn find_package_runner_in_path(
+    candidates: &'static [(&'static str, bool)],
+    path: Option<&str>,
+    cwd: &Path,
+) -> Option<(String, bool)> {
+    for (name, needs_yes) in candidates {
         let found = match path {
-            Some(path) => which::which_in(name, Some(path), &cwd),
+            Some(path) => which::which_in(name, Some(path), cwd),
             None => which::which(name),
         };
         if let Ok(found) = found {
@@ -250,12 +302,10 @@ fn find_bunx_or_npx_with_env(env: &HashMap<String, String>) -> (String, bool) {
             if path_str.contains("node_modules") {
                 continue;
             }
-            return (path_str.into_owned(), *needs_yes);
+            return Some((path_str.into_owned(), *needs_yes));
         }
     }
-
-    // Last resort: assume bunx is available
-    ("bunx".to_string(), false)
+    None
 }
 
 /// Final configuration used to spawn an agent process.
@@ -1826,6 +1876,76 @@ mod tests {
 
         assert_eq!(PathBuf::from(executable), bunx);
         assert!(!needs_yes);
+    }
+
+    #[cfg(all(not(windows), unix))]
+    fn write_test_runner(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write runner");
+        let mut permissions = std::fs::metadata(path)
+            .expect("runner metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod runner");
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn claude_latest_prefers_npx_over_bunx_on_nonwindows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        let npx = temp.path().join("npx");
+        write_test_runner(&bunx);
+        write_test_runner(&npx);
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let runner = resolve_runner_with_env(&AgentId::ClaudeCode, "latest", &env);
+
+        assert_eq!(PathBuf::from(runner.executable), npx);
+        assert_eq!(
+            runner.base_args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+            ],
+        );
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn claude_latest_falls_back_to_bunx_when_npx_is_missing_on_nonwindows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        write_test_runner(&bunx);
+        let path = temp.path().display().to_string();
+        let cwd = std::env::current_dir().expect("cwd");
+
+        let (executable, needs_yes) = find_package_runner_in_path(
+            package_runner_candidates_for_agent(&AgentId::ClaudeCode),
+            Some(path.as_str()),
+            &cwd,
+        )
+        .expect("runner");
+
+        assert_eq!(PathBuf::from(executable), bunx);
+        assert!(!needs_yes);
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn codex_latest_keeps_bunx_first_on_nonwindows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        let npx = temp.path().join("npx");
+        write_test_runner(&bunx);
+        write_test_runner(&npx);
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let runner = resolve_runner_with_env(&AgentId::Codex, "latest", &env);
+
+        assert_eq!(PathBuf::from(runner.executable), bunx);
+        assert_eq!(runner.base_args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
