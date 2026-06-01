@@ -6410,3 +6410,10 @@ Type: lesson
 Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
+
+## 2026-06-01 — SPEC section edits must stay sequential
+
+Type: workflow
+Context: During SPEC-2013 Phase 6, parallel gwtd issue spec --edit calls on spec/plan/tasks caused one section update to be overwritten and required sequential re-application.
+Learning: Same-issue SPEC section edits share one issue body and can race if run in parallel.
+Future Action: For one SPEC issue, read, patch, write, and re-read each section sequentially; never use multi_tool_use.parallel for gwtd issue spec --edit.

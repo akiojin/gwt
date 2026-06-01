@@ -22,8 +22,7 @@ function render(deps = {}) {
         { id: "tab-2", title: "Repo Two", project_root: "/repo/two" },
       ],
     activeTabId: deps.activeTabId ?? "tab-1",
-    indexStatusByProjectRoot: deps.indexStatusByProjectRoot ?? new Map(),
-    aggregateProjectTabDotState: deps.aggregateProjectTabDotState ?? (() => "ready"),
+    runtimeStateForWindow: deps.runtimeStateForWindow,
     send: deps.send ?? ((payload) => sends.push(payload)),
   });
   return { projectTabs, sends };
@@ -79,26 +78,39 @@ test("renderProjectTabs keeps one click binding per stable tab node", () => {
   assert.deepEqual(sends, [{ kind: "select_project_tab", tab_id: "tab-1" }]);
 });
 
-test("renderProjectTabs updates status dots without rebuilding tab buttons", () => {
+test("renderProjectTabs updates running-agent dots without rebuilding tab buttons", () => {
   const { projectTabs } = setupDom();
-  const statusByRoot = new Map([["/repo/one", { state: "indexing" }]]);
+  const runtimeStates = new Map([["agent-1", "running"]]);
+  const tabs = [
+    {
+      id: "tab-1",
+      title: "Repo One",
+      project_root: "/repo/one",
+      workspace: {
+        windows: [{ id: "agent-1", preset: "codex", status: "idle" }],
+      },
+    },
+    { id: "tab-2", title: "Repo Two", project_root: "/repo/two" },
+  ];
 
   render({
     projectTabs,
-    indexStatusByProjectRoot: statusByRoot,
-    aggregateProjectTabDotState: (status) => (status ? status.state : "ready"),
+    tabs,
+    runtimeStateForWindow: (windowData) =>
+      runtimeStates.get(windowData.id) || windowData.status,
   });
   const firstButton = projectTabs.querySelector('[data-project-tab-id="tab-1"]');
   assert.equal(
     firstButton.querySelector("[data-role='project-tab-dot']").dataset.state,
-    "indexing",
+    "running",
   );
 
-  statusByRoot.set("/repo/one", { state: "ready" });
+  runtimeStates.set("agent-1", "idle");
   render({
     projectTabs,
-    indexStatusByProjectRoot: statusByRoot,
-    aggregateProjectTabDotState: (status) => (status ? status.state : "ready"),
+    tabs,
+    runtimeStateForWindow: (windowData) =>
+      runtimeStates.get(windowData.id) || windowData.status,
   });
 
   assert.equal(
@@ -107,6 +119,72 @@ test("renderProjectTabs updates status dots without rebuilding tab buttons", () 
   );
   assert.equal(
     firstButton.querySelector("[data-role='project-tab-dot']").dataset.state,
-    "ready",
+    "",
+  );
+});
+
+test("renderProjectTabs marks dot running only for running agent windows", () => {
+  const { projectTabs } = setupDom();
+  const tabs = [
+    {
+      id: "tab-running",
+      title: "Running Agent",
+      project_root: "/repo/running",
+      workspace: {
+        windows: [
+          { id: "agent-running", preset: "codex", status: "idle" },
+          { id: "shell-running", preset: "shell", status: "running" },
+        ],
+      },
+    },
+    {
+      id: "tab-idle",
+      title: "Idle Agent",
+      project_root: "/repo/idle",
+      workspace: {
+        windows: [
+          { id: "agent-idle", preset: "claude", status: "idle" },
+          { id: "agent-waiting", preset: "agent", status: "waiting" },
+          {
+            id: "custom-stopped",
+            preset: "shell",
+            agent_id: "custom",
+            status: "stopped",
+          },
+        ],
+      },
+    },
+  ];
+  const runtimeStates = new Map([
+    ["agent-running", "running"],
+    ["shell-running", "running"],
+    ["agent-idle", "idle"],
+    ["agent-waiting", "waiting"],
+    ["custom-stopped", "stopped"],
+  ]);
+
+  render({
+    projectTabs,
+    tabs,
+    activeTabId: "tab-running",
+    runtimeStateForWindow: (windowData) =>
+      runtimeStates.get(windowData.id) || windowData.status,
+  });
+
+  assert.equal(
+    projectTabs
+      .querySelector(
+        "[data-project-tab-id='tab-running'] [data-role='project-tab-dot']",
+      )
+      .dataset.state,
+    "running",
+  );
+  assert.equal(
+    projectTabs
+      .querySelector(
+        "[data-project-tab-id='tab-idle'] [data-role='project-tab-dot']",
+      )
+      .dataset.state,
+    "",
   );
 });

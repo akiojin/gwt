@@ -147,7 +147,7 @@ body {
   display: none;
 }
 
-/* SPEC-1939 T-IDX-107 — per-worktree health dot on project tabs. */
+/* SPEC-2013 — running agent activity dot on project tabs. */
 .project-tab-dot {
   display: inline-block;
   width: 8px;
@@ -157,14 +157,34 @@ body {
   background: transparent;
   border: 1px solid transparent;
 }
-.project-tab-dot[data-state="ready"] {
+
+@keyframes project-tab-agent-running-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+    box-shadow: 0 0 0 0
+      color-mix(in oklab, var(--color-state-active) 0%, transparent);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 0 3px
+      color-mix(in oklab, var(--color-state-active) 30%, transparent);
+  }
+}
+
+.project-tab-dot[data-state="running"] {
   background: var(--color-state-active);
+  border-color: color-mix(in oklab, var(--color-state-active) 80%, transparent);
+  animation: project-tab-agent-running-pulse var(--motion-pulse) ease-in-out
+    infinite;
 }
-.project-tab-dot[data-state="error"] {
-  background: var(--color-state-blocked);
-}
-.project-tab-dot[data-state="repairing"] {
-  background: var(--agent-claude);
+
+@media (prefers-reduced-motion: reduce) {
+  .project-tab-dot[data-state="running"] {
+    animation: none;
+    opacity: 1;
+    box-shadow: none;
+  }
 }
 
 /* SPEC-1939 T-IDX-106 — Settings.Index health table. */

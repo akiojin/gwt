@@ -37,3 +37,32 @@ test(".project-tab CSS rule disables user-select so label clicks register", () =
     "`.project-tab` must declare `user-select: none` to prevent text-selection drag from swallowing click events on label text (Issue #2744)",
   );
 });
+
+test("project tab running-agent dot blinks and honors reduced motion", () => {
+  const block = findRuleBlock('.project-tab-dot[data-state="running"]');
+  assert.ok(
+    block !== null,
+    '`.project-tab-dot[data-state="running"]` rule not found in app.css',
+  );
+  assert.match(
+    block,
+    /animation\s*:\s*project-tab-agent-running-pulse\s+var\(--motion-pulse\)\s+ease-in-out\s+infinite\s*;?/,
+    "running agent dot must blink with the shared pulse duration",
+  );
+  assert.match(
+    css,
+    /@keyframes\s+project-tab-agent-running-pulse\s*\{/,
+    "running agent dot animation keyframes must exist",
+  );
+  assert.match(
+    css,
+    new RegExp(
+      [
+        String.raw`@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{`,
+        String.raw`[\s\S]*?\.project-tab-dot\[data-state="running"\]`,
+        String.raw`[\s\S]*?animation\s*:\s*none\s*;?[\s\S]*?\}`,
+      ].join(""),
+    ),
+    "running agent dot must become static when reduced motion is requested",
+  );
+});

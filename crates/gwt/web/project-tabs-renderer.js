@@ -57,26 +57,64 @@ function createTabButton(document, send, requestCloseProjectTab) {
   return button;
 }
 
+const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
+
+const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
+  starting: "running",
+  notstarted: "not_started",
+  "not-started": "not_started",
+  ready: "idle",
+  exited: "stopped",
+});
+
+function normalizeProjectTabRuntimeState(status) {
+  const rawState = String(status || "").toLowerCase();
+  return LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
+}
+
+function windowIsAgentPane(windowData) {
+  const preset = String(windowData?.preset || "").toLowerCase();
+  return Boolean(windowData?.agent_id) || AGENT_WINDOW_PRESETS.has(preset);
+}
+
+function projectTabWindows(tab) {
+  const windows = tab?.workspace?.windows;
+  return Array.isArray(windows) ? windows : [];
+}
+
+export function projectTabAgentDotState(tab, { runtimeStateForWindow } = {}) {
+  for (const windowData of projectTabWindows(tab)) {
+    if (!windowIsAgentPane(windowData)) {
+      continue;
+    }
+    const runtimeState =
+      typeof runtimeStateForWindow === "function"
+        ? runtimeStateForWindow(windowData)
+        : windowData.status;
+    if (normalizeProjectTabRuntimeState(runtimeState) === "running") {
+      return "running";
+    }
+  }
+  return "";
+}
+
 export function updateProjectTabDot(
   buttonEl,
-  projectRoot,
-  { indexStatusByProjectRoot, aggregateProjectTabDotState },
+  tab,
+  { runtimeStateForWindow } = {},
 ) {
   const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
   if (!dot) {
     return;
   }
-  const status =
-    (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
-  dot.dataset.state = aggregateProjectTabDotState(status);
+  dot.dataset.state = projectTabAgentDotState(tab, { runtimeStateForWindow });
 }
 
 export function renderProjectTabs({
   projectTabs,
   tabs,
   activeTabId,
-  indexStatusByProjectRoot,
-  aggregateProjectTabDotState,
+  runtimeStateForWindow,
   send,
   requestCloseProjectTab,
 }) {
@@ -152,10 +190,7 @@ export function renderProjectTabs({
     close.setAttribute("aria-label", `Close ${tab.title || "project"}`);
     close.title = `Close ${tab.title || "project"}`;
     dot.dataset.state = dot.dataset.state || "";
-    updateProjectTabDot(button, tab.project_root, {
-      indexStatusByProjectRoot,
-      aggregateProjectTabDotState,
-    });
+    updateProjectTabDot(button, tab, { runtimeStateForWindow });
 
     const current = projectTabs.children[index] || null;
     if (current !== button) {

@@ -32,7 +32,6 @@
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
-      import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
@@ -1893,8 +1892,7 @@
           projectTabs,
           tabs: appState.tabs || [],
           activeTabId: appState.active_tab_id,
-          indexStatusByProjectRoot,
-          aggregateProjectTabDotState,
+          runtimeStateForWindow,
           send,
           requestCloseProjectTab,
         });
@@ -1974,17 +1972,19 @@
         renderCloseProjectTabModal();
       }
 
-      function updateProjectTabDot(buttonEl, projectRoot) {
-        updateProjectTabDotView(buttonEl, projectRoot, {
-          indexStatusByProjectRoot,
-          aggregateProjectTabDotState,
-        });
+      function updateProjectTabDot(buttonEl, tab) {
+        updateProjectTabDotView(buttonEl, tab, { runtimeStateForWindow });
       }
 
       function refreshProjectTabDots() {
+        const tabsById = new Map(
+          (appState.tabs || []).map((tab) => [tab.id, tab]),
+        );
         for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
-          const projectRoot = buttonEl.dataset.projectRoot || "";
-          updateProjectTabDot(buttonEl, projectRoot);
+          updateProjectTabDot(
+            buttonEl,
+            tabsById.get(buttonEl.dataset.projectTabId),
+          );
         }
       }
 
@@ -3484,6 +3484,7 @@
             const element = windowMap.get(windowId);
             if (!element) {
               renderWindowList();
+              refreshProjectTabDots();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3536,6 +3537,7 @@
               }
             }
             renderWindowList();
+            refreshProjectTabDots();
           },
         );
       }
