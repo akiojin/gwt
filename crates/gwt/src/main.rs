@@ -31,7 +31,7 @@ use tao::{
 };
 use tokio::runtime::Runtime;
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     TrayIconBuilder,
 };
 use uuid::Uuid;
@@ -6441,36 +6441,11 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    // SPEC #2920 Phase 8 / FR-005 + FR-007: surface the autostart
-    // toggle on the tray menu so the user can fulfil the "OS 起動と
-    // 同時に常駐" request without leaving the menubar. The check state
-    // mirrors `AutostartManager::status()`; failures surface as
-    // logged warnings and revert the toggle on the next click.
-    let initial_autostart_checked = gwt::cli::tray::autostart::AutostartManager::status()
-        .map(|status| status.enabled)
-        .unwrap_or(false);
-    let tray_autostart = CheckMenuItem::with_id(
-        gwt::cli::tray::menu::ids::AUTOSTART_TOGGLE,
-        "Start at login",
-        true,
-        initial_autostart_checked,
-        None,
-    );
-    let tray_autostart_handle = tray_autostart.clone();
-    let tray_about = PredefinedMenuItem::about(
-        Some("About GWT"),
-        Some(tray_icon::menu::AboutMetadata {
-            name: Some("GWT".into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            ..Default::default()
-        }),
-    );
+    let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     tray_menu
         .append_items(&[
             &tray_open,
-            &PredefinedMenuItem::separator(),
-            &tray_autostart,
             &PredefinedMenuItem::separator(),
             &tray_about,
             &PredefinedMenuItem::separator(),
@@ -6938,8 +6913,8 @@ fn main() -> std::io::Result<()> {
                     BackendEvent::CloneProjectError { message },
                 )]);
             }
-            // SPEC #2920 Phase 4: the muda menu event handler is now
-            // cross-platform. The tray icon menu (Open / Quit) is the
+            // SPEC #2920 Phase 4: the tray menu event handler is now
+            // cross-platform. The tray icon menu (Open / About / Quit) is the
             // only producer; the legacy macOS native menubar
             // (NativeMenuCommand) was removed alongside the wry
             // WebView.
@@ -6965,33 +6940,22 @@ fn main() -> std::io::Result<()> {
                         // and watchers are torn down once.
                         let _ = proxy.send_event(UserEvent::QuitApp);
                     }
-                    Some(MenuAction::ToggleAutostart) => {
-                        // tray-icon flips the check state *before* the
-                        // MenuEvent fires, so `is_checked()` reflects
-                        // the new desired state.
-                        let desired_enabled = tray_autostart_handle.is_checked();
-                        let result = if desired_enabled {
-                            gwt::cli::tray::autostart::AutostartManager::install()
-                        } else {
-                            gwt::cli::tray::autostart::AutostartManager::uninstall()
-                        };
-                        if let Err(error) = result {
-                            // Revert the visual state so the menu does
-                            // not lie to the user about what the OS
-                            // actually has registered.
-                            tray_autostart_handle.set_checked(!desired_enabled);
+                    Some(MenuAction::About) => {
+                        let about_url =
+                            gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
+                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&about_url) {
                             tracing::warn!(
                                 target: "gwt_tray",
                                 error = %error,
-                                desired_enabled,
-                                "autostart toggle failed; reverted check state"
+                                url = about_url.as_str(),
+                                "tray About menu failed to launch the default browser"
                             );
                         }
                     }
-                    Some(MenuAction::About) | None => {
-                        // The `About` item is the muda
-                        // `PredefinedMenuItem::about` which the OS
-                        // renders natively; nothing to do here.
+                    None => {
+                        // Unknown menu ids can arrive from platform
+                        // integrations; ignore them so the tray loop
+                        // remains resilient.
                     }
                 }
             }

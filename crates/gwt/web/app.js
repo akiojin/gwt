@@ -392,6 +392,27 @@
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
+      function applyAutostartStatus(event, statusMessage = "") {
+        systemSettingsState.autostartEnabled = event.enabled === true;
+        systemSettingsState.autostartPreviousEnabled =
+          systemSettingsState.autostartEnabled;
+        systemSettingsState.autostartMechanism = event.mechanism || "";
+        systemSettingsState.autostartInstallPath = event.install_path || "";
+        systemSettingsState.autostartLoaded = true;
+        systemSettingsState.autostartPending = false;
+        systemSettingsState.statusMessage = statusMessage;
+        systemSettingsState.statusKind = statusMessage ? "success" : "";
+      }
+
+      function applyAutostartError(event) {
+        systemSettingsState.autostartEnabled =
+          systemSettingsState.autostartPreviousEnabled === true;
+        systemSettingsState.autostartPending = false;
+        systemSettingsState.statusMessage =
+          event.message || "Failed to update login launch setting.";
+        systemSettingsState.statusKind = "error";
+      }
+
       const systemSettingsInteractionGuard = createInteractionGuard({
         onFlush: (deferred) => {
           if (!deferred || typeof deferred !== "object") {
@@ -420,6 +441,13 @@
             systemSettingsState.statusMessage = deferred.message
               || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
+          } else if (deferred.kind === "autostart_status") {
+            applyAutostartStatus(
+              deferred,
+              deferred.from_update ? "Saved login launch setting." : "",
+            );
+          } else if (deferred.kind === "autostart_error") {
+            applyAutostartError(deferred);
           }
           renderSystemPanelInAllSettingsWindows();
         },
@@ -466,6 +494,7 @@
         error: "",
       };
       let versionState = { current: "", latest: "" };
+      let pendingAboutHashOpen = false;
       const indexStatusByProjectRoot = new Map();
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
@@ -521,6 +550,10 @@
           versionState.latest = latest;
         }
         renderAppVersion();
+        if (pendingAboutHashOpen && versionState.current) {
+          pendingAboutHashOpen = false;
+          releaseNotesWindow.openAbout(versionState.current || null);
+        }
       }
 
       function presetSurface(preset) {
@@ -1172,6 +1205,25 @@
         beginUpdateDownloading: (version) =>
           updateCtaController.beginDownloadingFor(version),
       });
+
+      function consumeAboutHash() {
+        if (window.location.hash === "#about") {
+          if (window.history && typeof window.history.replaceState === "function") {
+            window.history.replaceState(
+              null,
+              "",
+              `${window.location.pathname}${window.location.search}`,
+            );
+          }
+          if (versionState.current) {
+            releaseNotesWindow.openAbout(versionState.current || null);
+          } else {
+            pendingAboutHashOpen = true;
+          }
+        }
+      }
+      window.addEventListener("hashchange", consumeAboutHash);
+      consumeAboutHash();
 
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
@@ -10966,6 +11018,12 @@
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        autostartEnabled: false,
+        autostartPreviousEnabled: false,
+        autostartMechanism: "",
+        autostartInstallPath: "",
+        autostartLoaded: false,
+        autostartPending: false,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -11071,6 +11129,7 @@
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
         send({ kind: "get_system_settings" });
+        send({ kind: "get_autostart_status" });
 
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
@@ -11324,13 +11383,60 @@
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        const autostartSection = createDiv("settings-section");
+        const autostartLabel = document.createElement("label");
+        autostartLabel.className = "settings-checkbox-label";
+        autostartLabel.setAttribute("for", "settings-system-autostart");
+
+        const autostartCheckbox = document.createElement("input");
+        autostartCheckbox.type = "checkbox";
+        autostartCheckbox.className = "settings-checkbox";
+        autostartCheckbox.id = "settings-system-autostart";
+        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
+        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+        autostartCheckbox.addEventListener("change", (e) => {
+          const next = e.target.checked === true;
+          systemSettingsState.autostartPreviousEnabled =
+            systemSettingsState.autostartEnabled === true;
+          systemSettingsState.autostartEnabled = next;
+          systemSettingsState.autostartPending = true;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelInAllSettingsWindows();
+          send({ kind: "update_autostart", enabled: next });
+        });
+
+        const autostartText = document.createElement("span");
+        autostartText.textContent = "Launch GWT at login";
+        autostartLabel.appendChild(autostartCheckbox);
+        autostartLabel.appendChild(autostartText);
+        autostartSection.appendChild(autostartLabel);
+
+        const autostartHelp = document.createElement("p");
+        autostartHelp.className = "settings-help";
+        autostartHelp.textContent =
+          "Starts GWT in the menu bar when you log in. The browser does not open automatically.";
+        autostartSection.appendChild(autostartHelp);
+
+        if (systemSettingsState.autostartLoaded) {
+          const autostartDetail = document.createElement("p");
+          autostartDetail.className = "settings-help";
+          const mechanism = systemSettingsState.autostartMechanism || "Unknown";
+          const installPath = systemSettingsState.autostartInstallPath || "";
+          autostartDetail.textContent = installPath
+            ? `Autostart: ${mechanism} · ${installPath}`
+            : `Autostart: ${mechanism}`;
+          autostartSection.appendChild(autostartDetail);
+        }
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
-        section.appendChild(status);
+        autostartSection.appendChild(status);
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(autostartSection);
         renderSystemPanelStatus(panel);
       }
 
@@ -13066,6 +13172,38 @@
             }
             systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "autostart_status": {
+            const wasPending = systemSettingsState.autostartPending === true;
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "autostart_status",
+                enabled: event.enabled,
+                mechanism: event.mechanism,
+                install_path: event.install_path,
+                from_update: wasPending,
+              })
+            ) {
+              break;
+            }
+            applyAutostartStatus(
+              event,
+              wasPending ? "Saved login launch setting." : "",
+            );
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          }
+          case "autostart_error":
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "autostart_error",
+                message: event.message,
+              })
+            ) {
+              break;
+            }
+            applyAutostartError(event);
             renderSystemPanelInAllSettingsWindows();
             break;
           case "backend_connection_result":

@@ -6,6 +6,7 @@
 //! source tree via `include_str!`; no runtime behaviour is exercised.
 
 const CLI_ROOT: &str = include_str!("../src/cli.rs");
+const MAIN_RS: &str = include_str!("../src/main.rs");
 const TRAY_MOD: &str = include_str!("../src/cli/tray/mod.rs");
 const TRAY_MENU: &str = include_str!("../src/cli/tray/menu.rs");
 const TRAY_AUTOSTART: &str = include_str!("../src/cli/tray/autostart.rs");
@@ -56,6 +57,39 @@ fn tray_menu_pins_action_ids() {
     assert!(TRAY_MENU.contains(r#"pub const OPEN: &str = "gwt.tray.open";"#));
     assert!(TRAY_MENU.contains(r#"pub const QUIT: &str = "gwt.tray.quit";"#));
     assert!(TRAY_MENU.contains(r#"pub const ABOUT: &str = "gwt.tray.about";"#));
+    assert!(
+        !TRAY_MENU.contains("AUTOSTART_TOGGLE"),
+        "autostart must live in Settings > System, not in the tray menu"
+    );
+    assert!(
+        !TRAY_MENU.contains("ToggleAutostart"),
+        "tray menu action enum must not expose a tray autostart action"
+    );
+}
+
+#[test]
+fn tray_menu_contract_is_open_about_quit_only() {
+    assert!(
+        MAIN_RS.contains(r#""Open in browser""#),
+        "tray menu must expose Open in browser"
+    );
+    assert!(
+        MAIN_RS.contains(r#""About GWT""#),
+        "tray menu must expose About GWT"
+    );
+    assert!(MAIN_RS.contains(r#""Quit""#), "tray menu must expose Quit");
+    assert!(
+        !MAIN_RS.contains("CheckMenuItem"),
+        "Start at login must not be a tray CheckMenuItem"
+    );
+    assert!(
+        !MAIN_RS.contains("PredefinedMenuItem::about"),
+        "About GWT must open browser About, not the OS native About dialog"
+    );
+    assert!(
+        MAIN_RS.contains("about_url_for_browser_url(&browser_url)"),
+        "About GWT handler must derive browser_url#about"
+    );
 }
 
 #[test]

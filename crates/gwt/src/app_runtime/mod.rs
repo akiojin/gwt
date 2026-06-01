@@ -832,6 +832,12 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         } => FrontendUserActionLog::new("update_system_settings", "settings")
             .target(language)
             .force(codex_trust_managed_hooks.unwrap_or(false)),
+        FrontendEvent::GetAutostartStatus => {
+            FrontendUserActionLog::new("get_autostart_status", "settings")
+        }
+        FrontendEvent::UpdateAutostart { enabled } => {
+            FrontendUserActionLog::new("update_autostart", "settings").force(*enabled)
+        }
         FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
             FrontendUserActionLog::new("workspace_projection_prune", "workspace")
                 .mode(if *dry_run { "dry_run" } else { "apply" })
@@ -884,6 +890,26 @@ fn log_frontend_user_action(client_id: &str, event: &FrontendEvent) {
         forced = log.forced,
         "frontend user action"
     );
+}
+
+fn autostart_status_event_from_result(
+    result: Result<
+        gwt::cli::tray::autostart::AutostartStatus,
+        gwt::cli::tray::autostart::AutostartError,
+    >,
+) -> BackendEvent {
+    match result {
+        Ok(status) => BackendEvent::AutostartStatus {
+            enabled: status.enabled,
+            mechanism: format!("{:?}", status.mechanism),
+            install_path: status
+                .install_path
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        Err(error) => BackendEvent::AutostartError {
+            message: error.to_string(),
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4152,6 +4178,10 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
             } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
+            FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
+            FrontendEvent::UpdateAutostart { enabled } => {
+                self.autostart_update_events(client_id, enabled)
+            }
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
@@ -4357,6 +4387,32 @@ impl AppRuntime {
             client_id,
             gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
         )]
+    }
+
+    fn autostart_status_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id,
+            autostart_status_event_from_result(
+                gwt::cli::tray::autostart::AutostartManager::status(),
+            ),
+        )]
+    }
+
+    fn autostart_update_events(&self, client_id: ClientId, enabled: bool) -> Vec<OutboundEvent> {
+        let result = if enabled {
+            gwt::cli::tray::autostart::AutostartManager::install()
+        } else {
+            gwt::cli::tray::autostart::AutostartManager::uninstall()
+        };
+        let event = match result {
+            Ok(()) => autostart_status_event_from_result(
+                gwt::cli::tray::autostart::AutostartManager::status(),
+            ),
+            Err(error) => BackendEvent::AutostartError {
+                message: error.to_string(),
+            },
+        };
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     fn custom_agent_reply_with_cache_refresh(

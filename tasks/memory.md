@@ -6473,3 +6473,10 @@ Type: lesson
 Context: Launch Wizard close recovery after reconnect depended on an extreme terminal load condition that was hard for the user to reproduce manually after live E2E RED/GREEN coverage existed.
 Learning: When a UI failure is rare and load-dependent, deterministic E2E evidence can be the strongest practical proof; if the user explicitly accepts that evidence, record the acceptance in the SPEC instead of keeping the work blocked on manual reproduction.
 Future Action: For future rare load-only UI bugs, add a deterministic E2E that models the lost or delayed event path, record RED/GREEN evidence, then ask the user whether that evidence is sufficient when manual reproduction is impractical.
+
+## 2026-06-01 — Seed session for isolated GUI verification
+
+Type: lesson
+Context: SPEC-2920 tray/About verification used an isolated HOME. With an empty ~/.gwt/session.json, the app opened the Open Project picker instead of the intended checkout surface.
+Learning: Isolated GUI verification that must land on an in-project surface needs a seeded session.json pointing at the checkout under test; otherwise the verification can be blocked before the changed UI is reachable.
+Future Action: Before sharing a manual GUI verification URL from a temp HOME, seed ~/.gwt/session.json with the target checkout tab and verify the served URL reaches the intended screen.
