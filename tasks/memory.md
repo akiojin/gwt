@@ -6435,9 +6435,9 @@ Future Action: For gwt fresh UI checks, seed the target project/window or launch
 ## 2026-06-01 — Project-local skills do not need repository prefix
 
 Type: workflow
-Context: The browser verification skill was renamed to gwt-fresh-browser-check even though it lives inside this gwt repository's project-local skill set. The user corrected that gwt-* prefixes are redundant for gwt development skills.
+Context: The browser verification skill was renamed to `gwt-fresh-browser-check` even though it lives inside this gwt repository's project-local skill set. The user corrected that `gwt-*` prefixes are redundant for gwt development skills.
 Learning: For project-local skills, the repository context already supplies the namespace. Use concise action/domain names and keep the directory name, frontmatter name, and in-skill title aligned.
-Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as gwt-* unless the user explicitly requests one.
+Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as `gwt-*` unless the user explicitly requests one.
 
 ## 2026-06-01 — Use concise browser-check skill name
 

@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
@@ -49,8 +52,9 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
         return Ok(());
     };
     ensure_coordination_assets_for_session(&session);
-    let mut projection = load_or_default_workspace_projection(&session.worktree_path)?;
-    projection.project_root = session.worktree_path.clone();
+    let project_state_root = project_state_root_for_session(&session);
+    let mut projection = load_or_default_workspace_projection(&project_state_root)?;
+    projection.project_root = project_state_root.clone();
     let now = Utc::now();
     let registered = register_session_in_projection(&mut projection, &session, now);
     let derived = derive_title_summary_from_owner(&mut projection, &session);
@@ -58,10 +62,17 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
         projection.updated_at = now;
     }
     if registered || derived {
-        save_workspace_projection(&session.worktree_path, &projection)?;
-        crate::cli::workspace::publish_workspace_change(&session.worktree_path);
+        save_workspace_projection(&project_state_root, &projection)?;
+        crate::cli::workspace::publish_workspace_change(&project_state_root);
     }
     Ok(())
+}
+
+fn project_state_root_for_session(session: &Session) -> PathBuf {
+    crate::agent_project_state::canonical_project_state_root_for_session(
+        session,
+        &session.worktree_path,
+    )
 }
 
 /// SPEC-2359 Phase U-9 (FR-177): re-materialize coordination skill + hook
@@ -104,8 +115,9 @@ fn derive_title_summary_from_owner(
     projection: &mut WorkspaceProjection,
     session: &Session,
 ) -> bool {
+    let project_state_root = project_state_root_for_session(session);
     let issue_cache_root =
-        crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&session.worktree_path);
+        crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&project_state_root);
     derive_title_summary_from_owner_with_cache(projection, &session.id, &issue_cache_root)
 }
 
@@ -215,6 +227,12 @@ fn handle_user_prompt_submit_for_session(
     input: &str,
     session: &Session,
 ) -> Result<WorkspaceIdentityHookResult, HookError> {
+    let project_state_root = project_state_root_for_session(session);
+    crate::agent_project_state::repair_split_agent_state_if_needed(
+        &project_state_root,
+        &session.worktree_path,
+        &session.id,
+    )?;
     let Some(missing) = missing_identity_for_session(session)? else {
         return Ok(WorkspaceIdentityHookResult {
             updated: false,
@@ -249,8 +267,8 @@ fn handle_user_prompt_submit_for_session(
         });
     };
 
-    update_workspace_projection_with_journal(&session.worktree_path, update)?;
-    crate::cli::workspace::publish_workspace_change(&session.worktree_path);
+    update_workspace_projection_with_journal(&project_state_root, update)?;
+    crate::cli::workspace::publish_workspace_change(&project_state_root);
 
     Ok(WorkspaceIdentityHookResult {
         updated: true,
@@ -311,7 +329,15 @@ fn current_session_from_env() -> Result<Option<Session>, HookError> {
 }
 
 fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdentity>, HookError> {
-    let Some(projection) = load_workspace_projection(&session.worktree_path)? else {
+    let project_state_root = project_state_root_for_session(session);
+    missing_identity_for_session_at(session, &project_state_root)
+}
+
+fn missing_identity_for_session_at(
+    session: &Session,
+    project_state_root: &Path,
+) -> Result<Option<MissingIdentity>, HookError> {
+    let Some(projection) = load_workspace_projection(project_state_root)? else {
         return Ok(None);
     };
     let Some(agent) = projection
@@ -851,6 +877,61 @@ mod tests {
                 .is_some_and(|focus| focus.contains("エージェントウィンドウの更新")),
             "{:?}",
             update.agent_current_focus
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_updates_canonical_project_state_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+
+        let mut session = fresh_session(&worktree);
+        session.id = "session-canonical".to_string();
+        session.project_state_root = Some(project_root.clone());
+
+        let mut projection = projection_for(&project_root);
+        projection
+            .agents
+            .push(assigned_agent(&session.id, &worktree));
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save canonical projection");
+
+        let payload = serde_json::json!({
+            "session_id": "codex-provider-session",
+            "prompt": "$gwt-discussion エージェントウィンドウの更新がいまだにされません。今回の場合であれば「エージェントウィンドウの更新不具合」などが表示されるべきです。"
+        });
+
+        let result = handle_user_prompt_submit_for_session(&payload.to_string(), &session)
+            .expect("handle prompt");
+
+        assert!(result.updated, "identity hook should write canonical root");
+        let canonical = gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            .expect("load canonical")
+            .expect("canonical projection");
+        let agent = canonical
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session.id)
+            .expect("canonical agent");
+        assert_eq!(
+            agent.title_summary.as_deref(),
+            Some("エージェントウィンドウ更新不具合")
+        );
+        assert!(
+            agent
+                .current_focus
+                .as_deref()
+                .is_some_and(|focus| focus.contains("エージェントウィンドウの更新")),
+            "{:?}",
+            agent.current_focus
+        );
+        assert!(
+            gwt_core::workspace_projection::load_workspace_projection(&worktree)
+                .expect("load split")
+                .is_none(),
+            "identity hook must not create a split worktree Project State"
         );
     }
 
