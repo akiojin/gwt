@@ -6411,6 +6411,41 @@ Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
 
+## 2026-06-01 — Agent title updates must resolve canonical Project State root
+
+Type: lesson
+Context: SPEC-2359 Phase W-10: gwtd workspace update --agent-session was writing title/focus into the linked worktree Project State root while the live GUI watched the Workspace Home Project State root.
+Learning: Do not use an agent worktree path as the implicit Project State identity. Persist Session.project_state_root during GUI launch, route CLI/hook reads and writes through that canonical root, and repair old split same-session projection data by updated_at.
+Future Action: Before changing Agent title, Workspace, hook, or Project State behavior, add a regression test with a Workspace Home project root and a linked worktree agent so canonical-root and worktree-root writes cannot diverge again.
+
+## 2026-06-01 — Fresh browser checks must never share production gwt URLs
+
+Type: lesson
+Context: User corrected the headless-browser-check workflow after it printed an existing tray-resident production URL. The desired verification URL must come from the modified checkout's own freshly launched server.
+Learning: Browser verification skills for gwt must isolate HOME/USERPROFILE, launch the current checkout's target/debug/gwt with --no-tray --no-open, seed session.json for the checkout, and reject any URL reported after an existing tray instance warning.
+Future Action: When providing a gwt verification URL, use the browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
+
+## 2026-06-01 — Fresh browser verification should not use Start Work unless credentials are proven
+
+Type: lesson
+Context: During gwt-fresh-browser-check, the user saw a failed Claude Code window because the isolated HOME Start Work path tried to create remote branch origin/work/20260601-1042 and git push failed with terminal prompts disabled.
+Learning: Fresh browser checks isolate HOME and set GIT_TERMINAL_PROMPT=0, so Start Work can fail on GitHub HTTPS authentication even when the app under test is otherwise fine. Verification should avoid Start Work unless the feature under test requires it and branch creation credentials are preflighted.
+Future Action: For gwt fresh UI checks, seed the target project/window or launch on the current branch path; if a failed remote-branch Agent window appears, close it and treat it as verification setup noise rather than feature evidence.
+
+## 2026-06-01 — Project-local skills do not need repository prefix
+
+Type: workflow
+Context: The browser verification skill was renamed to `gwt-fresh-browser-check` even though it lives inside this gwt repository's project-local skill set. The user corrected that `gwt-*` prefixes are redundant for gwt development skills.
+Learning: For project-local skills, the repository context already supplies the namespace. Use concise action/domain names and keep the directory name, frontmatter name, and in-skill title aligned.
+Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as `gwt-*` unless the user explicitly requests one.
+
+## 2026-06-01 — Use concise browser-check skill name
+
+Type: workflow
+Context: After removing the project-local gwt- prefix, the skill was still named fresh-browser-check. The user clarified that browser-check is sufficient.
+Learning: When the skill's behavior already says it must launch a fresh isolated server, the public skill name does not need to include implementation qualifiers like fresh. Prefer the concise user-facing trigger name.
+Future Action: Name this browser verification skill browser-check in project-local skill directories, with freshness and isolation requirements documented inside SKILL.md rather than encoded in the skill name.
+
 ## 2026-06-01 — Hidden attribute can be overridden by component display rules
 
 Type: lesson

@@ -7871,6 +7871,9 @@ impl AppRuntime {
             let agent_id = config.agent_id.clone();
             let mut session =
                 gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
+            session.project_state_root = Some(
+                gwt_core::paths::normalize_windows_child_process_path(Path::new(&project_root)),
+            );
             session.display_name = config.display_name.clone();
             session.tool_version = config.tool_version.clone();
             session.model = config.model.clone();
@@ -20097,6 +20100,54 @@ exit 1
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
             "ActiveWorkProjection broadcast must still fire: {events:?}"
+        );
+    }
+
+    #[test]
+    fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project_root() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        fs::create_dir_all(&worktree).expect("worktree");
+        let (mut runtime, window_id) =
+            apply_title_sync_setup_tab_and_runtime(project_root.clone(), Some("tab-1"));
+        runtime
+            .active_agent_sessions
+            .get_mut(&window_id)
+            .expect("active session")
+            .worktree_path = worktree.clone();
+        let mut projection = apply_title_sync_sample_projection(
+            &project_root,
+            &window_id,
+            Some("Canonical Project State title"),
+            Some("Agent worktree differs from Project State root"),
+        );
+        projection.agents[0].worktree_path = Some(worktree);
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save projection");
+
+        let events = runtime.handle_workspace_projection_changed_events(&project_root);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "canonical Project State root updates must broadcast WorkspaceState: {events:?}"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Canonical Project State title")
+        );
+        assert_eq!(
+            agent_window.dynamic_title_detail.as_deref(),
+            Some("Agent worktree differs from Project State root")
         );
     }
 

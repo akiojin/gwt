@@ -328,6 +328,23 @@ pub(super) fn run<E: CliEnv>(
             current_focus,
             title_summary,
         } => {
+            let project_state_root = agent_session
+                .as_deref()
+                .map(|session_id| {
+                    crate::agent_project_state::project_state_root_for_agent_session_or_fallback(
+                        env.repo_path(),
+                        session_id,
+                    )
+                })
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            if let Some(session_id) = agent_session.as_deref() {
+                crate::agent_project_state::repair_split_agent_state_if_needed(
+                    &project_state_root,
+                    env.repo_path(),
+                    session_id,
+                )
+                .map_err(core_error)?;
+            }
             let update = WorkspaceProjectionUpdate {
                 title,
                 status_category: status
@@ -343,9 +360,9 @@ pub(super) fn run<E: CliEnv>(
                 agent_current_focus: current_focus,
                 agent_title_summary: title_summary,
             };
-            let entry = update_workspace_projection_with_journal(env.repo_path(), update)
+            let entry = update_workspace_projection_with_journal(&project_state_root, update)
                 .map_err(|error| string_error(error.to_string()))?;
-            publish_workspace_change(env.repo_path());
+            publish_workspace_change(&project_state_root);
             out.push_str(&format!("workspace updated: {}\n", entry.id));
             Ok(0)
         }
@@ -1133,6 +1150,49 @@ mod tests {
         }
     }
 
+    fn assigned_agent_with_window(
+        session_id: &str,
+        window_id: &str,
+        worktree_path: &Path,
+    ) -> WorkspaceAgentSummary {
+        let mut agent = unassigned_agent(session_id);
+        agent.window_id = Some(window_id.to_string());
+        agent.current_focus = None;
+        agent.title_summary = None;
+        agent.worktree_path = Some(worktree_path.to_path_buf());
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent
+    }
+
+    fn write_session_with_project_state_root(
+        session_id: &str,
+        worktree_path: &Path,
+        project_state_root: &Path,
+    ) {
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let session = format!(
+            r#"
+id = "{session_id}"
+worktree_path = "{}"
+project_state_root = "{}"
+branch = "work/20260601-0934"
+agent_id = {{ type = "Codex" }}
+status = "Running"
+launch_command = "codex"
+launch_args = []
+created_at = "2026-06-01T00:00:00Z"
+updated_at = "2026-06-01T00:00:00Z"
+last_activity_at = "2026-06-01T00:00:00Z"
+display_name = "Codex"
+"#,
+            worktree_path.display(),
+            project_state_root.display()
+        );
+        std::fs::write(sessions_dir.join(format!("{session_id}.toml")), session)
+            .expect("write session");
+    }
+
     #[test]
     fn parse_workspace_update_accepts_summary_fields() {
         let parsed = parse(&[
@@ -1363,6 +1423,135 @@ mod tests {
         assert_eq!(saved.title, "Work coordination");
         assert_eq!(saved.status_category, WorkspaceStatusCategory::Blocked);
         assert_eq!(saved.owner.as_deref(), Some("SPEC-2359"));
+    }
+
+    #[test]
+    fn workspace_update_agent_session_uses_stored_project_state_root() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        canonical.agents.push(assigned_agent_with_window(
+            "session-1",
+            "project::agent-1",
+            &worktree,
+        ));
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+
+        let mut env = TestEnv::new(worktree.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Implement canonical Project State identity".to_string()),
+                title_summary: Some("Project State identity".to_string()),
+            },
+            &mut out,
+        )
+        .expect("update workspace");
+
+        assert_eq!(code, 0);
+        let saved = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("canonical agent");
+        assert_eq!(
+            agent.title_summary.as_deref(),
+            Some("Project State identity")
+        );
+        assert_eq!(
+            agent.current_focus.as_deref(),
+            Some("Implement canonical Project State identity")
+        );
+        assert!(
+            load_workspace_projection(&worktree)
+                .expect("load worktree projection")
+                .is_none(),
+            "agent workspace update must not create a split Project State under the worktree root"
+        );
+    }
+
+    #[test]
+    fn workspace_update_repairs_split_agent_title_into_canonical_root() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        canonical.agents.push(assigned_agent_with_window(
+            "session-1",
+            "project::agent-1",
+            &worktree,
+        ));
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+
+        let mut split = WorkspaceProjection::default_for_project(&worktree);
+        let mut split_agent =
+            assigned_agent_with_window("session-1", "project::agent-1", &worktree);
+        split_agent.title_summary = Some("Split root title".to_string());
+        split_agent.current_focus = Some("Previously written to worktree root".to_string());
+        split.agents.push(split_agent);
+        save_workspace_projection(&worktree, &split).expect("save split projection");
+
+        let mut env = TestEnv::new(worktree.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Continue from canonical Project State".to_string()),
+                title_summary: None,
+            },
+            &mut out,
+        )
+        .expect("update workspace");
+
+        assert_eq!(code, 0);
+        let saved = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("canonical agent");
+        assert_eq!(
+            agent.title_summary.as_deref(),
+            Some("Split root title"),
+            "the first canonical update after the fix must recover the title written to the old split root"
+        );
+        assert_eq!(
+            agent.current_focus.as_deref(),
+            Some("Continue from canonical Project State")
+        );
     }
 
     #[test]
