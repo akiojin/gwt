@@ -150,15 +150,48 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
 });
 
+test("System tab exposes Launch GWT at login autostart control", () => {
+  assert.match(
+    appSource,
+    /autostartEnabled:\s*false/,
+    "expected System settings state to track autostart enabled status",
+  );
+  assert.match(
+    appSource,
+    /autostartPreviousEnabled:\s*false/,
+    "expected System settings state to retain the previous autostart value for failed updates",
+  );
+  assert.match(
+    appSource,
+    /systemSettingsState\.autostartEnabled\s*=\s*systemSettingsState\.autostartPreviousEnabled\s*===\s*true/,
+    "expected autostart update errors to restore the last confirmed value",
+  );
+  assert.match(
+    appSource,
+    /autostartText\.textContent\s*=\s*"Launch GWT at login"/,
+    "expected System tab autostart checkbox label",
+  );
+  assert.match(
+    appSource,
+    /send\(\{\s*kind:\s*"update_autostart",\s*enabled:\s*next\s*\}\)/,
+    "expected autostart checkbox onChange to send update_autostart",
+  );
+});
+
 test("renderSettingsWindow requests current settings via get_system_settings", () => {
   assert.match(
     appSource,
     /send\(\{\s*kind:\s*"get_system_settings"\s*\}\)/,
     "expected renderSettingsWindow to send get_system_settings on open",
   );
+  assert.match(
+    appSource,
+    /send\(\{\s*kind:\s*"get_autostart_status"\s*\}\)/,
+    "expected renderSettingsWindow to send get_autostart_status on open",
+  );
 });
 
-test("Frontend dispatches all three system_settings backend events", () => {
+test("Frontend dispatches all system_settings and autostart backend events", () => {
   // The dispatch must handle the three reply variants from
   // crates/gwt/src/system_settings.rs: SystemSettings (load),
   // SystemSettingsUpdated (save success), SystemSettingsError (failure).
@@ -166,6 +199,8 @@ test("Frontend dispatches all three system_settings backend events", () => {
     /case\s+"system_settings":/,
     /case\s+"system_settings_updated":/,
     /case\s+"system_settings_error":/,
+    /case\s+"autostart_status":/,
+    /case\s+"autostart_error":/,
   ]) {
     assert.match(
       appSource,
@@ -173,6 +208,24 @@ test("Frontend dispatches all three system_settings backend events", () => {
       `expected backend event dispatch case: ${kind}`,
     );
   }
+});
+
+test("app.js consumes #about hash by opening the About GWT version surface", () => {
+  assert.match(
+    appSource,
+    /window\.addEventListener\(\s*"hashchange",\s*consumeAboutHash/,
+    "expected app.js to listen for #about hash changes",
+  );
+  assert.match(
+    appSource,
+    /window\.location\.hash\s*===\s*"#about"/,
+    "expected app.js to detect #about hash exactly",
+  );
+  assert.match(
+    appSource,
+    /releaseNotesWindow\.openAbout\(versionState\.current\s*\|\|\s*null\)/,
+    "expected #about to open the About GWT version surface",
+  );
 });
 
 test("Custom Agents panel keeps the data-role='settings-scroll' hook for the legacy renderer", () => {

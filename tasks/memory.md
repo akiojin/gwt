@@ -6397,6 +6397,13 @@ Context: Agent TTY overlay had been intentionally disabled, but Launch completio
 Learning: When a process fails before a PTY exists, status/detail chrome is not enough. Emit a normal terminal_output diagnostic and replay it through terminal_snapshot on frontend reconnect; do not reintroduce foreground overlays.
 Future Action: For any future launch/startup failure path that can happen before PTY output, add tests for both immediate TerminalOutput and reconnect TerminalSnapshot visibility.
 
+## 2026-06-01 — Seed project tabs for isolated HOME visual verification
+
+Type: failure-pattern
+Context: SPEC-2785 status strip visual verification launched target/debug/gwt with a temporary HOME to avoid the user production GWT.app tray lock. The server was reachable, but the UI stopped at Open Project because the isolated HOME had an empty ~/.gwt/session.json.
+Learning: A reachable fresh gwt URL is not enough for visual verification when HOME is isolated. If the target UI surface requires an opened project, the isolated session.json must contain the current checkout project tab before asking the user to verify.
+Future Action: For headless-browser-check or fresh checkout UI verification with temporary HOME, pre-seed ~/.gwt/session.json with the current worktree project tab, then verify via browser automation that the page is past Open Project and the requested UI surface is visible before sharing the URL.
+
 ## 2026-06-01 — frontend root module route parity
 
 Type: lesson
@@ -6445,3 +6452,73 @@ Type: lesson
 Context: SPEC-2008 Phase 26.F: user could scroll only after maximizing the agent window because fresh frontend ready / reconnect snapshots contained only the current vt100 visible screen.
 Learning: A normal-size agent window with xterm baseY=0 can mean the backend snapshot did not replay scrollback; maximizing can create misleading xterm scrollback through redraw and hide the real source of the bug.
 Future Action: For terminal scroll bugs, measure baseY/viewportY on fresh connect and verify backend snapshot composition includes scrollback before changing wheel routing or resize behavior.
+
+## 2026-06-01 — SPEC section edits must stay sequential
+
+Type: workflow
+Context: During SPEC-2013 Phase 6, parallel gwtd issue spec --edit calls on spec/plan/tasks caused one section update to be overwritten and required sequential re-application.
+Learning: Same-issue SPEC section edits share one issue body and can race if run in parallel.
+Future Action: For one SPEC issue, read, patch, write, and re-read each section sequentially; never use multi_tool_use.parallel for gwtd issue spec --edit.
+
+## 2026-06-01 — Agent title updates must resolve canonical Project State root
+
+Type: lesson
+Context: SPEC-2359 Phase W-10: gwtd workspace update --agent-session was writing title/focus into the linked worktree Project State root while the live GUI watched the Workspace Home Project State root.
+Learning: Do not use an agent worktree path as the implicit Project State identity. Persist Session.project_state_root during GUI launch, route CLI/hook reads and writes through that canonical root, and repair old split same-session projection data by updated_at.
+Future Action: Before changing Agent title, Workspace, hook, or Project State behavior, add a regression test with a Workspace Home project root and a linked worktree agent so canonical-root and worktree-root writes cannot diverge again.
+
+## 2026-06-01 — Fresh browser checks must never share production gwt URLs
+
+Type: lesson
+Context: User corrected the headless-browser-check workflow after it printed an existing tray-resident production URL. The desired verification URL must come from the modified checkout's own freshly launched server.
+Learning: Browser verification skills for gwt must isolate HOME/USERPROFILE, launch the current checkout's target/debug/gwt with --no-tray --no-open, seed session.json for the checkout, and reject any URL reported after an existing tray instance warning.
+Future Action: When providing a gwt verification URL, use the browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
+
+## 2026-06-01 — Fresh browser verification should not use Start Work unless credentials are proven
+
+Type: lesson
+Context: During gwt-fresh-browser-check, the user saw a failed Claude Code window because the isolated HOME Start Work path tried to create remote branch origin/work/20260601-1042 and git push failed with terminal prompts disabled.
+Learning: Fresh browser checks isolate HOME and set GIT_TERMINAL_PROMPT=0, so Start Work can fail on GitHub HTTPS authentication even when the app under test is otherwise fine. Verification should avoid Start Work unless the feature under test requires it and branch creation credentials are preflighted.
+Future Action: For gwt fresh UI checks, seed the target project/window or launch on the current branch path; if a failed remote-branch Agent window appears, close it and treat it as verification setup noise rather than feature evidence.
+
+## 2026-06-01 — Project-local skills do not need repository prefix
+
+Type: workflow
+Context: The browser verification skill was renamed to `gwt-fresh-browser-check` even though it lives inside this gwt repository's project-local skill set. The user corrected that `gwt-*` prefixes are redundant for gwt development skills.
+Learning: For project-local skills, the repository context already supplies the namespace. Use concise action/domain names and keep the directory name, frontmatter name, and in-skill title aligned.
+Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as `gwt-*` unless the user explicitly requests one.
+
+## 2026-06-01 — Use concise browser-check skill name
+
+Type: workflow
+Context: After removing the project-local gwt- prefix, the skill was still named fresh-browser-check. The user clarified that browser-check is sufficient.
+Learning: When the skill's behavior already says it must launch a fresh isolated server, the public skill name does not need to include implementation qualifiers like fresh. Prefer the concise user-facing trigger name.
+Future Action: Name this browser verification skill browser-check in project-local skill directories, with freshness and isolation requirements documented inside SKILL.md rather than encoded in the skill name.
+
+## 2026-06-01 — Hidden attribute can be overridden by component display rules
+
+Type: lesson
+Context: SPEC-2009 Branches notice hotfix: .branch-notice used display:grid, so a hidden notice still rendered as an empty red band after branch detail checking completed.
+Learning: When a component class sets display explicitly, hidden elements need an explicit selector such as .component[hidden] { display: none; } and a visual regression contract, because the class rule can override the UA hidden style.
+Future Action: For UI surfaces with reusable notice/banner components, add hidden-state display contracts in both static CSS tests and browser/UI tests whenever the component sets display.
+
+## 2026-06-01 — FrontendReady must replay nullable singleton tombstones
+
+Type: lesson
+Context: Launch Wizard close recovery after heavy Launch Agent processing / Event Hub queue overflow investigation on 2026-06-01.
+Learning: A successful mutation can emit a close event, but bounded ClientHub overflow may disconnect a slow WebView before it receives the frame. Reconnect recovery must be authoritative for latest-wins nullable singleton state; omitting None/tombstone payloads leaves stale frontend UI.
+Future Action: When adding nullable latest-wins frontend state, make FrontendReady reply with both Some(current state) and None(tombstone), and add RED reconnect-sync coverage before relying on one-shot broadcast close events.
+
+## 2026-06-01 — User-accepted visual verification for rare load-only UI failures
+
+Type: lesson
+Context: Launch Wizard close recovery after reconnect depended on an extreme terminal load condition that was hard for the user to reproduce manually after live E2E RED/GREEN coverage existed.
+Learning: When a UI failure is rare and load-dependent, deterministic E2E evidence can be the strongest practical proof; if the user explicitly accepts that evidence, record the acceptance in the SPEC instead of keeping the work blocked on manual reproduction.
+Future Action: For future rare load-only UI bugs, add a deterministic E2E that models the lost or delayed event path, record RED/GREEN evidence, then ask the user whether that evidence is sufficient when manual reproduction is impractical.
+
+## 2026-06-01 — Seed session for isolated GUI verification
+
+Type: lesson
+Context: SPEC-2920 tray/About verification used an isolated HOME. With an empty ~/.gwt/session.json, the app opened the Open Project picker instead of the intended checkout surface.
+Learning: Isolated GUI verification that must land on an in-project surface needs a seeded session.json pointing at the checkout under test; otherwise the verification can be blocked before the changed UI is reachable.
+Future Action: Before sharing a manual GUI verification URL from a temp HOME, seed ~/.gwt/session.json with the target checkout tab and verify the served URL reaches the intended screen.

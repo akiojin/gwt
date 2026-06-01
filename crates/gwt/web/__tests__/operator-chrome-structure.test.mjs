@@ -718,6 +718,79 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
   );
 });
 
+test("Branches detail-check state explains checking and interrupted cleanup safety", () => {
+  assert.match(
+    appSource,
+    /function\s+branchLoadStatusSummary\(state\)/,
+    "expected Branches to derive a status summary from branch load state",
+  );
+  for (const copy of [
+    "Checking branch details",
+    "Branch detail check interrupted",
+    "Safety unknown",
+    "Refresh to verify cleanup safety",
+  ]) {
+    assert.ok(appSource.includes(copy), `expected Branches clarity copy: ${copy}`);
+  }
+  assert.doesNotMatch(
+    appSource,
+    /Cleanup status unavailable/,
+    "Branches rows should explain unknown safety instead of showing an unavailable cleanup placeholder",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /state\.loading\s*\?\s*"loading"\s*:\s*"unknown"/,
+    "Branches cleanup badges should not collapse interrupted hydration into an ambiguous unknown label",
+  );
+  for (const selector of [
+    ".branch-notice-title",
+    ".branch-notice-detail",
+    ".branch-notice-hint",
+  ]) {
+    assert.ok(inlineStyle.includes(selector), `missing Branches status summary CSS: ${selector}`);
+  }
+  assert.match(
+    inlineStyle,
+    /\.branch-notice\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden Branches notices must not leave an empty status band behind",
+  );
+});
+
+test("Branches detail-check checking state uses motion without animating static states", () => {
+  assert.match(
+    inlineStyle,
+    /@keyframes\s+branch-detail-check-sweep/,
+    "expected Branches checking summary to define a named sweep animation",
+  );
+  assert.match(
+    inlineStyle,
+    /@keyframes\s+branch-cleanup-checking-pulse/,
+    "expected Branches checking badge to define a named pulse animation",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-notice\[data-branch-status="checking"\]::before[\s\S]+animation:\s*branch-detail-check-sweep/,
+    "expected only the checking summary notice to run the progress sweep",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-cleanup-badge\.loading[\s\S]+animation:\s*branch-cleanup-checking-pulse/,
+    "expected only checking cleanup badges to pulse",
+  );
+
+  const reducedMotion = extractMediaBlocks(inlineStyle, "prefers-reduced-motion: reduce");
+  assert.match(
+    reducedMotion,
+    /branch-notice\[data-branch-status="checking"\]::before[\s\S]+animation:\s*none/,
+    "reduced-motion users must not get the checking summary sweep",
+  );
+  assert.match(
+    reducedMotion,
+    /branch-cleanup-badge\.loading[\s\S]+animation:\s*none/,
+    "reduced-motion users must not get the checking badge pulse",
+  );
+});
+
 test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
@@ -810,6 +883,23 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   const clockCell = document.getElementById("op-strip-clock")?.parentElement;
   assert.ok(clockCell, "clock cell exists");
   assert.equal(clockCell.getAttribute("aria-hidden"), "true");
+});
+
+test("Status Strip omits the retired server URL cell", () => {
+  assert.equal(document.getElementById("op-strip-server-url"), null);
+  assert.equal(document.getElementById("op-strip-server-url-copy"), null);
+  assert.equal(document.querySelector(".op-status-strip__cell--server-url"), null);
+  assert.doesNotMatch(appSource, /op-strip-server-url/);
+  assert.doesNotMatch(appSource, /kind:\s*"open_server_url"/);
+});
+
+test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () => {
+  const strip = document.getElementById("op-status-strip");
+  const connectionLabel = strip?.querySelector("[data-role='connection-label']");
+  assert.ok(connectionLabel, "expected a connection label in the status strip");
+  assert.equal(connectionLabel.textContent?.trim(), "ONLINE");
+  assert.doesNotMatch(html, />\s*LIVE\s*</);
+  assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
 });
 
 test("Sidebar Quick rows expose aria-keyshortcuts and kbd badges", () => {
@@ -1510,6 +1600,19 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
     appSource,
     /wizardModal\.classList\.contains\("open"\)[\s\S]{0,500}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc/close to locally dismiss error-only wizard state before sending backend cancel",
+  );
+});
+
+test("Launch wizard tombstone does not dismiss open-error modal state", () => {
+  assert.match(
+    appSource,
+    /if\s*\(deferred\.kind\s*===\s*"launch_wizard_state"\)[\s\S]{0,500}?if\s*\(deferred\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*deferred\.wizard/,
+    "expected deferred launch_wizard_state tombstones to preserve launchWizardOpenError",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,900}?if\s*\(event\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*event\.wizard/,
+    "expected launch_wizard_state tombstones to clear stale wizard state without clearing launchWizardOpenError",
   );
 });
 
