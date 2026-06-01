@@ -156,6 +156,15 @@ impl ClientHub {
         }
 
         if !stale_clients.is_empty() {
+            stale_clients.sort();
+            stale_clients.dedup();
+            tracing::warn!(
+                target: "gwt::client_hub",
+                queue_capacity = CLIENT_QUEUE_CAPACITY,
+                stale_client_count = stale_clients.len(),
+                stale_clients = ?stale_clients,
+                "evicting lagging websocket clients after outbound queue overflow; reconnect will replay latest state"
+            );
             let mut clients = self
                 .clients
                 .lock()
