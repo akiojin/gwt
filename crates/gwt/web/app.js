@@ -52,6 +52,7 @@
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
+        rearmRefreshOnVisible,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -2926,18 +2927,23 @@
 
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
-        if (
-          !runtime ||
-          runtime.viewportRefreshFrame !== null ||
-          !canRefreshTerminalViewport(windowId)
-        ) {
+        if (!runtime) {
+          return;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          runtime.viewportRefreshPending = true;
+          return;
+        }
+        if (runtime.viewportRefreshFrame !== null) {
           return;
         }
         runtime.viewportRefreshFrame = requestAnimationFrame(() => {
           runtime.viewportRefreshFrame = null;
           if (!canRefreshTerminalViewport(windowId)) {
+            runtime.viewportRefreshPending = true;
             return;
           }
+          runtime.viewportRefreshPending = false;
           refreshTerminalViewport(windowId);
         });
       }
@@ -2948,6 +2954,60 @@
           return;
         }
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
+      }
+
+      function forceTerminalViewportRefresh(windowId, { shouldPersistGeometry = true } = {}) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          return false;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          runtime.viewportRefreshPending = true;
+          return false;
+        }
+        const activation = runTerminalActivationSequence({
+          runtime,
+          windowId,
+          shouldFocus: false,
+          shouldPersistGeometry,
+          sendGeometry,
+        });
+        if (!activation.ran) {
+          runtime.viewportRefreshPending = true;
+          scheduleTerminalFocusActivation(windowId, { shouldPersistGeometry });
+          return false;
+        }
+        runtime.viewportRefreshPending = false;
+        refreshTerminalViewport(windowId);
+        return true;
+      }
+
+      function rearmPendingTerminalViewportRefresh(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          return false;
+        }
+        return rearmRefreshOnVisible({
+          hasPendingRefresh: () => runtime.viewportRefreshPending === true,
+          canRefresh: () => canRefreshTerminalViewport(windowId),
+          clearPendingRefresh: () => {
+            runtime.viewportRefreshPending = false;
+          },
+          scheduleRefresh: () => {
+            forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
+          },
+        });
+      }
+
+      function rearmVisibleTerminalViewportRefreshes() {
+        for (const windowId of terminalMap.keys()) {
+          if (!canRefreshTerminalViewport(windowId)) {
+            continue;
+          }
+          if (!rearmPendingTerminalViewportRefresh(windowId)) {
+            scheduleTerminalViewportRefresh(windowId);
+          }
+        }
       }
 
       function scheduleTerminalFocusActivation(
@@ -4580,6 +4640,15 @@
           terminalRoot: terminalContainer,
           terminal,
           window,
+          isApplicationScrollFallbackEnabled: () =>
+            isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
+          sendTerminalInput: (data) => {
+            if (terminalMap.get(windowId)?.isReady !== true) {
+              return;
+            }
+            terminal.focus();
+            send({ kind: "terminal_input", id: windowId, data });
+          },
         });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         // Re-fit whenever the terminal container actually changes size. Covers
@@ -4638,6 +4707,7 @@
           fitAddon,
           cleanup,
           viewportRefreshFrame: null,
+          viewportRefreshPending: false,
           activationFrame: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
           // `isReady` flips to `true` AFTER the first
@@ -4813,16 +4883,7 @@
           // sequence directly so the viewport is consistent the moment the
           // snapshot lands. We skip focus stealing (`shouldFocus: false`)
           // because snapshot replays happen on background tabs too.
-          if (canRefreshTerminalViewport(windowId)) {
-            runTerminalActivationSequence({
-              runtime,
-              windowId,
-              shouldFocus: false,
-              shouldPersistGeometry: true,
-              sendGeometry,
-            });
-          }
-          scheduleTerminalViewportRefresh(windowId);
+          forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
         });
       }
 
@@ -11806,7 +11867,10 @@
                 element,
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
-                onReveal: () => scheduleTerminalFocusActivation(windowId),
+                onReveal: () => {
+                  rearmPendingTerminalViewportRefresh(windowId);
+                  scheduleTerminalFocusActivation(windowId);
+                },
               });
             }
             for (const windowId of visibility.removed) {
@@ -11864,7 +11928,10 @@
                 element,
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
-                onReveal: () => scheduleTerminalFocusActivation(windowData.id),
+                onReveal: () => {
+                  rearmPendingTerminalViewportRefresh(windowData.id);
+                  scheduleTerminalFocusActivation(windowData.id);
+                },
               });
             }
 
@@ -13893,6 +13960,12 @@
           syncMaximizedWindowsToViewport();
         },
       });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          return;
+        }
+        rearmVisibleTerminalViewportRefreshes();
+      });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {
           return;
@@ -14027,6 +14100,35 @@
             return;
           }
           send(detail);
+        });
+        window.__gwtTerminalTestApi = Object.freeze({
+          metrics(windowId) {
+            const runtime = terminalMap.get(windowId);
+            const terminal = runtime?.terminal;
+            const buffer = terminal?.buffer?.active;
+            const viewport = terminal?.element
+              ?.parentElement
+              ?.querySelector?.(".xterm-viewport");
+            return {
+              hasRuntime: Boolean(runtime),
+              isReady: runtime?.isReady ?? null,
+              viewportRefreshPending: runtime?.viewportRefreshPending === true,
+              cols: terminal?.cols ?? 0,
+              rows: terminal?.rows ?? 0,
+              baseY: buffer?.baseY ?? 0,
+              viewportY: buffer?.viewportY ?? 0,
+              bufferLength: buffer?.length ?? 0,
+              domScrollTop: viewport?.scrollTop ?? 0,
+              domScrollHeight: viewport?.scrollHeight ?? 0,
+              domClientHeight: viewport?.clientHeight ?? 0,
+            };
+          },
+          scrollToBottom(windowId) {
+            const terminal = terminalMap.get(windowId)?.terminal;
+            if (terminal && typeof terminal.scrollToBottom === "function") {
+              terminal.scrollToBottom();
+            }
+          },
         });
       }
 

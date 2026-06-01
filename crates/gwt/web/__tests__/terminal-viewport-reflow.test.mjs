@@ -21,6 +21,7 @@ import {
   classifyProjectWindowVisibility,
   elementHasLayoutBox,
   gateTerminalInputForReadiness,
+  rearmRefreshOnVisible,
   runTerminalActivationSequence,
   viewportEligibleForRefresh,
 } from "../terminal-viewport-reflow.js";
@@ -134,8 +135,10 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
   const { document } = parseHTML(`<!doctype html><body></body>`);
   const visibleEl = document.createElement("section");
   visibleEl.hidden = false;
+  document.body.appendChild(visibleEl);
   const hiddenEl = document.createElement("section");
   hiddenEl.hidden = true;
+  document.body.appendChild(hiddenEl);
 
   // Hidden element short-circuits before the workspace state is consulted.
   assert.equal(
@@ -157,11 +160,69 @@ test("viewportEligibleForRefresh skips display:none and minimised windows (T-186
     true,
   );
 
+  const disconnectedEl = document.createElement("section");
+  disconnectedEl.hidden = false;
+  assert.equal(
+    viewportEligibleForRefresh({
+      element: disconnectedEl,
+      workspaceWindow: { minimized: false },
+    }),
+    false,
+    "detached elements must skip refresh",
+  );
+
   // Defensive: missing element / workspaceWindow falls back to allow.
   assert.equal(
     viewportEligibleForRefresh({ element: null, workspaceWindow: null }),
     true,
   );
+});
+
+test("rearmRefreshOnVisible reruns a pending hidden viewport refresh once visible (T-199)", () => {
+  const calls = [];
+  let pending = true;
+  let visible = false;
+
+  const attemptHidden = rearmRefreshOnVisible({
+    hasPendingRefresh: () => pending,
+    canRefresh: () => visible,
+    clearPendingRefresh: () => {
+      pending = false;
+      calls.push("clear");
+    },
+    scheduleRefresh: () => calls.push("refresh"),
+  });
+
+  assert.equal(attemptHidden, false, "hidden windows keep the pending refresh armed");
+  assert.equal(pending, true, "pending flag must survive while hidden");
+  assert.deepEqual(calls, []);
+
+  visible = true;
+  const attemptVisible = rearmRefreshOnVisible({
+    hasPendingRefresh: () => pending,
+    canRefresh: () => visible,
+    clearPendingRefresh: () => {
+      pending = false;
+      calls.push("clear");
+    },
+    scheduleRefresh: () => calls.push("refresh"),
+  });
+
+  assert.equal(attemptVisible, true);
+  assert.equal(pending, false, "pending flag must clear before the refresh is scheduled");
+  assert.deepEqual(calls, ["clear", "refresh"]);
+});
+
+test("rearmRefreshOnVisible is a no-op when no hidden refresh is pending (T-199)", () => {
+  const calls = [];
+  const didRearm = rearmRefreshOnVisible({
+    hasPendingRefresh: () => false,
+    canRefresh: () => true,
+    clearPendingRefresh: () => calls.push("clear"),
+    scheduleRefresh: () => calls.push("refresh"),
+  });
+  assert.equal(didRearm, false);
+  assert.deepEqual(calls, []);
 });
 
 test("runTerminalActivationSequence renders before fit and emits geometry (T-199 / FR-056)", () => {
@@ -620,6 +681,26 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /classifyProjectWindowVisibility\(\{/,
     "project tab switches must classify inactive project windows as hidden instead of disposing their terminal runtimes",
+  );
+  assert.match(
+    appSource,
+    /rearmRefreshOnVisible/,
+    "hidden refresh requests must re-arm through the shared visibility helper",
+  );
+  assert.match(
+    appSource,
+    /document\.addEventListener\("visibilitychange"[\s\S]*?rearmVisibleTerminalViewportRefreshes\(\);/,
+    "document visibility restore must re-arm visible terminal viewport refreshes",
+  );
+  assert.match(
+    appSource,
+    /function forceTerminalViewportRefresh\(windowId,[\s\S]*?viewportRefreshPending = true[\s\S]*?runTerminalActivationSequence\(\{/,
+    "forceTerminalViewportRefresh must mark hidden/unresolved terminals pending and run the activation sequence when visible",
+  );
+  assert.match(
+    appSource,
+    /replaceTerminalSnapshot\([\s\S]*?forceTerminalViewportRefresh\(windowId,\s*\{\s*shouldPersistGeometry:\s*true\s*\}\);/,
+    "snapshot replay must use the force refresh path so terminal.reset() cannot strand scrollback",
   );
   // SPEC-2008 Phase 26.B / FR-056 wiring: activation path must delegate
   // to runTerminalActivationSequence so refresh-before-fit ordering stays

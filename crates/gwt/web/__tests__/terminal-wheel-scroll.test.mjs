@@ -5,10 +5,15 @@
 // only wires a verified primitive into each terminal runtime.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  APPLICATION_SCROLL_PAGE_DOWN,
+  APPLICATION_SCROLL_PAGE_UP,
+  applicationScrollInputForWheel,
   createTerminalWheelScrollController,
+  hasNormalScrollback,
   isTerminalMouseTrackingActive,
   wheelDeltaToScrollLines,
 } from "../terminal-wheel-scroll.js";
@@ -66,6 +71,41 @@ test("non-Windows terminal wheel behavior is unchanged", () => {
   fixture.dispose();
 });
 
+test("agent fullscreen terminal wheel sends PageUp and PageDown when xterm has no scrollback", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: { buffer: { active: { baseY: 0 } } },
+  });
+
+  fixture.terminalRoot.dispatchEvent(wheelEvent(fixture.window, { deltaY: -96 }));
+  fixture.terminalRoot.dispatchEvent(wheelEvent(fixture.window, { deltaY: 96 }));
+
+  assert.deepEqual(fixture.inputCalls, [
+    APPLICATION_SCROLL_PAGE_UP,
+    APPLICATION_SCROLL_PAGE_DOWN,
+  ]);
+  assert.deepEqual(fixture.scrollCalls, []);
+  assert.equal(fixture.bubbledWheelCount, 0);
+  fixture.dispose();
+});
+
+test("agent fullscreen wheel fallback does not steal normal xterm scrollback", () => {
+  const fixture = mountFixture({
+    isWindowsHost: () => false,
+    applicationScrollFallback: true,
+    terminalOptions: { buffer: { active: { baseY: 8 } } },
+  });
+  const event = wheelEvent(fixture.window, { deltaY: -96 });
+
+  fixture.terminalRoot.dispatchEvent(event);
+
+  assert.equal(event.defaultPrevented, false);
+  assert.deepEqual(fixture.inputCalls, []);
+  assert.equal(fixture.bubbledWheelCount, 1);
+  fixture.dispose();
+});
+
 test("dispose removes the terminal wheel listener", () => {
   const fixture = mountFixture({ isWindowsHost: () => true });
   fixture.dispose();
@@ -93,9 +133,66 @@ test("isTerminalMouseTrackingActive reads xterm public mouse tracking mode", () 
   assert.equal(isTerminalMouseTrackingActive({}), false);
 });
 
-function mountFixture({ isWindowsHost, terminalOptions = {} }) {
+test("applicationScrollInputForWheel only emits fallback input for plain wheel without normal scrollback", () => {
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: -1 }),
+      { terminal: { buffer: { active: { baseY: 0 } } }, enabled: true },
+    ),
+    APPLICATION_SCROLL_PAGE_UP,
+  );
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: 1 }),
+      { terminal: { buffer: { active: { baseY: 0 } } }, enabled: true },
+    ),
+    APPLICATION_SCROLL_PAGE_DOWN,
+  );
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: -1, metaKey: true }),
+      { terminal: { buffer: { active: { baseY: 0 } } }, enabled: true },
+    ),
+    null,
+  );
+  assert.equal(
+    applicationScrollInputForWheel(
+      wheelEvent(null, { deltaY: -1 }),
+      { terminal: { buffer: { active: { baseY: 5 } } }, enabled: true },
+    ),
+    null,
+  );
+});
+
+test("hasNormalScrollback reads xterm active buffer baseY", () => {
+  assert.equal(hasNormalScrollback({ buffer: { active: { baseY: 0 } } }), false);
+  assert.equal(hasNormalScrollback({ buffer: { active: { baseY: 1 } } }), true);
+  assert.equal(hasNormalScrollback({}), false);
+});
+
+test("app.js wires application wheel fallback only through agent window presets", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+
+  assert.match(
+    appSource,
+    /isApplicationScrollFallbackEnabled:\s*\(\)\s*=>\s*isAgentWindowPreset\(workspaceWindowById\(windowId\)\?\.preset\)/,
+    "agent fullscreen wheel fallback must be limited to agent presets",
+  );
+  assert.match(
+    appSource,
+    /sendTerminalInput:\s*\(data\)\s*=>\s*\{[\s\S]*?send\(\{\s*kind:\s*"terminal_input",\s*id:\s*windowId,\s*data\s*\}\);[\s\S]*?\}/,
+    "agent fullscreen wheel fallback must send PageUp/PageDown through terminal_input",
+  );
+});
+
+function mountFixture({
+  isWindowsHost,
+  terminalOptions = {},
+  applicationScrollFallback = false,
+} = {}) {
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
+  const inputCalls = [];
   let bubbledWheelCount = 0;
   terminalRoot.setBubbleHandler(() => {
     bubbledWheelCount += 1;
@@ -107,6 +204,8 @@ function mountFixture({ isWindowsHost, terminalOptions = {} }) {
       scrollLines: (lines) => scrollCalls.push(lines),
       ...terminalOptions,
     },
+    isApplicationScrollFallbackEnabled: () => applicationScrollFallback,
+    sendTerminalInput: (data) => inputCalls.push(data),
     window: { navigator: { platform: "Win32" } },
     isWindowsHost,
   });
@@ -114,6 +213,7 @@ function mountFixture({ isWindowsHost, terminalOptions = {} }) {
   return {
     terminalRoot,
     scrollCalls,
+    inputCalls,
     get bubbledWheelCount() {
       return bubbledWheelCount;
     },

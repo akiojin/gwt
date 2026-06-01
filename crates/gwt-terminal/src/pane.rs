@@ -16,6 +16,8 @@ pub enum PaneStatus {
     Error(String),
 }
 
+const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
 ///
 /// `pty` is wrapped in an `Arc` so that callers who only need to write input
@@ -134,6 +136,27 @@ impl Pane {
         self.parser.screen()
     }
 
+    /// Build a replayable terminal snapshot for frontend reconnect.
+    ///
+    /// `vt100::Screen::contents_formatted()` only describes the currently
+    /// visible grid. Prepending completed scrollback lines lets a fresh xterm.js
+    /// instance rebuild normal-buffer history before the current screen is
+    /// redrawn.
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        let mut snapshot = Vec::new();
+        let scrollback_len = self.scrollback.len();
+        let visible_rows = usize::from(self.parser.screen().size().0);
+        let replayable_len = scrollback_len.saturating_sub(visible_rows);
+        let start = replayable_len.saturating_sub(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+
+        for line in self.scrollback.get_lines(start, replayable_len - start) {
+            append_snapshot_scrollback_line(&mut snapshot, line);
+        }
+
+        snapshot.extend_from_slice(&self.parser.screen().contents_formatted());
+        snapshot
+    }
+
     /// Get scrollback lines from the ring buffer.
     pub fn scrollback_lines(&self, start: usize, count: usize) -> Vec<&ScrollbackLine> {
         self.scrollback.get_lines(start, count)
@@ -211,6 +234,83 @@ impl Pane {
     }
 }
 
+fn append_snapshot_scrollback_line(snapshot: &mut Vec<u8>, line: &ScrollbackLine) {
+    let before = snapshot.len();
+    let raw = if line.formatted.is_empty() {
+        line.text.as_bytes()
+    } else {
+        line.formatted.as_slice()
+    };
+
+    append_sanitized_snapshot_line(snapshot, raw);
+    if snapshot.len() > before {
+        snapshot.push(b'\n');
+    }
+}
+
+fn append_sanitized_snapshot_line(output: &mut Vec<u8>, raw: &[u8]) {
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index] {
+            b'\x1b' => {
+                index = append_or_skip_escape_sequence(output, raw, index);
+            }
+            b'\r' | b'\t' => {
+                output.push(raw[index]);
+                index += 1;
+            }
+            0x20..=0x7e | 0x80..=0xff => {
+                output.push(raw[index]);
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+}
+
+fn append_or_skip_escape_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
+    let Some(kind) = raw.get(start + 1).copied() else {
+        return start + 1;
+    };
+    match kind {
+        b'[' => append_or_skip_csi_sequence(output, raw, start),
+        b']' => skip_osc_sequence(raw, start),
+        _ => (start + 2).min(raw.len()),
+    }
+}
+
+fn append_or_skip_csi_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < raw.len() {
+        let byte = raw[index];
+        if (0x40..=0x7e).contains(&byte) {
+            let next = index + 1;
+            if byte == b'm' {
+                output.extend_from_slice(&raw[start..next]);
+            }
+            return next;
+        }
+        index += 1;
+    }
+    raw.len()
+}
+
+fn skip_osc_sequence(raw: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < raw.len() {
+        if raw[index] == b'\x07' {
+            return index + 1;
+        }
+        if raw[index] == b'\x1b' && raw.get(index + 1) == Some(&b'\\') {
+            return index + 2;
+        }
+        index += 1;
+    }
+    raw.len()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -260,6 +360,19 @@ mod tests {
         );
 
         let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_snapshot_sanitizer_preserves_sgr_but_drops_destructive_csi() {
+        let mut output = Vec::new();
+
+        append_sanitized_snapshot_line(&mut output, b"\x1b[H\x1b[J\x1b[31;1mALERT\x1b[0m\x1b[2K");
+
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            "\x1b[31;1mALERT\x1b[0m",
+            "scrollback replay must keep styling but not cursor moves or clears"
+        );
     }
 
     #[test]

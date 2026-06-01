@@ -198,8 +198,35 @@ export function classifyProjectWindowVisibility({
  * `.hidden` short-circuit ahead of the workspace `minimized` check.
  */
 export function viewportEligibleForRefresh({ element, workspaceWindow }) {
+  if (element && element.isConnected === false) return false;
   if (element && element.hidden) return false;
   if (workspaceWindow && workspaceWindow.minimized) return false;
+  return true;
+}
+
+/**
+ * Re-arm a viewport refresh that was requested while the terminal was
+ * temporarily ineligible for refresh (hidden tab, hidden document, or an
+ * unsettled layout). The pending flag is caller-owned so app.js can store it
+ * on each terminal runtime without this pure helper knowing about terminalMap.
+ *
+ * Returns true only when the pending refresh was consumed and the caller's
+ * refresh scheduler was invoked.
+ */
+export function rearmRefreshOnVisible({
+  hasPendingRefresh,
+  canRefresh,
+  clearPendingRefresh,
+  scheduleRefresh,
+}) {
+  const pending =
+    typeof hasPendingRefresh === "function"
+      ? hasPendingRefresh()
+      : Boolean(hasPendingRefresh);
+  if (!pending) return false;
+  if (typeof canRefresh === "function" && !canRefresh()) return false;
+  if (typeof clearPendingRefresh === "function") clearPendingRefresh();
+  if (typeof scheduleRefresh === "function") scheduleRefresh();
   return true;
 }
 

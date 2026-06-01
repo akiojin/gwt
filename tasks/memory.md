@@ -6403,3 +6403,45 @@ Type: lesson
 Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
+
+## 2026-06-01 — Isolated HOME live checks must avoid Start Work auth traps
+
+Type: lesson
+Context: During SPEC-2008 manual visual verification, current checkout was launched with isolated HOME to avoid tray lock collisions. The empty or partially linked HOME caused Start Work to attempt git push origin origin/develop:refs/heads/work/... without usable GitHub credentials, yielding fatal: could not read Username for https://github.com: terminal prompts disabled before the intended scroll check.
+Learning: For UI verification that only needs an existing worktree, do not drive Start Work in an isolated HOME unless Git/GitHub credentials are fully available and noninteractive. Prefer seeding session.json for the current worktree and using OpenActiveWorkLaunchWizard on the existing branch, or explicitly link required agent/git config while avoiding remote branch creation.
+Future Action: When preparing manual verification URLs with isolated HOME, document that the user should not use Start Work/Open Project for the check, close any failed remote-branch windows, and provide a pre-launched running agent or deterministic fixture for the exact UI behavior under test.
+
+## 2026-06-01 — Claude Code agent scrollback requires no-flicker off
+
+Type: lesson
+Context: SPEC-2008 agent window scroll regression: CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 alone still left Claude Code 2.1.159 in a fullscreen/no-flicker style renderer where xterm viewport scrollHeight equaled clientHeight and wheel did not move visible history.
+Learning: Claude Code may keep virtual scroll history inside its own renderer unless CLAUDE_CODE_NO_FLICKER=0 is also set. In this mode xterm viewport metrics may still look non-scrollable, so verify by observing screen content change after wheel input and by checking process env.
+Future Action: For future Claude Code terminal scroll fixes, set and test both CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 and CLAUDE_CODE_NO_FLICKER=0 while preserving explicit user/custom overrides; live verification should include process env plus wheel-driven content change.
+
+## 2026-06-01 — Isolated HOME Claude verification needs claude.json
+
+Type: lesson
+Context: During SPEC-2008 live debug verification, isolated HOME linked ~/.claude but initially omitted ~/.claude.json, causing Claude Code to show login/setup instead of the authenticated agent UI.
+Learning: Claude Code authentication/config in this environment depends on ~/.claude.json as well as ~/.claude. Linking only the directory can produce a misleading launch blocker unrelated to the feature under test.
+Future Action: When preparing isolated HOME live GUI verification for Claude Code, link both ~/.claude and ~/.claude.json before launching gwt, then confirm the agent reaches the normal TUI before testing the target behavior.
+
+## 2026-06-01 — Debug browser Open Project can require killing the verification gwt process
+
+Type: lesson
+Context: During SPEC-2008 user visual verification, the user clicked Open Project in a browser-served debug URL. The current checkout gwt process still answered HTTP 200, but Open Project had entered the native rfd FileDialog path and normal TERM did not stop the process; INT plus KILL was needed before starting a fresh URL.
+Learning: In browser-served verification, Open Project is not a safe recovery path. It can leave the validation server in a partially blocked native-dialog state even when HTTP health checks pass.
+Future Action: For future debug-browser verification, pre-open the target project and tell the user not to click Open Project. If they do, restart only the verification gwt process from the current checkout and issue a fresh URL; do not treat HTTP 200 as proof the user tab is usable.
+
+## 2026-06-01 — Claude fullscreen TUI wheel needs PageUp/PageDown fallback
+
+Type: lesson
+Context: SPEC-2008 agent window scroll regression persisted after setting CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 and CLAUDE_CODE_NO_FLICKER=0. Live debug URL showed wheel reached .xterm-screen and was not canvas-prevented, but xterm metrics stayed baseY=0 and scrollHeight=clientHeight, so there was no normal scrollback for wheel to move.
+Learning: Claude Code can render as a fullscreen TUI with internal scroll even when launch env asks for classic/no-alt behavior. In that state, xterm scrollback metrics are the wrong success criterion; wheel must be translated to the same terminal input that PageUp/PageDown sends, scoped only to agent presets and only when normal xterm scrollback is absent.
+Future Action: For future agent terminal scroll issues, measure wheel delivery, xterm baseY/scrollHeight, and PageUp/PageDown behavior separately. If baseY=0 but PageUp changes the TUI, add or verify an agent-only wheel-to-PageUp/PageDown fallback instead of continuing viewport reflow fixes.
+
+## 2026-06-01 — Terminal reconnect snapshots must replay scrollback
+
+Type: lesson
+Context: SPEC-2008 Phase 26.F: user could scroll only after maximizing the agent window because fresh frontend ready / reconnect snapshots contained only the current vt100 visible screen.
+Learning: A normal-size agent window with xterm baseY=0 can mean the backend snapshot did not replay scrollback; maximizing can create misleading xterm scrollback through redraw and hide the real source of the bug.
+Future Action: For terminal scroll bugs, measure baseY/viewportY on fresh connect and verify backend snapshot composition includes scrollback before changing wheel routing or resize behavior.
