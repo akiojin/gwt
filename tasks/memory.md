@@ -6410,3 +6410,10 @@ Type: lesson
 Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
+
+## 2026-06-01 — Agent title updates must resolve canonical Project State root
+
+Type: lesson
+Context: SPEC-2359 Phase W-10: gwtd workspace update --agent-session was writing title/focus into the linked worktree Project State root while the live GUI watched the Workspace Home Project State root.
+Learning: Do not use an agent worktree path as the implicit Project State identity. Persist Session.project_state_root during GUI launch, route CLI/hook reads and writes through that canonical root, and repair old split same-session projection data by updated_at.
+Future Action: Before changing Agent title, Workspace, hook, or Project State behavior, add a regression test with a Workspace Home project root and a linked worktree agent so canonical-root and worktree-root writes cannot diverge again.
