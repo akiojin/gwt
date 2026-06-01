@@ -21,6 +21,8 @@
         boardEntryOriginSessionId,
         boardEntryPreview,
         findBoardEntry,
+        groupBoardLanes,
+        GENERAL_LANE_KEY,
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
@@ -7334,6 +7336,48 @@
         updateProfileStatus(windowId);
       }
 
+      // SPEC-2959: the known Work lanes available to the Board, derived from
+      // the active Work projection. Used for lane labels and the composer
+      // "To:" selector.
+      function boardLaneWorkspaces() {
+        const works = Array.isArray(activeWorkProjection?.active_works)
+          ? activeWorkProjection.active_works
+          : [];
+        const result = [];
+        for (const work of works) {
+          const id = String(work?.id || "").trim();
+          if (!id) continue;
+          const agents = Array.isArray(work?.agents) ? work.agents : [];
+          const titleSummary =
+            agents.map((agent) => String(agent?.title_summary || "").trim()).find(Boolean) || "";
+          const branch =
+            String(work?.branch || "").trim() ||
+            agents.map((agent) => String(agent?.branch || "").trim()).find(Boolean) ||
+            "";
+          result.push({
+            id,
+            titleSummary,
+            title: String(work?.title || "").trim(),
+            branch,
+            lifecycle: String(work?.lifecycle_stage || "").trim(),
+          });
+        }
+        return result;
+      }
+
+      // SPEC-2959 FR-018: resolve the composer "To:" value. An explicit, still
+      // valid selection wins; otherwise default to the active Work, else General.
+      function boardComposerTarget(state) {
+        const ids = new Set(boardLaneWorkspaces().map((work) => work.id));
+        const explicit = state?.composerTarget;
+        if (explicit === GENERAL_LANE_KEY) return GENERAL_LANE_KEY;
+        if (explicit && ids.has(explicit)) return explicit;
+        const active = Array.isArray(currentProjectWorkspaceId)
+          ? currentProjectWorkspaceId.find((id) => ids.has(id))
+          : null;
+        return active || GENERAL_LANE_KEY;
+      }
+
       function submitBoardEntry(windowId) {
         const state = ensureBoardState(windowId);
         const body = state.composerBody.trim();
@@ -7352,6 +7396,14 @@
           parentId,
           existingEntryIds: new Set(state.entries.map((entry) => entry.id)),
         };
+        // SPEC-2959 FR-018..021: resolve the composer "To:" selection into the
+        // post's lane. General → broadcast (empty audience); a Work id pins the
+        // post to that lane; an empty selection lets the backend use the active
+        // workspace default.
+        const target = boardComposerTarget(state);
+        const broadcast = target === GENERAL_LANE_KEY;
+        const targetWorkspace =
+          !broadcast && target && target !== "__default__" ? target : null;
         send({
           kind: "post_board_entry",
           id: windowId,
@@ -7361,6 +7413,8 @@
           topics: [],
           owners: [],
           mentions,
+          target_workspace: targetWorkspace,
+          broadcast,
         });
         renderBoard(windowId);
       }
@@ -7567,7 +7621,10 @@
           );
         }
         let focusTarget = null;
-        for (const entry of visibleEntries) {
+        // SPEC-2959: build a single message card. Reused for every lane so the
+        // bubble layout, reply quote, for-you highlight, and origin actions stay
+        // identical to the previous flat timeline (FR-017).
+        const buildBoardMessageCard = (entry) => {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
           if (authorKind === "user") {
@@ -7651,7 +7708,65 @@
             messageActions.appendChild(originButton);
           }
           card.appendChild(messageActions);
-          timeline.appendChild(card);
+          return card;
+        };
+
+        // SPEC-2959: group the visible entries into Work lanes and render each
+        // lane with a collapsible header. Active/recent lanes are expanded;
+        // Done/Archived lanes default to collapsed (FR-009/012/013/014).
+        if (!state.collapsedLanes) state.collapsedLanes = {};
+        if (!state.laneSeen) state.laneSeen = {};
+        const lanes = groupBoardLanes(visibleEntries, {
+          workspaces: boardLaneWorkspaces(),
+        });
+        for (const lane of lanes) {
+          const explicit = state.collapsedLanes[lane.key];
+          const collapsed = explicit === true || explicit === false ? explicit : lane.isDone;
+          if (state.laneSeen[lane.key] === undefined) {
+            state.laneSeen[lane.key] = lane.entries.length;
+          }
+          const unread = collapsed
+            ? Math.max(0, lane.entries.length - state.laneSeen[lane.key])
+            : 0;
+          if (!collapsed) {
+            state.laneSeen[lane.key] = lane.entries.length;
+          }
+
+          const laneEl = createNode("section", "board-lane");
+          laneEl.dataset.laneKey = lane.key;
+          if (lane.isGeneral) laneEl.classList.add("general");
+          if (lane.isDone) laneEl.classList.add("done");
+          if (collapsed) laneEl.classList.add("collapsed");
+
+          const header = createNode("button", "board-lane-header");
+          header.type = "button";
+          header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          header.appendChild(
+            createNode("span", "board-lane-caret", collapsed ? "▸" : "▾"),
+          );
+          header.appendChild(createNode("span", "board-lane-label", lane.label));
+          header.appendChild(
+            createNode("span", "board-lane-count", String(lane.entries.length)),
+          );
+          if (unread > 0) {
+            const badge = createNode("span", "board-lane-unread", String(unread));
+            badge.setAttribute("aria-label", `${unread} unread in ${lane.label}`);
+            header.appendChild(badge);
+          }
+          header.addEventListener("click", () => {
+            state.collapsedLanes[lane.key] = !collapsed;
+            renderBoard(windowId);
+          });
+          laneEl.appendChild(header);
+
+          if (!collapsed) {
+            const laneBody = createNode("div", "board-lane-body");
+            for (const entry of lane.entries) {
+              laneBody.appendChild(buildBoardMessageCard(entry));
+            }
+            laneEl.appendChild(laneBody);
+          }
+          timeline.appendChild(laneEl);
         }
 
         if (scroller) {
@@ -7702,6 +7817,30 @@
           banner.appendChild(cancel);
           composer.appendChild(banner);
         }
+
+        // SPEC-2959 FR-018/019: composer "To:" selector — default active Work,
+        // with other Works and General (broadcast) selectable.
+        const toField = createNode("label", "board-composer-to");
+        toField.appendChild(createNode("span", "mock-label", "To"));
+        const toSelect = document.createElement("select");
+        toSelect.className = "board-composer-to-select settings-select";
+        const generalOption = document.createElement("option");
+        generalOption.value = GENERAL_LANE_KEY;
+        generalOption.textContent = "General (broadcast)";
+        toSelect.appendChild(generalOption);
+        for (const ws of boardLaneWorkspaces()) {
+          const option = document.createElement("option");
+          option.value = ws.id;
+          option.textContent = ws.titleSummary || ws.title || ws.branch || ws.id;
+          toSelect.appendChild(option);
+        }
+        toSelect.value = boardComposerTarget(state);
+        toSelect.addEventListener("change", (event) => {
+          state.composerTarget = event.target.value;
+        });
+        toField.appendChild(toSelect);
+        composer.appendChild(toField);
+
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");

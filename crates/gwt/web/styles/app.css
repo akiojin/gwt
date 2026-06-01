@@ -2435,6 +2435,98 @@ body {
   opacity: 0.72;
 }
 
+/* SPEC-2959: Work-lane grouping for the Board timeline. */
+.board-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-surface) 96%, transparent);
+}
+
+.board-lane.general {
+  border-style: dashed;
+}
+
+.board-lane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.board-lane-header:hover {
+  background: var(--color-surface-elevated);
+}
+
+.board-lane-header:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.board-lane-caret {
+  width: 1em;
+  color: var(--color-text-muted);
+}
+
+.board-lane-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-lane-count {
+  color: var(--color-text-muted);
+}
+
+.board-lane-unread {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-state-active);
+  color: var(--color-canvas);
+  font-size: var(--type-2xs, 10px);
+  line-height: 18px;
+  text-align: center;
+}
+
+.board-lane.done .board-lane-label {
+  color: var(--color-text-muted);
+}
+
+.board-lane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px 2px;
+}
+
+.board-composer-to {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.board-composer-to-select {
+  flex: 0 1 auto;
+  max-width: 60%;
+}
+
 .board-composer-bar {
   border-top: 1px solid var(--color-border);
   background: color-mix(in oklab, var(--color-surface) 94%, transparent);

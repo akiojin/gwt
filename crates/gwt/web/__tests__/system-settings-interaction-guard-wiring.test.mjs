@@ -29,7 +29,7 @@ test("app.js instantiates systemSettingsInteractionGuard via the factory", () =>
 test("system_settings handler defers via guard before mutating state", () => {
   assert.match(
     appSource,
-    /case\s+"system_settings":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,200}?\)\s*\)\s*\{\s*break;\s*\}[\s\S]{0,400}?systemSettingsState\.language\s*=\s*event\.language/,
+    /case\s+"system_settings":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,360}?\)\s*\)\s*\{\s*break;\s*\}[\s\S]{0,400}?systemSettingsState\.language\s*=\s*event\.language/,
     "expected guard.defer() short-circuit before language mutation in system_settings case",
   );
 });
@@ -37,7 +37,7 @@ test("system_settings handler defers via guard before mutating state", () => {
 test("system_settings_updated handler defers via guard before mutating state", () => {
   assert.match(
     appSource,
-    /case\s+"system_settings_updated":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,200}?\)\s*\)\s*\{\s*break;\s*\}/,
+    /case\s+"system_settings_updated":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,360}?\)\s*\)\s*\{\s*break;\s*\}/,
     "expected guard.defer() short-circuit in system_settings_updated case",
   );
 });
