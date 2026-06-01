@@ -118,11 +118,6 @@ pub fn focus_trap_js() -> &'static str {
     include_str!("../web/focus-trap.js")
 }
 
-// SPEC-1939 Phase 12 — index status badge controller.
-pub fn index_status_controller_js() -> &'static str {
-    include_str!("../web/index-status-controller.js")
-}
-
 // Issue #2698 — stable project tab renderer. Keeps tab DOM keyed by project
 // tab id so status-only workspace refreshes do not rebuild the whole tab strip.
 pub fn project_tabs_renderer_js() -> &'static str {
@@ -309,11 +304,6 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/focus-trap.js",
         source: focus_trap_js,
         marker: "createFocusTrap",
-    },
-    RootJsModuleAsset {
-        path: "/index-status-controller.js",
-        source: index_status_controller_js,
-        marker: "aggregateProjectTabDotState",
     },
     RootJsModuleAsset {
         path: "/project-tabs-renderer.js",
@@ -1672,7 +1662,7 @@ mod tests {
         assert!(
             js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
-            "frontend must still consume project_index_status events for the dot + Index Health tab",
+            "frontend must still consume project_index_status events for the Index Health tab",
         );
         assert!(
             !js.contains("buildSettingsTab(\"index\"") && js.contains("renderIndexSettingsPanel({"),
@@ -1680,8 +1670,9 @@ mod tests {
         );
         assert!(
             html.contains(".project-tab-dot")
-                && project_tabs_js.contains("aggregateProjectTabDotState(status)"),
-            "SPEC-1939 T-IDX-107: project tab must keep its aggregated worktree health dot",
+                && project_tabs_js.contains("projectTabAgentDotState(tab")
+                && !project_tabs_js.contains("aggregateProjectTabDotState"),
+            "SPEC-2013 Phase 6: project tab dot must reflect running agent state, not Index health",
         );
     }
 

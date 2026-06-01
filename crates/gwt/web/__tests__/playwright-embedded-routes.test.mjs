@@ -25,6 +25,12 @@ function playwrightRootModules(source) {
 
 test("Playwright embedded routes serve every app.js root module import", () => {
   const modules = new Set(playwrightRootModules(embeddedRoutesSource));
-  const missing = rootModuleImports(appSource).filter((moduleName) => !modules.has(moduleName));
+  const appImports = rootModuleImports(appSource);
+  const missing = appImports.filter((moduleName) => !modules.has(moduleName));
   assert.deepEqual(missing, []);
+  const orphaned = [...modules].filter((moduleName) => !appImports.includes(moduleName));
+  assert.ok(
+    !orphaned.includes("index-status-controller.js"),
+    `removed project-tab Index route must not remain in Playwright helper: ${orphaned.join(", ")}`,
+  );
 });

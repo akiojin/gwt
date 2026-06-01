@@ -56,23 +56,69 @@ test.describe("Project tabs", () => {
     await expect(second).toHaveAttribute("aria-current", "page");
     await expect(first).not.toHaveAttribute("aria-current", "page");
   });
-});
 
-async function installProjectTabsBackend(page, tabCount: number) {
-  await page.addInitScript((count) => {
-    const tabs = Array.from({ length: count }, (_, index) => {
-      const number = String(index + 1).padStart(2, "0");
-      return {
-        id: `tab-${number}`,
-        title: `known-project-${number}`,
-        project_root: `/fixture/known-project-${number}`,
+  test("project tab dot blinks only when the project has a running agent", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installProjectTabsBackend(page, [
+      {
+        id: "tab-running",
+        title: "Running Agent",
+        project_root: "/fixture/running-agent",
         kind: "git",
         workspace: {
           viewport: { x: 0, y: 0, zoom: 1 },
-          windows: [],
+          windows: [{ id: "agent-running", preset: "codex", status: "running" }],
         },
-      };
-    });
+      },
+      {
+        id: "tab-no-agent",
+        title: "Shell Only",
+        project_root: "/fixture/shell-only",
+        kind: "git",
+        workspace: {
+          viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [{ id: "shell-running", preset: "shell", status: "running" }],
+        },
+      },
+    ]);
+
+    await page.goto(APP_URL);
+
+    const runningDot = page.locator(
+      '[data-project-tab-id="tab-running"] [data-role="project-tab-dot"]',
+    );
+    const shellOnlyDot = page.locator(
+      '[data-project-tab-id="tab-no-agent"] [data-role="project-tab-dot"]',
+    );
+
+    await expect(runningDot).toHaveAttribute("data-state", "running");
+    await expect(shellOnlyDot).toHaveAttribute("data-state", "");
+    await expect(runningDot).toHaveCSS(
+      "animation-name",
+      "project-tab-agent-running-pulse",
+    );
+  });
+});
+
+async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
+  await page.addInitScript((fixture) => {
+    const tabs = Array.isArray(fixture)
+      ? fixture
+      : Array.from({ length: fixture }, (_, index) => {
+          const number = String(index + 1).padStart(2, "0");
+          return {
+            id: `tab-${number}`,
+            title: `known-project-${number}`,
+            project_root: `/fixture/known-project-${number}`,
+            kind: "git",
+            workspace: {
+              viewport: { x: 0, y: 0, zoom: 1 },
+              windows: [],
+            },
+          };
+        });
     const workspaceState = {
       kind: "workspace_state",
       workspace: {
@@ -137,5 +183,5 @@ async function installProjectTabsBackend(page, tabCount: number) {
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, tabCount);
+  }, tabFixture);
 }

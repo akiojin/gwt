@@ -1,6 +1,6 @@
 // SPEC-1939 Phase 15 — project-bar Index badge withdrawn. The remaining
-// coverage exercises the per-tab dot aggregator and the Index window
-// navigation event helper that other entry points still consume.
+// coverage keeps the dedicated Index window and project-tab separation
+// contract stable.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -8,12 +8,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
-import {
-  aggregateProjectTabDotState,
-  dispatchOpenIndexSettings,
-  INDEX_STATUS_OPEN_SETTINGS_EVENT,
-  INDEX_STATUS_OPEN_SETTINGS_TARGET,
-} from "../index-status-controller.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
@@ -23,22 +17,6 @@ const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
 );
-const projectTabSource = `${appSource}\n${projectTabsRendererSource}`;
-
-test("dispatchOpenIndexSettings emits settings:open with target=index", () => {
-  const { document } = parseHTML(`<!doctype html><body><button id="badge"></button></body>`);
-  const badge = document.getElementById("badge");
-
-  let captured = null;
-  document.addEventListener(INDEX_STATUS_OPEN_SETTINGS_EVENT, (event) => {
-    captured = event;
-  });
-
-  dispatchOpenIndexSettings(badge);
-
-  assert.ok(captured, "settings:open should bubble up to document");
-  assert.equal(captured.detail.target, INDEX_STATUS_OPEN_SETTINGS_TARGET);
-});
 
 test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   const { document } = parseHTML(indexHtml);
@@ -61,79 +39,14 @@ test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   );
 });
 
-test("aggregateProjectTabDotState ignores repo-shared scopes", () => {
-  // Repo-shared scopes are intentionally excluded from per-worktree dots.
-  assert.equal(
-    aggregateProjectTabDotState({
-      scopes: {
-        issues: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
-        specs: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
-        memory: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
-        board: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
-      },
-    }),
-    "",
-  );
-});
-
-test("aggregateProjectTabDotState returns 'error' when any worktree files cell is unhealthy", () => {
-  assert.equal(
-    aggregateProjectTabDotState({
-      state: "repair_required",
-      scopes: {
-        files: {
-          wtA: { healthy: true, repair_required: false, document_count: 1 },
-          wtB: { healthy: false, repair_required: true, document_count: 0 },
-        },
-      },
-    }),
-    "error",
-  );
-});
-
-test("aggregateProjectTabDotState returns 'repairing' when state is repairing and no error", () => {
-  assert.equal(
-    aggregateProjectTabDotState({
-      state: "repairing",
-      scopes: {
-        files: {
-          wtA: { healthy: true, repair_required: false, document_count: 1 },
-        },
-        "files-docs": {
-          wtA: { healthy: true, repair_required: false, document_count: 1 },
-        },
-      },
-    }),
-    "repairing",
-  );
-});
-
-test("aggregateProjectTabDotState returns 'ready' when every files / files-docs cell is healthy", () => {
-  assert.equal(
-    aggregateProjectTabDotState({
-      state: "ready",
-      scopes: {
-        files: {
-          wtA: { healthy: true, repair_required: false, document_count: 310 },
-        },
-        "files-docs": {
-          wtA: { healthy: true, repair_required: false, document_count: 16 },
-        },
-      },
-    }),
-    "ready",
-  );
-});
-
-test("aggregateProjectTabDotState returns '' when no worktree health is reported", () => {
-  assert.equal(aggregateProjectTabDotState({ state: "ready", scopes: {} }), "");
-  assert.equal(aggregateProjectTabDotState(null), "");
-});
-
-test("app.js still wires the per-tab dot aggregator", () => {
+test("project tab dots no longer wire Project Index health", () => {
   assert.ok(
-    projectTabSource.includes("aggregateProjectTabDotState(status)"),
-    "renderProjectTabs should consume the shared aggregator",
+    !projectTabsRendererSource.includes("aggregateProjectTabDotState"),
+    "project tab dots should be driven by agent runtime state, not Project Index health",
+  );
+  assert.ok(
+    !appSource.includes("aggregateProjectTabDotState"),
+    "app.js must not import or call the removed project-tab Index health helper",
   );
   assert.ok(
     !appSource.includes("formatIndexStatusLabel"),
