@@ -45,14 +45,14 @@ const CLIENT_QUEUE_CAPACITY: usize = 64;
 /// eventual operator-visible Live tab) can sample the most recent entries
 /// without parsing log files. Older entries are evicted FIFO once the ring
 /// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
-/// would grow without limit in long-running `gwt serve` sessions.
+/// would grow without limit in long-running browser-server sessions.
 const ACCESS_LOG_RING_CAPACITY: usize = 1024;
 
 /// One captured HTTP / WebSocket access event. Emitted both as
 /// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
 /// and into an in-memory [`AccessLogSink`] for test inspection.
 ///
-/// SPEC-1942 FR-098: visibility for headless mode — operators need to see
+/// SPEC-1942 FR-098: visibility for LAN-bound browser-server mode — operators need to see
 /// where access comes from when running with `--bind` on a LAN-reachable
 /// address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +69,7 @@ pub struct AccessLogRecord {
 /// underlying buffer (Arc-wrapped) so the embedded server, middleware and
 /// tests observe the same recordings. The ring is capped at
 /// [`ACCESS_LOG_RING_CAPACITY`] entries; older records are evicted FIFO so
-/// memory stays bounded under long-running `gwt serve`.
+/// memory stays bounded under long-running browser-server sessions.
 #[derive(Clone, Default)]
 pub struct AccessLogSink {
     inner: Arc<Mutex<std::collections::VecDeque<AccessLogRecord>>>,
@@ -216,9 +216,9 @@ impl EmbeddedServer {
     }
 
     /// SPEC-1942 FR-095 / FR-098: bind the embedded server to a caller-chosen
-    /// IP / port and install the access-log middleware. Used by both the GUI
-    /// (loopback + ephemeral) and `gwt serve` (operator-chosen `--bind` /
-    /// `--port`) routes.
+    /// IP / port and install the access-log middleware. Used by the current
+    /// browser-server route for both loopback defaults and operator-chosen
+    /// `--bind` / `--port`.
     pub(super) fn start_with_bind(
         runtime: &Runtime,
         bind: IpAddr,

@@ -1,7 +1,7 @@
 /**
  * SPEC-2014 2026-05-27 follow-up — Launch Wizard Fast mode live E2E.
  *
- * Runs against a real `gwt serve` backend and exercises the user-facing path
+ * Runs against a real gwt browser-server backend and exercises the user-facing path
  * that regressed: Start Work -> Configure and start -> Claude Code -> Fast mode
  * -> runtime context resolution. The test stops before the final launch so it
  * does not create a branch or start a real Claude Code process.

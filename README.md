@@ -139,38 +139,35 @@ server.
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
 v10.0.0 (SPEC #2920 Q9). CI / automation scripts that relied on
-`gwt serve --no-open` can keep using the current `gwt` invocation:
+the old command should use the current `gwt` invocation instead.
 `gwt browser URL: ...` is still written to stderr and
-`GWT_BROWSER_URL_FILE` still receives the bound URL. When the tray
-host is unavailable (e.g. headless CI runners), tray initialisation
-fails silently and the embedded server continues to run.
+`GWT_BROWSER_URL_FILE` still receives the bound URL after the embedded
+server starts.
 
-Trust boundary: **LAN only** (including VPN-extended LAN). `gwt serve` does
-not ship TLS termination, an authentication gate, or rate limiting. Anyone
-that can reach the bind address can drive the embedded UI, which includes
-spawning terminals. The `--bind` flag is opt-in: the default `127.0.0.1`
-keeps the same loopback-trust behaviour as the native GUI. For external
-access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather than
-exposing the port to the public Internet.
+Trust boundary: **LAN only** (including VPN-extended LAN). The embedded
+browser server does not ship TLS termination, an authentication gate, or rate
+limiting. Anyone that can reach the bind address can drive the embedded UI,
+which includes spawning terminals. The `--bind` flag is opt-in: the default
+`127.0.0.1` keeps the same loopback-trust behaviour as the native GUI. For
+external access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather
+than exposing the port to the public Internet.
 
 Platform note: on Linux, `tao 0.35` still requires a display server (X11 or
-Wayland) at EventLoop creation, so v1 of `gwt serve` inherits the GUI's
-`DISPLAY` dependency. macOS and Windows headless installs need nothing
-special; Linux operators in pure-headless environments (no DISPLAY) should
-either use `Xvfb`/`xvfb-run` or wait for the tao-detach follow-up tracked
-under SPEC-1942.
+Wayland) at EventLoop creation. macOS and Windows browser-server launches
+need no additional display setup; Linux operators in pure-headless
+environments (no DISPLAY) should use `Xvfb`/`xvfb-run` or wait for the
+tao-detach follow-up tracked under SPEC-1942.
 
 Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 "gwt_access", ...)` so the operator can see *which* peer is connecting in
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the `gwt serve` process owns the agent / PTY lifetime. Closing a
-browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM`
-asks the server to drain PTYs and exit gracefully. The GUI and a headless
-session for the same worktree are isolated by separate lock kinds, so you
-can run `gwt` and `gwt serve` together; a startup warning surfaces the
-co-existence so it is intentional, not accidental.
+Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
+browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
+the server to drain PTYs and exit gracefully. The tray-resident process is one
+per OS-login user; a second `gwt` invocation prints the existing URL and exits
+instead of starting a second server.
 
 CLI subcommands run through `gwtd` without opening a GUI window:
 

@@ -135,37 +135,34 @@ URL を stderr に出して exit 0 で終了します。
 ### `gwt serve` 廃止について
 
 `gwt serve` / `gwt --headless` 経路は v10.0.0 で削除されました (SPEC #2920 Q9)。
-従来 `gwt serve --no-open` を使っていた CI / 自動化スクリプトは現状の `gwt`
-出力 (`gwt browser URL: ...`) と `GWT_BROWSER_URL_FILE` 環境変数のハンドオフ
-契約をそのまま利用できます。tray アイコンが見えない CI 環境では tray は
-best effort で初期化に失敗しますが、埋込サーバーは継続稼働します。
+従来のコマンドを使っていた CI / 自動化スクリプトは、現状の `gwt` 出力
+(`gwt browser URL: ...`) と `GWT_BROWSER_URL_FILE` 環境変数のハンドオフ契約を
+利用してください。埋込サーバーが起動すると、同じ URL 取得経路を使えます。
 
-信頼境界は **LAN のみ** (VPN-extended LAN を含む) です。`gwt serve` には
-TLS 終端、認証ゲート、レート制限は組み込まれていません。`--bind` で
-公開した IP に到達できる主体はすべて trusted と見なされ、ターミナル起動を
-含む全 UI 操作が可能になります。既定値は `127.0.0.1` で、ネイティブ GUI と
-同じローカルループバック信頼モデルを維持します。外部からアクセスする場合は、
+信頼境界は **LAN のみ** (VPN-extended LAN を含む) です。埋込ブラウザサーバー
+には TLS 終端、認証ゲート、レート制限は組み込まれていません。`--bind` で
+公開した IP に到達できる主体はすべて trusted と見なされ、ターミナル起動を含む
+全 UI 操作が可能になります。既定値は `127.0.0.1` で、ネイティブ GUI と同じ
+ローカルループバック信頼モデルを維持します。外部からアクセスする場合は、
 ポートを公開インターネットに晒さず、VPN (Tailscale、WireGuard など) 越しで
 LAN に入ってから接続してください。
 
 プラットフォーム注記: Linux では `tao 0.35` が EventLoop 生成時に display
-server (X11 / Wayland) を要求するので、v1 の `gwt serve` は GUI と同じ
-`DISPLAY` 依存を引き継ぎます。macOS / Windows の headless 利用は追加設定
-不要ですが、Linux の pure-headless 環境 (DISPLAY 無し) では `Xvfb` /
-`xvfb-run` を併用するか、SPEC-1942 follow-up の tao 切り離し対応を待って
-ください。
+server (X11 / Wayland) を要求します。macOS / Windows のブラウザサーバー起動は
+追加の display 設定不要ですが、Linux の pure-headless 環境 (DISPLAY 無し) では
+`Xvfb` / `xvfb-run` を併用するか、SPEC-1942 follow-up の tao 切り離し対応を
+待ってください。
 
 すべての HTTP / WebSocket リクエストは `tracing::info!(target = "gwt_access",
 ...)` で記録されるため、stderr と `~/.gwt/logs/<date>/` で「どこからアクセス
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: `gwt serve` プロセスが agent / PTY の寿命を所有します。ブラウザの
-タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取った
-ときに、PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。
-GUI と headless は別の lock kind を使うので、同じ worktree で `gwt` と
-`gwt serve` を同時に起動できます。起動時に共存 warning が stderr に出るので、
-意図しない並走は気付けます。
+Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。ブラウザの
+タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取ったときに、
+PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。tray 常駐
+プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
+出して終了します。
 
 CLI サブコマンドは `gwtd` で処理され、GUI は起動しません。
 
