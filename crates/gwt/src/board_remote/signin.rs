@@ -88,26 +88,31 @@ pub fn begin_signin(
 ) -> std::result::Result<String, String> {
     let redirect = redirect_uri(redirect_base);
     let state = uuid::Uuid::new_v4().to_string();
-    let (provider_key, config) = match kind {
+    // Slack uses a client secret; the Microsoft (Teams) public client uses PKCE.
+    let (provider_key, config, pkce) = match kind {
         BoardProviderKind::Slack => (
             "slack".to_string(),
             slack_oauth_config(&settings.board.slack, &redirect)?,
+            None,
         ),
         BoardProviderKind::Teams => (
             "teams".to_string(),
             teams_oauth_config(&settings.board.teams, &redirect)?,
+            Some(super::oauth::generate_pkce()),
         ),
         BoardProviderKind::Local => {
             return Err("Local provider does not require sign-in".to_string())
         }
     };
+    let pkce_verifier = pkce.as_ref().map(|(verifier, _)| verifier.clone());
+    let pkce_challenge = pkce.map(|(_, challenge)| challenge);
     let pending = PendingAuth {
         provider_key,
         state,
         config,
-        pkce_verifier: None,
+        pkce_verifier,
     };
-    sessions().begin(pending, None)
+    sessions().begin(pending, pkce_challenge.as_deref())
 }
 
 /// Provider key (`"slack"` / `"teams"`) for a remote kind, if any.

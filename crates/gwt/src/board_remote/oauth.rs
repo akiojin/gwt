@@ -5,10 +5,31 @@
 //! real network calls. The production poster (reqwest blocking) is wired in a
 //! later phase alongside the embedded-server `/oauth/callback` route.
 
+use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::board_remote::token_store::TokenSet;
+
+/// Compute the PKCE S256 code challenge for a verifier:
+/// `base64url-nopad(sha256(verifier))` (RFC 7636).
+pub fn pkce_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Generate a PKCE `(verifier, S256 challenge)` pair. The verifier is 64
+/// unreserved characters (two UUIDs), within RFC 7636's 43–128 length range.
+pub fn generate_pkce() -> (String, String) {
+    let verifier = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let challenge = pkce_challenge(&verifier);
+    (verifier, challenge)
+}
 
 /// Which remote provider an OAuth flow targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +299,27 @@ mod tests {
         assert!(url.contains("code_challenge=challenge123"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("login.microsoftonline.com/common/oauth2/v2.0/authorize"));
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_vector() {
+        // sha256("abc") base64url-nopad — a stable known value.
+        assert_eq!(
+            pkce_challenge("abc"),
+            "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
+        );
+    }
+
+    #[test]
+    fn generate_pkce_is_unreserved_and_unique() {
+        let (verifier, challenge) = generate_pkce();
+        assert!(verifier.len() >= 43 && verifier.len() <= 128);
+        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric()));
+        // S256 challenge is url-safe base64 without padding.
+        assert!(!challenge.contains('+') && !challenge.contains('/') && !challenge.contains('='));
+        assert_eq!(challenge, pkce_challenge(&verifier));
+        let (other, _) = generate_pkce();
+        assert_ne!(verifier, other);
     }
 
     #[test]
