@@ -6319,3 +6319,10 @@ Type: lesson
 Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
 Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
 Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。
+
+## 2026-06-01 — gwt GUI 修正の視覚検証は HOME 隔離で dev build を起動し lsof で配信プロセスを確認する
+
+Type: lesson
+Context: #2948 検証で ./target/debug/gwt を起動したら single-instance lock($HOME/.gwt キー)で既存 tray インスタンス(installed /Applications/GWT.app)を検知し、既存 URL(53425)を表示して自身は終了していた。lsof で 53425 の listener が installed app(修正なし)と判明。ユーザーに『その URL に修正は入っていないのでは』と的確に指摘された。
+Learning: 2つ目の gwt は single-instance lock(main.rs: gui_single_instance + cli::tray::lock, どちらも gwt_home=$HOME/.gwt キー)により installed app へ defer し、自分のバックエンドを配信しない。dev build を独立起動するには HOME を隔離(例: worktree 内 ./.gwt-verify-home)して gwt_home を分離する。隔離 HOME は ~/.bun ~/.npm cache も空=cold になるので cold 再現検証にも使える。プロジェクトは ReopenRecentProject(任意パス)で WS 経由で開け、Start Work は git origin remote を要求する。
+Future Action: GUI 修正の視覚検証で dev build を案内する前に、必ず HOME 隔離起動し『lsof -nP -iTCP:<port> -sTCP:LISTEN』で listener PID=自分の ./target/debug/gwt であることを確認してから URL を共有する。installed app と同居する素の起動は修正が反映されない。
