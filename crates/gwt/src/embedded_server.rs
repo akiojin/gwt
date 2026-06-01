@@ -16,7 +16,7 @@ use axum::{
         HeaderMap, StatusCode,
     },
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -297,6 +297,9 @@ impl EmbeddedServer {
             get(embedded_web::font_jetbrains_mono_handler),
         )
         .route("/healthz", get(health_handler))
+        // SPEC-2963 Phase 5: OAuth redirect target for remote Board provider
+        // sign-in. Completes the flow against the process-global session store.
+        .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/internal/attachment-upload-token",
             get(attachment_upload_token_handler),
@@ -380,6 +383,59 @@ fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState>
 
 pub async fn health_handler() -> &'static str {
     "ok"
+}
+
+/// Query parameters on the OAuth redirect (SPEC-2963 Phase 5).
+#[derive(Debug, Deserialize)]
+struct OAuthCallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn oauth_result_page(title: &str, message: &str) -> Html<String> {
+    Html(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
+         <body style=\"font-family:system-ui,sans-serif;padding:2.5rem;max-width:34rem;margin:auto\">\
+         <h2>{title}</h2><p>{message}</p>\
+         <p style=\"color:#666\">You can close this tab and return to gwt.</p></body></html>"
+    ))
+}
+
+/// OAuth redirect handler: completes the remote Board provider sign-in against
+/// the process-global session store. Self-contained (uses the global session +
+/// token store), so it needs no shared `ServerState`.
+async fn oauth_callback_handler(Query(params): Query<OAuthCallbackQuery>) -> Html<String> {
+    if let Some(error) = params.error.as_deref().filter(|value| !value.is_empty()) {
+        return oauth_result_page("Sign-in failed", error);
+    }
+    let (Some(code), Some(state)) = (params.code, params.state) else {
+        return oauth_result_page("Sign-in failed", "Missing authorization code or state.");
+    };
+    // The token exchange is blocking (reqwest); run it off the async worker.
+    let outcome = tokio::task::spawn_blocking(move || {
+        let poster = gwt::board_remote::http::ReqwestHttpClient::new();
+        gwt::board_remote::oauth_session::complete_callback(
+            gwt::board_remote::signin::sessions(),
+            &code,
+            &state,
+            &poster,
+            &gwt::board_remote::token_store::default_dir(),
+            chrono::Utc::now(),
+        )
+    })
+    .await;
+    match outcome {
+        Ok(Ok(provider_key)) => oauth_result_page(
+            "Signed in",
+            &format!("Connected the {provider_key} Board provider."),
+        ),
+        Ok(Err(reason)) => oauth_result_page("Sign-in failed", &reason),
+        Err(_) => oauth_result_page("Sign-in failed", "Internal error completing sign-in."),
+    }
 }
 
 #[derive(Debug, Serialize)]
