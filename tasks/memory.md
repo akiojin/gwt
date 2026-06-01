@@ -6403,3 +6403,10 @@ Type: failure-pattern
 Context: SPEC-2785 status strip visual verification launched target/debug/gwt with a temporary HOME to avoid the user production GWT.app tray lock. The server was reachable, but the UI stopped at Open Project because the isolated HOME had an empty ~/.gwt/session.json.
 Learning: A reachable fresh gwt URL is not enough for visual verification when HOME is isolated. If the target UI surface requires an opened project, the isolated session.json must contain the current checkout project tab before asking the user to verify.
 Future Action: For headless-browser-check or fresh checkout UI verification with temporary HOME, pre-seed ~/.gwt/session.json with the current worktree project tab, then verify via browser automation that the page is past Open Project and the requested UI surface is visible before sharing the URL.
+
+## 2026-06-01 — frontend root module route parity
+
+Type: lesson
+Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
+Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
+Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
