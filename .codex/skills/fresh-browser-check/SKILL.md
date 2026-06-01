@@ -1,9 +1,9 @@
 ---
-name: gwt-fresh-browser-check
+name: fresh-browser-check
 description: Use when a user needs browser verification of this gwt checkout, a served URL for the code just edited, or visual confirmation that must not reuse a production or already-running gwt instance.
 ---
 
-# gwt Fresh Browser Check
+# Fresh Browser Check
 
 Launch a fresh browser-served gwt process from the current checkout and give
 the user only that fresh server URL. This skill is for verifying edited code,
@@ -109,7 +109,7 @@ an old browser tab.
 - If launch fails, report the last relevant startup log lines and fix the
   fresh-launch problem before asking the user to retry.
 - If the user sees a failed Agent window from remote branch creation, close
-  that fresh-check window and explain it as a verification setup problem, not
-  as evidence about the feature under test.
+  that fresh-check window before asking the user to retry. Explain it as a
+  verification setup problem, not as evidence about the feature under test.
 - Keep user-facing status messages concise and in Japanese. Keep commands,
   flags, paths, and code examples as-is.

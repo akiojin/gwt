@@ -6431,3 +6431,10 @@ Type: lesson
 Context: During gwt-fresh-browser-check, the user saw a failed Claude Code window because the isolated HOME Start Work path tried to create remote branch origin/work/20260601-1042 and git push failed with terminal prompts disabled.
 Learning: Fresh browser checks isolate HOME and set GIT_TERMINAL_PROMPT=0, so Start Work can fail on GitHub HTTPS authentication even when the app under test is otherwise fine. Verification should avoid Start Work unless the feature under test requires it and branch creation credentials are preflighted.
 Future Action: For gwt fresh UI checks, seed the target project/window or launch on the current branch path; if a failed remote-branch Agent window appears, close it and treat it as verification setup noise rather than feature evidence.
+
+## 2026-06-01 — Project-local skills do not need repository prefix
+
+Type: workflow
+Context: The browser verification skill was renamed to gwt-fresh-browser-check even though it lives inside this gwt repository's project-local skill set. The user corrected that gwt-* prefixes are redundant for gwt development skills.
+Learning: For project-local skills, the repository context already supplies the namespace. Use concise action/domain names and keep the directory name, frontmatter name, and in-skill title aligned.
+Future Action: Before naming or renaming a project-local skill, check whether the skill location already implies the repository scope; avoid redundant repository prefixes such as gwt-* unless the user explicitly requests one.
