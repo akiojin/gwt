@@ -6354,3 +6354,10 @@ Type: lesson
 Context: #2942 で、隔離 HOME の gwt は claude 認証が通らず（token は macOS Keychain にあり HOME 非依存だが、隔離 HOME 起動の claude は 'Not logged in' / 'No conversation found' になる）クリーンな視覚検証ができなかった。実 HOME は per-user single-instance tray lock（main.rs 6273、--no-tray でも無条件）で GWT.app と共存できず即終了。
 Learning: 実環境でクリーンに認証された GUI 検証をするには、(1) debug ビルドで single-instance lock を一時 cfg(debug_assertions) skip（別パス debug-coexist で handle 取得）し GWT.app と共存、(2) 実 HOME で起動して実 ~/.claude + Keychain 認証を効かせる。ただし実 HOME 起動は session.json の全タブ・全ペインを resume するため、他の稼働中エージェントのセッションも claude --resume で二重起動し干渉しうる。検証専用変更はコミットしない。
 Future Action: GUI の実環境視覚検証が必要で GWT.app を閉じられない場合: debug-only の lock-skip を一時適用→実 HOME で起動→目視→即停止→lock-skip を revert。他エージェントの session を巻き込むため最短時間で停止する。検証コードは PR に含めない（revert 必須）。debug ビルドでの恒久 lock-skip は別 Issue で検討。
+
+## 2026-06-01 — gwt GUI 修正の視覚検証は HOME 隔離で dev build を起動し lsof で配信プロセスを確認する
+
+Type: lesson
+Context: #2948 検証で ./target/debug/gwt を起動したら single-instance lock($HOME/.gwt キー)で既存 tray インスタンス(installed /Applications/GWT.app)を検知し、既存 URL(53425)を表示して自身は終了していた。lsof で 53425 の listener が installed app(修正なし)と判明。ユーザーに『その URL に修正は入っていないのでは』と的確に指摘された。
+Learning: 2つ目の gwt は single-instance lock(main.rs: gui_single_instance + cli::tray::lock, どちらも gwt_home=$HOME/.gwt キー)により installed app へ defer し、自分のバックエンドを配信しない。dev build を独立起動するには HOME を隔離(例: worktree 内 ./.gwt-verify-home)して gwt_home を分離する。隔離 HOME は ~/.bun ~/.npm cache も空=cold になるので cold 再現検証にも使える。プロジェクトは ReopenRecentProject(任意パス)で WS 経由で開け、Start Work は git origin remote を要求する。関連: 同 single-instance lock を debug build の lock-skip + 実 HOME で回避する手法も別 entry にあり(認証が必要な検証向け)。
+Future Action: GUI 修正の視覚検証で dev build を案内する前に、必ず HOME 隔離起動し『lsof -nP -iTCP:<port> -sTCP:LISTEN』で listener PID=自分の ./target/debug/gwt であることを確認してから URL を共有する。installed app と同居する素の起動は修正が反映されない。
