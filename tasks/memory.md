@@ -6333,3 +6333,24 @@ Type: lesson
 Context: 新ビルド検証で隔離HOMEのgwtを別プロセス起動しChromeから操作。Open Projectクリックで UI がフリーズ（HTTPサーバーは200で生存）。
 Learning: open_project_dialog_events は rfd::FileDialog::pick_folder() を同期呼び出し(crates/gwt/src/app_runtime/mod.rs:4659)。headless serveプロセスはウィンドウ/Dock無しのバックグラウンドのため、別アプリ(Chrome)経由だとネイティブダイアログを前面化できずブロックする。ReopenRecentProject{path}->open_project_path_events はダイアログ不要でパスから開ける。
 Future Action: serve+remote browserでプロジェクトを開く必要がある時はOpen Projectを使わず、WS(/ws)へ {kind:'reopen_recent_project', path:'<repo>'} を送る(Playwright page.evaluateでWebSocketを開いて送信)。serveモードのOpen Projectフリーズ自体は別Issue候補。
+
+## 2026-05-31 — startup auto-resume: linked worktree の agent session が workspace-home tab に紐付かず resume されない (#2942)
+
+Type: lesson
+Context: 前回終了していないセッションの復元が Stopped のまま起動されない。当初 open_project 経路未配線と誤診したが、実フローは ~/.gwt/session.json の tab 復元 (bootstrap 経路) であり open_project_path は通らない。
+Learning: auto_resume_tab_id_for_session が project_scope_hash 一致のみでタブ照合していたが、gwt 管理レイアウトでは workspace home (親 project_root) と linked worktree で repo_hash/scope_hash が異なる (例: 親=b19aac, worktree=99a866) ため worktree 由来の agent session を親 tab に紐付けられず queue されなかった。session 状態の正本は session-state.json ではなく ~/.gwt/session.json (gwt_session_state_path)。
+Future Action: worktree とプロジェクトの関連付けは repo_hash/project_scope_hash 比較ではなく gwt_git::worktree::main_worktree_root() の一致で判定する。復元/resume バグ調査では、静的推測でなくライブで各ゲートの発火 (DEBUGQ ログ) を確認して実際に skip しているゲートを特定してから修正する。
+
+## 2026-06-01 — PR Gate: ユーザーの曖昧な質問を視覚検証 confirmed と解釈して PR を先走り作成しない
+
+Type: lesson
+Context: #2942 で、ユーザーが視覚検証スクショ送信後に『何が残っているのですか？』と質問。これを承認と解釈して PR #2947 を作成したが、明示的な『OK/問題なし』は未取得だった（PR Gate 手順違反、PR #2857 と同型）。
+Learning: 『何が残っているのか』『これで合っているのか』等の曖昧な質問・確認要求は User Verification Result: confirmed ではない。PR Gate は『confirmed』または『n/a』、もしくはユーザーが明示的に skip を選んだ場合のみ満たされる。解釈による前倒しは違反。
+Future Action: PR create/update は、ユーザーが literal に『OK / 問題なし / confirmed / skip 承認』を述べるまで実行しない。曖昧な質問には『PR 作成には明示的な OK が必要』と返し、承認を待つ。誤って作成したら即 [DO NOT MERGE — user verification pending] をタイトルに付与しブロック comment、confirmed 後にタイトル復元。
+
+## 2026-06-01 — 実環境 GUI 検証: GWT.app と共存起動するには debug ビルドで single-instance lock を一時無効化＋実 HOME（claude 認証は Keychain）
+
+Type: lesson
+Context: #2942 で、隔離 HOME の gwt は claude 認証が通らず（token は macOS Keychain にあり HOME 非依存だが、隔離 HOME 起動の claude は 'Not logged in' / 'No conversation found' になる）クリーンな視覚検証ができなかった。実 HOME は per-user single-instance tray lock（main.rs 6273、--no-tray でも無条件）で GWT.app と共存できず即終了。
+Learning: 実環境でクリーンに認証された GUI 検証をするには、(1) debug ビルドで single-instance lock を一時 cfg(debug_assertions) skip（別パス debug-coexist で handle 取得）し GWT.app と共存、(2) 実 HOME で起動して実 ~/.claude + Keychain 認証を効かせる。ただし実 HOME 起動は session.json の全タブ・全ペインを resume するため、他の稼働中エージェントのセッションも claude --resume で二重起動し干渉しうる。検証専用変更はコミットしない。
+Future Action: GUI の実環境視覚検証が必要で GWT.app を閉じられない場合: debug-only の lock-skip を一時適用→実 HOME で起動→目視→即停止→lock-skip を revert。他エージェントの session を巻き込むため最短時間で停止する。検証コードは PR に含めない（revert 必須）。debug ビルドでの恒久 lock-skip は別 Issue で検討。
