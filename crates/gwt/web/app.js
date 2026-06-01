@@ -60,6 +60,7 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
+        maximizedGeometry,
         resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
         syncResizeStatePointerEvent,
@@ -1927,15 +1928,6 @@
         }
       }
 
-      function maximizedGeometry(bounds) {
-        return {
-          x: bounds.x + 24,
-          y: bounds.y + 24,
-          width: Math.max(bounds.width - 48, 0),
-          height: Math.max(bounds.height - 48, 0),
-        };
-      }
-
       function geometryMatches(left, right) {
         return (
           Math.abs(left.x - right.x) < 0.5 &&
@@ -1946,8 +1938,7 @@
       }
 
       function syncMaximizedWindowsToViewport() {
-        const bounds = visibleBounds();
-        const nextGeometry = maximizedGeometry(bounds);
+        const nextGeometry = maximizedGeometry(visibleBounds(), viewport.zoom);
         for (const windowData of activeWorkspace().windows || []) {
           if (!windowData.maximized) {
             continue;
@@ -1958,7 +1949,9 @@
           send({
             kind: "maximize_window",
             id: windowData.id,
-            bounds,
+            // The frontend now sends the FINAL maximized geometry (zoom-corrected
+            // screen inset); the backend stores it as-is. See maximizedGeometry.
+            bounds: nextGeometry,
           });
         }
       }
@@ -3692,7 +3685,9 @@
         send({
           kind: "maximize_window",
           id: windowId,
-          bounds: visibleBounds(),
+          // Final maximized geometry (zoom-corrected screen inset). The backend
+          // stores it as-is; see maximizedGeometry in window-geometry-sync.js.
+          bounds: maximizedGeometry(visibleBounds(), viewport.zoom),
         });
       }
 
