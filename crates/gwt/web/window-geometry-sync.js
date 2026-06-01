@@ -13,6 +13,33 @@ function positiveFiniteNumber(value, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+// Screen-space inset (px) between a maximized window and the visible viewport
+// edges. Mirrors `ARRANGE_PADDING` in crates/gwt/src/workspace.rs.
+const MAXIMIZE_SCREEN_INSET = 24;
+
+/**
+ * Compute a maximized window's geometry from the visible viewport bounds.
+ *
+ * `bounds` is in WORLD space (the viewport size already divided by zoom), and
+ * the window is positioned inside `#canvas-stage`, which applies
+ * `scale(zoom)`. The inset is a constant SCREEN-space gap, so it must be
+ * divided by zoom: `screenInset = worldInset * zoom`, hence
+ * `worldInset = MAXIMIZE_SCREEN_INSET / zoom`. The previous code added a raw
+ * `MAXIMIZE_SCREEN_INSET` in world units, which rendered as
+ * `MAXIMIZE_SCREEN_INSET * zoom` screen px and drifted the maximized window off
+ * the viewport at any zoom != 1.
+ */
+export function maximizedGeometry(bounds, zoom = 1) {
+  const normalizedZoom = positiveFiniteNumber(zoom, 1);
+  const inset = MAXIMIZE_SCREEN_INSET / normalizedZoom;
+  return {
+    x: finiteNumber(bounds?.x) + inset,
+    y: finiteNumber(bounds?.y) + inset,
+    width: Math.max(finiteNumber(bounds?.width) - inset * 2, 0),
+    height: Math.max(finiteNumber(bounds?.height) - inset * 2, 0),
+  };
+}
+
 export function createGeometrySyncState() {
   return {
     localEdits: new Map(),

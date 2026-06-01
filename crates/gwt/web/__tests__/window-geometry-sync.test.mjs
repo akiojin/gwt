@@ -131,3 +131,46 @@ test("resize release geometry uses the pointer-end event coordinates", () => {
     height: 340,
   });
 });
+
+// maximizedGeometry must keep a CONSTANT 24px SCREEN inset at every zoom.
+// bounds are world-space (viewport divided by zoom); the window lives inside
+// #canvas-stage which applies scale(zoom). A raw +24 world-unit inset rendered
+// as 24*zoom screen px and drifted the maximized window off the viewport at
+// zoom != 1. Screen inset = geometry.x * zoom + viewport.x; with
+// geometry.x = bounds.x + 24/zoom and bounds.x = -viewport.x/zoom this is a
+// constant 24px regardless of zoom.
+test("maximizedGeometry keeps a constant 24px screen inset at zoom = 1", () => {
+  // viewport.x = 0, zoom = 1 → visibleBounds.x = 0
+  const g = geometrySync.maximizedGeometry({ x: 0, y: 0, width: 1000, height: 800 }, 1);
+  assert.deepEqual(g, { x: 24, y: 24, width: 952, height: 752 });
+});
+
+test("maximizedGeometry divides the screen inset by zoom so it does not drift when zoomed in", () => {
+  // zoom = 2, viewport.x = 0 → visibleBounds = { x: 0, width: clientWidth/zoom }
+  // For a 1000px-wide canvas at zoom 2: visibleBounds.width = 500.
+  const z = 2;
+  const bounds = { x: 0, y: 0, width: 1000 / z, height: 800 / z };
+  const g = geometrySync.maximizedGeometry(bounds, z);
+  // world inset must be 24/zoom = 12 so that *zoom screen = 24px constant.
+  assert.equal(g.x, 12);
+  assert.equal(g.y, 12);
+  // screen-space left = g.x * zoom + viewport.x(0) = 24 (constant)
+  assert.equal(g.x * z, 24);
+  // screen-space width = g.width * zoom = clientWidth - 48 (24 each side)
+  assert.equal(g.width * z, 1000 - 48);
+});
+
+test("maximizedGeometry divides the screen inset by zoom when zoomed out", () => {
+  const z = 0.5;
+  const bounds = { x: 0, y: 0, width: 1000 / z, height: 800 / z };
+  const g = geometrySync.maximizedGeometry(bounds, z);
+  assert.equal(g.x * z, 24);
+  assert.equal(g.width * z, 1000 - 48);
+});
+
+test("maximizedGeometry defaults zoom to 1 and never returns negative size", () => {
+  const g = geometrySync.maximizedGeometry({ x: 5, y: 5, width: 10, height: 10 });
+  assert.equal(g.x, 29);
+  assert.equal(g.width, 0); // 10 - 48 clamped to 0
+  assert.equal(g.height, 0);
+});

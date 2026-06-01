@@ -3376,14 +3376,29 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
-            if !startup_auto_resume_window_was_open(&session) {
-                continue;
-            }
-            if !session.exact_auto_resume_candidate() {
-                continue;
-            }
-            if !startup_auto_resume_is_fresh(&session, now) {
-                continue;
+            // Issue #2942: a persisted Stopped agent placeholder means the user
+            // did not explicitly close the window (closing removes it from the
+            // workspace). Such "still open" windows must restore regardless of
+            // the session's status drift (e.g. idle-timeout -> Stopped) or age,
+            // honoring "restore everything not explicitly closed". Sessions with
+            // no placeholder are orphans (the workspace lost the window); keep
+            // the conservative status / freshness gates so old, windowless
+            // sessions are not resurrected at startup.
+            let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
+            if placeholder_tab.is_some() {
+                if !session.worktree_path.exists() {
+                    continue;
+                }
+            } else {
+                if !startup_auto_resume_window_was_open(&session) {
+                    continue;
+                }
+                if !session.exact_auto_resume_candidate() {
+                    continue;
+                }
+                if !startup_auto_resume_is_fresh(&session, now) {
+                    continue;
+                }
             }
             let Some(native_session_id) = session.exact_resume_session_id() else {
                 continue;
@@ -3398,7 +3413,9 @@ impl AppRuntime {
             {
                 continue;
             }
-            let Some(tab_id) = self.auto_resume_tab_id_for_session(&session) else {
+            let Some(tab_id) =
+                placeholder_tab.or_else(|| self.auto_resume_tab_id_for_session(&session))
+            else {
                 continue;
             };
             let Some(tab) = self.tab(&tab_id) else {
@@ -3434,46 +3451,171 @@ impl AppRuntime {
         let total = pending.len();
         let mut events = Vec::new();
         for (index, pending_session) in pending.into_iter().enumerate() {
-            let config = launch_config_from_persisted_session(&pending_session.session);
-            let existing_windows = self
-                .window_lookup
-                .keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>();
-            let stale_geometry = self.remove_stale_paused_agent_window(
+            let fallback_geometry =
+                startup_auto_resume_window_geometry(index, total, bounds.clone());
+            let mut spawned = self.spawn_restored_agent_session(
                 &pending_session.tab_id,
-                &pending_session.session.id,
-            );
-            let geometry = stale_geometry.unwrap_or_else(|| {
-                startup_auto_resume_window_geometry(index, total, bounds.clone())
-            });
-            match self.spawn_agent_window_at_geometry(
-                &pending_session.tab_id,
-                config,
-                geometry,
+                pending_session.session,
                 pending_session.workspace_resume_context,
-            ) {
-                Ok(mut spawned_events) => events.append(&mut spawned_events),
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %pending_session.session.id,
-                        error = %error,
-                        "failed to spawn startup auto-resume agent window"
-                    );
+                fallback_geometry,
+            );
+            events.append(&mut spawned);
+        }
+        events
+    }
+
+    /// Spawn a single restored agent window from a persisted session, reusing
+    /// the paused placeholder's geometry when present (Issue #2942). Shared by
+    /// startup auto-resume and the Open Project restore path so both honor the
+    /// "restore everything the user did not explicitly close" rule. Records the
+    /// source session in `pending_auto_resume_sources` so the lifecycle handler
+    /// retires the old session once the resumed window reports its own id.
+    fn spawn_restored_agent_session(
+        &mut self,
+        tab_id: &str,
+        session: gwt_agent::Session,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        fallback_geometry: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let config = launch_config_from_persisted_session(&session);
+        let geometry = self
+            .remove_stale_paused_agent_window(tab_id, &session.id)
+            .unwrap_or(fallback_geometry);
+        // Snapshot the window registry *after* the paused placeholder is
+        // removed: the freshly spawned window may reuse the placeholder's id
+        // (ids are assigned lowest-free), so a pre-removal snapshot would fail
+        // to detect it and the source session would never be retired.
+        let existing_windows = self
+            .window_lookup
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        match self.spawn_agent_window_at_geometry(
+            tab_id,
+            config,
+            geometry,
+            workspace_resume_context,
+        ) {
+            Ok(events) => {
+                if let Some(window_id) = self
+                    .window_lookup
+                    .keys()
+                    .find(|window_id| !existing_windows.contains(*window_id))
+                    .cloned()
+                {
+                    self.pending_auto_resume_sources
+                        .insert(window_id, session.id);
+                }
+                events
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    error = %error,
+                    "failed to spawn restored agent window"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Restore every process window the user did not explicitly close in a
+    /// freshly opened/restored project tab (Issue #2942). Closing a window
+    /// removes it from the persisted workspace, so the persisted process
+    /// windows are exactly the set to restart: agents resume via their native
+    /// session id (or launch fresh when none exists), and non-agent process
+    /// windows (e.g. Shell) launch fresh. Runs synchronously because each
+    /// placeholder already carries its geometry, so no frontend canvas bounds
+    /// round-trip is required. The startup `bootstrap` queue only covers tabs
+    /// open at launch, so projects opened via Open Project / Reopen Recent were
+    /// never restored before this path existed.
+    fn restore_open_project_windows(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        let windows = match self.tab(tab_id) {
+            Some(tab) if tab.kind == gwt::ProjectKind::Git && !tab.migration_pending => tab
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .filter(|window| {
+                    window.preset.requires_process()
+                        && window.status == WindowProcessStatus::Stopped
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+            _ => return Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        for window in windows {
+            let combined = combined_window_id(tab_id, &window.id);
+            // A window with a live PTY/runtime is already running (e.g. when an
+            // already-open project tab is re-selected); only paused placeholders
+            // should be restarted. `window_lookup` is the registry of known
+            // windows, not the set of running ones, so it must not gate here.
+            if self.runtimes.contains_key(&combined) {
+                continue;
+            }
+            if crate::runtime_support::window_is_agent_pane(&window) {
+                let Some(session_id) = window.session_id.clone() else {
+                    continue;
+                };
+                let path = self.sessions_dir.join(format!("{session_id}.toml"));
+                let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+                    continue;
+                };
+                if !session.worktree_path.exists() {
                     continue;
                 }
-            }
-            if let Some(window_id) = self
-                .window_lookup
-                .keys()
-                .find(|window_id| !existing_windows.contains(*window_id))
-                .cloned()
-            {
-                self.pending_auto_resume_sources
-                    .insert(window_id, pending_session.session.id);
+                if self
+                    .active_agent_sessions
+                    .values()
+                    .any(|active| active.session_id == session.id)
+                {
+                    continue;
+                }
+                let workspace_resume_context =
+                    gwt_core::workspace_projection::load_workspace_projection(
+                        &session.worktree_path,
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|projection| workspace_resume_context_from_projection(&projection));
+                let fallback_geometry = window.geometry.clone();
+                let mut spawned = self.spawn_restored_agent_session(
+                    tab_id,
+                    session,
+                    workspace_resume_context,
+                    fallback_geometry,
+                );
+                events.append(&mut spawned);
+            } else {
+                events.extend(self.start_window(
+                    tab_id,
+                    &window.id,
+                    window.preset,
+                    window.geometry.clone(),
+                ));
             }
         }
         events
+    }
+
+    /// Find the tab holding a persisted, paused (`Stopped`) agent placeholder
+    /// window backed by `session_id`. Its presence proves the user did not
+    /// explicitly close that window (Issue #2942), so the session must restore
+    /// regardless of status drift or age.
+    fn paused_placeholder_tab_for_session(&self, session_id: &str) -> Option<String> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .find(|tab| {
+                tab.workspace.persisted().windows.iter().any(|window| {
+                    window.status == WindowProcessStatus::Stopped
+                        && crate::runtime_support::window_is_agent_pane(window)
+                        && window.session_id.as_deref() == Some(session_id)
+                })
+            })
+            .map(|tab| tab.id.clone())
     }
 
     fn remove_stale_paused_agent_window(
@@ -3508,6 +3650,22 @@ impl AppRuntime {
                 && same_worktree_path(&tab.project_root, &session.worktree_path)
         }) {
             return Some(tab.id.clone());
+        }
+
+        // Issue #2942: a session's worktree belongs to the tab whose project
+        // shares the same main worktree root (the gwt workspace home / bare
+        // layout root). `repo_hash` / `project_scope_hash` differ between a
+        // workspace-home project_root and its linked worktrees, so scope-hash
+        // equality alone fails to associate worktree-backed agent sessions with
+        // the parent tab and they never auto-resume on startup.
+        if let Ok(session_root) = gwt_git::worktree::main_worktree_root(&session.worktree_path) {
+            if let Some(tab) = self.tabs.iter().find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && !tab.migration_pending
+                    && same_worktree_path(&tab.main_worktree_root(), &session_root)
+            }) {
+                return Some(tab.id.clone());
+            }
         }
 
         let session_scope = session_project_scope_hash(session)?;
@@ -4756,6 +4914,15 @@ impl AppRuntime {
         match self.open_project_path(path) {
             Ok(wizard_closed) => {
                 let mut events = vec![self.workspace_state_broadcast()];
+                // Issue #2942: restore the opened tab's process windows the
+                // user did not explicitly close — resume agents (native session
+                // id) and fresh-launch shells. The startup `bootstrap` queue
+                // only covers tabs open at launch, so projects opened via this
+                // path (Open Project / Reopen Recent) were never restored and
+                // their agent panes stayed `Stopped`.
+                if let Some(active_tab_id) = self.active_tab_id.clone() {
+                    events.extend(self.restore_open_project_windows(&active_tab_id));
+                }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);
                 }
@@ -14657,6 +14824,167 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_tab() {
+        // Issue #2942 root cause: the open tab's project_root is the gwt
+        // workspace home / main repo, while a resumable agent session lives in
+        // a *linked worktree*. `repo_hash` / `project_scope_hash` differ between
+        // the two, so scope-hash matching failed and the session never resumed
+        // on startup. It must match via the shared main worktree root instead.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("linked-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/linked-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        // Tab project_root is the workspace home / main repo, NOT the worktree.
+        let tab = sample_project_tab("tab-home", "Home", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-home"));
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/linked-resume",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.id = "sess-linked".to_string();
+        session.agent_session_id = Some("native-linked".to_string());
+        // A non-matching persisted repo_hash guarantees the scope-hash fallback
+        // cannot match; only the main-worktree-root association can.
+        session.repo_hash = Some("zz-nonmatching-scope-hash".to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+
+        runtime.bootstrap();
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::StartupAutoResumeReady {
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let agent_windows = runtime
+            .tab("tab-home")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 1,
+            "a session in a linked worktree must resume into the workspace-home tab"
+        );
+    }
+
+    #[test]
+    fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status_and_age() {
+        // Issue #2942: a session whose status drifted to Stopped (idle timeout)
+        // AND is older than the 24h freshness window must STILL resume on
+        // startup when its agent window is still present in the workspace (the
+        // user did not explicitly close it). Both the status-candidate gate and
+        // the freshness gate would exclude this session on the orphan path; only
+        // the "unclosed placeholder" path can restore it.
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("unclosed-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/unclosed-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+
+        // Tab still holds the paused agent placeholder (not closed by the user).
+        let mut persisted = empty_workspace_state();
+        let mut agent_window =
+            sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+        agent_window.agent_id = Some("claude".to_string());
+        agent_window.session_id = Some("sess-unclosed".to_string());
+        persisted.windows.push(agent_window);
+        persisted.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-unclosed".to_string(),
+            title: "Unclosed".to_string(),
+            project_root: worktree.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-unclosed"));
+
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/unclosed-resume",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.id = "sess-unclosed".to_string();
+        session.agent_session_id = Some("native-unclosed".to_string());
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        // Status drifted to Stopped (would fail the candidate gate)...
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        // ...and the session is older than the 24h freshness window.
+        session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save stale stopped session");
+
+        runtime.bootstrap();
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::StartupAutoResumeReady {
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let agent_windows = runtime
+            .tab("tab-unclosed")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 1,
+            "an unclosed agent window must resume despite Stopped status and >24h age"
+        );
+        assert_eq!(
+            runtime.pending_auto_resume_sources.len(),
+            1,
+            "the resumed unclosed window must track its source session"
+        );
+    }
+
+    #[test]
     fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         let _env_lock = env_test_lock()
             .lock()
@@ -14727,6 +15055,95 @@ exit 1
             .count();
         assert_eq!(agent_windows, 1);
         assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    }
+
+    #[test]
+    fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let worktree = temp.path().join("worktrees").join("open-project-resume");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "work/open-project-resume",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+
+        // A paused (Stopped) agent placeholder persisted in the workspace means
+        // the user never closed it (closing removes it from the list).
+        let mut persisted = empty_workspace_state();
+        let mut agent_window =
+            sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+        agent_window.agent_id = Some("claude".to_string());
+        agent_window.session_id = Some("session-open-resume".to_string());
+        persisted.windows.push(agent_window);
+        persisted.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-open".to_string(),
+            title: "Open Resume".to_string(),
+            project_root: worktree.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-open"));
+
+        // The backing session drifted to `Stopped` via idle timeout but was
+        // never explicitly closed; it must still be restored (Issue #2942).
+        let mut session = gwt_agent::Session::new(
+            &worktree,
+            "work/open-project-resume",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.id = "session-open-resume".to_string();
+        session.agent_session_id = Some("native-open-resume".to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+
+        let events = runtime.restore_open_project_windows("tab-open");
+
+        assert!(
+            !events.is_empty(),
+            "Open Project restore should spawn the resumable agent window"
+        );
+        let agent_windows = runtime
+            .tab("tab-open")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count();
+        assert_eq!(
+            agent_windows, 1,
+            "the paused placeholder should be replaced by one live agent window"
+        );
+        assert_eq!(
+            runtime.pending_auto_resume_sources.len(),
+            1,
+            "the source session must be tracked so it is retired on launch complete"
+        );
+        assert!(runtime
+            .pending_auto_resume_sources
+            .values()
+            .any(|source| source == "session-open-resume"));
     }
 
     #[test]

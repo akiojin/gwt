@@ -6319,3 +6319,52 @@ Type: lesson
 Context: Ultracode gating を selected_agent().installed_version >= 2.1.154 で実装したが、手動 GUI 検証で常に非表示だった。load_agent_options が build_agent_options(Vec::new(), ...) を呼ぶため AgentOption.installed_version は production で常に None。AgentDetector::detect_all() は production で Launch Wizard に配線されていない (tests のみ)。
 Learning: Launch Wizard は render 時に installed agent version を保持しない。installed_version に依存する gating は常に false になり、自動テストは fixture で version を埋めるため通ってしまう (テスト緑でも実挙動と乖離)。
 Future Action: Launch Wizard で installed version 依存の判定が必要な場合は wizard-open 時に検出して context へ格納する (例: claude_ultracode_supported() を context.ultracode_supported に格納)。render hot path で subprocess/IO しない。version 依存 feature は自動テストに加え実 GUI で必ず確認する。
+
+## 2026-06-01 — xterm fontFamily に CSS var() を渡すと canvas 測定が 10px sans-serif に化けて見切れる
+
+Type: lesson
+Context: ターミナル文字の縦見切れを lineHeight 1.2→1.28→1.35 と上げ続けても直らなかった (#2903 系譜)。xterm.js 6.0.0 は OffscreenCanvas で ctx.font=`${fontSize}px ${fontFamily}` を設定しセル高を測定するが、fontFamily が 'var(--font-mono), …' だった。
+Learning: Canvas 2D の ctx.font は CSS custom property を解決できず、var() を含む font 文字列は丸ごと無効として無視され ctx.font は初期値 '10px sans-serif' のままになる (Playwright 実機計測: varString.normalized='10px sans-serif' boxHeight=10、resolved --font-mono='14px JetBrains Mono Variable…' boxHeight=18 で JBM ground truth と一致)。一方 DOM 行は style.fontFamily で var() を解決し 18px の JBM を描画するため、測定(10)<描画(18) の恒久的不一致で overflow:hidden 行が glyph を切る。lineHeight 倍率は誤った base を倍率するため何度上げても収束しない。
+Future Action: xterm の fontFamily オプションには var() を含めない。getComputedStyle(:root).getPropertyValue('--font-mono') で解決した実フォントスタックを渡し、測定フォント==描画フォントに揃える。canvas/OffscreenCanvas に渡す font 文字列全般で CSS 変数を使わない。
+
+## 2026-06-01 — gwt serve(--no-tray --no-open)+リモートブラウザでは Open Project(rfd)がフリーズ。reopen_recent_project でパス指定 open する
+
+Type: lesson
+Context: 新ビルド検証で隔離HOMEのgwtを別プロセス起動しChromeから操作。Open Projectクリックで UI がフリーズ（HTTPサーバーは200で生存）。
+Learning: open_project_dialog_events は rfd::FileDialog::pick_folder() を同期呼び出し(crates/gwt/src/app_runtime/mod.rs:4659)。headless serveプロセスはウィンドウ/Dock無しのバックグラウンドのため、別アプリ(Chrome)経由だとネイティブダイアログを前面化できずブロックする。ReopenRecentProject{path}->open_project_path_events はダイアログ不要でパスから開ける。
+Future Action: serve+remote browserでプロジェクトを開く必要がある時はOpen Projectを使わず、WS(/ws)へ {kind:'reopen_recent_project', path:'<repo>'} を送る(Playwright page.evaluateでWebSocketを開いて送信)。serveモードのOpen Projectフリーズ自体は別Issue候補。
+
+## 2026-05-31 — startup auto-resume: linked worktree の agent session が workspace-home tab に紐付かず resume されない (#2942)
+
+Type: lesson
+Context: 前回終了していないセッションの復元が Stopped のまま起動されない。当初 open_project 経路未配線と誤診したが、実フローは ~/.gwt/session.json の tab 復元 (bootstrap 経路) であり open_project_path は通らない。
+Learning: auto_resume_tab_id_for_session が project_scope_hash 一致のみでタブ照合していたが、gwt 管理レイアウトでは workspace home (親 project_root) と linked worktree で repo_hash/scope_hash が異なる (例: 親=b19aac, worktree=99a866) ため worktree 由来の agent session を親 tab に紐付けられず queue されなかった。session 状態の正本は session-state.json ではなく ~/.gwt/session.json (gwt_session_state_path)。
+Future Action: worktree とプロジェクトの関連付けは repo_hash/project_scope_hash 比較ではなく gwt_git::worktree::main_worktree_root() の一致で判定する。復元/resume バグ調査では、静的推測でなくライブで各ゲートの発火 (DEBUGQ ログ) を確認して実際に skip しているゲートを特定してから修正する。
+
+## 2026-06-01 — PR Gate: ユーザーの曖昧な質問を視覚検証 confirmed と解釈して PR を先走り作成しない
+
+Type: lesson
+Context: #2942 で、ユーザーが視覚検証スクショ送信後に『何が残っているのですか？』と質問。これを承認と解釈して PR #2947 を作成したが、明示的な『OK/問題なし』は未取得だった（PR Gate 手順違反、PR #2857 と同型）。
+Learning: 『何が残っているのか』『これで合っているのか』等の曖昧な質問・確認要求は User Verification Result: confirmed ではない。PR Gate は『confirmed』または『n/a』、もしくはユーザーが明示的に skip を選んだ場合のみ満たされる。解釈による前倒しは違反。
+Future Action: PR create/update は、ユーザーが literal に『OK / 問題なし / confirmed / skip 承認』を述べるまで実行しない。曖昧な質問には『PR 作成には明示的な OK が必要』と返し、承認を待つ。誤って作成したら即 [DO NOT MERGE — user verification pending] をタイトルに付与しブロック comment、confirmed 後にタイトル復元。
+
+## 2026-06-01 — 実環境 GUI 検証: GWT.app と共存起動するには debug ビルドで single-instance lock を一時無効化＋実 HOME（claude 認証は Keychain）
+
+Type: lesson
+Context: #2942 で、隔離 HOME の gwt は claude 認証が通らず（token は macOS Keychain にあり HOME 非依存だが、隔離 HOME 起動の claude は 'Not logged in' / 'No conversation found' になる）クリーンな視覚検証ができなかった。実 HOME は per-user single-instance tray lock（main.rs 6273、--no-tray でも無条件）で GWT.app と共存できず即終了。
+Learning: 実環境でクリーンに認証された GUI 検証をするには、(1) debug ビルドで single-instance lock を一時 cfg(debug_assertions) skip（別パス debug-coexist で handle 取得）し GWT.app と共存、(2) 実 HOME で起動して実 ~/.claude + Keychain 認証を効かせる。ただし実 HOME 起動は session.json の全タブ・全ペインを resume するため、他の稼働中エージェントのセッションも claude --resume で二重起動し干渉しうる。検証専用変更はコミットしない。
+Future Action: GUI の実環境視覚検証が必要で GWT.app を閉じられない場合: debug-only の lock-skip を一時適用→実 HOME で起動→目視→即停止→lock-skip を revert。他エージェントの session を巻き込むため最短時間で停止する。検証コードは PR に含めない（revert 必須）。debug ビルドでの恒久 lock-skip は別 Issue で検討。
+
+## 2026-06-01 — gwt GUI 修正の視覚検証は HOME 隔離で dev build を起動し lsof で配信プロセスを確認する
+
+Type: lesson
+Context: #2948 検証で ./target/debug/gwt を起動したら single-instance lock($HOME/.gwt キー)で既存 tray インスタンス(installed /Applications/GWT.app)を検知し、既存 URL(53425)を表示して自身は終了していた。lsof で 53425 の listener が installed app(修正なし)と判明。ユーザーに『その URL に修正は入っていないのでは』と的確に指摘された。
+Learning: 2つ目の gwt は single-instance lock(main.rs: gui_single_instance + cli::tray::lock, どちらも gwt_home=$HOME/.gwt キー)により installed app へ defer し、自分のバックエンドを配信しない。dev build を独立起動するには HOME を隔離(例: worktree 内 ./.gwt-verify-home)して gwt_home を分離する。隔離 HOME は ~/.bun ~/.npm cache も空=cold になるので cold 再現検証にも使える。プロジェクトは ReopenRecentProject(任意パス)で WS 経由で開け、Start Work は git origin remote を要求する。関連: 同 single-instance lock を debug build の lock-skip + 実 HOME で回避する手法も別 entry にあり(認証が必要な検証向け)。
+Future Action: GUI 修正の視覚検証で dev build を案内する前に、必ず HOME 隔離起動し『lsof -nP -iTCP:<port> -sTCP:LISTEN』で listener PID=自分の ./target/debug/gwt であることを確認してから URL を共有する。installed app と同居する素の起動は修正が反映されない。
+
+## 2026-06-01 — リリース中に origin/develop が他Agentマージで移動した場合は ff 後に CHANGELOG/version を再生成する
+
+Type: lesson
+Context: /release 実行中、pull 後に別Agentが PR #2950 を develop にマージし origin/develop が前進。最初のリリースコミット(古い develop ベース)は #2950 の fix を含まず、push も non-fast-forward で不成立だった。
+Learning: リリースコミットは push 直前時点の origin/develop に直接乗っている必要がある。origin が動いたら release commit を reset → origin/develop に --ff-only → version/CHANGELOG を git-cliff で再生成 → 再コミット、で新規マージ分を取り込む。背景 git push は完了報告が遅延するため push 後に必ず origin/develop == HEAD を fetch 確認してから成功宣言する。
+Future Action: /release の push 前に git fetch + 'HEAD~1 == origin/develop' を確認し、不一致なら reset+ff+再生成。push 後も fetch で origin/develop が release commit と一致するまで成功を宣言しない。
