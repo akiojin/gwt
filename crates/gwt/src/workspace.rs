@@ -372,12 +372,13 @@ impl WorkspaceState {
         let group_id = self.persisted.windows[index].tab_group_id.clone();
         let was_maximized = self.persisted.windows[index].maximized;
         let pre_geometry = self.persisted.windows[index].geometry.clone();
-        let target_geometry = WindowGeometry {
-            x: bounds.x + ARRANGE_PADDING,
-            y: bounds.y + ARRANGE_PADDING,
-            width: (bounds.width - ARRANGE_PADDING * 2.0).max(0.0),
-            height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
-        };
+        // The frontend sends the FINAL maximized geometry (with a zoom-corrected
+        // screen-space inset already applied in `maximizedGeometry`), so store it
+        // verbatim. The previous code added a constant `ARRANGE_PADDING` in WORLD
+        // units here, which rendered as an `ARRANGE_PADDING * zoom` SCREEN inset
+        // under the canvas-stage `scale(zoom)` transform and drifted the maximized
+        // window off the visible viewport at any zoom != 1.
+        let target_geometry = bounds;
 
         // No-op fast path: already maximized at the exact target geometry.
         // Without this, repeated sync events from the frontend turn into a
@@ -1488,15 +1489,12 @@ mod tests {
         assert!(maximized.maximized);
         assert!(!maximized.minimized);
         assert_eq!(maximized.pre_maximize_geometry, Some(original.clone()));
-        assert_eq!(
-            maximized.geometry,
-            WindowGeometry {
-                x: 124.0,
-                y: 64.0,
-                width: 952.0,
-                height: 712.0,
-            }
-        );
+        // The backend now stores the received geometry VERBATIM — the frontend
+        // applies the zoom-corrected screen inset in `maximizedGeometry` before
+        // sending. (Previously the backend added ARRANGE_PADDING here, which
+        // became a zoom-scaled inset under the canvas-stage transform and drifted
+        // the maximized window off the viewport at any zoom != 1.)
+        assert_eq!(maximized.geometry, arrange_bounds());
 
         // Issue #2757 follow-up: repeated maximize_window with the same
         // bounds must be a no-op. The frontend's viewport-sync path used to
@@ -1520,6 +1518,28 @@ mod tests {
         assert!(!restored.minimized);
         assert_eq!(restored.pre_maximize_geometry, None);
         assert_eq!(restored.geometry, original);
+    }
+
+    #[test]
+    fn maximize_window_stores_received_geometry_verbatim_without_world_padding() {
+        // Regression: the zoom-correct maximize inset is applied on the frontend
+        // (`maximizedGeometry` divides the 24px screen inset by zoom). The backend
+        // must NOT re-pad in world units, otherwise the inset scales with zoom and
+        // the maximized window drifts off the visible viewport.
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let geometry = WindowGeometry {
+            x: 312.5,
+            y: 88.0,
+            width: 640.0,
+            height: 360.0,
+        };
+        assert!(workspace.maximize_window("claude-1", geometry.clone()));
+        let maximized = workspace.window("claude-1").expect("claude");
+        assert!(maximized.maximized);
+        assert_eq!(
+            maximized.geometry, geometry,
+            "backend must store the frontend-computed maximize geometry unchanged",
+        );
     }
 
     #[test]

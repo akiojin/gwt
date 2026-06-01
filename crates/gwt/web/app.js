@@ -46,6 +46,7 @@
       } from "/launch-controls.js";
       import {
         applyVisibilityTransition,
+        attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
@@ -59,6 +60,7 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
+        maximizedGeometry,
         resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
         syncResizeStatePointerEvent,
@@ -1926,15 +1928,6 @@
         }
       }
 
-      function maximizedGeometry(bounds) {
-        return {
-          x: bounds.x + 24,
-          y: bounds.y + 24,
-          width: Math.max(bounds.width - 48, 0),
-          height: Math.max(bounds.height - 48, 0),
-        };
-      }
-
       function geometryMatches(left, right) {
         return (
           Math.abs(left.x - right.x) < 0.5 &&
@@ -1945,8 +1938,7 @@
       }
 
       function syncMaximizedWindowsToViewport() {
-        const bounds = visibleBounds();
-        const nextGeometry = maximizedGeometry(bounds);
+        const nextGeometry = maximizedGeometry(visibleBounds(), viewport.zoom);
         for (const windowData of activeWorkspace().windows || []) {
           if (!windowData.maximized) {
             continue;
@@ -1957,7 +1949,9 @@
           send({
             kind: "maximize_window",
             id: windowData.id,
-            bounds,
+            // The frontend now sends the FINAL maximized geometry (zoom-corrected
+            // screen inset); the backend stores it as-is. See maximizedGeometry.
+            bounds: nextGeometry,
           });
         }
       }
@@ -3691,7 +3685,9 @@
         send({
           kind: "maximize_window",
           id: windowId,
-          bounds: visibleBounds(),
+          // Final maximized geometry (zoom-corrected screen inset). The backend
+          // stores it as-is; see maximizedGeometry in window-geometry-sync.js.
+          bounds: maximizedGeometry(visibleBounds(), viewport.zoom),
         });
       }
 
@@ -4553,6 +4549,24 @@
         brightWhite: "#f8fafc",
       };
 
+      // xterm 6.0.0 measures the character cell via an OffscreenCanvas strategy
+      // (`ctx.font = `${fontSize}px ${fontFamily}``). Canvas 2D `ctx.font` does
+      // NOT resolve CSS custom properties, so a `var(--font-mono)` family token
+      // is dropped and the SHORTER system fallback (SF Mono / Menlo) is measured,
+      // while the rendered rows resolve var() to the TALLER JetBrains Mono — a
+      // permanent measure-vs-render mismatch that clips glyphs vertically. Resolve
+      // --font-mono here (keeping typography.css as the single source of truth) so
+      // the measured font equals the rendered font.
+      function resolveTerminalFontFamily() {
+        const resolved = getComputedStyle(document.documentElement)
+          .getPropertyValue("--font-mono")
+          .trim();
+        return (
+          resolved ||
+          '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+        );
+      }
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
@@ -4561,8 +4575,7 @@
           cursorBlink: true,
           convertEol: true,
           theme: XTERM_THEME_DARK,
-          fontFamily:
-            "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          fontFamily: resolveTerminalFontFamily(),
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
@@ -4592,6 +4605,19 @@
           window,
         });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
+        // Re-fit whenever the terminal container actually changes size. Covers
+        // size changes that bypass the per-event reflow wiring (maximize /
+        // restore via server geometry, restore-from-minimize, tile/stack, or a
+        // fit that no-opped against an unsettled layout box) which otherwise
+        // leave the grown container showing a black band below the grid. The
+        // manual drag-resize handler already owns reflow + final geometry, so
+        // skip while it is active to avoid a redundant per-frame PTY resync.
+        const containerResizeCleanup = attachContainerResizeReflow({
+          element: terminalContainer,
+          windowId,
+          fitTerminal,
+          shouldSkip: () => !!resizeState && resizeState.id === windowId,
+        });
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
@@ -4599,6 +4625,7 @@
           contextMenuCleanup();
           wheelScrollCleanup.dispose();
           viewportRefreshCleanup();
+          containerResizeCleanup();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;

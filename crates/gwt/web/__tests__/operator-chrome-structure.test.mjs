@@ -1073,6 +1073,33 @@ test("xterm developer readability defaults use larger font metrics", () => {
   );
 });
 
+test("xterm fontFamily is resolved without CSS var() so OffscreenCanvas char measurement matches the rendered font", () => {
+  // xterm 6.0.0 measures the char cell via an OffscreenCanvas strategy
+  // (ctx.font = `${fontSize}px ${fontFamily}`). Canvas 2D `ctx.font` CANNOT
+  // resolve CSS custom properties, so a `var(--font-mono)` family token is
+  // dropped and the SHORTER system fallback (SF Mono / Menlo) is measured,
+  // while the rendered rows resolve var() to the TALLER JetBrains Mono — the
+  // permanent measure-vs-render mismatch that clips glyphs vertically.
+  const runtime = appSource.match(/new\s+Terminal\(\{\s*([\s\S]*?)\s*\}\);/);
+  assert.ok(runtime, "expected xterm Terminal constructor options");
+  assert.doesNotMatch(
+    runtime[1],
+    /var\(/,
+    "xterm Terminal options must not pass a CSS var() font family; OffscreenCanvas ctx.font cannot resolve it",
+  );
+  assert.match(
+    appSource,
+    /function\s+resolveTerminalFontFamily\s*\(/,
+    "expected a resolveTerminalFontFamily() helper that resolves --font-mono to a var()-free stack",
+  );
+  // The resolver's hardcoded fallback must still prefer JetBrains Mono.
+  assert.match(
+    appSource,
+    /resolveTerminalFontFamily[\s\S]{0,400}?JetBrains Mono/,
+    "resolveTerminalFontFamily fallback must reference JetBrains Mono",
+  );
+});
+
 test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
   // SPEC-2356 Phase 9 (FR-021/FR-022/FR-031): hover-reveal state machine sets
