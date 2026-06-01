@@ -6326,3 +6326,10 @@ Type: lesson
 Context: ターミナル文字の縦見切れを lineHeight 1.2→1.28→1.35 と上げ続けても直らなかった (#2903 系譜)。xterm.js 6.0.0 は OffscreenCanvas で ctx.font=`${fontSize}px ${fontFamily}` を設定しセル高を測定するが、fontFamily が 'var(--font-mono), …' だった。
 Learning: Canvas 2D の ctx.font は CSS custom property を解決できず、var() を含む font 文字列は丸ごと無効として無視され ctx.font は初期値 '10px sans-serif' のままになる (Playwright 実機計測: varString.normalized='10px sans-serif' boxHeight=10、resolved --font-mono='14px JetBrains Mono Variable…' boxHeight=18 で JBM ground truth と一致)。一方 DOM 行は style.fontFamily で var() を解決し 18px の JBM を描画するため、測定(10)<描画(18) の恒久的不一致で overflow:hidden 行が glyph を切る。lineHeight 倍率は誤った base を倍率するため何度上げても収束しない。
 Future Action: xterm の fontFamily オプションには var() を含めない。getComputedStyle(:root).getPropertyValue('--font-mono') で解決した実フォントスタックを渡し、測定フォント==描画フォントに揃える。canvas/OffscreenCanvas に渡す font 文字列全般で CSS 変数を使わない。
+
+## 2026-06-01 — gwt serve(--no-tray --no-open)+リモートブラウザでは Open Project(rfd)がフリーズ。reopen_recent_project でパス指定 open する
+
+Type: lesson
+Context: 新ビルド検証で隔離HOMEのgwtを別プロセス起動しChromeから操作。Open Projectクリックで UI がフリーズ（HTTPサーバーは200で生存）。
+Learning: open_project_dialog_events は rfd::FileDialog::pick_folder() を同期呼び出し(crates/gwt/src/app_runtime/mod.rs:4659)。headless serveプロセスはウィンドウ/Dock無しのバックグラウンドのため、別アプリ(Chrome)経由だとネイティブダイアログを前面化できずブロックする。ReopenRecentProject{path}->open_project_path_events はダイアログ不要でパスから開ける。
+Future Action: serve+remote browserでプロジェクトを開く必要がある時はOpen Projectを使わず、WS(/ws)へ {kind:'reopen_recent_project', path:'<repo>'} を送る(Playwright page.evaluateでWebSocketを開いて送信)。serveモードのOpen Projectフリーズ自体は別Issue候補。
