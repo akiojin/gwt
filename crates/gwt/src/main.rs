@@ -1970,23 +1970,37 @@ mod tests {
     }
 
     #[test]
-    fn restored_process_window_is_not_auto_started_when_exited() {
+    fn restored_agent_window_is_not_fresh_started_by_non_agent_path() {
+        // Issue #2942: agent panes are restored by the resume path, not the
+        // fresh-start path, so they are excluded regardless of status.
         assert!(!should_auto_start_restored_window(&sample_window(
             WindowPreset::Claude,
             WindowProcessStatus::Exited,
         )));
+        assert!(!should_auto_start_restored_window(&sample_window(
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        )));
     }
 
     #[test]
-    fn restored_process_window_is_auto_started_only_when_running_or_starting() {
+    fn restored_non_agent_process_window_is_auto_started_regardless_of_status() {
+        // Issue #2942: a persisted process window was not explicitly closed
+        // (closing removes it), so it must restart even after being paused to
+        // `Stopped` on restore — status no longer gates the decision.
         assert!(should_auto_start_restored_window(&sample_window(
             WindowPreset::Shell,
             WindowProcessStatus::Running,
         )));
         assert!(should_auto_start_restored_window(&sample_window(
             WindowPreset::Shell,
+            WindowProcessStatus::Stopped,
+        )));
+        assert!(should_auto_start_restored_window(&sample_window(
+            WindowPreset::Shell,
             WindowProcessStatus::Starting,
         )));
+        // Non-process surfaces never auto-start.
         assert!(!should_auto_start_restored_window(&sample_window(
             WindowPreset::Branches,
             WindowProcessStatus::Ready,

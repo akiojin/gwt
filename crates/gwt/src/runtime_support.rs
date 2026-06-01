@@ -33,9 +33,13 @@ pub fn close_window_from_workspace(
 }
 
 pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
-    window.preset.requires_process()
-        && window.preset != WindowPreset::Agent
-        && window.status == WindowProcessStatus::Running
+    // Issue #2942: a process window persisted in the workspace is one the user
+    // did not explicitly close (closing removes it from the list), so it must
+    // be restarted regardless of the paused `status` it carries after
+    // `pause_process_windows_for_restore`. Agent panes are restored by the
+    // resume path (which carries the native session id), so they are excluded
+    // here and only non-agent process windows (e.g. Shell) launch fresh.
+    window.preset.requires_process() && !window_is_agent_pane(window)
 }
 
 // SPEC-2013 FR-011: `cli::pane::is_agent_pane` と同じ判定 (`agent_id` 設定済み
