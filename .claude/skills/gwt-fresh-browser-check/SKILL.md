@@ -74,6 +74,14 @@ an old browser tab.
    - Verify with `curl -fsS -I <url>`.
    - Optionally use browser automation once to confirm the page is past
      startup and has a project tab for the seeded checkout.
+   - Do not make `Start Work` the user's verification path unless the task is
+     specifically about Start Work and you have already proven GitHub branch
+     creation works in the isolated home. Fresh checks run with
+     `GIT_TERMINAL_PROMPT=0`; otherwise a `git push` can fail with
+     `could not read Username for 'https://github.com'`.
+   - If the verification needs an agent window but not Start Work itself,
+     prepare or launch it on the current checkout/current branch path instead
+     of asking the user to create a new work branch from the fresh browser.
 
 6. Tell the user:
    - The fresh checkout URL.
@@ -100,5 +108,8 @@ an old browser tab.
 - Do not leave the fresh gwt process running after the user is done.
 - If launch fails, report the last relevant startup log lines and fix the
   fresh-launch problem before asking the user to retry.
+- If the user sees a failed Agent window from remote branch creation, close
+  that fresh-check window and explain it as a verification setup problem, not
+  as evidence about the feature under test.
 - Keep user-facing status messages concise and in Japanese. Keep commands,
   flags, paths, and code examples as-is.

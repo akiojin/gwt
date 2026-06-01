@@ -6424,3 +6424,10 @@ Type: lesson
 Context: User corrected the headless-browser-check workflow after it printed an existing tray-resident production URL. The desired verification URL must come from the modified checkout's own freshly launched server.
 Learning: Browser verification skills for gwt must isolate HOME/USERPROFILE, launch the current checkout's target/debug/gwt with --no-tray --no-open, seed session.json for the checkout, and reject any URL reported after an existing tray instance warning.
 Future Action: When providing a gwt verification URL, use the renamed gwt-fresh-browser-check workflow and prove the URL comes from the fresh process's GWT_BROWSER_URL_FILE plus HTTP 200 before sharing it.
+
+## 2026-06-01 — Fresh browser verification should not use Start Work unless credentials are proven
+
+Type: lesson
+Context: During gwt-fresh-browser-check, the user saw a failed Claude Code window because the isolated HOME Start Work path tried to create remote branch origin/work/20260601-1042 and git push failed with terminal prompts disabled.
+Learning: Fresh browser checks isolate HOME and set GIT_TERMINAL_PROMPT=0, so Start Work can fail on GitHub HTTPS authentication even when the app under test is otherwise fine. Verification should avoid Start Work unless the feature under test requires it and branch creation credentials are preflighted.
+Future Action: For gwt fresh UI checks, seed the target project/window or launch on the current branch path; if a failed remote-branch Agent window appears, close it and treat it as verification setup noise rather than feature evidence.
