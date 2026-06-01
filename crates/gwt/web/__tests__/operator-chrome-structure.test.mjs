@@ -718,6 +718,79 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
   );
 });
 
+test("Branches detail-check state explains checking and interrupted cleanup safety", () => {
+  assert.match(
+    appSource,
+    /function\s+branchLoadStatusSummary\(state\)/,
+    "expected Branches to derive a status summary from branch load state",
+  );
+  for (const copy of [
+    "Checking branch details",
+    "Branch detail check interrupted",
+    "Safety unknown",
+    "Refresh to verify cleanup safety",
+  ]) {
+    assert.ok(appSource.includes(copy), `expected Branches clarity copy: ${copy}`);
+  }
+  assert.doesNotMatch(
+    appSource,
+    /Cleanup status unavailable/,
+    "Branches rows should explain unknown safety instead of showing an unavailable cleanup placeholder",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /state\.loading\s*\?\s*"loading"\s*:\s*"unknown"/,
+    "Branches cleanup badges should not collapse interrupted hydration into an ambiguous unknown label",
+  );
+  for (const selector of [
+    ".branch-notice-title",
+    ".branch-notice-detail",
+    ".branch-notice-hint",
+  ]) {
+    assert.ok(inlineStyle.includes(selector), `missing Branches status summary CSS: ${selector}`);
+  }
+  assert.match(
+    inlineStyle,
+    /\.branch-notice\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden Branches notices must not leave an empty status band behind",
+  );
+});
+
+test("Branches detail-check checking state uses motion without animating static states", () => {
+  assert.match(
+    inlineStyle,
+    /@keyframes\s+branch-detail-check-sweep/,
+    "expected Branches checking summary to define a named sweep animation",
+  );
+  assert.match(
+    inlineStyle,
+    /@keyframes\s+branch-cleanup-checking-pulse/,
+    "expected Branches checking badge to define a named pulse animation",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-notice\[data-branch-status="checking"\]::before[\s\S]+animation:\s*branch-detail-check-sweep/,
+    "expected only the checking summary notice to run the progress sweep",
+  );
+  assert.match(
+    inlineStyle,
+    /\.branch-cleanup-badge\.loading[\s\S]+animation:\s*branch-cleanup-checking-pulse/,
+    "expected only checking cleanup badges to pulse",
+  );
+
+  const reducedMotion = extractMediaBlocks(inlineStyle, "prefers-reduced-motion: reduce");
+  assert.match(
+    reducedMotion,
+    /branch-notice\[data-branch-status="checking"\]::before[\s\S]+animation:\s*none/,
+    "reduced-motion users must not get the checking summary sweep",
+  );
+  assert.match(
+    reducedMotion,
+    /branch-cleanup-badge\.loading[\s\S]+animation:\s*none/,
+    "reduced-motion users must not get the checking badge pulse",
+  );
+});
+
 test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");

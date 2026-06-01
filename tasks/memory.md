@@ -6411,6 +6411,13 @@ Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
 
+## 2026-06-01 — Hidden attribute can be overridden by component display rules
+
+Type: lesson
+Context: SPEC-2009 Branches notice hotfix: .branch-notice used display:grid, so a hidden notice still rendered as an empty red band after branch detail checking completed.
+Learning: When a component class sets display explicitly, hidden elements need an explicit selector such as .component[hidden] { display: none; } and a visual regression contract, because the class rule can override the UA hidden style.
+Future Action: For UI surfaces with reusable notice/banner components, add hidden-state display contracts in both static CSS tests and browser/UI tests whenever the component sets display.
+
 ## 2026-06-01 — FrontendReady must replay nullable singleton tombstones
 
 Type: lesson

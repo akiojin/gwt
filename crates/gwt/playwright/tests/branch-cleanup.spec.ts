@@ -27,6 +27,9 @@ test.describe("Branch Cleanup E2E", () => {
 
     const branchSurface = branchesWindow.locator("[data-work-section='branches']");
     await expect(branchSurface).toBeVisible();
+    const notice = branchSurface.locator(".branch-notice");
+    await expect(notice).toBeHidden();
+    await expect(notice).toHaveCSS("display", "none");
 
     const firstBranch = branchSurface.locator(
       ".branch-row[data-branch-name='work/cleanup-one']",
@@ -144,6 +147,121 @@ test.describe("Branch Cleanup E2E", () => {
     await expect(modal).toContainText("Cleanup result");
     await expect(modal).toContainText("success 2 · partial 0 · failed 0");
     await expect(modal.getByRole("button", { name: "Close" })).toBeVisible();
+  });
+
+  test("explains branch detail checks and interrupted cleanup safety", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBranchDetailCheckBackend(page);
+
+    await page.goto(APP_URL);
+
+    const branchesWindow = page.locator(".workspace-window.surface-work");
+    await expect(branchesWindow).toBeVisible({ timeout: 10_000 });
+    await branchesWindow.locator("[data-work-tab='branches']").click();
+
+    const branchSurface = branchesWindow.locator("[data-work-section='branches']");
+    const notice = branchSurface.locator(".branch-notice");
+    const branch = branchSurface.locator(
+      ".branch-row[data-branch-name='work/detail-pending']",
+    );
+
+    await expect(notice.locator(".branch-notice-title")).toHaveText(
+      "Checking branch details",
+    );
+    await expect(notice).toContainText(
+      "Cleanup selection unlocks after verification.",
+    );
+    await expect(branch.locator(".branch-cleanup-badge")).toHaveText("checking");
+    await expect(branch.locator(".branch-cleanup-toggle")).toHaveAttribute(
+      "title",
+      "Checking cleanup safety",
+    );
+    await expect
+      .poll(() =>
+        notice.evaluate(
+          (element) =>
+            window.getComputedStyle(element, "::before").animationName,
+        ),
+      )
+      .toContain("branch-detail-check-sweep");
+    await expect
+      .poll(() =>
+        branch
+          .locator(".branch-cleanup-badge")
+          .evaluate((element) => window.getComputedStyle(element).animationName),
+      )
+      .toContain("branch-cleanup-checking-pulse");
+
+    await page.evaluate(() => window.__branchDetailFixture.close());
+
+    await expect(notice.locator(".branch-notice-title")).toHaveText(
+      "Branch detail check interrupted",
+    );
+    await expect(notice).toContainText("Refresh to verify cleanup safety.");
+    await expect(branch.locator(".branch-cleanup-badge")).toHaveText(
+      "Safety unknown",
+    );
+    await expect(branch.locator(".branch-cleanup-toggle")).toHaveAttribute(
+      "title",
+      "Refresh to verify cleanup safety",
+    );
+    await expect
+      .poll(() =>
+        notice.evaluate(
+          (element) =>
+            window.getComputedStyle(element, "::before").animationName,
+        ),
+      )
+      .toBe("none");
+    await expect
+      .poll(() =>
+        branch
+          .locator(".branch-cleanup-badge")
+          .evaluate((element) => window.getComputedStyle(element).animationName),
+      )
+      .toBe("none");
+  });
+
+  test("honors reduced motion for branch detail check animations", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await installEmbeddedRoutes(page);
+    await installBranchDetailCheckBackend(page);
+
+    await page.goto(APP_URL);
+
+    const branchesWindow = page.locator(".workspace-window.surface-work");
+    await expect(branchesWindow).toBeVisible({ timeout: 10_000 });
+    await branchesWindow.locator("[data-work-tab='branches']").click();
+
+    const branchSurface = branchesWindow.locator("[data-work-section='branches']");
+    const notice = branchSurface.locator(".branch-notice");
+    const branch = branchSurface.locator(
+      ".branch-row[data-branch-name='work/detail-pending']",
+    );
+
+    await expect(notice.locator(".branch-notice-title")).toHaveText(
+      "Checking branch details",
+    );
+    await expect(branch.locator(".branch-cleanup-badge")).toHaveText("checking");
+    await expect
+      .poll(() =>
+        notice.evaluate(
+          (element) =>
+            window.getComputedStyle(element, "::before").animationName,
+        ),
+      )
+      .toBe("none");
+    await expect
+      .poll(() =>
+        branch
+          .locator(".branch-cleanup-badge")
+          .evaluate((element) => window.getComputedStyle(element).animationName),
+      )
+      .toBe("none");
   });
 });
 
@@ -293,6 +411,120 @@ async function installBranchCleanupBackend(page) {
           risks,
         },
       };
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      value: FixtureWebSocket,
+    });
+  });
+}
+
+async function installBranchDetailCheckBackend(page) {
+  await page.addInitScript(() => {
+    const branchEntries = [
+      {
+        name: "work/detail-pending",
+        scope: "local",
+        is_head: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        last_commit_date: "2026-05-20",
+        cleanup_ready: false,
+        cleanup: null,
+      },
+    ];
+
+    const workspaceState = {
+      kind: "workspace_state",
+      workspace: {
+        app_version: "playwright",
+        tabs: [
+          {
+            id: "tab-1",
+            title: "Fixture",
+            project_root: "/fixture",
+            kind: "git",
+            workspace: {
+              viewport: { x: 0, y: 0, zoom: 1 },
+              windows: [
+                {
+                  id: "branches-1",
+                  title: "Branches",
+                  preset: "branches",
+                  geometry: { x: 96, y: 96, width: 760, height: 620 },
+                  z_index: 1,
+                  status: "running",
+                  minimized: false,
+                  maximized: false,
+                  pre_maximize_geometry: null,
+                  persist: true,
+                  purpose_title: null,
+                  dynamic_title: null,
+                  dynamic_title_detail: null,
+                  agent_id: null,
+                  agent_color: null,
+                  tab_group_id: null,
+                  tab_group_active: false,
+                },
+              ],
+            },
+          },
+        ],
+        active_tab_id: "tab-1",
+        recent_projects: [],
+      },
+    };
+
+    class FixtureWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = FixtureWebSocket.CONNECTING;
+        window.__branchDetailFixture = this;
+        setTimeout(() => {
+          this.readyState = FixtureWebSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+
+      send(raw) {
+        const message = JSON.parse(raw);
+        switch (message.kind) {
+          case "frontend_ready":
+            this.emit(workspaceState);
+            break;
+          case "load_branches":
+            this.emit({
+              kind: "branch_entries",
+              id: message.id,
+              phase: "loading",
+              entries: branchEntries,
+            });
+            break;
+          default:
+            break;
+        }
+      }
+
+      close() {
+        this.readyState = FixtureWebSocket.CLOSED;
+        this.dispatchEvent(new CloseEvent("close"));
+      }
+
+      emit(payload) {
+        setTimeout(() => {
+          this.dispatchEvent(
+            new MessageEvent("message", { data: JSON.stringify(payload) }),
+          );
+        }, 0);
+      }
     }
 
     Object.defineProperty(window, "WebSocket", {
