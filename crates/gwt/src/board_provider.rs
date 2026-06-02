@@ -30,10 +30,57 @@ use crate::board_remote::token_store::{self, TokenSet};
 /// per call (rather than caching a process global) keeps a settings change
 /// effective immediately (FR-008) and avoids cross-call/test state leakage.
 /// Unreadable config falls back to `local` (FR-004).
+///
+/// Test seam: in `#[cfg(test)]` builds the kind comes from a per-thread
+/// override that defaults to `Local`, so board unit tests run against the
+/// filesystem provider regardless of the developer machine's
+/// `~/.gwt/config.toml`. `Settings::global_config_path` resolves via
+/// `dirs::home_dir()` (which ignores `HOME`/`USERPROFILE` on Windows), so the
+/// global config cannot be isolated with env vars; the override is the
+/// race-free way to keep tests hermetic. Production builds always read config.
 pub fn current_kind() -> BoardProviderKind {
-    Settings::load()
-        .map(|s| s.board.provider)
-        .unwrap_or_default()
+    #[cfg(test)]
+    {
+        test_provider_override::current()
+    }
+    #[cfg(not(test))]
+    {
+        Settings::load()
+            .map(|s| s.board.provider)
+            .unwrap_or_default()
+    }
+}
+
+/// Per-thread provider-kind override used only by unit tests (see
+/// [`current_kind`]). Thread-local so parallel tests never race on it.
+#[cfg(test)]
+pub(crate) mod test_provider_override {
+    use super::BoardProviderKind;
+    use std::cell::Cell;
+
+    thread_local! {
+        static KIND: Cell<BoardProviderKind> = const { Cell::new(BoardProviderKind::Local) };
+    }
+
+    /// Current override for this thread (defaults to `Local`).
+    pub(crate) fn current() -> BoardProviderKind {
+        KIND.with(Cell::get)
+    }
+
+    /// Force `kind` for the duration of the returned guard, then restore.
+    pub(crate) fn force(kind: BoardProviderKind) -> Guard {
+        let previous = KIND.with(|cell| cell.replace(kind));
+        Guard(previous)
+    }
+
+    /// RAII guard restoring the previous override on drop.
+    pub(crate) struct Guard(BoardProviderKind);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            KIND.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// A provider that fails every operation with a clear reason. Returned when a
@@ -170,10 +217,11 @@ fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardPr
 /// The active provider, resolved from current settings. `local` stays on the
 /// zero-cost fast path; remote providers load settings + credentials.
 pub fn provider() -> Box<dyn BoardProvider> {
-    let settings = Settings::load().unwrap_or_default();
-    match settings.board.provider {
+    // `current_kind()` honours the test override (defaulting to `Local` in
+    // tests) and reads `Settings` in production, so unit tests stay hermetic.
+    match current_kind() {
         BoardProviderKind::Local => Box::new(LocalProvider),
-        kind => build_remote(kind, &settings),
+        kind => build_remote(kind, &Settings::load().unwrap_or_default()),
     }
 }
 
@@ -277,6 +325,30 @@ mod tests {
         let provider = build_remote(BoardProviderKind::Teams, &Settings::default());
         let err = provider.load_snapshot(dir.path()).unwrap_err();
         assert!(err.to_string().contains("Teams"));
+    }
+
+    #[test]
+    fn current_kind_defaults_to_local_in_tests_and_provider_is_hermetic() {
+        // Without an override the unit-test default is Local regardless of the
+        // machine's config.toml, so board behaviour tests never depend on a
+        // configured remote provider.
+        assert_eq!(current_kind(), BoardProviderKind::Local);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(provider().load_snapshot(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn test_override_routes_provider_to_remote() {
+        // Forcing a remote kind routes `provider()` through `build_remote`;
+        // with default (unconfigured) settings that surfaces an error rather
+        // than silently serving local (FR-010).
+        let _guard = test_provider_override::force(BoardProviderKind::Slack);
+        assert_eq!(current_kind(), BoardProviderKind::Slack);
+        let dir = tempfile::tempdir().unwrap();
+        assert!(provider().load_snapshot(dir.path()).is_err());
+        drop(_guard);
+        // Restored to the hermetic default.
+        assert_eq!(current_kind(), BoardProviderKind::Local);
     }
 
     #[test]

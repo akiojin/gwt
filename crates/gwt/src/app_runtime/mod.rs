@@ -3074,10 +3074,7 @@ fn os_url_open_command(url: &str) -> (&'static str, Vec<String>) {
     } else if cfg!(target_os = "windows") {
         (
             "rundll32.exe",
-            vec![
-                "url.dll,FileProtocolHandler".to_string(),
-                url.to_string(),
-            ],
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
         )
     } else {
         ("xdg-open", vec![url.to_string()])
