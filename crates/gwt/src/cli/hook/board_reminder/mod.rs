@@ -140,27 +140,44 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
         session,
         &session.worktree_path,
     );
-    let Some(projection) =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?
-    else {
-        return Ok(false);
+    let projection =
+        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
+    Ok(title_summary_missing_in_projection(
+        projection.as_ref(),
+        &session.id,
+    ))
+}
+
+/// Pure decision for whether `session_id`'s agent still needs a `title_summary`.
+///
+/// SPEC-2359 Phase W-11 (US-58 / US-46 / FR-179): the title reminder must also
+/// fire for Unassigned agents. Start Work / standalone agents are Unassigned
+/// yet still need a purpose title; with the prompt-derivation path removed
+/// (W-11), an `is_unassigned()` early-return would leave them with neither a
+/// derived title nor a reminder. (The derivation path dropped the same guard
+/// under US-46/FR-179 for the same reason.) A missing projection or an
+/// unregistered session is treated as "not missing" so the reminder only
+/// fires once the agent is actually present in the projection.
+fn title_summary_missing_in_projection(
+    projection: Option<&gwt_core::workspace_projection::WorkspaceProjection>,
+    session_id: &str,
+) -> bool {
+    let Some(projection) = projection else {
+        return false;
     };
     let Some(agent) = projection
         .agents
         .iter()
-        .find(|agent| agent.session_id == session.id)
+        .find(|agent| agent.session_id == session_id)
     else {
-        return Ok(false);
+        return false;
     };
-    if agent.is_unassigned() {
-        return Ok(false);
-    }
-    Ok(agent
+    agent
         .title_summary
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .is_none())
+        .is_none()
 }
 
 fn append_title_summary_required_context(
@@ -707,6 +724,70 @@ mod tests {
             !agent_title_summary_missing(&session).expect("title check"),
             "title guard must read the canonical Project State root, not the worktree root"
         );
+    }
+
+    /// SPEC-2359 Phase W-11 (US-58 / US-46 / FR-179): the title-missing
+    /// decision must return `true` for an Unassigned agent with no title, so
+    /// the reminder fires. Start Work / standalone agents are Unassigned; the
+    /// old `is_unassigned()` early-return left them with neither a derived
+    /// title nor a reminder once the prompt-derivation path was removed.
+    /// Pure-logic test (no global store / env) to stay deterministic.
+    #[test]
+    fn title_summary_missing_in_projection_covers_affiliation_and_presence() {
+        use gwt_core::workspace_projection::{
+            WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+            WorkspaceStatusCategory,
+        };
+
+        let mut agent = WorkspaceAgentSummary {
+            session_id: "sess-1".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+            workspace_id: None,
+            updated_at: Utc::now(),
+        };
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(agent.clone());
+
+        // Unassigned + empty title -> missing (the fix).
+        assert!(title_summary_missing_in_projection(
+            Some(&projection),
+            "sess-1"
+        ));
+
+        // Assigned + empty title -> still missing.
+        projection.agents[0].affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        assert!(title_summary_missing_in_projection(
+            Some(&projection),
+            "sess-1"
+        ));
+
+        // Any affiliation + non-empty title -> not missing.
+        projection.agents[0].title_summary = Some("Agent title purpose".to_string());
+        assert!(!title_summary_missing_in_projection(
+            Some(&projection),
+            "sess-1"
+        ));
+
+        // No projection / unknown session -> not missing.
+        assert!(!title_summary_missing_in_projection(None, "sess-1"));
+        agent.title_summary = None;
+        let mut other = WorkspaceProjection::default_for_project("/repo");
+        other.agents.push(agent);
+        assert!(!title_summary_missing_in_projection(
+            Some(&other),
+            "sess-unknown"
+        ));
     }
 
     fn push_entry(
