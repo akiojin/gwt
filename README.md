@@ -151,7 +151,7 @@ Trust boundary: **LAN only** (including VPN-extended LAN). The embedded
 browser server does not ship TLS termination, an authentication gate, or rate
 limiting. Anyone that can reach the bind address can drive the embedded UI,
 which includes spawning terminals. The `--bind` flag is opt-in: the default
-`127.0.0.1` keeps the same loopback-trust behaviour as the native GUI. For
+`127.0.0.1` keeps the same loopback-trust behavior as the native GUI. For
 external access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather
 than exposing the port to the public Internet.
 
@@ -312,7 +312,7 @@ folder. The new project is created at `<parent>/<project>/`, with a bare
 exists, otherwise on the remote default branch.
 
 Existing Normal Git repositories (`.git/` directly under the project
-directory) are recognised so a migration to the Nested Bare + Worktree layout
+directory) are recognized so a migration to the Nested Bare + Worktree layout
 can be run on demand. The migration safely backs up the original tree to
 `.gwt-migration-backup/`, rebuilds the bare repo, recreates each worktree,
 and rolls back automatically if any phase fails. Tracking work is captured in
