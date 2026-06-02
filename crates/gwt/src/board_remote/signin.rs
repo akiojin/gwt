@@ -95,11 +95,22 @@ pub fn begin_signin(
     let state = uuid::Uuid::new_v4().to_string();
     // Slack uses a client secret; the Microsoft (Teams) public client uses PKCE.
     let (provider_key, config, pkce) = match kind {
-        BoardProviderKind::Slack => (
-            "slack".to_string(),
-            slack_oauth_config(&settings.board.slack, &redirect)?,
-            None,
-        ),
+        BoardProviderKind::Slack => {
+            // Slack needs the client secret at the token-exchange step. Fail
+            // here (before opening the browser) so a missing secret surfaces
+            // as a clear settings error instead of a post-authorization
+            // `invalid_client` failure the user cannot see.
+            if slack_client_secret().is_none() {
+                return Err("Slack client secret is not configured. Enter it in \
+                     Settings > System > Board provider and Save before signing in."
+                    .to_string());
+            }
+            (
+                "slack".to_string(),
+                slack_oauth_config(&settings.board.slack, &redirect)?,
+                None,
+            )
+        }
         BoardProviderKind::Teams => (
             "teams".to_string(),
             teams_oauth_config(&settings.board.teams, &redirect)?,

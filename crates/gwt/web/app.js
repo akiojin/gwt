@@ -11518,6 +11518,18 @@
                   : "required for Slack sign-in",
               },
             );
+            // The secret is stored securely and never echoed back, so the
+            // field intentionally clears after Save. Show an explicit saved
+            // state so it is obvious the secret persisted (id used by tests).
+            const secretState = createNode(
+              "p",
+              "settings-help board-secret-state",
+              cfg.slackHasSecret
+                ? "✓ A client secret is saved (the field stays blank for security)."
+                : "No client secret saved yet.",
+            );
+            secretState.dataset.hasSecret = cfg.slackHasSecret ? "true" : "false";
+            configForm.appendChild(secretState);
           } else {
             clientIdInput = makeField(
               "settings-board-teams-client-id",

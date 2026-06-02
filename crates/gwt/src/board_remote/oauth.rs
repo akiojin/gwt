@@ -105,15 +105,27 @@ pub fn build_authorize_url(
     state: &str,
     pkce_challenge: Option<&str>,
 ) -> Result<String, String> {
-    let scope = config.scopes.join(" ");
+    // Scope list separator is provider-specific: Slack OAuth v2 expects a
+    // COMMA-separated list (a space-separated list is parsed as one invalid
+    // scope, yielding Slack's "No scopes requested" install error), while the
+    // Microsoft identity platform follows the OAuth2/OIDC SPACE-separated form.
+    let scope = match config.provider {
+        OAuthProvider::Slack => config.scopes.join(","),
+        OAuthProvider::Teams => config.scopes.join(" "),
+    };
     let mut params: Vec<(&str, &str)> = vec![
         ("client_id", config.client_id.as_str()),
         ("redirect_uri", config.redirect_uri.as_str()),
-        ("response_type", "code"),
         ("state", state),
     ];
-    // Slack uses `scope`; both accept `scope`. Microsoft additionally honors
-    // `response_mode=query` which is the default for code flow.
+    // `response_type=code` is the OAuth2/OIDC authorization-code marker the
+    // Microsoft identity platform (Teams) requires. Slack OAuth v2's
+    // `/oauth/v2/authorize` does not define `response_type` (sending it nudges
+    // Slack toward the OIDC "Sign in with Slack" interpretation), so omit it on
+    // the Slack branch to stay spec-correct for the bot-install flow.
+    if matches!(config.provider, OAuthProvider::Teams) {
+        params.push(("response_type", "code"));
+    }
     params.push(("scope", scope.as_str()));
     if let Some(challenge) = pkce_challenge {
         params.push(("code_challenge", challenge));
@@ -282,8 +294,17 @@ mod tests {
         assert!(url.starts_with("https://slack.com/oauth/v2/authorize?"));
         assert!(url.contains("client_id=C1"));
         assert!(url.contains("state=state-xyz"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("chat%3Awrite")); // url-encoded scope
+        // Slack OAuth v2 does not define response_type; it must be omitted.
+        assert!(
+            !url.contains("response_type"),
+            "Slack authorize URL must not carry response_type: {url}"
+        );
+        // Slack v2 requires a COMMA-separated scope list; a space-separated list
+        // is rejected as "No scopes requested". Comma encodes to %2C.
+        assert!(
+            url.contains("scope=chat%3Awrite%2Cchannels%3Ahistory"),
+            "Slack scopes must be comma-separated: {url}"
+        );
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2Foauth%2Fcallback"));
     }
 
@@ -299,6 +320,39 @@ mod tests {
         assert!(url.contains("code_challenge=challenge123"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("login.microsoftonline.com/common/oauth2/v2.0/authorize"));
+        // Microsoft's authorization-code flow requires response_type=code.
+        assert!(
+            url.contains("response_type=code"),
+            "Teams authorize URL must carry response_type=code: {url}"
+        );
+    }
+
+    #[test]
+    fn scope_separator_is_provider_specific() {
+        // Slack -> comma-separated (%2C); Teams/Microsoft -> space-separated (+).
+        let slack = OAuthConfig::slack(
+            "C1",
+            Some("s".into()),
+            "http://localhost/cb",
+            vec!["chat:write".into(), "channels:read".into()],
+        );
+        let slack_url = build_authorize_url(&slack, "s", None).unwrap();
+        assert!(
+            slack_url.contains("scope=chat%3Awrite%2Cchannels%3Aread"),
+            "slack scopes must join with comma: {slack_url}"
+        );
+
+        let teams = OAuthConfig::teams(
+            "T1",
+            "common",
+            "http://localhost/cb",
+            vec!["ChannelMessage.Send".into(), "Channel.ReadBasic.All".into()],
+        );
+        let teams_url = build_authorize_url(&teams, "s", None).unwrap();
+        assert!(
+            teams_url.contains("scope=ChannelMessage.Send+Channel.ReadBasic.All"),
+            "teams scopes must join with space: {teams_url}"
+        );
     }
 
     #[test]

@@ -232,6 +232,18 @@ test("System tab exposes remote provider config form that saves via update_board
     /slackClientId:\s*event\.slack_client_id/,
     "dispatch must prefill slack client id from board_auth_status",
   );
+  // The secret field clears after Save by design; an explicit saved-state note
+  // must make persistence obvious instead of looking like data loss.
+  assert.match(
+    appSource,
+    /board-secret-state/,
+    "a client-secret saved-state indicator must exist",
+  );
+  assert.match(
+    appSource,
+    /A client secret is saved/,
+    "the saved-state indicator must confirm the secret persisted",
+  );
 });
 
 test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
