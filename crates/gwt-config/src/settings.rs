@@ -14,6 +14,7 @@ use crate::{
     atomic::write_atomic,
     error::{ConfigError, Result},
     profile::ProfilesConfig,
+    usage_config::UsageConfig,
     voice_config::VoiceConfig,
 };
 
@@ -44,6 +45,8 @@ pub struct Settings {
     /// Currently the only reader is [`AISettings::effective_language`] for
     /// narrative output language resolution (SPEC-1933 FR-009 / FR-010).
     pub ai: AISettings,
+    /// Provider usage display configuration (SPEC-2970).
+    pub usage: UsageConfig,
 }
 
 impl Default for Settings {
@@ -62,6 +65,7 @@ impl Default for Settings {
             voice: VoiceConfig::default(),
             agent: AgentConfig::default(),
             ai: AISettings::default(),
+            usage: UsageConfig::default(),
         }
     }
 }
@@ -151,6 +155,16 @@ mod tests {
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+    }
+
+    #[test]
+    fn legacy_config_without_usage_section_defaults() {
+        // A config written before SPEC-2970 has no [usage] table; both
+        // providers default on (FR-013 migration).
+        let s: Settings =
+            toml::from_str("default_base_branch = \"main\"\ndebug = false\n").unwrap();
+        assert!(s.usage.codex_enabled);
+        assert!(s.usage.claude_account_enabled);
     }
 
     #[test]

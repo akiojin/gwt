@@ -19,7 +19,7 @@ pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_search;
 pub mod index_worker;
-mod issue_cache;
+pub mod issue_cache;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;

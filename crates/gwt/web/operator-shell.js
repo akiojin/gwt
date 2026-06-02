@@ -377,6 +377,86 @@ export function applyTelemetryCounts(doc, counts = {}) {
 }
 
 // ------------------------------------------------------------
+// Provider usage pill (SPEC-2970)
+// ------------------------------------------------------------
+
+const USAGE_PROVIDER_ICON = { codex: "⬡", claude_code: "◇" };
+
+function usageWindowByKind(account, kind) {
+  return (account.windows || []).find((w) => w.kind === kind) || null;
+}
+
+// Stable, glanceable per-provider summary value for the status strip (weekly %
+// when available, else a short degraded token). No rotation.
+function usageSummaryValue(account) {
+  const kind = (account.state || {}).kind || "ok";
+  if (kind === "disabled") return "off";
+  if (kind === "no_data") return "—";
+  if (kind === "unavailable") return "n/a";
+  const week = usageWindowByKind(account, "weekly");
+  const five = usageWindowByKind(account, "five_hour");
+  if (week) return `${Math.round(week.used_percent)}%`;
+  if (five) return `${Math.round(five.used_percent)}%`;
+  return "—";
+}
+
+// SPEC-2970 — status-strip USAGE cell: a stable, consolidated summary
+// (`USAGE ⬡ 23% ◇ 9%`). Hover shows the full consolidated popover (all windows
+// + consumption) via the app-provided hooks; click opens the detail modal. No
+// ticker rotation — everything is visible at a glance / on hover.
+export function applyProviderUsage(doc, snapshot = {}) {
+  const cell = doc.getElementById("op-strip-usage");
+  if (!cell) return;
+  const accounts = snapshot.accounts || [];
+  if (!accounts.length) {
+    cell.hidden = true;
+    return;
+  }
+  while (cell.firstChild) cell.removeChild(cell.firstChild);
+  const label = doc.createElement("span");
+  label.className = "op-status-strip__label";
+  label.textContent = "USAGE";
+  cell.appendChild(label);
+  for (const account of accounts) {
+    const chip = doc.createElement("span");
+    chip.className = "op-usage-sum";
+    chip.dataset.provider = account.provider;
+    if (account.limit_reached) chip.dataset.limit = "true";
+    chip.textContent = `${USAGE_PROVIDER_ICON[account.provider] || ""} ${usageSummaryValue(
+      account,
+    )}`;
+    cell.appendChild(chip);
+  }
+  if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
+  else delete cell.dataset.limit;
+  cell.hidden = false;
+
+  const win = doc.defaultView || window;
+  // No modal: hover (or click, for touch/non-hover) shows the full popover.
+  cell.onclick = () => {
+    try {
+      win.__gwtShowUsageHover?.(cell);
+    } catch {
+      /* no-op */
+    }
+  };
+  cell.onmouseenter = () => {
+    try {
+      win.__gwtShowUsageHover?.(cell);
+    } catch {
+      /* no-op */
+    }
+  };
+  cell.onmouseleave = () => {
+    try {
+      win.__gwtHideUsageHover?.();
+    } catch {
+      /* no-op */
+    }
+  };
+}
+
+// ------------------------------------------------------------
 // Mission Briefing intro
 // ------------------------------------------------------------
 

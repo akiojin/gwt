@@ -118,6 +118,16 @@ impl ClientHub {
             .remove(client_id);
     }
 
+    /// SPEC-2970 FR-007: whether any GUI client is currently connected. The
+    /// usage poller skips work entirely when no one is watching.
+    pub fn has_clients(&self) -> bool {
+        !self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
         // Snapshot sender clones under a short-lived lock so that serialization
         // and per-client try_send work happen outside the registry mutex. This
