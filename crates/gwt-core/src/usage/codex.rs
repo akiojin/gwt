@@ -475,4 +475,52 @@ mod tests {
         assert_eq!(acc.state, UsageState::Ok);
         assert_eq!(acc.windows[0].used_percent, 7.0);
     }
+
+    #[test]
+    fn rollouts_modified_since_orders_newest_first_and_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("sessions/2026/05/28");
+        fs::create_dir_all(&day).unwrap();
+        let older = day.join("rollout-2026-05-28T08-00-00-aaaa.jsonl");
+        let newer = day.join("rollout-2026-05-28T09-00-00-bbbb.jsonl");
+        fs::write(&older, "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&newer, "{}").unwrap();
+        // Files that are not `rollout-*.jsonl` are ignored.
+        fs::write(day.join("other.jsonl"), "{}").unwrap();
+        let found = rollouts_modified_since(dir.path(), std::time::SystemTime::UNIX_EPOCH, 10);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], newer);
+        // `limit` caps to the newest.
+        let one = rollouts_modified_since(dir.path(), std::time::SystemTime::UNIX_EPOCH, 1);
+        assert_eq!(one, vec![newer]);
+        // A future cutoff excludes everything.
+        let far = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(rollouts_modified_since(dir.path(), far, 10).is_empty());
+    }
+
+    #[test]
+    fn read_codex_session_reads_rollout_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("sessions/2026/05/28");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(
+            day.join("rollout-2026-05-28T09-00-00-bbbb.jsonl"),
+            r#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}}"#,
+        )
+        .unwrap();
+        let s = read_codex_session(dir.path(), "bbbb").unwrap();
+        assert_eq!(s.input_tokens, 7);
+        assert_eq!(s.total_tokens, 10);
+        // Unknown session id → None.
+        assert!(read_codex_session(dir.path(), "zzzz").is_none());
+    }
+
+    #[test]
+    fn parse_codex_session_without_token_count_is_nodata() {
+        let s = parse_codex_session("sid", r#"{"payload":{"type":"session_meta"}}"#);
+        assert_eq!(s.state, UsageState::NoData);
+        assert_eq!(s.total_tokens, 0);
+        assert!(s.context_used_tokens.is_none());
+    }
 }

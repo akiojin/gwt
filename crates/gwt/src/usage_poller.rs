@@ -404,4 +404,59 @@ mod tests {
         // No fetch should have happened.
         assert!(poller.last_claude_fetch.is_none());
     }
+
+    fn account_with_weekly_reset(
+        provider: UsageProvider,
+        reset: Option<DateTime<Utc>>,
+    ) -> ProviderUsage {
+        let kind = if reset.is_some() {
+            WindowKind::Weekly
+        } else {
+            WindowKind::FiveHour
+        };
+        ProviderUsage {
+            provider,
+            plan: None,
+            windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
+            limit_reached: false,
+            state: UsageState::Ok,
+            fetched_at: Some(now()),
+        }
+    }
+
+    #[test]
+    fn week_start_uses_weekly_reset_minus_seven_days() {
+        let reset = now() + chrono::Duration::days(2);
+        let accounts = vec![account_with_weekly_reset(UsageProvider::Codex, Some(reset))];
+        let ws = week_start_for(&accounts, UsageProvider::Codex, now());
+        assert_eq!(ws, reset - chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn week_start_falls_back_to_rolling_window() {
+        // Provider absent from the snapshot → rolling 7-day fallback.
+        let accounts = vec![account_with_weekly_reset(UsageProvider::Codex, Some(now()))];
+        let fb = week_start_for(&accounts, UsageProvider::ClaudeCode, now());
+        assert_eq!(fb, now() - chrono::Duration::days(7));
+        // Provider present but with no Weekly window → same fallback.
+        let no_weekly = vec![account_with_weekly_reset(UsageProvider::Codex, None)];
+        let fb2 = week_start_for(&no_weekly, UsageProvider::Codex, now());
+        assert_eq!(fb2, now() - chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn consumption_serves_cache_when_not_due() {
+        let mut poller = Poller::default();
+        let cached = vec![ProviderConsumption::empty(UsageProvider::Codex, now())];
+        poller.cached_consumption = cached.clone();
+        poller.last_consumption_at = Some(now());
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        // Not forced and within the cache window → returns the cached value
+        // untouched without scanning the filesystem.
+        let out = poller.consumption(&config, &[], now(), false);
+        assert_eq!(out, cached);
+    }
 }

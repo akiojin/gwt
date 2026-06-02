@@ -514,4 +514,75 @@ mod tests {
         let s = read_claude_session(dir.path(), "sid-123").unwrap();
         assert_eq!(s.input_tokens, 1);
     }
+
+    #[test]
+    fn transcript_for_session_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `projects/` dir at all → None (read_dir fails).
+        assert!(transcript_for_session(dir.path(), "missing").is_none());
+        // `projects/` exists but holds no matching transcript → None.
+        fs::create_dir_all(dir.path().join("projects/x")).unwrap();
+        assert!(transcript_for_session(dir.path(), "missing").is_none());
+        assert!(read_claude_session(dir.path(), "missing").is_none());
+    }
+
+    #[test]
+    fn transcripts_modified_since_orders_newest_first_and_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("projects/a");
+        let p2 = dir.path().join("projects/b");
+        fs::create_dir_all(&p1).unwrap();
+        fs::create_dir_all(&p2).unwrap();
+        fs::write(p1.join("old.jsonl"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(p2.join("new.jsonl"), "{}").unwrap();
+        // Non-jsonl files are ignored.
+        fs::write(p1.join("note.txt"), "x").unwrap();
+        let cutoff = std::time::SystemTime::UNIX_EPOCH;
+        let found = transcripts_modified_since(dir.path(), cutoff, 10);
+        assert_eq!(found.len(), 2);
+        assert!(found[0].ends_with("new.jsonl"));
+        // `limit` caps the result and keeps the newest.
+        let one = transcripts_modified_since(dir.path(), cutoff, 1);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].ends_with("new.jsonl"));
+        // A cutoff in the far future excludes everything.
+        let far = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(transcripts_modified_since(dir.path(), far, 10).is_empty());
+    }
+
+    #[test]
+    fn creds_from_file_reads_credentials_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"abc","subscriptionType":"pro"}}"#,
+        )
+        .unwrap();
+        let c = creds_from_file(dir.path()).unwrap();
+        assert_eq!(c.access_token, "abc");
+        assert_eq!(c.subscription_type.as_deref(), Some("pro"));
+        // Missing file → None.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(creds_from_file(empty.path()).is_none());
+    }
+
+    #[test]
+    fn parse_creds_json_accepts_unwrapped_shape() {
+        // No `claudeAiOauth` wrapper → falls back to the top-level object.
+        let c = parse_creds_json(r#"{"accessToken":"flat","subscriptionType":"team"}"#).unwrap();
+        assert_eq!(c.access_token, "flat");
+        assert_eq!(c.subscription_type.as_deref(), Some("team"));
+    }
+
+    #[test]
+    fn parse_oauth_usage_skips_window_missing_utilization() {
+        // `five_hour` is present but has no `utilization` → skipped; only the
+        // valid `seven_day` window survives.
+        let body =
+            r#"{"five_hour":{"resets_at":"2026-06-02T16:10:00Z"},"seven_day":{"utilization":12}}"#;
+        let acc = parse_oauth_usage(body, now()).unwrap();
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].kind, WindowKind::Weekly);
+    }
 }

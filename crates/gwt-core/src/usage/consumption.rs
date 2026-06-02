@@ -351,4 +351,81 @@ mod tests {
         assert_eq!(pc.today, ConsumptionBreakdown::default());
         assert!(pc.days.iter().all(|d| d.breakdown.total() == 0));
     }
+
+    #[test]
+    fn breakdown_add_and_total_accumulate() {
+        let mut acc = ConsumptionBreakdown::default();
+        acc.add(&ConsumptionBreakdown {
+            input: 3,
+            output: 4,
+            cached: 5,
+        });
+        acc.add(&ConsumptionBreakdown {
+            input: 1,
+            output: 1,
+            cached: 1,
+        });
+        assert_eq!(acc.input, 4);
+        assert_eq!(acc.output, 5);
+        assert_eq!(acc.cached, 6);
+        assert_eq!(acc.total(), 15);
+    }
+
+    #[test]
+    fn read_codex_consumption_walks_rollout_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("sessions/2026/05/28");
+        fs::create_dir_all(&day).unwrap();
+        let now = ts("2026-05-28T12:00:00Z");
+        // `input` excludes the cached portion: 300 - 100 = 200.
+        let line = format!(
+            r#"{{"timestamp":"{}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":300,"cached_input_tokens":100,"output_tokens":50}}}}}}}}"#,
+            now.to_rfc3339()
+        );
+        fs::write(day.join("rollout-2026-05-28T12-00-00-aaaa.jsonl"), line).unwrap();
+        let week_start = now - Duration::days(1);
+        let pc = read_codex_consumption(dir.path(), week_start, now);
+        assert_eq!(pc.provider, UsageProvider::Codex);
+        assert_eq!(pc.days.len(), CHART_DAYS as usize);
+        assert_eq!(pc.this_week.input, 200);
+        assert_eq!(pc.this_week.cached, 100);
+        assert_eq!(pc.this_week.output, 50);
+        // Event instant == `now`, so it buckets into "today".
+        assert_eq!(pc.today.total(), 350);
+    }
+
+    #[test]
+    fn read_claude_consumption_walks_project_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("projects/-Users-x");
+        fs::create_dir_all(&proj).unwrap();
+        let now = ts("2026-05-28T12:00:00Z");
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"usage":{{"input_tokens":80,"output_tokens":12,"cache_read_input_tokens":40,"cache_creation_input_tokens":5}}}}}}"#,
+            now.to_rfc3339()
+        );
+        fs::write(proj.join("sid.jsonl"), line).unwrap();
+        let week_start = now - Duration::days(1);
+        let pc = read_claude_consumption(dir.path(), week_start, now);
+        assert_eq!(pc.provider, UsageProvider::ClaudeCode);
+        assert_eq!(pc.days.len(), CHART_DAYS as usize);
+        assert_eq!(pc.this_week.input, 80);
+        assert_eq!(pc.this_week.output, 12);
+        assert_eq!(pc.this_week.cached, 45);
+        assert_eq!(pc.today.total(), 80 + 12 + 45);
+    }
+
+    #[test]
+    fn read_consumption_handles_missing_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = ts("2026-05-28T12:00:00Z");
+        let week_start = now - Duration::days(1);
+        // No sessions/ or projects/ subtree → empty rollups, still 7 zero days.
+        let codex = read_codex_consumption(dir.path(), week_start, now);
+        assert_eq!(codex.days.len(), CHART_DAYS as usize);
+        assert_eq!(codex.this_week.total(), 0);
+        let claude = read_claude_consumption(dir.path(), week_start, now);
+        assert_eq!(claude.days.len(), CHART_DAYS as usize);
+        assert_eq!(claude.this_week.total(), 0);
+    }
 }
