@@ -6438,3 +6438,10 @@ Type: lesson
 Context: gwt Board SlackProvider (SPEC-2963). After OAuth sign-in succeeds and the xoxb- bot token is stored, reading the Board surfaced 'slack conversations.history error: not_in_channel' for the configured default channel.
 Learning: A Slack bot token with channels:history/channels:read/chat:write still cannot read history or post to a channel unless the bot is a MEMBER of that channel. conversations.history returns not_in_channel and chat.postMessage fails until the bot joins. chat:write.public would allow posting to public channels without joining, but reading history always requires membership.
 Future Action: Tell users to invite the gwt bot to the target channel (/invite @gwt, or channel Integrations > Add apps) after sign-in. Optional enhancement: on not_in_channel, have SlackProvider call conversations.join (needs channels:join scope added to SLACK_SCOPES + re-auth) and retry, for public channels only.
+
+## 2026-06-02 — OAuth redirect port only matters during sign-in, not ongoing Board ops
+
+Type: lesson
+Context: gwt Board remote provider (SPEC-2963). The fixed OAuth callback port (default 8765) is used to build redirect_uri for authorize + code->token exchange.
+Learning: redirect_uri/port is only consumed during the interactive sign-in flow (authorize request + oauth token exchange). After the access token is stored, all Board read/write use the Bearer token with no redirect, so changing/losing the port does NOT break an existing session. Slack bot tokens (xoxb-) typically never expire (no refresh_token). Microsoft/Teams tokens expire but refresh uses grant_type=refresh_token with NO redirect_uri, so refresh needs no port either. The port is needed again only for a fresh sign-in (sign-out -> sign-in, or after refresh_token revocation).
+Future Action: When reasoning about the fixed-port requirement: it must be stable/registerable at sign-in time only. Post-auth port changes are safe for existing sessions; only the next sign-in needs the new redirect URL registered. Do not over-engineer port stability for ongoing operation.
