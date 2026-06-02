@@ -6522,3 +6522,10 @@ Type: lesson
 Context: SPEC-2920 tray/About verification used an isolated HOME. With an empty ~/.gwt/session.json, the app opened the Open Project picker instead of the intended checkout surface.
 Learning: Isolated GUI verification that must land on an in-project surface needs a seeded session.json pointing at the checkout under test; otherwise the verification can be blocked before the changed UI is reachable.
 Future Action: Before sharing a manual GUI verification URL from a temp HOME, seed ~/.gwt/session.json with the target checkout tab and verify the served URL reaches the intended screen.
+
+## 2026-06-02 — gwt-managed skill ファイル編集は dual-mirror + force-add
+
+Type: workflow
+Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
+Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
+Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。
