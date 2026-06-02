@@ -1,6 +1,36 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.52.0] - 2026-06-02
+
+### Bug Fixes
+
+- **autostart:** MacOS 13+ の Login Items 表示名を GWT にする (SMAppService 移行)
+- Show agent window title purpose instead of raw prompt (SPEC-2359 W-11)
+- Enforce agent sets a provisional title before responding (SPEC-2359 W-11)
+- Fire title reminder for Unassigned agents (SPEC-2359 W-11 root cause)
+- **usage:** Claude アカウント枠取得を opt-in 既定 OFF に戻し空 snapshot で stale footer を消す
+
+### Documentation
+
+- **gwt-fix-issue:** Closure コメント必須テンプレと gwt-verify 明示保証を追加
+- **memory:** Record gwt-managed skill dual-mirror + force-add workflow
+
+### Features
+
+- **usage:** Codex/Claude の使用量・レートリミット・消費をステータスバーに表示
+- **workspace:** タブホバーでタイトル表示と余白ゼロの完全最大化（複数クライアントのチラつき修正）
+
+### Miscellaneous Tasks
+
+- Record SPEC-2359 W-11 lessons in memory log
+- Merge origin/develop into work/20260602-1035
+- Tasks/memory.md に最大化 per-client チラつきの再発防止 lesson を追記
+
+### Testing
+
+- **usage:** Cover usage reader fs-walk and poller window paths
+
 ## [9.51.0] - 2026-06-02
 
 ### Bug Fixes
