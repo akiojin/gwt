@@ -46,6 +46,7 @@ mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_support;
 mod update_front_door;
+mod usage_poller;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -2130,6 +2131,7 @@ mod tests {
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
+            usage_refresh: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -6408,6 +6410,11 @@ fn main() -> std::io::Result<()> {
     // SPEC-2785 FR-E: hand the bound URL to AppRuntime so
     // `open_server_url_events` can gate `OpenServerUrl` requests against it.
     app.set_server_url(browser_url.clone());
+    // SPEC-2970: background provider-usage poller. The shared Notify lets the
+    // Claude opt-in toggle request an immediate refresh.
+    let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
+    app.set_usage_refresh(usage_refresh.clone());
+    usage_poller::spawn_usage_poller(&runtime, clients.clone(), usage_refresh);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also

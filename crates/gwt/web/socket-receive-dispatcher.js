@@ -24,6 +24,7 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "workspace_state",
     "active_work_projection",
     "window_list",
+    "provider_usage",
     "project_index_status",
     "launch_wizard_state",
     "launch_wizard_open",
