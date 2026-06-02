@@ -3056,23 +3056,38 @@ fn validate_server_url(allowed: Option<&str>, requested: &str) -> bool {
 /// that have already cleared [`validate_server_url`]). The opener receives
 /// the URL via argv directly, never through a shell, so URL contents cannot
 /// trigger shell metacharacter expansion.
+/// Build the `(program, args)` that opens `url` in the OS default browser.
+///
+/// Windows deliberately uses `rundll32 url.dll,FileProtocolHandler <url>`
+/// instead of `cmd /C start "" <url>`. `cmd.exe` re-parses its command line with
+/// shell rules, so a URL's `&` (the query-string separator) is treated as a
+/// command separator: the browser receives only the text up to the first `&`
+/// and every later parameter is dropped. For OAuth authorize URLs that silently
+/// strips `redirect_uri`, `scope`, and `state`, producing Slack's
+/// "redirect_uri did not match" / "No scopes requested" errors. `rundll32`
+/// (like `open` / `xdg-open`) receives the URL as a single CreateProcess
+/// argument and hands the full string to the default protocol handler, so `&`
+/// and `%` survive verbatim.
+fn os_url_open_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(target_os = "windows") {
+        (
+            "rundll32.exe",
+            vec![
+                "url.dll,FileProtocolHandler".to_string(),
+                url.to_string(),
+            ],
+        )
+    } else {
+        ("xdg-open", vec![url.to_string()])
+    }
+}
+
 fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
     use std::process::Command;
-    let child = if cfg!(target_os = "macos") {
-        let mut cmd = Command::new("open");
-        cmd.arg(url);
-        cmd.spawn()?
-    } else if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
-        // The empty "" before the URL is required by `start` so that a URL
-        // beginning with quoted text is not interpreted as a window title.
-        cmd.args(["/C", "start", "", url]);
-        cmd.spawn()?
-    } else {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(url);
-        cmd.spawn()?
-    };
+    let (program, args) = os_url_open_command(url);
+    let child = Command::new(program).args(&args).spawn()?;
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
@@ -21886,5 +21901,25 @@ exit 1
         let event = super::skipped_lines_warning(&diagnostics);
 
         assert!(event.message.contains("Skipped 1 malformed line "));
+    }
+
+    #[test]
+    fn os_url_open_command_keeps_oauth_query_intact_and_avoids_cmd() {
+        // Regression: `cmd /C start "" <url>` truncated OAuth authorize URLs at
+        // the first `&`, dropping redirect_uri/scope/state and breaking Slack
+        // sign-in. The opener must pass the whole URL as one argument and must
+        // not route through cmd.exe (whose shell parsing splits on `&`).
+        let url = "https://slack.com/oauth/v2/authorize?client_id=A&redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Foauth%2Fcallback&scope=chat%3Awrite%2Cchannels%3Aread&state=xyz";
+        let (program, args) = super::os_url_open_command(url);
+
+        assert!(
+            args.iter().any(|arg| arg == url),
+            "the full URL must be passed as a single intact argument, got {args:?}"
+        );
+        assert_ne!(program, "cmd", "must not open URLs through cmd.exe");
+        assert!(
+            !args.iter().any(|arg| arg.contains("start")),
+            "must not use the cmd `start` builtin which splits on &: {args:?}"
+        );
     }
 }
