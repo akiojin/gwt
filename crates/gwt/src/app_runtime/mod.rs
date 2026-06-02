@@ -438,6 +438,11 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
+            FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")
         }
@@ -3236,6 +3241,10 @@ pub struct AppRuntime {
     /// AppRuntime construction or unit tests that never call
     /// `set_server_url`).
     pub(crate) server_url: Option<String>,
+    /// SPEC-2970: notifies the background usage poller to refresh immediately
+    /// (e.g. after the Claude opt-in toggle changes). `None` in unit tests and
+    /// before `set_usage_refresh` is called during startup wiring.
+    pub(crate) usage_refresh: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl ProjectTabRuntime {
@@ -3325,6 +3334,7 @@ impl AppRuntime {
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
+            usage_refresh: None,
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -3747,6 +3757,32 @@ impl AppRuntime {
         self.server_url = Some(url);
     }
 
+    /// SPEC-2970: wire the usage poller's refresh handle so frontend toggles
+    /// can request an immediate re-poll.
+    pub(crate) fn set_usage_refresh(&mut self, refresh: std::sync::Arc<tokio::sync::Notify>) {
+        self.usage_refresh = Some(refresh);
+    }
+
+    /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and
+    /// request an immediate refresh.
+    fn set_claude_account_usage_enabled_events(&self, enabled: bool) -> Vec<OutboundEvent> {
+        if let Err(error) = gwt_config::Settings::update_global(|settings| {
+            settings.usage.claude_account_enabled = enabled;
+            Ok(())
+        }) {
+            tracing::warn!(%error, "failed to persist Claude usage opt-in");
+        }
+        self.request_usage_refresh_events()
+    }
+
+    /// SPEC-2970 FR-022: nudge the background poller to refresh now.
+    fn request_usage_refresh_events(&self) -> Vec<OutboundEvent> {
+        if let Some(refresh) = &self.usage_refresh {
+            refresh.notify_one();
+        }
+        Vec::new()
+    }
+
     pub(crate) fn handle_frontend_event(
         &mut self,
         client_id: ClientId,
@@ -3754,7 +3790,20 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         log_frontend_user_action(&client_id, &event);
         match event {
-            FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
+            FrontendEvent::FrontendReady => {
+                // SPEC-2970: kick an immediate usage poll on connect so the
+                // status-bar pill populates right away instead of waiting for
+                // the next 30s poller tick (otherwise a freshly loaded page
+                // shows an empty usage cell).
+                if let Some(refresh) = &self.usage_refresh {
+                    refresh.notify_one();
+                }
+                self.frontend_sync_events(&client_id)
+            }
+            FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
+                self.set_claude_account_usage_enabled_events(enabled)
+            }
+            FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
                 self.startup_auto_resume_ready_events(bounds)
             }
@@ -10886,6 +10935,7 @@ exit 1
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
+            usage_refresh: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();

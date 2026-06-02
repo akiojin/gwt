@@ -182,6 +182,12 @@ pub enum FileAttachment {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
+    SetClaudeAccountUsageEnabled {
+        enabled: bool,
+    },
+    /// Request an immediate usage refresh (SPEC-2970 FR-022).
+    RefreshUsage,
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
@@ -1004,6 +1010,14 @@ pub enum BackendEvent {
     WindowList {
         windows: Vec<PersistedWindowState>,
     },
+    /// Provider usage snapshot: account-level windows + per-session usage +
+    /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
+    /// types directly.
+    ProviderUsage {
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        sessions: Vec<gwt_core::usage::SessionUsage>,
+        consumption: Vec<gwt_core::usage::ProviderConsumption>,
+    },
     TerminalOutput {
         id: String,
         data_base64: String,
@@ -1569,6 +1583,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "provider_usage",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "terminal_output",
         BackendEventDeliveryClass::Streamed,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -1968,6 +1987,7 @@ impl BackendEvent {
             BackendEvent::WorkspaceState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",

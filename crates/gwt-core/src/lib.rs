@@ -22,6 +22,7 @@ pub mod skill_state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod update;
+pub mod usage;
 pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
