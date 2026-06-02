@@ -174,8 +174,16 @@ fn append_title_summary_required_context(
     }
     let required = texts::title_summary_required_reminder(language);
     match output {
+        // SPEC-2359 Phase W-11 (US-58 / FR-347): prepend so the
+        // "set a provisional purpose before responding" instruction is the
+        // first thing the agent sees, ahead of the board reminder.
         HookOutput::HookSpecificAdditionalContext { event, text } => {
-            HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{required}"))
+            HookOutput::hook_specific_additional_context(event, format!("{required}\n\n{text}"))
+        }
+        // Inject even when there is no board reminder this turn, so a fresh
+        // agent's first UserPromptSubmit always carries the title instruction.
+        HookOutput::Silent => {
+            HookOutput::hook_specific_additional_context(event, required.to_string())
         }
         other => other,
     }
@@ -527,11 +535,34 @@ mod tests {
         assert!(ja_text.contains("目的"), "{ja_text}");
         assert!(ja_text.contains("暫定"), "{ja_text}");
         assert!(ja_text.contains("生プロンプト"), "{ja_text}");
+        // Imperative: must instruct setting the title before responding.
+        assert!(ja_text.contains("応答する前に"), "{ja_text}");
+        assert!(ja_text.contains("最初のアクション"), "{ja_text}");
 
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("purpose"), "{en_text}");
         assert!(en_text.contains("provisional"), "{en_text}");
         assert!(en_text.to_lowercase().contains("raw prompt"), "{en_text}");
+        // Imperative: must instruct setting the title before responding.
+        assert!(en_text.contains("before you respond"), "{en_text}");
+        assert!(en_text.contains("first action"), "{en_text}");
+    }
+
+    /// SPEC-2359 Phase W-11 (US-58 / FR-347): the title-required reminder must
+    /// fire even when there is no board reminder this turn (Silent), so a fresh
+    /// agent's first UserPromptSubmit always carries the instruction.
+    #[test]
+    fn title_summary_required_context_injects_even_when_board_is_silent() {
+        let guarded = append_title_summary_required_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::UserPromptSubmit,
+            true,
+            "en",
+        );
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = guarded else {
+            panic!("title reminder must inject even when board output is Silent");
+        };
+        assert!(text.contains("before you respond"), "{text}");
     }
 
     #[test]
