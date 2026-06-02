@@ -11499,13 +11499,13 @@
               "settings-board-slack-client-id",
               "Client ID",
               cfg.slackClientId,
-              { placeholder: "e.g. 2389371082.1126…" },
+              { placeholder: "e.g. 1234567890.1234567890" },
             );
             defaultChannelInput = makeField(
               "settings-board-slack-channel",
               "Default channel ID",
               cfg.slackDefaultChannel,
-              { placeholder: "e.g. C0B74NMMALX" },
+              { placeholder: "e.g. C0123456789" },
             );
             secretInput = makeField(
               "settings-board-slack-secret",
