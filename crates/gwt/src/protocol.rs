@@ -673,6 +673,13 @@ pub enum FrontendEvent {
         #[serde(default)]
         client_secret: Option<String>,
     },
+    /// SPEC-2963 FR-005: persist the fixed loopback OAuth callback port from the
+    /// settings UI. `0` resets to the default (8765). Backend replies with
+    /// [`BackendEvent::BoardAuthStatus`] carrying the canonical port. Takes
+    /// effect on the next launch (the callback listener binds at server boot).
+    UpdateBoardOauthPort {
+        port: u16,
+    },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
     /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
@@ -1487,6 +1494,10 @@ pub enum BackendEvent {
         teams_tenant_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         teams_default_channel: Option<String>,
+        /// Fixed loopback port for the OAuth callback. The settings UI shows the
+        /// redirect URL `http://127.0.0.1:<port>/oauth/callback` to register.
+        #[serde(default)]
+        oauth_redirect_port: u16,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -3492,6 +3503,17 @@ mod tests {
     }
 
     #[test]
+    fn frontend_event_update_board_oauth_port_round_trips() {
+        let payload = r#"{"kind":"update_board_oauth_port","port":9123}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateBoardOauthPort");
+        match event {
+            FrontendEvent::UpdateBoardOauthPort { port } => assert_eq!(port, 9123),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn backend_event_board_auth_status_carries_config_view_without_secret() {
         let event = BackendEvent::BoardAuthStatus {
             slack: true,
@@ -3503,12 +3525,14 @@ mod tests {
             teams_client_id: None,
             teams_tenant_id: None,
             teams_default_channel: None,
+            oauth_redirect_port: 8765,
         };
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "board_auth_status");
         assert_eq!(value["slack"], true);
         assert_eq!(value["slack_client_id"], "C-id");
         assert_eq!(value["slack_has_secret"], true);
+        assert_eq!(value["oauth_redirect_port"], 8765);
         // The secret value itself is never part of the wire payload.
         assert!(value.get("slack_client_secret").is_none());
         assert!(value.get("client_secret").is_none());

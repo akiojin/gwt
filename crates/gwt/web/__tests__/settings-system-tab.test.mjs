@@ -246,6 +246,31 @@ test("System tab exposes remote provider config form that saves via update_board
   );
 });
 
+test("System tab exposes an editable OAuth callback port + redirect URL hint (SPEC-2963 FR-005)", () => {
+  // The OAuth redirect must use a fixed, registerable loopback port; the UI
+  // exposes it (default 8765) and shows the exact URL to register.
+  assert.match(
+    appSource,
+    /"settings-board-oauth-port"/,
+    "OAuth callback port input must exist",
+  );
+  assert.match(
+    appSource,
+    /127\.0\.0\.1:\$\{[^}]+\}\/oauth\/callback/,
+    "the redirect URL hint must show http://127.0.0.1:<port>/oauth/callback",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"update_board_oauth_port"/,
+    "Save port must send update_board_oauth_port",
+  );
+  assert.match(
+    appSource,
+    /oauthRedirectPort:\s*event\.oauth_redirect_port/,
+    "dispatch must prefill the OAuth port from board_auth_status",
+  );
+});
+
 test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
   assert.match(
     appSource,

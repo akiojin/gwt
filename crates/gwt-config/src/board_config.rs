@@ -81,8 +81,18 @@ pub struct TeamsConfig {
     pub channel_map: BTreeMap<String, String>,
 }
 
+/// Default fixed loopback port for the OAuth redirect callback (SPEC-2963).
+/// OAuth providers require the redirect_uri to exactly match a pre-registered
+/// URL, so the callback must use a stable port rather than the embedded
+/// server's ephemeral port.
+pub const DEFAULT_OAUTH_REDIRECT_PORT: u16 = 8765;
+
+fn default_oauth_redirect_port() -> u16 {
+    DEFAULT_OAUTH_REDIRECT_PORT
+}
+
 /// Board configuration block, persisted under `[board]` in `config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BoardConfig {
     /// Selected Board provider. Defaults to `local`.
@@ -91,6 +101,24 @@ pub struct BoardConfig {
     pub slack: SlackConfig,
     /// Non-secret Teams settings (SPEC-2963).
     pub teams: TeamsConfig,
+    /// Fixed loopback port for the OAuth redirect callback. The sign-in
+    /// redirect_uri is `http://127.0.0.1:<port>/oauth/callback` and must match
+    /// the redirect URL registered in the Slack/Teams app. Defaults to 8765;
+    /// configurable from Settings so a user whose 8765 is busy can pick
+    /// another port (and register the matching URL).
+    #[serde(default = "default_oauth_redirect_port")]
+    pub oauth_redirect_port: u16,
+}
+
+impl Default for BoardConfig {
+    fn default() -> Self {
+        Self {
+            provider: BoardProviderKind::default(),
+            slack: SlackConfig::default(),
+            teams: TeamsConfig::default(),
+            oauth_redirect_port: default_oauth_redirect_port(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +128,25 @@ mod tests {
     #[test]
     fn default_provider_is_local() {
         assert_eq!(BoardConfig::default().provider, BoardProviderKind::Local);
+    }
+
+    #[test]
+    fn default_oauth_redirect_port_is_8765() {
+        assert_eq!(BoardConfig::default().oauth_redirect_port, 8765);
+        // Missing from a partial [board] table still defaults to 8765.
+        let cfg: BoardConfig = toml::from_str("provider = \"slack\"").unwrap();
+        assert_eq!(cfg.oauth_redirect_port, 8765);
+    }
+
+    #[test]
+    fn oauth_redirect_port_roundtrips_when_customized() {
+        let cfg = BoardConfig {
+            oauth_redirect_port: 9123,
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&cfg).unwrap();
+        let restored: BoardConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(restored.oauth_redirect_port, 9123);
     }
 
     #[test]

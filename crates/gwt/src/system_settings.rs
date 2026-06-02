@@ -154,7 +154,7 @@ use crate::board_remote::token_store;
 /// Snapshot of the editable provider configuration surfaced to the settings UI.
 /// Secrets are never returned — only a `*_has_secret` flag so the UI can show
 /// "configured" without echoing the value.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardProviderConfigSnapshot {
     pub slack_client_id: Option<String>,
     pub slack_default_channel: Option<String>,
@@ -162,6 +162,23 @@ pub struct BoardProviderConfigSnapshot {
     pub teams_client_id: Option<String>,
     pub teams_tenant_id: Option<String>,
     pub teams_default_channel: Option<String>,
+    /// Fixed loopback port for the OAuth callback. The redirect URL the user
+    /// must register is `http://127.0.0.1:<port>/oauth/callback`.
+    pub oauth_redirect_port: u16,
+}
+
+impl Default for BoardProviderConfigSnapshot {
+    fn default() -> Self {
+        Self {
+            slack_client_id: None,
+            slack_default_channel: None,
+            slack_has_secret: false,
+            teams_client_id: None,
+            teams_tenant_id: None,
+            teams_default_channel: None,
+            oauth_redirect_port: gwt_config::DEFAULT_OAUTH_REDIRECT_PORT,
+        }
+    }
 }
 
 fn load_settings_or_default(path: &Path) -> Result<Settings, SystemSettingsError> {
@@ -197,7 +214,26 @@ pub fn read_board_provider_config_in(
         teams_client_id: settings.board.teams.client_id.clone(),
         teams_tenant_id: settings.board.teams.tenant_id.clone(),
         teams_default_channel: settings.board.teams.default_channel.clone(),
+        oauth_redirect_port: settings.board.oauth_redirect_port,
     })
+}
+
+/// Persist the OAuth callback port into `[board]` of `config.toml`. A `0` value
+/// resets to the default ([`gwt_config::DEFAULT_OAUTH_REDIRECT_PORT`]). Returns
+/// the canonical port written. Takes effect on the next launch (the dedicated
+/// callback listener binds the port at server boot).
+pub fn write_oauth_redirect_port(path: &Path, port: u16) -> Result<u16, SystemSettingsError> {
+    let canonical = if port == 0 {
+        gwt_config::DEFAULT_OAUTH_REDIRECT_PORT
+    } else {
+        port
+    };
+    let mut settings = load_settings_or_default(path)?;
+    settings.board.oauth_redirect_port = canonical;
+    settings
+        .save(path)
+        .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
+    Ok(canonical)
 }
 
 /// Read the current provider config using the default credentials directory.
@@ -311,6 +347,7 @@ pub fn board_auth_status_event(message: Option<String>) -> BackendEvent {
         teams_client_id: config.teams_client_id,
         teams_tenant_id: config.teams_tenant_id,
         teams_default_channel: config.teams_default_channel,
+        oauth_redirect_port: config.oauth_redirect_port,
     }
 }
 
@@ -633,6 +670,40 @@ mod tests {
         assert_eq!(
             reloaded.board.teams.tenant_id.as_deref(),
             Some("tenant-xyz")
+        );
+    }
+
+    #[test]
+    fn oauth_redirect_port_defaults_and_roundtrips() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+
+        // Missing config → default 8765.
+        assert_eq!(
+            read_board_provider_config_in(&path, creds.path())
+                .unwrap()
+                .oauth_redirect_port,
+            8765
+        );
+
+        // Persist a custom port and read it back.
+        assert_eq!(write_oauth_redirect_port(&path, 9123).unwrap(), 9123);
+        assert_eq!(
+            read_board_provider_config_in(&path, creds.path())
+                .unwrap()
+                .oauth_redirect_port,
+            9123
+        );
+
+        // 0 resets to the default.
+        assert_eq!(write_oauth_redirect_port(&path, 0).unwrap(), 8765);
+        assert_eq!(
+            Settings::load_from_path(&path)
+                .unwrap()
+                .board
+                .oauth_redirect_port,
+            8765
         );
     }
 

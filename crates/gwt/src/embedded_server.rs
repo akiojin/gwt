@@ -208,6 +208,9 @@ impl EmbeddedServer {
             runtime,
             IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             0,
+            // 0 disables the dedicated fixed-port OAuth listener so parallel
+            // tests never contend on a shared loopback port.
+            0,
             proxy,
             clients,
             pty_writers,
@@ -219,10 +222,12 @@ impl EmbeddedServer {
     /// IP / port and install the access-log middleware. Used by the current
     /// browser-server route for both loopback defaults and operator-chosen
     /// `--bind` / `--port`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_with_bind(
         runtime: &Runtime,
         bind: IpAddr,
         port: u16,
+        oauth_redirect_port: u16,
         proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
@@ -323,6 +328,46 @@ impl EmbeddedServer {
             access_log.clone(),
             access_log_middleware,
         ));
+
+        // SPEC-2963 FR-005: dedicated fixed-port loopback OAuth callback
+        // listener. The OAuth redirect_uri must be a stable, pre-registered URL
+        // (`http://127.0.0.1:<oauth_redirect_port>/oauth/callback`), but the
+        // main server uses an ephemeral / operator-chosen port. Bind the fixed
+        // loopback port and serve the same router so `/oauth/callback` is
+        // reachable there. Skipped when disabled (`0`, e.g. tests) or when the
+        // main server already listens on that port (no double-bind).
+        let oauth_listener = if oauth_redirect_port != 0 && oauth_redirect_port != addr.port() {
+            match runtime.block_on(TcpListener::bind((
+                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                oauth_redirect_port,
+            ))) {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    eprintln!(
+                        "gwt: OAuth callback port {oauth_redirect_port} is unavailable \
+                         ({error}); remote Board sign-in may fail until it is freed or \
+                         changed in Settings."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(oauth_listener) = oauth_listener {
+            let oauth_app = app.clone();
+            runtime.spawn(async move {
+                if let Err(error) = axum::serve(
+                    oauth_listener,
+                    oauth_app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                {
+                    eprintln!("embedded OAuth callback server error: {error}");
+                }
+            });
+        }
 
         runtime.spawn(async move {
             let server = axum::serve(
@@ -1369,6 +1414,7 @@ mod tests {
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             0,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,
@@ -1394,6 +1440,7 @@ mod tests {
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             0,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,
@@ -1445,6 +1492,7 @@ mod tests {
             &runtime,
             tray_args.bind,
             tray_args.port,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,

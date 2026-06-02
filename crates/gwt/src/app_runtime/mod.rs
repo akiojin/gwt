@@ -838,6 +838,10 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::UpdateBoardProviderConfig { provider, .. } => {
             FrontendUserActionLog::new("update_board_provider_config", "settings").target(provider)
         }
+        FrontendEvent::UpdateBoardOauthPort { port } => {
+            FrontendUserActionLog::new("update_board_oauth_port", "settings")
+                .target(port.to_string())
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
@@ -4200,6 +4204,9 @@ impl AppRuntime {
                 tenant_id,
                 client_secret,
             ),
+            FrontendEvent::UpdateBoardOauthPort { port } => {
+                self.board_oauth_port_update_events(client_id, port)
+            }
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
@@ -4420,6 +4427,25 @@ impl AppRuntime {
         self.board_auth_status_events(client_id, message)
     }
 
+    /// SPEC-2963 FR-005: persist the fixed OAuth callback port, then reply with
+    /// the refreshed auth/config view. The new port binds on the next launch.
+    fn board_oauth_port_update_events(&self, client_id: ClientId, port: u16) -> Vec<OutboundEvent> {
+        let Some(path) = gwt_config::Settings::global_config_path() else {
+            return self.board_auth_status_events(
+                client_id,
+                Some("unable to resolve home directory (`~/.gwt/config.toml`)".to_string()),
+            );
+        };
+        let message = match gwt::system_settings::write_oauth_redirect_port(&path, port) {
+            Ok(saved) => Some(format!(
+                "Saved OAuth callback port {saved}. Restart gwt and register \
+                 http://127.0.0.1:{saved}/oauth/callback in the provider app."
+            )),
+            Err(error) => Some(format!("Failed to save OAuth port: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
     /// SPEC-2963: begin OAuth sign-in for a remote Board provider by opening the
     /// browser to the authorize URL (redirect back to the embedded server).
     fn board_provider_sign_in_events(
@@ -4437,15 +4463,12 @@ impl AppRuntime {
                 );
             }
         };
-        let Some(redirect_base) = self.server_url.clone() else {
-            return self.board_auth_status_events(
-                client_id,
-                Some("Server URL is not available yet; retry shortly.".to_string()),
-            );
-        };
+        // The OAuth redirect uses a fixed loopback callback port (from
+        // settings.board.oauth_redirect_port), not the embedded server's
+        // ephemeral URL, so sign-in works regardless of how the GUI server
+        // bound. The dedicated callback listener is started at server boot.
         let settings = gwt_config::Settings::load().unwrap_or_default();
-        let message = match gwt::board_remote::signin::begin_signin(kind, &settings, &redirect_base)
-        {
+        let message = match gwt::board_remote::signin::begin_signin(kind, &settings) {
             Ok(authorize_url) => match open_url_with_os_default(&authorize_url) {
                 Ok(()) => Some(format!(
                     "Opened the browser to sign in to {provider}. Complete it, then Refresh."

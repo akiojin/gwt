@@ -11051,6 +11051,7 @@
           teamsClientId: "",
           teamsTenantId: "",
           teamsDefaultChannel: "",
+          oauthRedirectPort: 8765,
         },
         loaded: false,
         statusMessage: "",
@@ -11580,6 +11581,55 @@
           });
           configForm.appendChild(saveBtn);
           boardSection.appendChild(configForm);
+
+          // SPEC-2963 FR-005: fixed OAuth callback port. The redirect_uri must
+          // exactly match a URL registered in the provider app; gwt binds this
+          // loopback port so sign-in works regardless of the (ephemeral) GUI
+          // server port. Editable so a busy 8765 can be changed.
+          const oauthPort = Number(cfg.oauthRedirectPort) || 8765;
+          const oauthForm = createDiv("settings-section board-oauth-port-form");
+          const portField = createDiv("settings-field");
+          const portLabel = document.createElement("label");
+          portLabel.className = "settings-label";
+          portLabel.setAttribute("for", "settings-board-oauth-port");
+          portLabel.textContent = "OAuth callback port";
+          portField.appendChild(portLabel);
+          const portInput = document.createElement("input");
+          portInput.className = "settings-input";
+          portInput.id = "settings-board-oauth-port";
+          portInput.type = "number";
+          portInput.min = "1";
+          portInput.max = "65535";
+          portInput.value = String(oauthPort);
+          portField.appendChild(portInput);
+          oauthForm.appendChild(portField);
+
+          const redirectHint = createNode(
+            "p",
+            "settings-help board-oauth-redirect-hint",
+            "",
+          );
+          const renderRedirectHint = () => {
+            const p = Number(portInput.value) || oauthPort;
+            redirectHint.textContent =
+              "Register this exact Redirect URL in the Slack/Teams app: " +
+              `http://127.0.0.1:${p}/oauth/callback`;
+          };
+          renderRedirectHint();
+          portInput.addEventListener("input", renderRedirectHint);
+          oauthForm.appendChild(redirectHint);
+
+          const savePortBtn = createNode("button", "wizard-button", "Save port");
+          savePortBtn.type = "button";
+          savePortBtn.addEventListener("click", () => {
+            const next = Number(portInput.value);
+            send({
+              kind: "update_board_oauth_port",
+              port: Number.isFinite(next) && next > 0 ? Math.floor(next) : 0,
+            });
+          });
+          oauthForm.appendChild(savePortBtn);
+          boardSection.appendChild(oauthForm);
 
           const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
           const signedIn = auth[selectedProvider] === true;
@@ -13330,6 +13380,7 @@
               teamsClientId: event.teams_client_id || "",
               teamsTenantId: event.teams_tenant_id || "",
               teamsDefaultChannel: event.teams_default_channel || "",
+              oauthRedirectPort: event.oauth_redirect_port || 8765,
             };
             renderSystemPanelInAllSettingsWindows();
             break;

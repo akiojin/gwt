@@ -84,14 +84,30 @@ pub fn redirect_uri(redirect_base: &str) -> String {
     format!("{}/oauth/callback", redirect_base.trim_end_matches('/'))
 }
 
+/// Fixed loopback base for the OAuth redirect. Always `127.0.0.1` (never the
+/// embedded server's bind host, which may be an ephemeral port or `0.0.0.0`)
+/// so the redirect_uri is stable and matches the value registered in the
+/// provider app. The embedded server binds this `port` as a dedicated callback
+/// listener (SPEC-2963 FR-005 fixed-port redirect).
+pub fn oauth_redirect_base(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The full OAuth redirect URI for `port`
+/// (`http://127.0.0.1:<port>/oauth/callback`) — the value the user must
+/// register in the Slack/Teams app.
+pub fn oauth_redirect_url(port: u16) -> String {
+    redirect_uri(&oauth_redirect_base(port))
+}
+
 /// Begin a sign-in for `kind`. Returns the authorize URL to open in a browser
-/// and records the pending state in [`sessions`].
+/// and records the pending state in [`sessions`]. The redirect_uri uses the
+/// fixed loopback callback port from `settings.board.oauth_redirect_port`.
 pub fn begin_signin(
     kind: BoardProviderKind,
     settings: &Settings,
-    redirect_base: &str,
 ) -> std::result::Result<String, String> {
-    let redirect = redirect_uri(redirect_base);
+    let redirect = oauth_redirect_url(settings.board.oauth_redirect_port);
     let state = uuid::Uuid::new_v4().to_string();
     // Slack uses a client secret; the Microsoft (Teams) public client uses PKCE.
     let (provider_key, config, pkce) = match kind {
@@ -198,7 +214,23 @@ mod tests {
     #[test]
     fn begin_signin_rejects_local() {
         let settings = Settings::default();
-        assert!(begin_signin(BoardProviderKind::Local, &settings, "http://127.0.0.1:5").is_err());
+        assert!(begin_signin(BoardProviderKind::Local, &settings).is_err());
+    }
+
+    #[test]
+    fn oauth_redirect_is_fixed_loopback_port() {
+        // The redirect must always be 127.0.0.1:<configured port>/oauth/callback,
+        // independent of the embedded server's bind host/port, so it matches the
+        // value registered in the provider app.
+        assert_eq!(oauth_redirect_base(8765), "http://127.0.0.1:8765");
+        assert_eq!(
+            oauth_redirect_url(8765),
+            "http://127.0.0.1:8765/oauth/callback"
+        );
+        assert_eq!(
+            oauth_redirect_url(9123),
+            "http://127.0.0.1:9123/oauth/callback"
+        );
     }
 
     #[test]
