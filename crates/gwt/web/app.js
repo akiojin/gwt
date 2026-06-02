@@ -3241,12 +3241,14 @@
         } catch {
           /* no-op */
         }
-        if ((latestProviderUsage.sessions || []).length) {
-          try {
-            renderActiveWorkOverview();
-          } catch {
-            /* no-op */
-          }
+        // Re-render regardless of session count: when a snapshot drops back to
+        // sessions:[] (agent stopped, rollout/transcript unreadable, settings
+        // change) the Active Work footer must clear its stale token/context
+        // instead of keeping the previous poll's values.
+        try {
+          renderActiveWorkOverview();
+        } catch {
+          /* no-op */
         }
       }
 
@@ -3681,7 +3683,7 @@
         const consent = document.createElement("p");
         consent.className = "settings-hint";
         consent.textContent =
-          "On by default. Claude account usage reads your OAuth token from the Keychain / credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes). Uncheck to disable. Per-session token usage is read locally and is not affected by this setting.";
+          "Off by default (opt-in). When enabled, Claude account usage reads your OAuth token from the Keychain / credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes). While disabled, no Keychain read or network request happens. Per-session token usage is read locally and is not affected by this setting.";
         section.appendChild(consent);
 
         panel.appendChild(section);
