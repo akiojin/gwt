@@ -73,6 +73,16 @@ image.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# SPEC #2920 Phase 12: macOS Login Items display-name fix. On macOS 13+ the
+# autostart entry is registered through the modern `SMAppService` API so the
+# System Settings background/login list attributes it to the app bundle and
+# shows "GWT" instead of the Developer ID team name. macOS 12 and earlier keep
+# the `auto-launch` LaunchAgent path. `NSError` is enabled so register /
+# unregister failures surface a real message instead of a silent fallback.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", features = ["NSError"] }
+objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2-foundation"] }
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource.workspace = true
 
