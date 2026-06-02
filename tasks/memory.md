@@ -6543,3 +6543,24 @@ Type: lesson
 Context: SPEC-2970 で Claude account usage が 401 auth expired になった。原因は resolve_claude_creds が .credentials.json を先に読み、その accessToken が expiresAt 過去で失効していたため。Keychain (security find-generic-password -s "Claude Code-credentials" -w) の token は live で同 endpoint が 200 を返す。
 Learning: macOS では Keychain が live token の真実。resolve は Keychain 優先 → file fallback にする。ただし GUI でない detached プロセスから security を叩くと keychain ACL prompt が応答できず失敗し得る（実 GUI アプリは初回 Always Allow で解決）。headless 検証では CLAUDE_CONFIG_DIR を worktree 内一時ディレクトリに向け、Keychain から取り出した最新 token を .credentials.json として置けば file fallback で 200 を再現できる。claude_home は CLAUDE_CONFIG_DIR env を尊重する。
 Future Action: Claude token は Keychain 優先・file fallback。失効 access token のときは将来 refreshToken での更新も検討。検証時は CLAUDE_CONFIG_DIR + 一時 .credentials.json で実データ再現し、token file は確認後に削除する。
+
+## 2026-06-02 — Removing a derivation path: check sibling reminder guards for the same is_unassigned early-return
+
+Type: lesson
+Context: SPEC-2359 W-11: removed the UserPromptSubmit prompt→title derivation. Unassigned Start Work agents then got no title at all because board_reminder::agent_title_summary_missing still had an is_unassigned() early-return that suppressed the title reminder. The derivation path had already dropped that guard (US-46/FR-179) but the reminder path had not.
+Learning: When you remove one code path that handled a case (e.g. derivation for unassigned agents), grep for the SAME guard (is_unassigned / affiliation early-returns) in sibling paths (reminders, sync) that must now cover the case. A guard that was harmless while the derivation existed becomes a silent gap once it is removed.
+Future Action: After deleting a path that produced some state, search for every other gate keyed on the same condition (e.g. grep is_unassigned) and confirm each still behaves correctly without the deleted path.
+
+## 2026-06-02 — browser-check of hook-driven agent behavior needs keychain symlink + GWT_HOOK_BIN
+
+Type: lesson
+Context: Verifying SPEC-2359 W-11 title behavior in an isolated browser-check instance hit 3 env-only blockers: (1) Start Work git push failed because the macOS login keychain lives at $HOME/Library/Keychains and the isolated HOME had none; (2) materialized agent hooks resolved to the installed /Applications/GWT.app gwtd (old code) not the rebuilt target/debug/gwtd; (3) my standalone CLI hook sim io-errored on the daemon-forward step which only works inside the launched agent.
+Learning: Isolated-HOME browser-check needs: symlink $CHECK_HOME/Library/Keychains -> $HOME/Library/Keychains so osxkeychain can auth git push; set GWT_HOOK_BIN=<repo>/target/debug/gwtd so new worktrees' hooks run the rebuilt binary; verify agent behavior via the projection (CHECK_HOME/.gwt/projects/*/current.json) and the Claude transcript, not a standalone CLI hook invocation (daemon-forward step needs the launch env).
+Future Action: When browser-check must exercise agent hooks against edited Rust, symlink the keychain into the isolated HOME, launch with GWT_HOOK_BIN pointing at target/debug/gwtd, and confirm outcomes by reading the projection + transcript.
+
+## 2026-06-02 — gwt-managed skill ファイル編集は dual-mirror + force-add
+
+Type: workflow
+Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
+Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
+Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。

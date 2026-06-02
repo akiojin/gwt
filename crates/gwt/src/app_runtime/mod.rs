@@ -3373,6 +3373,15 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
                 &tab.project_root,
             );
+            // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
+            // clear of legacy prompt-derived title_summary / current_focus so
+            // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
+            // display fallback and agent re-authoring. Idempotent via
+            // `agent_identity.migration.json`; never re-clears agent-authored
+            // values written after the marker.
+            let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
+                &tab.project_root,
+            );
         }
 
         self.queue_startup_auto_resume_sessions();
@@ -6299,17 +6308,34 @@ impl AppRuntime {
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> bool {
+        // SPEC-2359 Phase W-11 (US-58 / FR-344): resolve the effective window
+        // title with the display fallback chain — the agent-authored
+        // `title_summary` first, then the linked Issue/SPEC title, then `None`
+        // (which lets the frontend fall back to the neutral agent label). The
+        // raw prompt is never written into a title, so it can never appear here.
+        let issue_fallback_title = projection
+            .linked_issues
+            .first()
+            .map(|issue| issue.number)
+            .and_then(|number| {
+                let cache_root =
+                    gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+                gwt::issue_cache::load_issue_title_from_cache(&cache_root, number)
+            });
+
         let updates = projection
             .agents
             .iter()
             .filter_map(|agent| {
+                let window_id = self.resolve_title_sync_window_id(agent, project_root)?;
                 let title = agent
                     .title_summary
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())?;
-                let window_id = self.resolve_title_sync_window_id(agent, project_root)?;
-                Some((window_id, title.to_string(), agent.current_focus.clone()))
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| issue_fallback_title.clone());
+                Some((window_id, title, agent.current_focus.clone()))
             })
             .collect::<Vec<_>>();
 
@@ -6323,7 +6349,7 @@ impl AppRuntime {
             };
             if tab
                 .workspace
-                .set_dynamic_title_with_detail(&address.raw_id, Some(title), detail)
+                .set_dynamic_title_with_detail(&address.raw_id, title, detail)
             {
                 changed = true;
             }
