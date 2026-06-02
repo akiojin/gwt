@@ -125,6 +125,10 @@ pub fn build_authorize_url(
     // the Slack branch to stay spec-correct for the bot-install flow.
     if matches!(config.provider, OAuthProvider::Teams) {
         params.push(("response_type", "code"));
+        // Microsoft v2.0 returns the authorization code on the query string by
+        // default; make it explicit so the GET loopback `/oauth/callback`
+        // always receives it (immune to a future default change).
+        params.push(("response_mode", "query"));
     }
     params.push(("scope", scope.as_str()));
     if let Some(challenge) = pkce_challenge {
@@ -320,10 +324,15 @@ mod tests {
         assert!(url.contains("code_challenge=challenge123"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("login.microsoftonline.com/common/oauth2/v2.0/authorize"));
-        // Microsoft's authorization-code flow requires response_type=code.
+        // Microsoft's authorization-code flow requires response_type=code, and
+        // we pin response_mode=query for the GET loopback callback.
         assert!(
             url.contains("response_type=code"),
             "Teams authorize URL must carry response_type=code: {url}"
+        );
+        assert!(
+            url.contains("response_mode=query"),
+            "Teams authorize URL must pin response_mode=query: {url}"
         );
     }
 

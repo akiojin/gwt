@@ -76,6 +76,9 @@ impl TeamsProvider {
         let mut entries: Vec<BoardEntry> = parsed
             .value
             .iter()
+            // Skip system events (join/leave, etc.) and deleted messages so the
+            // Board shows only real posts.
+            .filter(|message| message.is_renderable())
             .map(|message| graph_message_to_entry(message, &workspace))
             .collect();
         entries.sort_by_key(|entry| entry.created_at);
@@ -130,6 +133,15 @@ fn check_status(response: &HttpResponse, op: &str) -> Result<()> {
             response.retry_after.unwrap_or(30)
         )));
     }
+    if response.status == 403 {
+        // Self-diagnosing message for the most common Teams setup blocker: the
+        // signed-in user is not a member of the target team/channel (the Teams
+        // analogue of Slack `not_in_channel`).
+        return Err(GwtError::Other(format!(
+            "teams {op} forbidden (403): ensure the signed-in account is a member \
+             of the target team and channel"
+        )));
+    }
     if response.status >= 400 {
         return Err(GwtError::Other(format!(
             "teams {op} http {}",
@@ -156,6 +168,21 @@ struct GraphMessage {
     body: Option<GraphBody>,
     #[serde(default)]
     from: Option<GraphFrom>,
+    /// `message` for user posts; `systemEventMessage` etc. for join/leave and
+    /// other system entries we should not render as Board posts.
+    #[serde(rename = "messageType", default)]
+    message_type: Option<String>,
+    /// Set when the message was deleted (body is then empty); skip these.
+    #[serde(rename = "deletedDateTime", default)]
+    deleted_date_time: Option<String>,
+}
+
+impl GraphMessage {
+    /// Whether this is a normal, non-deleted user message worth rendering.
+    fn is_renderable(&self) -> bool {
+        self.message_type.as_deref().unwrap_or("message") == "message"
+            && self.deleted_date_time.is_none()
+    }
 }
 
 #[derive(Deserialize)]
@@ -235,7 +262,11 @@ impl BoardProvider for TeamsProvider {
             }
             None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
         };
-        let payload = serde_json::json!({ "body": { "content": entry.body } }).to_string();
+        // Pin contentType=text so the body is posted verbatim (no HTML
+        // interpretation of `<`, `&`, @mentions, etc.).
+        let payload =
+            serde_json::json!({ "body": { "contentType": "text", "content": entry.body } })
+                .to_string();
         let response = self
             .http
             .post_json(&url, &self.token, &payload)
@@ -503,5 +534,59 @@ mod tests {
         let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
         let err = prov.load_snapshot(&root()).unwrap_err();
         assert!(err.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn skips_system_and_deleted_messages() {
+        let mock = MockGraph {
+            messages_body: r#"{"value":[
+                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"hi"},"from":{"user":{"displayName":"Akio"}}},
+                {"id":"sys","messageType":"systemEventMessage","createdDateTime":"2026-01-01T10:01:00Z","body":{"content":"joined the channel"}},
+                {"id":"del","createdDateTime":"2026-01-01T10:02:00Z","deletedDateTime":"2026-01-01T10:03:00Z","body":{"content":""}}
+            ]}"#
+            .to_string(),
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+        let snapshot = prov.load_snapshot(&root()).unwrap();
+        assert_eq!(
+            snapshot.board.entries.len(),
+            1,
+            "system + deleted must be skipped"
+        );
+        assert_eq!(snapshot.board.entries[0].id, "m1");
+    }
+
+    #[test]
+    fn forbidden_surfaces_membership_hint() {
+        let mock = MockGraph {
+            messages_status: 403,
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+        let err = prov.load_snapshot(&root()).unwrap_err().to_string();
+        assert!(
+            err.contains("forbidden") && err.contains("member"),
+            "403 must surface an actionable membership hint: {err}"
+        );
+    }
+
+    #[test]
+    fn post_body_pins_text_content_type() {
+        let recorded = std::sync::Arc::new(MockGraph::default());
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/chan-1",
+            BTreeMap::new(),
+            Box::new(MockGraphShared(recorded.clone())),
+            60,
+        );
+        prov.post_entry(&root(), entry("hello world")).unwrap();
+        let body = recorded.last_post_body.lock().unwrap().clone();
+        assert!(
+            body.contains("\"contentType\":\"text\""),
+            "post body must pin contentType=text: {body}"
+        );
+        assert!(body.contains("hello world"));
     }
 }
