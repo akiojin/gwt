@@ -6564,3 +6564,10 @@ Type: workflow
 Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
 Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
 Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。
+
+## 2026-06-02 — SPEC-2970 Claude usage は opt-in 既定 OFF が consent 正。default-on は外部送信を同意なしに発火させる
+
+Type: lesson
+Context: Provider Usage 実装で Claude account 既定を ON にしたところ Codex 自動レビューが P1 指摘: [usage] 未設定の既存ユーザーが GUI 接続直後に opt-in 同意なしで Keychain 読取 + Anthropic /api/oauth/usage 送信を受ける。承認済み SPEC の同意モデルは『Claude アカウント枠のみ opt-in』だった。
+Learning: 外部送信/資格情報読取を伴う機能の既定値は『承認済み SPEC の consent 契約』に従う。デバッグ中の『既定で見たい』要望で default-on にすると spec と矛盾し privacy regression になる。フラグgate は呼び出し経路の最前段(early-return)に置き、未同意時は資格情報にも通信にも一切触れないことを敵対的監査で確認する。per-session のローカル読取は opt-in 不要(FR-017)。
+Future Action: consent を伴う設定の既定は false(opt-in)。SPEC FR の同意モデルとコード default を必ず一致させ、UI 説明文(Settings hint)・FR 全箇所の『既定で有効』表現も同時に掃き出す。視覚検証は隔離 HOME(未 opt-in 状態)で『Enable in Settings』が既定表示されることを確認する。

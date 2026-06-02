@@ -159,12 +159,13 @@ mod tests {
 
     #[test]
     fn legacy_config_without_usage_section_defaults() {
-        // A config written before SPEC-2970 has no [usage] table; both
-        // providers default on (FR-013 migration).
+        // A config written before SPEC-2970 has no [usage] table; Codex
+        // (local-only) defaults on while Claude account usage stays opt-in
+        // and defaults off (FR-009/FR-013 consent model).
         let s: Settings =
             toml::from_str("default_base_branch = \"main\"\ndebug = false\n").unwrap();
         assert!(s.usage.codex_enabled);
-        assert!(s.usage.claude_account_enabled);
+        assert!(!s.usage.claude_account_enabled);
     }
 
     #[test]
