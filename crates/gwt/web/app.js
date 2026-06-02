@@ -5957,6 +5957,7 @@
             error: "",
             replyParentId: null,
             composerKind: "status",
+            composerTitle: "",
             composerBody: "",
             pendingSubmit: null,
             hasMoreBefore: false,
@@ -7386,6 +7387,8 @@
           renderBoard(windowId);
           return;
         }
+        // SPEC-2963: optional post title/subject.
+        const title = (state.composerTitle || "").trim();
         const mentions = mentionsForBoardSubmit(state);
         state.loading = true;
         state.submitting = true;
@@ -7393,6 +7396,7 @@
         const parentId = state.replyParentId || null;
         state.pendingSubmit = {
           body,
+          title,
           parentId,
           existingEntryIds: new Set(state.entries.map((entry) => entry.id)),
         };
@@ -7409,6 +7413,7 @@
           id: windowId,
           entry_kind: state.composerKind,
           body,
+          title: title || null,
           parent_id: parentId,
           topics: [],
           owners: [],
@@ -7686,7 +7691,13 @@
             quote.addEventListener("click", () => focusBoardEntry(entry.parent_id));
             card.appendChild(quote);
           }
-          card.appendChild(createNode("div", "board-message-body", entry.body));
+          if (entry.title) {
+            card.appendChild(createNode("div", "board-message-title", entry.title));
+          }
+          // SPEC-2963: the body is authored in Markdown; render the
+          // server-sanitized `body_html` (falls back to plaintext when absent),
+          // reusing the Knowledge surface's markdown renderer.
+          card.appendChild(createKnowledgeMarkdownBody(entry, "board-message-body"));
           const messageActions = createNode("div", "board-message-actions");
           const replyButton = createNode("button", "board-reply-button", "Reply");
           replyButton.type = "button";
@@ -7840,6 +7851,22 @@
         });
         toField.appendChild(toSelect);
         composer.appendChild(toField);
+
+        // SPEC-2963: optional post title/subject (Teams subject / Slack header
+        // block / board card heading). Slack caps the header at 150 chars.
+        const titleField = createNode("label", "board-composer-field board-composer-title-field");
+        titleField.appendChild(createNode("span", "mock-label", "Title (optional)"));
+        const titleInput = document.createElement("input");
+        titleInput.type = "text";
+        titleInput.className = "board-title-input settings-input";
+        titleInput.maxLength = 150;
+        titleInput.value = state.composerTitle || "";
+        titleInput.placeholder = "Short subject for this post";
+        titleInput.addEventListener("input", () => {
+          state.composerTitle = titleInput.value;
+        });
+        titleField.appendChild(titleInput);
+        composer.appendChild(titleField);
 
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
@@ -12770,6 +12797,9 @@
             if (completedSubmit) {
               if (state.composerBody.trim() === pendingSubmit.body) {
                 state.composerBody = "";
+              }
+              if ((state.composerTitle || "").trim() === (pendingSubmit.title || "")) {
+                state.composerTitle = "";
               }
               state.replyParentId = null;
               state.pendingSubmit = null;

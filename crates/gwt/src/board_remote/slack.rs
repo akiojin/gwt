@@ -21,6 +21,7 @@ use gwt_core::{GwtError, Result};
 
 use super::cache::TimedCache;
 use super::mapping::{self, SlackMessage};
+use super::markdown;
 
 const SLACK_API: &str = "https://slack.com/api";
 /// Slack caps `conversations.history` at 15 objects for non-Marketplace apps.
@@ -225,8 +226,46 @@ impl BoardProvider for SlackProvider {
                 .ok_or_else(|| {
                     GwtError::Other("slack: no channel resolved for post".to_string())
                 })?;
-        let text = mapping::board_entry_to_slack_text(&entry);
-        let mut params: Vec<(&str, &str)> = vec![("channel", &channel), ("text", &text)];
+        // Build Block Kit: an optional `header` block for the title (plain_text,
+        // Slack caps it at 150 chars) + a `section` block with the body rendered
+        // to mrkdwn (SPEC-2963). `text` stays as the notification/accessibility
+        // fallback (Slack recommends it whenever `blocks` is used).
+        let title = entry
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        let mrkdwn = markdown::markdown_to_slack_mrkdwn(&entry.body);
+
+        let mut blocks: Vec<serde_json::Value> = Vec::new();
+        if let Some(title) = title {
+            let header_text: String = title.chars().take(150).collect();
+            blocks.push(serde_json::json!({
+                "type": "header",
+                "text": { "type": "plain_text", "text": header_text, "emoji": true }
+            }));
+        }
+        if !mrkdwn.trim().is_empty() {
+            // A single section's text field is capped at 3000 chars.
+            let section_text: String = mrkdwn.chars().take(3000).collect();
+            blocks.push(serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": section_text }
+            }));
+        }
+        let has_blocks = !blocks.is_empty();
+        let blocks_json = serde_json::Value::Array(blocks).to_string();
+
+        let body_text = mapping::board_entry_to_slack_text(&entry);
+        let fallback = match title {
+            Some(title) => format!("{title}\n{body_text}"),
+            None => body_text,
+        };
+
+        let mut params: Vec<(&str, &str)> = vec![("channel", &channel), ("text", &fallback)];
+        if has_blocks {
+            params.push(("blocks", &blocks_json));
+        }
         if let Some(parent) = entry.parent_id.as_deref() {
             params.push(("thread_ts", parent));
         }
@@ -496,6 +535,77 @@ mod tests {
         assert!(params.contains(&("channel".to_string(), "CH-A".to_string())));
         assert!(params.contains(&("text".to_string(), "threaded".to_string())));
         assert!(params.contains(&("thread_ts".to_string(), "1700000000.000100".to_string())));
+    }
+
+    #[test]
+    fn post_entry_builds_block_kit_for_title_and_markdown() {
+        let recorded = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        struct RecordingHttp {
+            recorded: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+        }
+        impl HttpClient for RecordingHttp {
+            fn get(
+                &self,
+                _u: &str,
+                _b: &str,
+                _q: &[(&str, &str)],
+            ) -> std::result::Result<HttpResponse, String> {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: r#"{"ok":true,"messages":[]}"#.to_string(),
+                    retry_after: None,
+                })
+            }
+            fn post_form(
+                &self,
+                _u: &str,
+                _b: &str,
+                params: &[(&str, &str)],
+            ) -> std::result::Result<HttpResponse, String> {
+                *self.recorded.lock().unwrap() = params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                Ok(HttpResponse {
+                    status: 200,
+                    body: r#"{"ok":true}"#.to_string(),
+                    retry_after: None,
+                })
+            }
+        }
+        let prov = SlackProvider::new(
+            "t",
+            "CH-DEFAULT",
+            BTreeMap::new(),
+            Box::new(RecordingHttp {
+                recorded: recorded.clone(),
+            }),
+            60,
+        );
+        prov.post_entry(&root(), entry("**bold** text").with_title("Release notes"))
+            .unwrap();
+        let params = recorded.lock().unwrap().clone();
+        let blocks = params
+            .iter()
+            .find(|(k, _)| k == "blocks")
+            .map(|(_, v)| v.clone())
+            .expect("blocks param must be present");
+        assert!(
+            blocks.contains("\"type\":\"header\""),
+            "title must become a header block: {blocks}"
+        );
+        assert!(
+            blocks.contains("Release notes"),
+            "header must carry the title: {blocks}"
+        );
+        assert!(
+            blocks.contains("\"type\":\"mrkdwn\"") && blocks.contains("*bold*"),
+            "body must become an mrkdwn section: {blocks}"
+        );
+        // Accessibility/notification fallback still carries title + body.
+        assert!(params
+            .iter()
+            .any(|(k, v)| k == "text" && v.contains("Release notes")));
     }
 
     #[test]

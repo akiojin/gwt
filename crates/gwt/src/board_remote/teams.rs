@@ -21,6 +21,7 @@ use gwt_core::{GwtError, Result};
 
 use super::cache::TimedCache;
 use super::mapping;
+use super::markdown;
 use super::slack::{HttpClient, HttpResponse};
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
@@ -162,6 +163,9 @@ struct GraphMessage {
     id: String,
     #[serde(rename = "replyToId", default)]
     reply_to_id: Option<String>,
+    /// Channel-message subject (root posts only; replies have none).
+    #[serde(default)]
+    subject: Option<String>,
     #[serde(rename = "createdDateTime", default)]
     created_date_time: Option<String>,
     #[serde(default)]
@@ -189,6 +193,11 @@ impl GraphMessage {
 struct GraphBody {
     #[serde(default)]
     content: String,
+    /// `text` or `html` (SPEC-2963). When `html`, the read-back path strips
+    /// tags for the plaintext board (POST-only formatting scope: no HTML→
+    /// Markdown reconstruction).
+    #[serde(rename = "contentType", default)]
+    content_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -214,12 +223,28 @@ fn graph_message_to_entry(message: &GraphMessage, workspace: &str) -> BoardEntry
     let body = message
         .body
         .as_ref()
-        .map(|b| b.content.clone())
+        .map(|b| {
+            let is_html = b
+                .content_type
+                .as_deref()
+                .is_some_and(|ct| ct.eq_ignore_ascii_case("html"));
+            if is_html {
+                markdown::strip_html_tags(&b.content)
+            } else {
+                b.content.clone()
+            }
+        })
         .unwrap_or_default();
     let parent_id = message
         .reply_to_id
         .clone()
         .filter(|id| !id.trim().is_empty());
+    let title = message
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let mut entry = BoardEntry::new(
         AuthorKind::User,
@@ -232,6 +257,7 @@ fn graph_message_to_entry(message: &GraphMessage, workspace: &str) -> BoardEntry
         vec![],
     );
     entry.id = message.id.clone();
+    entry.title = title;
     if let Some(dt) = message
         .created_date_time
         .as_deref()
@@ -262,11 +288,24 @@ impl BoardProvider for TeamsProvider {
             }
             None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
         };
-        // Pin contentType=text so the body is posted verbatim (no HTML
-        // interpretation of `<`, `&`, @mentions, etc.).
-        let payload =
-            serde_json::json!({ "body": { "contentType": "text", "content": entry.body } })
-                .to_string();
+        // Body is authored in Markdown and rendered to the HTML subset Teams
+        // displays (SPEC-2963); headings degrade to bold+<br>.
+        let content = markdown::markdown_to_teams_html(&entry.body);
+        let mut payload =
+            serde_json::json!({ "body": { "contentType": "html", "content": content } });
+        // `subject` is only valid on root channel messages; Graph rejects it on
+        // replies, so set it only when this is not a threaded reply.
+        if entry.parent_id.is_none() {
+            if let Some(title) = entry
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                payload["subject"] = serde_json::Value::String(title.to_string());
+            }
+        }
+        let payload = payload.to_string();
         let response = self
             .http
             .post_json(&url, &self.token, &payload)
@@ -572,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn post_body_pins_text_content_type() {
+    fn post_body_renders_html_with_subject() {
         let recorded = std::sync::Arc::new(MockGraph::default());
         let prov = TeamsProvider::new(
             "tok",
@@ -581,12 +620,63 @@ mod tests {
             Box::new(MockGraphShared(recorded.clone())),
             60,
         );
-        prov.post_entry(&root(), entry("hello world")).unwrap();
+        prov.post_entry(
+            &root(),
+            entry("**bold** and _italic_").with_title("Release notes"),
+        )
+        .unwrap();
         let body = recorded.last_post_body.lock().unwrap().clone();
         assert!(
-            body.contains("\"contentType\":\"text\""),
-            "post body must pin contentType=text: {body}"
+            body.contains("\"contentType\":\"html\""),
+            "post body must use contentType=html: {body}"
         );
-        assert!(body.contains("hello world"));
+        assert!(
+            body.contains("<strong>bold</strong>"),
+            "markdown bold must render to <strong>: {body}"
+        );
+        assert!(
+            body.contains("\"subject\":\"Release notes\""),
+            "title must map to the Teams subject: {body}"
+        );
+    }
+
+    #[test]
+    fn reply_post_omits_subject() {
+        let recorded = std::sync::Arc::new(MockGraph::default());
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/chan-1",
+            BTreeMap::new(),
+            Box::new(MockGraphShared(recorded.clone())),
+            60,
+        );
+        let mut reply = entry("re").with_title("ignored");
+        reply.parent_id = Some("m1".to_string());
+        prov.post_entry(&root(), reply).unwrap();
+        let body = recorded.last_post_body.lock().unwrap().clone();
+        assert!(
+            !body.contains("\"subject\""),
+            "replies must not carry a subject (Graph rejects it): {body}"
+        );
+    }
+
+    #[test]
+    fn read_back_strips_html_and_maps_subject_to_title() {
+        let mock = MockGraph {
+            messages_body: r#"{"value":[
+                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","subject":"Release notes","body":{"contentType":"html","content":"<strong>bold</strong> text"},"from":{"user":{"displayName":"Akio"}}}
+            ]}"#
+            .to_string(),
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+        let snapshot = prov.load_snapshot(&root()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        let e = &snapshot.board.entries[0];
+        assert_eq!(e.title.as_deref(), Some("Release notes"));
+        assert_eq!(
+            e.body, "bold text",
+            "html tags stripped for plaintext board"
+        );
     }
 }

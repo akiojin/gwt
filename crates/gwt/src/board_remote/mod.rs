@@ -8,6 +8,7 @@
 pub mod cache;
 pub mod http;
 pub mod mapping;
+pub mod markdown;
 pub mod oauth;
 pub mod oauth_session;
 pub mod signin;

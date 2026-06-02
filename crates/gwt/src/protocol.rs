@@ -426,6 +426,9 @@ pub enum FrontendEvent {
         id: String,
         entry_kind: BoardEntryKind,
         body: String,
+        /// SPEC-2963: optional post title/subject from the composer.
+        #[serde(default)]
+        title: Option<String>,
         parent_id: Option<String>,
         topics: Vec<String>,
         owners: Vec<String>,

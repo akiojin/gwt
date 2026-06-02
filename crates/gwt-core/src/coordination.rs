@@ -270,6 +270,11 @@ pub struct BoardEntry {
     pub author: String,
     pub kind: BoardEntryKind,
     pub body: String,
+    /// Optional post title/subject (SPEC-2963). Distinct from `title_summary`
+    /// (which tracks the agent window-title for drift detection). Rendered as
+    /// the Teams `subject` / Slack header block / board card heading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_summary: Option<String>,
     #[serde(default)]
@@ -298,6 +303,12 @@ pub struct BoardEntry {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub audience: Vec<String>,
+    /// Server-rendered, sanitized HTML of `body` (Markdown), populated only at
+    /// the protocol-emit boundary for the web UI (SPEC-2963). Never persisted:
+    /// `skip_deserializing` keeps it `None` on load and it is omitted when
+    /// `None`, so it never enters the JSONL event log.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub body_html: Option<String>,
 }
 
 impl BoardEntry {
@@ -319,6 +330,13 @@ impl BoardEntry {
     pub fn with_title_summary(mut self, value: impl Into<String>) -> Self {
         let value = value.into();
         self.title_summary = (!value.trim().is_empty()).then_some(value);
+        self
+    }
+
+    /// Set the post title/subject (SPEC-2963). Trims and ignores empty.
+    pub fn with_title(mut self, value: impl Into<String>) -> Self {
+        let value = value.into();
+        self.title = (!value.trim().is_empty()).then_some(value);
         self
     }
 
@@ -378,6 +396,7 @@ impl BoardEntry {
             author: author.into(),
             kind,
             body: body.into(),
+            title: None,
             title_summary: None,
             state,
             parent_id,
@@ -391,6 +410,7 @@ impl BoardEntry {
             target_owners: Vec::new(),
             mentions: Vec::new(),
             audience: Vec::new(),
+            body_html: None,
         }
     }
 }
@@ -1839,6 +1859,74 @@ mod tests {
         let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
 
         assert!(entry.mentions.is_empty());
+    }
+
+    #[test]
+    fn board_entry_with_title_sets_trims_and_ignores_empty() {
+        let base = BoardEntry::new(
+            AuthorKind::User,
+            "You",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        assert_eq!(base.title, None, "default title is None");
+        assert_eq!(
+            base.clone()
+                .with_title("  Release notes  ")
+                .title
+                .as_deref(),
+            Some("  Release notes  "),
+            "title is set (whitespace preserved on the inside)"
+        );
+        assert_eq!(
+            base.clone().with_title("   ").title,
+            None,
+            "all-whitespace title is ignored"
+        );
+    }
+
+    #[test]
+    fn board_entry_title_and_body_html_are_backward_compatible() {
+        // Legacy JSON without `title` / `body_html` deserializes with None.
+        let legacy = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+        let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(entry.title, None);
+        assert_eq!(entry.body_html, None);
+
+        // `body_html` is serialize-only: never written when None, and never
+        // read back from inbound JSON (skip_deserializing keeps it None).
+        let mut e = BoardEntry::new(
+            AuthorKind::User,
+            "You",
+            BoardEntryKind::Status,
+            "b",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let no_html = serde_json::to_value(&e).unwrap();
+        assert!(no_html.get("body_html").is_none(), "None body_html omitted");
+        e.body_html = Some("<p>x</p>".to_string());
+        let with_html = serde_json::to_value(&e).unwrap();
+        assert_eq!(
+            with_html["body_html"], "<p>x</p>",
+            "Some body_html serializes"
+        );
+        let round: BoardEntry = serde_json::from_value(with_html).unwrap();
+        assert_eq!(round.body_html, None, "body_html never deserialized back");
     }
 
     #[test]

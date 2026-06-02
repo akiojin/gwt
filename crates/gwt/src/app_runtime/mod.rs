@@ -4026,6 +4026,7 @@ impl AppRuntime {
                 id,
                 entry_kind,
                 body,
+                title,
                 parent_id,
                 topics,
                 owners,
@@ -4039,6 +4040,7 @@ impl AppRuntime {
                     id,
                     entry_kind,
                     body,
+                    title,
                     parent_id,
                     topics,
                     owners,
@@ -6124,14 +6126,18 @@ impl AppRuntime {
             gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
         };
         match snapshot_result {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardEntries {
-                    id: id.to_string(),
-                    entries: snapshot.board.entries,
-                    has_more_before: snapshot.board.has_more_before,
-                },
-            )],
+            Ok(snapshot) => {
+                let mut entries = snapshot.board.entries;
+                board::attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardEntries {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: snapshot.board.has_more_before,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
@@ -6220,14 +6226,18 @@ impl AppRuntime {
             )
         };
         match page_result {
-            Ok(page) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardHistoryPage {
-                    id: id.to_string(),
-                    entries: page.entries,
-                    has_more_before: page.has_more_before,
-                },
-            )],
+            Ok(page) => {
+                let mut entries = page.entries;
+                board::attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardHistoryPage {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: page.has_more_before,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
@@ -6337,9 +6347,11 @@ impl AppRuntime {
                         .map(|snapshot| snapshot.board)
                         .unwrap_or_else(|_| snapshot.board.clone())
                 };
+                let mut entries = board.entries;
+                board::attach_board_body_html(&mut entries);
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
                     id: window_id,
-                    entries: board.entries,
+                    entries,
                     has_more_before: board.has_more_before,
                 }));
             }
@@ -18506,6 +18518,7 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "I will take the next slice".to_string(),
+                title: None,
                 target_workspace: None,
                 broadcast: false,
                 parent_id: Some(parent.id.clone()),
@@ -18605,6 +18618,7 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "Reply to older context".to_string(),
+                title: None,
                 target_workspace: None,
                 broadcast: false,
                 parent_id: Some(parent_id.clone()),
@@ -18655,6 +18669,7 @@ exit 1
                 id: window_id,
                 entry_kind: BoardEntryKind::Next,
                 body: "Run final verification".to_string(),
+                title: None,
                 target_workspace: None,
                 broadcast: false,
                 parent_id: None,

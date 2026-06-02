@@ -2652,13 +2652,28 @@ body {
   border-color: var(--color-focus-ring);
 }
 
+.board-message-title {
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-text);
+  margin-bottom: 2px;
+  overflow-wrap: anywhere;
+}
+
 .board-message-body {
   font-family: var(--font-body);
   font-size: var(--type-sm);
   line-height: 1.5;
   color: var(--color-text);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* SPEC-2963: Markdown is rendered to HTML; only the plaintext fallback needs
+   pre-wrap to preserve authored line breaks. */
+.board-message-body.is-plaintext {
+  white-space: pre-wrap;
 }
 
 .board-message-actions {

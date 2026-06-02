@@ -1259,6 +1259,7 @@ mod tests {
                 id: "tab-1::board-1".to_string(),
                 entry_kind: gwt_core::coordination::BoardEntryKind::Status,
                 body: "done".to_string(),
+                title: None,
                 parent_id: None,
                 topics: Vec::new(),
                 owners: Vec::new(),
