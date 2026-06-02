@@ -338,16 +338,21 @@ mod tests {
     }
 
     #[test]
-    fn test_override_routes_provider_to_remote() {
-        // Forcing a remote kind routes `provider()` through `build_remote`;
-        // with default (unconfigured) settings that surfaces an error rather
-        // than silently serving local (FR-010).
-        let _guard = test_provider_override::force(BoardProviderKind::Slack);
-        assert_eq!(current_kind(), BoardProviderKind::Slack);
-        let dir = tempfile::tempdir().unwrap();
-        assert!(provider().load_snapshot(dir.path()).is_err());
-        drop(_guard);
-        // Restored to the hermetic default.
+    fn test_override_controls_current_kind_and_restores() {
+        // The override drives `current_kind()` (which `provider()` routes on),
+        // and restores on guard drop. Kept hermetic by asserting on
+        // `current_kind()` only — `provider()` for a remote kind reads the real
+        // machine config/credentials, which must not leak into this unit test.
+        assert_eq!(current_kind(), BoardProviderKind::Local);
+        {
+            let _slack = test_provider_override::force(BoardProviderKind::Slack);
+            assert_eq!(current_kind(), BoardProviderKind::Slack);
+        }
+        assert_eq!(current_kind(), BoardProviderKind::Local);
+        {
+            let _teams = test_provider_override::force(BoardProviderKind::Teams);
+            assert_eq!(current_kind(), BoardProviderKind::Teams);
+        }
         assert_eq!(current_kind(), BoardProviderKind::Local);
     }
 
