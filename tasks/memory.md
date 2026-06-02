@@ -6536,3 +6536,10 @@ Type: lesson
 Context: Verifying SPEC-2359 W-11 title behavior in an isolated browser-check instance hit 3 env-only blockers: (1) Start Work git push failed because the macOS login keychain lives at $HOME/Library/Keychains and the isolated HOME had none; (2) materialized agent hooks resolved to the installed /Applications/GWT.app gwtd (old code) not the rebuilt target/debug/gwtd; (3) my standalone CLI hook sim io-errored on the daemon-forward step which only works inside the launched agent.
 Learning: Isolated-HOME browser-check needs: symlink $CHECK_HOME/Library/Keychains -> $HOME/Library/Keychains so osxkeychain can auth git push; set GWT_HOOK_BIN=<repo>/target/debug/gwtd so new worktrees' hooks run the rebuilt binary; verify agent behavior via the projection (CHECK_HOME/.gwt/projects/*/current.json) and the Claude transcript, not a standalone CLI hook invocation (daemon-forward step needs the launch env).
 Future Action: When browser-check must exercise agent hooks against edited Rust, symlink the keychain into the isolated HOME, launch with GWT_HOOK_BIN pointing at target/debug/gwtd, and confirm outcomes by reading the projection + transcript.
+
+## 2026-06-02 — gwt-managed skill ファイル編集は dual-mirror + force-add
+
+Type: workflow
+Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
+Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
+Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。
