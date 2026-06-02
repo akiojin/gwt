@@ -6571,3 +6571,10 @@ Type: lesson
 Context: Provider Usage 実装で Claude account 既定を ON にしたところ Codex 自動レビューが P1 指摘: [usage] 未設定の既存ユーザーが GUI 接続直後に opt-in 同意なしで Keychain 読取 + Anthropic /api/oauth/usage 送信を受ける。承認済み SPEC の同意モデルは『Claude アカウント枠のみ opt-in』だった。
 Learning: 外部送信/資格情報読取を伴う機能の既定値は『承認済み SPEC の consent 契約』に従う。デバッグ中の『既定で見たい』要望で default-on にすると spec と矛盾し privacy regression になる。フラグgate は呼び出し経路の最前段(early-return)に置き、未同意時は資格情報にも通信にも一切触れないことを敵対的監査で確認する。per-session のローカル読取は opt-in 不要(FR-017)。
 Future Action: consent を伴う設定の既定は false(opt-in)。SPEC FR の同意モデルとコード default を必ず一致させ、UI 説明文(Settings hint)・FR 全箇所の『既定で有効』表現も同時に掃き出す。視覚検証は隔離 HOME(未 opt-in 状態)で『Enable in Settings』が既定表示されることを確認する。
+
+## 2026-06-02 — 最大化など per-client 表示状態を共有ジオメトリに broadcast すると複数クライアントでチラつく
+
+Type: lesson
+Context: SPEC-2008 の最大化で、ユーザー検証中に激しいチラつきが発生。調査の結果、syncMaximizedWindowsToViewport が各クライアントの可視領域に合わせて共有の最大化ジオメトリへ maximize_window 補正を broadcast しており、異なる viewport サイズの 2 クライアント（検証用 MCP ブラウザ1200px + ユーザーのブラウザ810px）が同時接続するとジオメトリを往復させ続けた。inset 値に依存しない既存設計問題。
+Learning: 最大化の塗りつぶしのような per-client な表示状態を shared workspace geometry に書き戻して全クライアントに broadcast すると、サイズの異なるクライアント間で ping-pong してチラつく。各クライアントが visibleBounds から fill をローカル計算してローカル適用し、共有するのは maximized フラグだけにすると解消する。さらに、エージェント検証時に検証用ブラウザ(Playwright/MCP)を開いたままユーザーに視覚確認を依頼すると、それが第2クライアントになり multi-client バグを誘発し『回帰』に見える。
+Future Action: (1) 最大化/ズーム追従など viewport 依存の表示はローカル描画にし、shared geometry へ補正を broadcast しない。(2) ユーザーに視覚確認を依頼する前に、検証用ブラウザ(MCP/Playwright)を必ず閉じて単一クライアントにする。複数クライアント挙動を確認したい場合は意図的に別サイズで開く。
