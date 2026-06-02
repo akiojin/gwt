@@ -83,6 +83,29 @@ test("open() with null focus_version sends null, not undefined", () => {
   assert.equal(sent[0].focus_version, null);
 });
 
+test("openAbout() requests release notes and renders About GWT chrome", () => {
+  const { document, controller, sent, entries } = makeFixture();
+  controller.openAbout("9.38.0");
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "open_release_notes");
+  assert.equal(sent[0].focus_version, "9.38.0");
+
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.38.0",
+  });
+
+  const root = document.getElementById("release-notes-window");
+  assert.equal(root.getAttribute("aria-label"), "About GWT");
+  assert.equal(
+    root.querySelector(".op-global-window__title").textContent,
+    "About GWT",
+  );
+});
+
 test("handlePayload mounts the window and renders sidebar entries", () => {
   const { document, controller, entries } = makeFixture();
   controller.handlePayload({ id: "rn-test-1", entries, focus_version: null });

@@ -89,6 +89,22 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
   }
 });
 
+test("launch_wizard_state null tombstone wins during coalescing", () => {
+  const coalesced = coalesceEvents(
+    [
+      { kind: "launch_wizard_state", wizard: { id: "wizard-1" } },
+      { kind: "terminal_output", id: "agent", data: "ready" },
+      { kind: "launch_wizard_state", wizard: null },
+    ],
+    DEFAULT_COALESCE_KINDS,
+  );
+
+  assert.deepEqual(coalesced, [
+    { kind: "terminal_output", id: "agent", data: "ready" },
+    { kind: "launch_wizard_state", wizard: null },
+  ]);
+});
+
 test("dispatcher flushes once per frame and renders only the latest workspace_state", () => {
   const received = [];
   const scheduler = manualScheduler();

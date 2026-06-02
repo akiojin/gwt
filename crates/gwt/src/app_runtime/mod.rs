@@ -832,6 +832,12 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         } => FrontendUserActionLog::new("update_system_settings", "settings")
             .target(language)
             .force(codex_trust_managed_hooks.unwrap_or(false)),
+        FrontendEvent::GetAutostartStatus => {
+            FrontendUserActionLog::new("get_autostart_status", "settings")
+        }
+        FrontendEvent::UpdateAutostart { enabled } => {
+            FrontendUserActionLog::new("update_autostart", "settings").force(*enabled)
+        }
         FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
             FrontendUserActionLog::new("workspace_projection_prune", "workspace")
                 .mode(if *dry_run { "dry_run" } else { "apply" })
@@ -884,6 +890,26 @@ fn log_frontend_user_action(client_id: &str, event: &FrontendEvent) {
         forced = log.forced,
         "frontend user action"
     );
+}
+
+fn autostart_status_event_from_result(
+    result: Result<
+        gwt::cli::tray::autostart::AutostartStatus,
+        gwt::cli::tray::autostart::AutostartError,
+    >,
+) -> BackendEvent {
+    match result {
+        Ok(status) => BackendEvent::AutostartStatus {
+            enabled: status.enabled,
+            mechanism: format!("{:?}", status.mechanism),
+            install_path: status
+                .install_path
+                .map(|path| path.to_string_lossy().into_owned()),
+        },
+        Err(error) => BackendEvent::AutostartError {
+            message: error.to_string(),
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1667,14 +1693,12 @@ pub fn build_frontend_sync_events(
         ));
     }
 
-    if let Some(wizard) = launch_wizard {
-        events.push(OutboundEvent::reply(
-            client_id,
-            BackendEvent::LaunchWizardState {
-                wizard: Some(Box::new(wizard)),
-            },
-        ));
-    }
+    events.push(OutboundEvent::reply(
+        client_id,
+        BackendEvent::LaunchWizardState {
+            wizard: launch_wizard.map(Box::new),
+        },
+    ));
 
     if let Some(state) = pending_update {
         events.push(OutboundEvent::reply(
@@ -3173,6 +3197,7 @@ pub struct AppRuntime {
     pub(crate) profile_config_path: Option<PathBuf>,
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
     pub(crate) window_details: HashMap<String, String>,
+    pub(crate) launch_error_terminal_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
     pub(crate) board_all_view_windows: HashSet<String>,
     pub(crate) session_state_path: PathBuf,
@@ -3275,6 +3300,7 @@ impl AppRuntime {
             profile_config_path: None,
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: HashSet::new(),
             session_state_path,
@@ -4152,6 +4178,10 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
             } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
+            FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
+            FrontendEvent::UpdateAutostart { enabled } => {
+                self.autostart_update_events(client_id, enabled)
+            }
             FrontendEvent::WorkspaceProjectionPrune { dry_run, ids } => {
                 self.workspace_projection_prune_events(client_id, dry_run, ids)
             }
@@ -4357,6 +4387,32 @@ impl AppRuntime {
             client_id,
             gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
         )]
+    }
+
+    fn autostart_status_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id,
+            autostart_status_event_from_result(
+                gwt::cli::tray::autostart::AutostartManager::status(),
+            ),
+        )]
+    }
+
+    fn autostart_update_events(&self, client_id: ClientId, enabled: bool) -> Vec<OutboundEvent> {
+        let result = if enabled {
+            gwt::cli::tray::autostart::AutostartManager::install()
+        } else {
+            gwt::cli::tray::autostart::AutostartManager::uninstall()
+        };
+        let event = match result {
+            Ok(()) => autostart_status_event_from_result(
+                gwt::cli::tray::autostart::AutostartManager::status(),
+            ),
+            Err(error) => BackendEvent::AutostartError {
+                message: error.to_string(),
+            },
+        };
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     fn custom_agent_reply_with_cache_refresh(
@@ -4606,25 +4662,33 @@ impl AppRuntime {
                     .map(|status| (id.clone(), status, detail.clone()))
             })
             .collect();
-        let terminal_snapshots = self
+        let mut terminal_snapshots = self
             .runtimes
             .iter()
             .filter_map(|(id, runtime)| {
-                // SPEC-1919 FR-001a: snapshot replay must reproduce SGR
-                // attributes (color, bold, italic, underline, inverse) so
-                // tab switch / focus cycle / WebSocket reconnect do not
-                // collapse colored history into default-color text. Use
-                // vt100 `Screen::contents_formatted()` which emits a CSI
-                // escape stream xterm.js can replay verbatim, instead of
-                // `Screen::contents()` which strips formatting.
+                // SPEC-1919 FR-001a / SPEC-2008 Phase 26.F: snapshot replay
+                // must preserve the current formatted screen and enough
+                // scrollback history for a fresh xterm.js instance to scroll
+                // immediately after reconnect.
                 let snapshot = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.screen().contents_formatted())
+                    .map(|pane| pane.snapshot_bytes())
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let runtime_snapshot_ids = terminal_snapshots
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (id, detail) in &self.launch_error_terminal_details {
+            if !runtime_snapshot_ids.contains(id)
+                && self.window_status(id) == Some(WindowProcessStatus::Error)
+            {
+                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+            }
+        }
 
         let mut events = build_frontend_sync_events(
             client_id,
@@ -7302,6 +7366,7 @@ impl AppRuntime {
                             }
                         }
                         let _ = self.persist();
+                        self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         if workspace_projection_updated
                             && self.active_tab_id.as_deref() == Some(tab_id.as_str())
@@ -7387,6 +7452,7 @@ impl AppRuntime {
                 ) {
                     Ok(()) => {
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
+                        self.launch_error_terminal_details.remove(&window_id);
                         let mut events = vec![self.workspace_state_broadcast()];
                         let composed_status = self
                             .window_status(&window_id)
@@ -7858,6 +7924,9 @@ impl AppRuntime {
             let agent_id = config.agent_id.clone();
             let mut session =
                 gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
+            session.project_state_root = Some(
+                gwt_core::paths::normalize_windows_child_process_path(Path::new(&project_root)),
+            );
             session.display_name = config.display_name.clone();
             session.tool_version = config.tool_version.clone();
             session.model = config.model.clone();
@@ -8773,11 +8842,18 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
+        let terminal_output = Self::launch_error_terminal_output_event(window_id.clone(), &detail);
         if self.tracked_window_exists(&window_id) {
-            return self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+            self.launch_error_terminal_details
+                .insert(window_id.clone(), detail.clone());
+            let mut events =
+                self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+            events.push(terminal_output);
+            return events;
         }
         let mut events =
             Self::status_events(window_id, WindowProcessStatus::Error, Some(detail.clone()));
+        events.push(terminal_output);
         if let Some(context) = launch_feedback_context {
             events.push(OutboundEvent::reply(
                 context.client_id,
@@ -8788,6 +8864,25 @@ impl AppRuntime {
             ));
         }
         events
+    }
+
+    fn launch_error_terminal_bytes(detail: &str) -> Vec<u8> {
+        let mut message = String::from("\r\n[gwt] Launch failed before PTY started.\r\n");
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            message.push_str("[gwt] ");
+            message.push_str(detail);
+            message.push_str("\r\n");
+        }
+        message.into_bytes()
+    }
+
+    fn launch_error_terminal_output_event(window_id: String, detail: &str) -> OutboundEvent {
+        OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+            id: window_id,
+            data_base64: base64::engine::general_purpose::STANDARD
+                .encode(Self::launch_error_terminal_bytes(detail)),
+        })
     }
 
     fn status_events(
@@ -10740,6 +10835,7 @@ exit 1
             profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
             board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
@@ -11226,6 +11322,35 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_frontend_ready_replies_launch_wizard_tombstone_when_closed() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let tombstone = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.event,
+                    BackendEvent::LaunchWizardState { wizard: None }
+                )
+            })
+            .expect("FrontendReady must clear stale Launch Wizard state after reconnect");
+        assert!(
+            matches!(&tombstone.target, DispatchTarget::Client(client_id) if client_id == "client-1"),
+            "Launch Wizard tombstone must be scoped to the reconnecting client"
+        );
+    }
+
+    #[test]
     fn app_runtime_apply_update_uses_pending_available_update_state() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab(
@@ -11444,6 +11569,79 @@ exit 1
             has_sgr,
             "expected SGR escape (CSI ... m) in TerminalSnapshot bytes so xterm.js can replay color/style; raw snapshot bytes: {:?}",
             decoded
+        );
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let mut pane = Pane::new(
+            window_id.clone(),
+            command,
+            args,
+            80,
+            6,
+            HashMap::new(),
+            None,
+        )
+        .expect("pane");
+        for line in 1..=18 {
+            pane.process_bytes(format!("SCROLLBACK-LINE-{line:03}\r\n").as_bytes());
+        }
+
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime {
+                pane: Arc::new(Mutex::new(pane)),
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let snapshot = events.iter().find_map(|event| match &event.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                Some(data_base64)
+            }
+            _ => None,
+        });
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(snapshot.expect("terminal snapshot event"))
+            .expect("decode terminal snapshot");
+        let text = String::from_utf8_lossy(&decoded);
+        assert!(
+            text.contains("SCROLLBACK-LINE-001"),
+            "expected frontend reconnect snapshot to include old scrollback history, got: {text:?}"
+        );
+        assert!(
+            text.contains("SCROLLBACK-LINE-018"),
+            "expected frontend reconnect snapshot to include current visible screen, got: {text:?}"
         );
     }
 
@@ -13132,6 +13330,95 @@ exit 1
         assert_eq!(
             event.fields.get("error").map(String::as_str),
             Some("launch failed before process spawn")
+        );
+    }
+
+    #[test]
+    fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+
+        let events = runtime.handle_launch_complete(
+            window_id.clone(),
+            Err("launch failed before process spawn".to_string()),
+        );
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { id, status, detail }
+                    if id == &window_id
+                        && *status == WindowProcessStatus::Error
+                        && detail.as_deref() == Some("launch failed before process spawn")
+            )
+        }));
+        let diagnostic = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalOutput { id, data_base64 } if id == &window_id => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .expect("decode terminal diagnostic");
+                    Some(String::from_utf8_lossy(&decoded).to_string())
+                }
+                _ => None,
+            })
+            .expect("launch failure diagnostic terminal output");
+        assert!(
+            diagnostic.contains("Launch failed before PTY started"),
+            "diagnostic must explain that no PTY output exists yet: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("launch failed before process spawn"),
+            "diagnostic must include the launch error detail: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_runtime() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let _ = runtime.handle_launch_complete(
+            window_id.clone(),
+            Err("launch failed before process spawn".to_string()),
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let snapshot = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(data_base64)
+                        .expect("decode terminal diagnostic snapshot");
+                    Some(String::from_utf8_lossy(&decoded).to_string())
+                }
+                _ => None,
+            })
+            .expect("launch failure diagnostic terminal snapshot");
+        assert!(
+            snapshot.contains("Launch failed before PTY started"),
+            "snapshot must replay the launch diagnostic after reconnect: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("launch failed before process spawn"),
+            "snapshot must include the launch error detail: {snapshot:?}"
         );
     }
 
@@ -19939,6 +20226,54 @@ exit 1
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
             "ActiveWorkProjection broadcast must still fire: {events:?}"
+        );
+    }
+
+    #[test]
+    fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project_root() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260601-0934");
+        fs::create_dir_all(&worktree).expect("worktree");
+        let (mut runtime, window_id) =
+            apply_title_sync_setup_tab_and_runtime(project_root.clone(), Some("tab-1"));
+        runtime
+            .active_agent_sessions
+            .get_mut(&window_id)
+            .expect("active session")
+            .worktree_path = worktree.clone();
+        let mut projection = apply_title_sync_sample_projection(
+            &project_root,
+            &window_id,
+            Some("Canonical Project State title"),
+            Some("Agent worktree differs from Project State root"),
+        );
+        projection.agents[0].worktree_path = Some(worktree);
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save projection");
+
+        let events = runtime.handle_workspace_projection_changed_events(&project_root);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "canonical Project State root updates must broadcast WorkspaceState: {events:?}"
+        );
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Canonical Project State title")
+        );
+        assert_eq!(
+            agent_window.dynamic_title_detail.as_deref(),
+            Some("Agent worktree differs from Project State root")
         );
     }
 

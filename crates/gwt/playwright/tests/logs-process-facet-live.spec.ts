@@ -1,7 +1,7 @@
 /**
  * SPEC-2019 Amendment 2026-05-20 — Logs window Process kind facet live E2E.
  *
- * Drives a real `gwt --headless --no-open` instance through the Add Window
+ * Drives a real gwt browser-server instance through the Add Window
  * picker into the Logs preset and asserts:
  *
  *   - The Logs window mounts with the new `.logs-process-kind-select`

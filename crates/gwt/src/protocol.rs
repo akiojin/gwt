@@ -643,6 +643,15 @@ pub enum FrontendEvent {
         #[serde(default)]
         codex_trust_managed_hooks: Option<bool>,
     },
+    /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
+    /// the current OS autostart registration state for this user.
+    GetAutostartStatus,
+    /// SPEC #2920 Phase 11: Settings > System > Launch GWT at login changed.
+    /// Backend installs or uninstalls the per-user autostart registration and
+    /// replies with the authoritative status on success.
+    UpdateAutostart {
+        enabled: bool,
+    },
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
     /// archive→delete transitions. `ids` limits the action to specific
@@ -1435,6 +1444,21 @@ pub enum BackendEvent {
     SystemSettingsError {
         message: String,
     },
+    /// SPEC #2920 Phase 11: response to
+    /// [`FrontendEvent::GetAutostartStatus`] or
+    /// [`FrontendEvent::UpdateAutostart`]. Carries the authoritative
+    /// per-user OS autostart registration state.
+    AutostartStatus {
+        enabled: bool,
+        mechanism: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        install_path: Option<String>,
+    },
+    /// SPEC #2920 Phase 11: error reply for autostart status/update. The
+    /// frontend surfaces this inline in Settings > System.
+    AutostartError {
+        message: String,
+    },
     /// SPEC-2359 US-41: response to [`FrontendEvent::WorkspaceProjectionPrune`].
     /// `mode` is `"dry_run"` or `"applied"`; counts reflect the plan executed
     /// against `~/.gwt/projects/*/workspace/`.
@@ -1890,6 +1914,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "autostart_status",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "autostart_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "workspace_projection_prune_result",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2007,6 +2041,8 @@ impl BackendEvent {
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
+            BackendEvent::AutostartStatus { .. } => "autostart_status",
+            BackendEvent::AutostartError { .. } => "autostart_error",
             BackendEvent::WorkspaceProjectionPruneResult { .. } => {
                 "workspace_projection_prune_result"
             }

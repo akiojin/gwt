@@ -101,7 +101,7 @@ function Capture-HeadlessLaunch {
     return
   }
 
-  Add-Section "gwt serve headless smoke"
+  Add-Section "gwt browser server smoke"
   Add-Summary "GwtExe=$GwtExe"
 
   if (-not (Test-Path -LiteralPath $GwtExe)) {
@@ -109,9 +109,9 @@ function Capture-HeadlessLaunch {
     return
   }
 
-  $stdoutPath = Join-Path $OutputDir "gwt-serve-stdout.txt"
-  $stderrPath = Join-Path $OutputDir "gwt-serve-stderr.txt"
-  $args = "serve --no-open --port 0"
+  $stdoutPath = Join-Path $OutputDir "gwt-server-stdout.txt"
+  $stderrPath = Join-Path $OutputDir "gwt-server-stderr.txt"
+  $args = "--no-open --port 0"
   Add-Summary "Starting: $GwtExe $args"
 
   $process = Start-Process -FilePath $GwtExe `
@@ -123,9 +123,9 @@ function Capture-HeadlessLaunch {
   Start-Sleep -Seconds 5
 
   if ($process.HasExited) {
-    Add-Summary "gwt serve exited early with code $($process.ExitCode)."
+    Add-Summary "gwt browser server exited early with code $($process.ExitCode)."
   } else {
-    Add-Summary "gwt serve stayed alive for 5 seconds; stopping diagnostic process."
+    Add-Summary "gwt browser server stayed alive for 5 seconds; stopping diagnostic process."
     Stop-Process -Id $process.Id -Force
   }
 

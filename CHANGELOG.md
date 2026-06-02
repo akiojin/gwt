@@ -1,6 +1,57 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.51.0] - 2026-06-02
+
+### Bug Fixes
+
+- **launch:** Prefer npx for claude latest on non-windows
+- **ui:** Keep agent tty free of overlays
+- **diagnostics:** Remove stale gwt serve guidance
+- **launch:** Print pre-pty errors in terminal
+- **gui:** Support Windows Ctrl+C terminal copy
+- Restore agent terminal scrollback snapshots
+- Recover launch wizard close on reconnect
+- **ui:** Remove status strip server url
+- **launch-wizard:** Preserve open errors on reconnect
+- Clarify branch detail status
+- Restore tray about and move autostart to settings
+- Persist agent project state root
+- **workspace:** Align identity hook state root
+- Preserve terminal snapshot boundary scrollback
+- Avoid duplicate terminal snapshot visible rows
+
+### Documentation
+
+- Record branch notice hidden lesson
+- Rename fresh gwt browser check skill
+- Avoid start work in fresh browser checks
+- Remove redundant skill prefix
+- Rename browser check skill
+- Fix memory markdownlint URL formatting
+
+### Features
+
+- Show running agent activity on project tabs
+
+### Miscellaneous Tasks
+
+- Record rare verification lesson
+- Merge develop into status strip branch
+- Merge develop into branch detail status branch
+- Merge develop into branch detail status branch
+- Merge develop into title fix branch
+- Merge origin/develop into work/20260601-0908
+- Merge origin/develop into work/20260601-0908
+- Merge origin/develop into work/20260601-0908
+
+### Testing
+
+- Cover launch wizard reconnect e2e
+- Stabilize launch wizard reconnect e2e
+- **launch-wizard:** Align embedded contract with tombstones
+- Cover running agent project tab dot
+
 ## [9.50.1] - 2026-06-01
 
 ### Bug Fixes
@@ -213,7 +264,6 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - Update kanban visual test data Workspace to Work
-
 
 ## [9.45.1] - 2026-05-25
 

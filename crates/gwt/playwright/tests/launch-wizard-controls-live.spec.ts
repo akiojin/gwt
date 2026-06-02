@@ -1,6 +1,6 @@
 /**
  * SPEC-2014 2026-05-29 amendment (SC-065) — Launch Agent setting controls
- * live E2E. Runs against a real `gwt serve` backend and exercises the
+ * live E2E. Runs against a real gwt browser-server backend and exercises the
  * operation-appropriate controls introduced by the UI/UX overhaul:
  *
  *   - Target renders as a segmented radiogroup and switching to Shell hides

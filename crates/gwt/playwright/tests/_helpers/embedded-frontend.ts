@@ -28,7 +28,6 @@ const ROOT_MODULES = new Set([
   "focus-trap.js",
   "hotkey.js",
   "index-settings-panel.js",
-  "index-status-controller.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
@@ -43,6 +42,7 @@ const ROOT_MODULES = new Set([
   // SPEC-2809 — Console window per-kind tab live tail.
   "console-window.js",
   "socket-receive-dispatcher.js",
+  "terminal-copy-shortcut.js",
   "terminal-context-menu.js",
   "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",

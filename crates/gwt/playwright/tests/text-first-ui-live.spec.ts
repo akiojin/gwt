@@ -1,6 +1,6 @@
 /* SPEC-2356 Phase 11 — Text-first live opacity guard.
  *
- * Drives a real `gwt serve` instance because parent opacity regressions are
+ * Drives a real gwt browser-server instance because parent opacity regressions are
  * only obvious once the Canvas grid, window chrome, and terminal renderer are
  * composited by a headed browser.
  */

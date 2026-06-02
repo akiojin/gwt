@@ -30,8 +30,8 @@
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { classifyTerminalCopyKeyEvent } from "/terminal-copy-shortcut.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
-      import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import {
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
@@ -51,6 +51,7 @@
         classifyProjectWindowVisibility,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
+        rearmRefreshOnVisible,
         runTerminalActivationSequence,
         viewportEligibleForRefresh,
       } from "/terminal-viewport-reflow.js";
@@ -368,8 +369,10 @@
           }
           if (deferred.kind === "launch_wizard_state") {
             clearLaunchWizardPendingAction();
+            if (deferred.wizard) {
+              launchWizardOpenError = null;
+            }
             launchWizard = deferred.wizard;
-            launchWizardOpenError = null;
           } else if (deferred.kind === "launch_wizard_open_error") {
             clearLaunchWizardPendingAction();
             launchWizard = null;
@@ -390,6 +393,27 @@
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
+      function applyAutostartStatus(event, statusMessage = "") {
+        systemSettingsState.autostartEnabled = event.enabled === true;
+        systemSettingsState.autostartPreviousEnabled =
+          systemSettingsState.autostartEnabled;
+        systemSettingsState.autostartMechanism = event.mechanism || "";
+        systemSettingsState.autostartInstallPath = event.install_path || "";
+        systemSettingsState.autostartLoaded = true;
+        systemSettingsState.autostartPending = false;
+        systemSettingsState.statusMessage = statusMessage;
+        systemSettingsState.statusKind = statusMessage ? "success" : "";
+      }
+
+      function applyAutostartError(event) {
+        systemSettingsState.autostartEnabled =
+          systemSettingsState.autostartPreviousEnabled === true;
+        systemSettingsState.autostartPending = false;
+        systemSettingsState.statusMessage =
+          event.message || "Failed to update login launch setting.";
+        systemSettingsState.statusKind = "error";
+      }
+
       const systemSettingsInteractionGuard = createInteractionGuard({
         onFlush: (deferred) => {
           if (!deferred || typeof deferred !== "object") {
@@ -418,6 +442,13 @@
             systemSettingsState.statusMessage = deferred.message
               || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
+          } else if (deferred.kind === "autostart_status") {
+            applyAutostartStatus(
+              deferred,
+              deferred.from_update ? "Saved login launch setting." : "",
+            );
+          } else if (deferred.kind === "autostart_error") {
+            applyAutostartError(deferred);
           }
           renderSystemPanelInAllSettingsWindows();
         },
@@ -464,6 +495,7 @@
         error: "",
       };
       let versionState = { current: "", latest: "" };
+      let pendingAboutHashOpen = false;
       const indexStatusByProjectRoot = new Map();
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
@@ -519,6 +551,10 @@
           versionState.latest = latest;
         }
         renderAppVersion();
+        if (pendingAboutHashOpen && versionState.current) {
+          pendingAboutHashOpen = false;
+          releaseNotesWindow.openAbout(versionState.current || null);
+        }
       }
 
       function presetSurface(preset) {
@@ -1171,6 +1207,25 @@
           updateCtaController.beginDownloadingFor(version),
       });
 
+      function consumeAboutHash() {
+        if (window.location.hash === "#about") {
+          if (window.history && typeof window.history.replaceState === "function") {
+            window.history.replaceState(
+              null,
+              "",
+              `${window.location.pathname}${window.location.search}`,
+            );
+          }
+          if (versionState.current) {
+            releaseNotesWindow.openAbout(versionState.current || null);
+          } else {
+            pendingAboutHashOpen = true;
+          }
+        }
+      }
+      window.addEventListener("hashchange", consumeAboutHash);
+      consumeAboutHash();
+
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
         const openReleaseNotesFromLabel = () => {
@@ -1183,81 +1238,6 @@
             openReleaseNotesFromLabel();
           }
         });
-      }
-
-      // SPEC-2785 US-1 / FR-A〜G: server URL cell in op-status-strip. URL is
-      // derived from `window.location` (frontend is always loaded from the
-      // bound URL, so this is the canonical source) and matches the backend
-      // `AppRuntime::server_url` exactly. Clicking the URL value forwards an
-      // `OpenServerUrl` event to the backend which performs an exact
-      // same-origin check before invoking the OS opener. Clicking the copy
-      // glyph writes the URL to the clipboard with a transient `Copied`
-      // affordance; clipboard rejection downgrades to an inline error state
-      // (no modal) and logs to console for diagnostics.
-      const serverUrlValue = document.getElementById("op-strip-server-url");
-      const serverUrlCopy = document.getElementById("op-strip-server-url-copy");
-      if (serverUrlValue && !serverUrlValue.dataset.serverUrlBound) {
-        serverUrlValue.dataset.serverUrlBound = "true";
-        const serverUrl = new URL("/", window.location.href).toString();
-        serverUrlValue.textContent = serverUrl;
-        serverUrlValue.title = serverUrl;
-        if (serverUrlCopy) {
-          serverUrlCopy.dataset.url = serverUrl;
-        }
-        const openServerUrlInBrowser = () => {
-          send({ kind: "open_server_url", url: serverUrl });
-        };
-        serverUrlValue.addEventListener("click", openServerUrlInBrowser);
-        serverUrlValue.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            openServerUrlInBrowser();
-          }
-        });
-
-        if (serverUrlCopy && !serverUrlCopy.dataset.serverUrlBound) {
-          serverUrlCopy.dataset.serverUrlBound = "true";
-          let copyResetTimer = 0;
-          const flashCopyState = (state, baseLabel) => {
-            serverUrlCopy.dataset.state = state;
-            serverUrlValue.dataset.state = state;
-            if (baseLabel) {
-              serverUrlCopy.setAttribute("aria-label", baseLabel);
-            }
-            if (copyResetTimer) {
-              window.clearTimeout(copyResetTimer);
-            }
-            copyResetTimer = window.setTimeout(() => {
-              serverUrlCopy.removeAttribute("data-state");
-              serverUrlValue.removeAttribute("data-state");
-              serverUrlCopy.setAttribute("aria-label", "Copy server URL");
-              copyResetTimer = 0;
-            }, 1500);
-          };
-          const copyServerUrl = () => {
-            if (!navigator.clipboard?.writeText) {
-              console.warn(
-                "navigator.clipboard.writeText unavailable; cannot copy server URL",
-              );
-              flashCopyState("error", "Copy failed; clipboard unavailable");
-              return;
-            }
-            navigator.clipboard
-              .writeText(serverUrl)
-              .then(() => flashCopyState("copied", "Copied server URL"))
-              .catch((error) => {
-                console.warn("clipboard.writeText rejected", error);
-                flashCopyState("error", "Copy failed; permission denied");
-              });
-          };
-          serverUrlCopy.addEventListener("click", copyServerUrl);
-          serverUrlCopy.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              copyServerUrl();
-            }
-          });
-        }
       }
 
       const updateCtaController = createUpdateCtaController({
@@ -1273,9 +1253,15 @@
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
         // SPEC-2356 — propagate connection state to the Operator Status Strip
-        // so the LIVE cell visibly reflects whether the WebSocket bridge is
-        // up. The class is set on the strip element and consumed via CSS.
+        // so the bottom strip clearly reflects whether the WebSocket bridge is
+        // online. The class is set on the strip element and consumed via CSS.
         const strip = document.getElementById("op-status-strip");
+        const connectionStatusLabel = strip?.querySelector(
+          "[data-role='connection-label']",
+        );
+        if (connectionStatusLabel) {
+          connectionStatusLabel.textContent = connected ? "ONLINE" : "OFFLINE";
+        }
         if (strip) {
           strip.classList.toggle("op-status-strip--offline", !connected);
         }
@@ -1961,8 +1947,7 @@
           projectTabs,
           tabs: appState.tabs || [],
           activeTabId: appState.active_tab_id,
-          indexStatusByProjectRoot,
-          aggregateProjectTabDotState,
+          runtimeStateForWindow,
           send,
           requestCloseProjectTab,
         });
@@ -2042,17 +2027,19 @@
         renderCloseProjectTabModal();
       }
 
-      function updateProjectTabDot(buttonEl, projectRoot) {
-        updateProjectTabDotView(buttonEl, projectRoot, {
-          indexStatusByProjectRoot,
-          aggregateProjectTabDotState,
-        });
+      function updateProjectTabDot(buttonEl, tab) {
+        updateProjectTabDotView(buttonEl, tab, { runtimeStateForWindow });
       }
 
       function refreshProjectTabDots() {
+        const tabsById = new Map(
+          (appState.tabs || []).map((tab) => [tab.id, tab]),
+        );
         for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
-          const projectRoot = buttonEl.dataset.projectRoot || "";
-          updateProjectTabDot(buttonEl, projectRoot);
+          updateProjectTabDot(
+            buttonEl,
+            tabsById.get(buttonEl.dataset.projectTabId),
+          );
         }
       }
 
@@ -2925,18 +2912,23 @@
 
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
-        if (
-          !runtime ||
-          runtime.viewportRefreshFrame !== null ||
-          !canRefreshTerminalViewport(windowId)
-        ) {
+        if (!runtime) {
+          return;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          runtime.viewportRefreshPending = true;
+          return;
+        }
+        if (runtime.viewportRefreshFrame !== null) {
           return;
         }
         runtime.viewportRefreshFrame = requestAnimationFrame(() => {
           runtime.viewportRefreshFrame = null;
           if (!canRefreshTerminalViewport(windowId)) {
+            runtime.viewportRefreshPending = true;
             return;
           }
+          runtime.viewportRefreshPending = false;
           refreshTerminalViewport(windowId);
         });
       }
@@ -2947,6 +2939,60 @@
           return;
         }
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
+      }
+
+      function forceTerminalViewportRefresh(windowId, { shouldPersistGeometry = true } = {}) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          return false;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          runtime.viewportRefreshPending = true;
+          return false;
+        }
+        const activation = runTerminalActivationSequence({
+          runtime,
+          windowId,
+          shouldFocus: false,
+          shouldPersistGeometry,
+          sendGeometry,
+        });
+        if (!activation.ran) {
+          runtime.viewportRefreshPending = true;
+          scheduleTerminalFocusActivation(windowId, { shouldPersistGeometry });
+          return false;
+        }
+        runtime.viewportRefreshPending = false;
+        refreshTerminalViewport(windowId);
+        return true;
+      }
+
+      function rearmPendingTerminalViewportRefresh(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          return false;
+        }
+        return rearmRefreshOnVisible({
+          hasPendingRefresh: () => runtime.viewportRefreshPending === true,
+          canRefresh: () => canRefreshTerminalViewport(windowId),
+          clearPendingRefresh: () => {
+            runtime.viewportRefreshPending = false;
+          },
+          scheduleRefresh: () => {
+            forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
+          },
+        });
+      }
+
+      function rearmVisibleTerminalViewportRefreshes() {
+        for (const windowId of terminalMap.keys()) {
+          if (!canRefreshTerminalViewport(windowId)) {
+            continue;
+          }
+          if (!rearmPendingTerminalViewportRefresh(windowId)) {
+            scheduleTerminalViewportRefresh(windowId);
+          }
+        }
       }
 
       function scheduleTerminalFocusActivation(
@@ -3552,6 +3598,7 @@
             const element = windowMap.get(windowId);
             if (!element) {
               renderWindowList();
+              refreshProjectTabDots();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3590,12 +3637,8 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              const hasDetail = Boolean(effectiveDetail);
-              const shouldShowOverlay =
-                hasDetail &&
-                (runtimeState === "running" ||
-                  (runtimeState === "error" && !terminalHasOutput(windowId)));
-              const shouldSpin = shouldShowOverlay && runtimeState === "running";
+              const shouldShowOverlay = false;
+              const shouldSpin = false;
               const spinner = overlay.querySelector(".overlay-spinner");
               if (spinner) {
                 spinner.hidden = !shouldSpin;
@@ -3608,6 +3651,7 @@
               }
             }
             renderWindowList();
+            refreshProjectTabDots();
           },
         );
       }
@@ -3786,28 +3830,9 @@
         return Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       }
 
-      function isMacPlatform() {
-        const platform = navigator.userAgentData?.platform || navigator.platform || "";
-        return /mac|iphone|ipad|ipod/i.test(platform);
-      }
-
       function isBlinkBrowser() {
         const ua = navigator.userAgent || "";
         return /Chrome\//.test(ua);
-      }
-
-      function isTerminalCopyShortcut(event) {
-        if (isMacPlatform()) {
-          return false;
-        }
-        const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
-        return (
-          event.ctrlKey &&
-          event.shiftKey &&
-          !event.altKey &&
-          !event.metaKey &&
-          key === "c"
-        );
       }
 
       const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
@@ -4158,7 +4183,7 @@
         }
       }
 
-      async function copyTerminalSelection(windowId) {
+      async function copyTerminalSelection(windowId, { clearSelectionAfterCopy = false } = {}) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || !runtime.terminal.hasSelection()) {
           return false;
@@ -4167,7 +4192,11 @@
         if (!selection) {
           return false;
         }
-        return writeClipboardText(selection, () => runtime.terminal.focus());
+        const copied = await writeClipboardText(selection, () => runtime.terminal.focus());
+        if (copied && clearSelectionAfterCopy) {
+          runtime.terminal.clearSelection();
+        }
+        return copied;
       }
 
       async function copyTerminalOverlayMessage(windowId) {
@@ -4190,16 +4219,6 @@
         const hasMessage = Boolean(messageEl.textContent);
         button.hidden = !hasMessage;
         button.disabled = !hasMessage;
-      }
-
-      function terminalHasOutput(windowId) {
-        if (terminalMap.get(windowId)?.hasOutput) {
-          return true;
-        }
-        if ((pendingOutputMap.get(windowId)?.length || 0) > 0) {
-          return true;
-        }
-        return pendingSnapshotMap.has(windowId);
       }
 
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {
@@ -4263,7 +4282,10 @@
         };
 
         terminal.attachCustomKeyEventHandler((event) => {
-          if (!isTerminalCopyShortcut(event)) {
+          const copyDecision = classifyTerminalCopyKeyEvent(event, {
+            hasSelection: terminal.hasSelection(),
+          });
+          if (!copyDecision.copy) {
             return true;
           }
           event.preventDefault();
@@ -4271,7 +4293,9 @@
           if (!terminal.hasSelection()) {
             return false;
           }
-          void copyTerminalSelection(windowId);
+          void copyTerminalSelection(windowId, {
+            clearSelectionAfterCopy: copyDecision.clearSelectionAfterCopy,
+          });
           return false;
         });
 
@@ -4603,6 +4627,15 @@
           terminalRoot: terminalContainer,
           terminal,
           window,
+          isApplicationScrollFallbackEnabled: () =>
+            isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
+          sendTerminalInput: (data) => {
+            if (terminalMap.get(windowId)?.isReady !== true) {
+              return;
+            }
+            terminal.focus();
+            send({ kind: "terminal_input", id: windowId, data });
+          },
         });
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         // Re-fit whenever the terminal container actually changes size. Covers
@@ -4661,6 +4694,7 @@
           fitAddon,
           cleanup,
           viewportRefreshFrame: null,
+          viewportRefreshPending: false,
           activationFrame: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
           // `isReady` flips to `true` AFTER the first
@@ -4836,16 +4870,7 @@
           // sequence directly so the viewport is consistent the moment the
           // snapshot lands. We skip focus stealing (`shouldFocus: false`)
           // because snapshot replays happen on background tabs too.
-          if (canRefreshTerminalViewport(windowId)) {
-            runTerminalActivationSequence({
-              runtime,
-              windowId,
-              shouldFocus: false,
-              shouldPersistGeometry: true,
-              sendGeometry,
-            });
-          }
-          scheduleTerminalViewportRefresh(windowId);
+          forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
         });
       }
 
@@ -9147,11 +9172,7 @@
           cleanupButton.textContent =
             selectedCount === 0 ? "Clean Up" : `Clean Up (${selectedCount})`;
         }
-        if (notice) {
-          const noticeText = state.notice || branchLoadingNoticeText(state);
-          notice.hidden = !noticeText;
-          notice.textContent = noticeText || "";
-        }
+        renderBranchLoadStatusSummary(notice, branchLoadStatusSummary(state));
 
         if (state.error) {
           setBranchListPlaceholder(list, state.error);
@@ -9898,11 +9919,77 @@
         return target.reference ? `merged to ${target.reference}` : "";
       }
 
-      function branchLoadingNoticeText(state) {
-        if (!state.loading) {
-          return "";
+      const BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE = "Branch detail check interrupted";
+
+      function branchLoadStatusSummary(state) {
+        if (!state) {
+          return null;
         }
-        return state.entries.length === 0 ? "" : "Loading branch details";
+        if (state.error) {
+          return {
+            kind: "error",
+            title: "Branches unavailable",
+            detail: state.error,
+            hint: "Refresh to try again.",
+          };
+        }
+        if (state.loading && state.entries.length > 0) {
+          return {
+            kind: "checking",
+            title: "Checking branch details",
+            detail: "Loading branch details while cleanup safety is checked.",
+            hint: "Cleanup selection unlocks after verification.",
+          };
+        }
+        if (state.notice === BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE) {
+          return {
+            kind: "interrupted",
+            title: BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE,
+            detail: "Branch names are available, but cleanup safety was not verified.",
+            hint: "Refresh to verify cleanup safety.",
+          };
+        }
+        if (state.notice) {
+          return {
+            kind: "notice",
+            title: "Branch notice",
+            detail: state.notice,
+            hint: "",
+          };
+        }
+        return null;
+      }
+
+      function renderBranchLoadStatusSummary(notice, summary) {
+        if (!notice) {
+          return;
+        }
+        notice.textContent = "";
+        notice.hidden = !summary;
+        if (!summary) {
+          notice.removeAttribute("data-branch-status");
+          return;
+        }
+        notice.dataset.branchStatus = summary.kind;
+
+        const title = document.createElement("div");
+        title.className = "branch-notice-title";
+        title.textContent = summary.title;
+        notice.appendChild(title);
+
+        if (summary.detail) {
+          const detail = document.createElement("div");
+          detail.className = "branch-notice-detail";
+          detail.textContent = summary.detail;
+          notice.appendChild(detail);
+        }
+
+        if (summary.hint) {
+          const hint = document.createElement("div");
+          hint.className = "branch-notice-hint";
+          hint.textContent = summary.hint;
+          notice.appendChild(hint);
+        }
       }
 
       function failLoadingBranchesOnConnectionLoss(windowId, state) {
@@ -9916,22 +10003,28 @@
           state.notice = "";
         } else {
           state.error = "";
-          state.notice = "Connection lost while loading branch details";
+          state.notice = BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE;
         }
         syncBranchSelectionState(state);
         return true;
       }
 
       function branchCleanupPendingText(state) {
-        return state.loading ? "Loading cleanup status" : "Cleanup status unavailable";
+        return state.loading ? "Checking cleanup safety" : "Refresh to verify cleanup safety";
       }
 
       function cleanupAvailabilityForRender(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : "loading";
+        if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        if (state.loading) {
+          return "loading";
+        }
+        return "unknown";
       }
 
       function cleanupBadgeText(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "loading" : "unknown";
+        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "checking" : "Safety unknown";
       }
 
       function toggleBranchCleanupSelection(windowId, branchName) {
@@ -10986,6 +11079,12 @@
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        autostartEnabled: false,
+        autostartPreviousEnabled: false,
+        autostartMechanism: "",
+        autostartInstallPath: "",
+        autostartLoaded: false,
+        autostartPending: false,
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -11091,6 +11190,7 @@
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
         send({ kind: "get_system_settings" });
+        send({ kind: "get_autostart_status" });
 
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
@@ -11344,13 +11444,60 @@
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        const autostartSection = createDiv("settings-section");
+        const autostartLabel = document.createElement("label");
+        autostartLabel.className = "settings-checkbox-label";
+        autostartLabel.setAttribute("for", "settings-system-autostart");
+
+        const autostartCheckbox = document.createElement("input");
+        autostartCheckbox.type = "checkbox";
+        autostartCheckbox.className = "settings-checkbox";
+        autostartCheckbox.id = "settings-system-autostart";
+        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
+        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+        autostartCheckbox.addEventListener("change", (e) => {
+          const next = e.target.checked === true;
+          systemSettingsState.autostartPreviousEnabled =
+            systemSettingsState.autostartEnabled === true;
+          systemSettingsState.autostartEnabled = next;
+          systemSettingsState.autostartPending = true;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelInAllSettingsWindows();
+          send({ kind: "update_autostart", enabled: next });
+        });
+
+        const autostartText = document.createElement("span");
+        autostartText.textContent = "Launch GWT at login";
+        autostartLabel.appendChild(autostartCheckbox);
+        autostartLabel.appendChild(autostartText);
+        autostartSection.appendChild(autostartLabel);
+
+        const autostartHelp = document.createElement("p");
+        autostartHelp.className = "settings-help";
+        autostartHelp.textContent =
+          "Starts GWT in the menu bar when you log in. The browser does not open automatically.";
+        autostartSection.appendChild(autostartHelp);
+
+        if (systemSettingsState.autostartLoaded) {
+          const autostartDetail = document.createElement("p");
+          autostartDetail.className = "settings-help";
+          const mechanism = systemSettingsState.autostartMechanism || "Unknown";
+          const installPath = systemSettingsState.autostartInstallPath || "";
+          autostartDetail.textContent = installPath
+            ? `Autostart: ${mechanism} · ${installPath}`
+            : `Autostart: ${mechanism}`;
+          autostartSection.appendChild(autostartDetail);
+        }
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
-        section.appendChild(status);
+        autostartSection.appendChild(status);
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(autostartSection);
         renderSystemPanelStatus(panel);
       }
 
@@ -11829,7 +11976,10 @@
                 element,
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
-                onReveal: () => scheduleTerminalFocusActivation(windowId),
+                onReveal: () => {
+                  rearmPendingTerminalViewportRefresh(windowId);
+                  scheduleTerminalFocusActivation(windowId);
+                },
               });
             }
             for (const windowId of visibility.removed) {
@@ -11887,7 +12037,10 @@
                 element,
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
-                onReveal: () => scheduleTerminalFocusActivation(windowData.id),
+                onReveal: () => {
+                  rearmPendingTerminalViewportRefresh(windowData.id);
+                  scheduleTerminalFocusActivation(windowData.id);
+                },
               });
             }
 
@@ -12914,8 +13067,10 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            if (event.wizard) {
+              launchWizardOpenError = null;
+            }
             launchWizard = event.wizard;
-            launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
             break;
           case "runtime_hook_event":
@@ -13084,6 +13239,38 @@
             }
             systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "autostart_status": {
+            const wasPending = systemSettingsState.autostartPending === true;
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "autostart_status",
+                enabled: event.enabled,
+                mechanism: event.mechanism,
+                install_path: event.install_path,
+                from_update: wasPending,
+              })
+            ) {
+              break;
+            }
+            applyAutostartStatus(
+              event,
+              wasPending ? "Saved login launch setting." : "",
+            );
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          }
+          case "autostart_error":
+            if (
+              systemSettingsInteractionGuard.defer({
+                kind: "autostart_error",
+                message: event.message,
+              })
+            ) {
+              break;
+            }
+            applyAutostartError(event);
             renderSystemPanelInAllSettingsWindows();
             break;
           case "backend_connection_result":
@@ -13916,6 +14103,12 @@
           syncMaximizedWindowsToViewport();
         },
       });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          return;
+        }
+        rearmVisibleTerminalViewportRefreshes();
+      });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {
           return;
@@ -14050,6 +14243,35 @@
             return;
           }
           send(detail);
+        });
+        window.__gwtTerminalTestApi = Object.freeze({
+          metrics(windowId) {
+            const runtime = terminalMap.get(windowId);
+            const terminal = runtime?.terminal;
+            const buffer = terminal?.buffer?.active;
+            const viewport = terminal?.element
+              ?.parentElement
+              ?.querySelector?.(".xterm-viewport");
+            return {
+              hasRuntime: Boolean(runtime),
+              isReady: runtime?.isReady ?? null,
+              viewportRefreshPending: runtime?.viewportRefreshPending === true,
+              cols: terminal?.cols ?? 0,
+              rows: terminal?.rows ?? 0,
+              baseY: buffer?.baseY ?? 0,
+              viewportY: buffer?.viewportY ?? 0,
+              bufferLength: buffer?.length ?? 0,
+              domScrollTop: viewport?.scrollTop ?? 0,
+              domScrollHeight: viewport?.scrollHeight ?? 0,
+              domClientHeight: viewport?.clientHeight ?? 0,
+            };
+          },
+          scrollToBottom(windowId) {
+            const terminal = terminalMap.get(windowId)?.terminal;
+            if (terminal && typeof terminal.scrollToBottom === "function") {
+              terminal.scrollToBottom();
+            }
+          },
         });
       }
 

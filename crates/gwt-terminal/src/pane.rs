@@ -16,6 +16,8 @@ pub enum PaneStatus {
     Error(String),
 }
 
+const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
+
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
 ///
 /// `pty` is wrapped in an `Arc` so that callers who only need to write input
@@ -134,6 +136,28 @@ impl Pane {
         self.parser.screen()
     }
 
+    /// Build a replayable terminal snapshot for frontend reconnect.
+    ///
+    /// `vt100::Screen::contents_formatted()` only describes the currently
+    /// visible grid. Prepending completed scrollback lines lets a fresh xterm.js
+    /// instance rebuild normal-buffer history before the current screen is
+    /// redrawn.
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        let mut snapshot = Vec::new();
+        let scrollback_len = self.scrollback.len();
+        let visible_overlap =
+            visible_scrollback_overlap_len(&self.scrollback, self.parser.screen());
+        let replayable_len = scrollback_len.saturating_sub(visible_overlap);
+        let start = replayable_len.saturating_sub(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+
+        for line in self.scrollback.get_lines(start, replayable_len - start) {
+            append_snapshot_scrollback_line(&mut snapshot, line);
+        }
+
+        snapshot.extend_from_slice(&self.parser.screen().contents_formatted());
+        snapshot
+    }
+
     /// Get scrollback lines from the ring buffer.
     pub fn scrollback_lines(&self, start: usize, count: usize) -> Vec<&ScrollbackLine> {
         self.scrollback.get_lines(start, count)
@@ -211,6 +235,115 @@ impl Pane {
     }
 }
 
+fn visible_scrollback_overlap_len(scrollback: &ScrollbackStorage, screen: &vt100::Screen) -> usize {
+    let scrollback_len = scrollback.len();
+    if scrollback_len == 0 {
+        return 0;
+    }
+
+    let (_, cols) = screen.size();
+    let visible_rows: Vec<String> = screen.rows(0, cols).collect();
+    let max_overlap = scrollback_len.min(visible_rows.len());
+    let scrollback_tail: Vec<String> = scrollback
+        .get_lines(scrollback_len - max_overlap, max_overlap)
+        .into_iter()
+        .map(normalized_scrollback_text)
+        .collect();
+
+    for overlap in (1..=max_overlap).rev() {
+        let scrollback_suffix = &scrollback_tail[max_overlap - overlap..];
+        if visible_rows
+            .windows(overlap)
+            .any(|window| window == scrollback_suffix)
+        {
+            return overlap;
+        }
+    }
+
+    0
+}
+
+fn normalized_scrollback_text(line: &ScrollbackLine) -> String {
+    line.text.trim_end_matches('\r').to_string()
+}
+
+fn append_snapshot_scrollback_line(snapshot: &mut Vec<u8>, line: &ScrollbackLine) {
+    let before = snapshot.len();
+    let raw = if line.formatted.is_empty() {
+        line.text.as_bytes()
+    } else {
+        line.formatted.as_slice()
+    };
+
+    append_sanitized_snapshot_line(snapshot, raw);
+    if snapshot.len() > before {
+        snapshot.push(b'\n');
+    }
+}
+
+fn append_sanitized_snapshot_line(output: &mut Vec<u8>, raw: &[u8]) {
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index] {
+            b'\x1b' => {
+                index = append_or_skip_escape_sequence(output, raw, index);
+            }
+            b'\r' | b'\t' => {
+                output.push(raw[index]);
+                index += 1;
+            }
+            0x20..=0x7e | 0x80..=0xff => {
+                output.push(raw[index]);
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+}
+
+fn append_or_skip_escape_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
+    let Some(kind) = raw.get(start + 1).copied() else {
+        return start + 1;
+    };
+    match kind {
+        b'[' => append_or_skip_csi_sequence(output, raw, start),
+        b']' => skip_osc_sequence(raw, start),
+        _ => (start + 2).min(raw.len()),
+    }
+}
+
+fn append_or_skip_csi_sequence(output: &mut Vec<u8>, raw: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < raw.len() {
+        let byte = raw[index];
+        if (0x40..=0x7e).contains(&byte) {
+            let next = index + 1;
+            if byte == b'm' {
+                output.extend_from_slice(&raw[start..next]);
+            }
+            return next;
+        }
+        index += 1;
+    }
+    raw.len()
+}
+
+fn skip_osc_sequence(raw: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < raw.len() {
+        if raw[index] == b'\x07' {
+            return index + 1;
+        }
+        if raw[index] == b'\x1b' && raw.get(index + 1) == Some(&b'\\') {
+            return index + 2;
+        }
+        index += 1;
+    }
+    raw.len()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -228,6 +361,19 @@ mod tests {
             command.args,
             80,
             24,
+            HashMap::new(),
+            None,
+        )
+        .expect("Pane creation failed")
+    }
+
+    fn test_pane_with_rows(id: &str, rows: u16, command: TestCommand) -> Pane {
+        Pane::new(
+            id.to_string(),
+            command.command,
+            command.args,
+            80,
+            rows,
             HashMap::new(),
             None,
         )
@@ -260,6 +406,55 @@ mod tests {
         );
 
         let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_snapshot_sanitizer_preserves_sgr_but_drops_destructive_csi() {
+        let mut output = Vec::new();
+
+        append_sanitized_snapshot_line(&mut output, b"\x1b[H\x1b[J\x1b[31;1mALERT\x1b[0m\x1b[2K");
+
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            "\x1b[31;1mALERT\x1b[0m",
+            "scrollback replay must keep styling but not cursor moves or clears"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_bytes_preserves_boundary_scrollback_line() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-boundary", 6, sleep_command("60"));
+
+        for line in 1..=18 {
+            pane.process_bytes(format!("line-{line:02}\r\n").as_bytes());
+        }
+
+        let snapshot = String::from_utf8_lossy(&pane.snapshot_bytes()).into_owned();
+
+        assert!(
+            snapshot.contains("line-13"),
+            "snapshot should include the boundary scrollback line; got: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_bytes_uses_visible_rows_for_scrollback_overlap() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-visible-overlap", 6, sleep_command("60"));
+
+        for line in 1..=18 {
+            pane.process_bytes(format!("line-{line:02}\r\n").as_bytes());
+        }
+        pane.process_bytes(b"\x1b[2;1H");
+
+        let snapshot = String::from_utf8_lossy(&pane.snapshot_bytes()).into_owned();
+        let repeated_visible_line = snapshot.matches("line-14").count();
+
+        assert_eq!(
+            repeated_visible_line, 1,
+            "snapshot should not replay visible scrollback lines when cursor moves; got: {snapshot:?}"
+        );
     }
 
     #[test]
