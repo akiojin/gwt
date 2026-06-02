@@ -1559,6 +1559,95 @@ fn write_rebuild_marker(path: &Path) -> Result<()> {
     write_atomic(path, &body)
 }
 
+/// SPEC-2359 Phase W-11 (US-58 / FR-346): schema version for the one-time
+/// agent identity reset. Bumping this re-runs [`reset_legacy_agent_identity_at`]
+/// on existing data. Version 1 clears `title_summary` / `current_focus`
+/// written by the legacy prompt-derivation hook so the display fallback and
+/// agent re-authoring take over.
+pub const WORKSPACE_AGENT_IDENTITY_RESET_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AgentIdentityResetMarker {
+    version: u32,
+    #[serde(default)]
+    migrated_at: Option<DateTime<Utc>>,
+}
+
+fn agent_identity_reset_marker_path(current_path: &Path) -> PathBuf {
+    current_path
+        .parent()
+        .map(|dir| dir.join("agent_identity.migration.json"))
+        .unwrap_or_else(|| PathBuf::from("agent_identity.migration.json"))
+}
+
+fn agent_identity_reset_marker_at_or_above(path: &Path, required: u32) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let body = fs::read_to_string(path)?;
+    Ok(serde_json::from_str::<AgentIdentityResetMarker>(&body)
+        .map(|marker| marker.version >= required)
+        .unwrap_or(false))
+}
+
+fn write_agent_identity_reset_marker(path: &Path) -> Result<()> {
+    let marker = AgentIdentityResetMarker {
+        version: WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
+        migrated_at: Some(chrono::Utc::now()),
+    };
+    let body = serde_json::to_vec_pretty(&marker)
+        .map_err(|error| GwtError::Other(format!("agent identity reset marker: {error}")))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_atomic(path, &body)
+}
+
+/// SPEC-2359 Phase W-11 (US-58 / FR-346): clear legacy `title_summary` /
+/// `current_focus` from the canonical projection at `current_path` exactly
+/// once, guarded by a version marker. After this reset those fields are
+/// authored only by the agent (`gwtd workspace update` / `gwtd board post`),
+/// and empty values resolve through the display fallback chain. Returns
+/// `true` when the reset marker was newly written, `false` when the marker
+/// already records the current version (so agent-authored values written
+/// after the reset are never cleared again).
+pub fn reset_legacy_agent_identity_at(current_path: &Path) -> Result<bool> {
+    let marker_path = agent_identity_reset_marker_path(current_path);
+    if agent_identity_reset_marker_at_or_above(
+        &marker_path,
+        WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
+    )? {
+        return Ok(false);
+    }
+    if let Some(mut projection) = load_workspace_projection_from_path(current_path)? {
+        let mut changed = false;
+        for agent in &mut projection.agents {
+            if agent.title_summary.take().is_some() {
+                changed = true;
+            }
+            if agent.current_focus.take().is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            save_workspace_projection_to_path(current_path, &projection)?;
+        }
+    }
+    write_agent_identity_reset_marker(&marker_path)?;
+    Ok(true)
+}
+
+/// SPEC-2359 Phase W-11 (US-58 / FR-346): repo-scoped convenience wrapper for
+/// the startup bootstrap. Resolves the canonical projection path and runs the
+/// version-guarded one-time legacy identity reset. Call this once at startup
+/// (alongside the work-items rebuild), not on every projection load, so a
+/// freshly agent-authored title is never cleared.
+pub fn reset_legacy_agent_identity_for_repo(repo_path: &Path) -> Result<bool> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    reset_legacy_agent_identity_at(&current_path)
+}
+
 /// SPEC-2359 US-37 / FR-119: Convenience wrapper resolving the project-scoped
 /// current, work_items, and work_events paths from `repo_path` and invoking
 /// [`retroactive_auto_done_scan_paths`].
@@ -2426,6 +2515,62 @@ mod tests {
         assert_eq!(
             projection.status_text, "Still describing the current task",
             "category derivation must not overwrite the display status text"
+        );
+    }
+
+    /// SPEC-2359 Phase W-11 (US-58 / SC-228): the one-time reset clears
+    /// legacy title_summary / current_focus exactly once (version-guarded),
+    /// later runs are a no-op, and agent-authored values written after the
+    /// reset are preserved.
+    #[test]
+    fn reset_legacy_agent_identity_clears_once_and_preserves_later_values() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current_path = temp.path().join("current.json");
+
+        let mut projection = WorkspaceProjection::default_for_project(temp.path());
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "sess-legacy".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("/gwt-discussion 生プロンプト focus".to_string()),
+            title_summary: Some("あなたの目的は何ですか".to_string()),
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
+            updated_at: Utc::now(),
+        });
+        save_workspace_projection_to_path(&current_path, &projection).expect("save");
+
+        // First reset clears the legacy values and writes the marker.
+        let applied = reset_legacy_agent_identity_at(&current_path).expect("reset");
+        assert!(applied, "first reset should run and write the marker");
+        let after = load_workspace_projection_from_path(&current_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(after.agents[0].title_summary, None);
+        assert_eq!(after.agents[0].current_focus, None);
+
+        // The agent authors a real purpose after the migration.
+        let mut authored = after;
+        authored.agents[0].title_summary = Some("Agent タイトル目的化".to_string());
+        save_workspace_projection_to_path(&current_path, &authored).expect("save authored");
+
+        // Second reset is a no-op (marker guard) and preserves the agent value.
+        let applied_again = reset_legacy_agent_identity_at(&current_path).expect("reset again");
+        assert!(!applied_again, "marker must prevent a second clear");
+        let preserved = load_workspace_projection_from_path(&current_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            preserved.agents[0].title_summary.as_deref(),
+            Some("Agent タイトル目的化"),
+            "agent-authored title must survive later loads"
         );
     }
 

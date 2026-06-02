@@ -318,7 +318,7 @@ pub(super) fn title_summary_required_reminder(lang: &str) -> &'static str {
 必要に応じて同じ短いタイトルを Board milestone にも付けます:\n\
   gwtd board post --kind status --title-summary '<短い作業タイトル>' --body '<現在の状態 / 理由 / 次>'\n\
 \n\
-`title-summary` は Agent window tab と Workspace summary 用の短い作業名です。状態や結果ではなく「何の作業か」を書いてください。例: `エージェントタイトル改善`。不可: `エージェントタイトル改善完了`、`エージェントタイトル改善中`。完了/進行中/ブロック中などの状態は `--status`、`--current-focus`、`--summary`、または Board `--body` に分けてください。\n\
+`title-summary` は Agent window tab と Workspace summary 用の短い作業名です。状態や結果ではなく「何の作業か（作業の目的）」を書いてください。入力した生プロンプトをそのまま使わないでください。目的がまだ固まっていない場合は、それっぽい暫定の目的を設定し、目的が定まったら同じ `title-summary` を更新します。例: `エージェントタイトル改善`。不可: `エージェントタイトル改善完了`、`エージェントタイトル改善中`、生プロンプトのコピー。完了/進行中/ブロック中などの状態は `--status`、`--current-focus`、`--summary`、または Board `--body` に分けてください。\n\
 \n\
 **Use language: ja** for narrative outputs（Board 投稿本文、Workspace summaries、Agent title-summary）。gwtd subcommands、flags、code examples は English のまま。\n",
         ReminderLanguage::En => "# Agent Title Required\n\
@@ -331,7 +331,7 @@ Required command shape:\n\
 When useful, use the same short title on the Board milestone:\n\
   gwtd board post --kind status --title-summary '<short work title>' --body '<current state / reason / next>'\n\
 \n\
-`title-summary` is the short work name for Agent window tabs and Workspace summaries. Describe what the work is, not its status or result. Good: `Agent title improvement`. Bad: `Agent title improvement complete`, `Agent title improvement in progress`. Keep completion/progress/blocker state in `--status`, `--current-focus`, `--summary`, or Board `--body`.\n\
+`title-summary` is the short work name for Agent window tabs and Workspace summaries. Describe what the work is (its purpose), not its status or result. Do not copy the raw prompt into the title. If the purpose is not settled yet, set a plausible provisional purpose and update the same `title-summary` once it is confirmed. Good: `Agent title improvement`. Bad: `Agent title improvement complete`, `Agent title improvement in progress`, a copy of the raw prompt. Keep completion/progress/blocker state in `--status`, `--current-focus`, `--summary`, or Board `--body`.\n\
 \n\
 **Use language: en** for narrative outputs (Board post bodies, Workspace summaries, and Agent title-summary; gwtd subcommands, flags, and code examples stay English).\n",
     }

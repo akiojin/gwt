@@ -517,6 +517,23 @@ mod tests {
         assert!(text.contains("Use language: ja"));
     }
 
+    /// SPEC-2359 Phase W-11 (US-58 / US-59 / SC-229): the required reminder
+    /// must instruct the agent to author the work purpose (not the raw
+    /// prompt), set a provisional purpose when it is not settled, and update
+    /// it once confirmed — in both Japanese and English.
+    #[test]
+    fn title_summary_required_reminder_instructs_provisional_purpose() {
+        let ja_text = texts::title_summary_required_reminder("ja");
+        assert!(ja_text.contains("目的"), "{ja_text}");
+        assert!(ja_text.contains("暫定"), "{ja_text}");
+        assert!(ja_text.contains("生プロンプト"), "{ja_text}");
+
+        let en_text = texts::title_summary_required_reminder("en");
+        assert!(en_text.contains("purpose"), "{en_text}");
+        assert!(en_text.contains("provisional"), "{en_text}");
+        assert!(en_text.to_lowercase().contains("raw prompt"), "{en_text}");
+    }
+
     #[test]
     fn title_summary_guard_is_silent_when_agent_title_is_set() {
         let output = HookOutput::hook_specific_additional_context(
