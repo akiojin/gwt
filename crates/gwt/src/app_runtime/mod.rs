@@ -4381,24 +4381,9 @@ impl AppRuntime {
         client_id: ClientId,
         message: Option<String>,
     ) -> Vec<OutboundEvent> {
-        // The provider config view is best-effort: if the config path or file
-        // cannot be read we still report sign-in state with empty inputs.
-        let config = gwt_config::Settings::global_config_path()
-            .and_then(|path| gwt::system_settings::read_board_provider_config(&path).ok())
-            .unwrap_or_default();
         vec![OutboundEvent::reply(
             client_id,
-            BackendEvent::BoardAuthStatus {
-                slack: gwt::board_remote::signin::is_signed_in("slack"),
-                teams: gwt::board_remote::signin::is_signed_in("teams"),
-                message,
-                slack_client_id: config.slack_client_id,
-                slack_default_channel: config.slack_default_channel,
-                slack_has_secret: config.slack_has_secret,
-                teams_client_id: config.teams_client_id,
-                teams_tenant_id: config.teams_tenant_id,
-                teams_default_channel: config.teams_default_channel,
-            },
+            gwt::system_settings::board_auth_status_event(message),
         )]
     }
 

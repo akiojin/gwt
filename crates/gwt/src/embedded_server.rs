@@ -406,13 +406,19 @@ fn oauth_result_page(title: &str, message: &str) -> Html<String> {
 }
 
 /// OAuth redirect handler: completes the remote Board provider sign-in against
-/// the process-global session store. Self-contained (uses the global session +
-/// token store), so it needs no shared `ServerState`.
-async fn oauth_callback_handler(Query(params): Query<OAuthCallbackQuery>) -> Html<String> {
+/// the process-global session store. On success it broadcasts a refreshed
+/// [`gwt::BackendEvent::BoardAuthStatus`] to every connected client so the
+/// settings UI flips to "Signed in" without a manual Refresh (SPEC-2963
+/// FR-012). The token exchange itself is self-contained (global session +
+/// token store); only the broadcast needs the shared [`ServerState`].
+async fn oauth_callback_handler(
+    State(state): State<ServerState>,
+    Query(params): Query<OAuthCallbackQuery>,
+) -> Html<String> {
     if let Some(error) = params.error.as_deref().filter(|value| !value.is_empty()) {
         return oauth_result_page("Sign-in failed", error);
     }
-    let (Some(code), Some(state)) = (params.code, params.state) else {
+    let (Some(code), Some(oauth_state)) = (params.code, params.state) else {
         return oauth_result_page("Sign-in failed", "Missing authorization code or state.");
     };
     // The token exchange is blocking (reqwest); run it off the async worker.
@@ -421,7 +427,7 @@ async fn oauth_callback_handler(Query(params): Query<OAuthCallbackQuery>) -> Htm
         gwt::board_remote::oauth_session::complete_callback(
             gwt::board_remote::signin::sessions(),
             &code,
-            &state,
+            &oauth_state,
             &poster,
             &gwt::board_remote::token_store::default_dir(),
             chrono::Utc::now(),
@@ -429,10 +435,19 @@ async fn oauth_callback_handler(Query(params): Query<OAuthCallbackQuery>) -> Htm
     })
     .await;
     match outcome {
-        Ok(Ok(provider_key)) => oauth_result_page(
-            "Signed in",
-            &format!("Connected the {provider_key} Board provider."),
-        ),
+        Ok(Ok(provider_key)) => {
+            // Push the refreshed auth/config view to all connected gwt clients
+            // so the Settings panel reflects the new sign-in immediately.
+            state.clients.dispatch(vec![OutboundEvent::broadcast(
+                gwt::system_settings::board_auth_status_event(Some(format!(
+                    "Signed in to {provider_key}."
+                ))),
+            )]);
+            oauth_result_page(
+                "Signed in",
+                &format!("Connected the {provider_key} Board provider."),
+            )
+        }
         Ok(Err(reason)) => oauth_result_page("Sign-in failed", &reason),
         Err(_) => oauth_result_page("Sign-in failed", "Internal error completing sign-in."),
     }

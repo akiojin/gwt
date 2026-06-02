@@ -292,6 +292,28 @@ pub fn write_board_provider_config(
     )
 }
 
+/// Build the [`BackendEvent::BoardAuthStatus`] event carrying remote provider
+/// sign-in state plus the editable (non-secret) config view. Shared by the
+/// `GetBoardAuthStatus` reply path and the OAuth `/oauth/callback` broadcast so
+/// both surfaces report identical state (FR-012: the settings UI updates after
+/// a browser sign-in without a manual Refresh).
+pub fn board_auth_status_event(message: Option<String>) -> BackendEvent {
+    let config = Settings::global_config_path()
+        .and_then(|path| read_board_provider_config(&path).ok())
+        .unwrap_or_default();
+    BackendEvent::BoardAuthStatus {
+        slack: crate::board_remote::signin::is_signed_in("slack"),
+        teams: crate::board_remote::signin::is_signed_in("teams"),
+        message,
+        slack_client_id: config.slack_client_id,
+        slack_default_channel: config.slack_default_channel,
+        slack_has_secret: config.slack_has_secret,
+        teams_client_id: config.teams_client_id,
+        teams_tenant_id: config.teams_tenant_id,
+        teams_default_channel: config.teams_default_channel,
+    }
+}
+
 /// Build the `BackendEvent` reply for `FrontendEvent::GetSystemSettings`.
 pub fn get_event(path: &Path) -> BackendEvent {
     match read_settings(path) {
