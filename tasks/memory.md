@@ -6564,3 +6564,10 @@ Type: workflow
 Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
 Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
 Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。
+
+## 2026-06-02 — 最大化など per-client 表示状態を共有ジオメトリに broadcast すると複数クライアントでチラつく
+
+Type: lesson
+Context: SPEC-2008 の最大化で、ユーザー検証中に激しいチラつきが発生。調査の結果、syncMaximizedWindowsToViewport が各クライアントの可視領域に合わせて共有の最大化ジオメトリへ maximize_window 補正を broadcast しており、異なる viewport サイズの 2 クライアント（検証用 MCP ブラウザ1200px + ユーザーのブラウザ810px）が同時接続するとジオメトリを往復させ続けた。inset 値に依存しない既存設計問題。
+Learning: 最大化の塗りつぶしのような per-client な表示状態を shared workspace geometry に書き戻して全クライアントに broadcast すると、サイズの異なるクライアント間で ping-pong してチラつく。各クライアントが visibleBounds から fill をローカル計算してローカル適用し、共有するのは maximized フラグだけにすると解消する。さらに、エージェント検証時に検証用ブラウザ(Playwright/MCP)を開いたままユーザーに視覚確認を依頼すると、それが第2クライアントになり multi-client バグを誘発し『回帰』に見える。
+Future Action: (1) 最大化/ズーム追従など viewport 依存の表示はローカル描画にし、shared geometry へ補正を broadcast しない。(2) ユーザーに視覚確認を依頼する前に、検証用ブラウザ(MCP/Playwright)を必ず閉じて単一クライアントにする。複数クライアント挙動を確認したい場合は意図的に別サイズで開く。
