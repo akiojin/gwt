@@ -86,7 +86,11 @@ the current task, summary, next action, or focus changes:
       --title-summary '<short task title>'
 
 `--title-summary` is the short task name used by Agent window tabs and
-Workspace summaries. Write what the work is, not its completion state.
+Workspace summaries. Write the work purpose, not its completion state, and
+never copy the raw prompt into it. On a new Agent window, set it as your
+first action, before responding to the user. If the purpose is not settled
+yet, set a plausible provisional purpose now and update the same
+`--title-summary` the moment the purpose is confirmed.
 
 - Good: `Agent title summaries`
 - Bad (completion state): `Agent title summaries done`, `Working on agent title summaries`
@@ -188,7 +192,11 @@ summary、next action、focus が変わったら必ず更新します:
       --title-summary '<短い作業タイトル>'
 
 `--title-summary` は Agent window tab と Workspace summary 用の
-**短い作業名**。状態や結果ではなく「何の作業か」を書きます。
+**短い作業名**。状態や結果ではなく「何の作業か（作業の目的）」を書きます。
+入力した生プロンプトをそのまま使わないでください。新しい Agent window
+では、応答を始める前に最初のアクションとして設定します。目的がまだ
+固まっていない場合は、それっぽい暫定の目的を今すぐ設定し、目的が定まった
+瞬間に同じ `--title-summary` を更新します。
 
 - 例: `エージェントタイトル改善` ✓
 - 不可 (完了状態): `エージェントタイトル改善完了`、`エージェントタイトル改善中` ✗

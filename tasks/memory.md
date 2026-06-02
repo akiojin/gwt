@@ -6522,3 +6522,17 @@ Type: lesson
 Context: SPEC-2920 tray/About verification used an isolated HOME. With an empty ~/.gwt/session.json, the app opened the Open Project picker instead of the intended checkout surface.
 Learning: Isolated GUI verification that must land on an in-project surface needs a seeded session.json pointing at the checkout under test; otherwise the verification can be blocked before the changed UI is reachable.
 Future Action: Before sharing a manual GUI verification URL from a temp HOME, seed ~/.gwt/session.json with the target checkout tab and verify the served URL reaches the intended screen.
+
+## 2026-06-02 — Removing a derivation path: check sibling reminder guards for the same is_unassigned early-return
+
+Type: lesson
+Context: SPEC-2359 W-11: removed the UserPromptSubmit prompt→title derivation. Unassigned Start Work agents then got no title at all because board_reminder::agent_title_summary_missing still had an is_unassigned() early-return that suppressed the title reminder. The derivation path had already dropped that guard (US-46/FR-179) but the reminder path had not.
+Learning: When you remove one code path that handled a case (e.g. derivation for unassigned agents), grep for the SAME guard (is_unassigned / affiliation early-returns) in sibling paths (reminders, sync) that must now cover the case. A guard that was harmless while the derivation existed becomes a silent gap once it is removed.
+Future Action: After deleting a path that produced some state, search for every other gate keyed on the same condition (e.g. grep is_unassigned) and confirm each still behaves correctly without the deleted path.
+
+## 2026-06-02 — browser-check of hook-driven agent behavior needs keychain symlink + GWT_HOOK_BIN
+
+Type: lesson
+Context: Verifying SPEC-2359 W-11 title behavior in an isolated browser-check instance hit 3 env-only blockers: (1) Start Work git push failed because the macOS login keychain lives at $HOME/Library/Keychains and the isolated HOME had none; (2) materialized agent hooks resolved to the installed /Applications/GWT.app gwtd (old code) not the rebuilt target/debug/gwtd; (3) my standalone CLI hook sim io-errored on the daemon-forward step which only works inside the launched agent.
+Learning: Isolated-HOME browser-check needs: symlink $CHECK_HOME/Library/Keychains -> $HOME/Library/Keychains so osxkeychain can auth git push; set GWT_HOOK_BIN=<repo>/target/debug/gwtd so new worktrees' hooks run the rebuilt binary; verify agent behavior via the projection (CHECK_HOME/.gwt/projects/*/current.json) and the Claude transcript, not a standalone CLI hook invocation (daemon-forward step needs the launch env).
+Future Action: When browser-check must exercise agent hooks against edited Rust, symlink the keychain into the isolated HOME, launch with GWT_HOOK_BIN pointing at target/debug/gwtd, and confirm outcomes by reading the projection + transcript.
