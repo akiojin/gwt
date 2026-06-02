@@ -6522,3 +6522,59 @@ Type: lesson
 Context: SPEC-2920 tray/About verification used an isolated HOME. With an empty ~/.gwt/session.json, the app opened the Open Project picker instead of the intended checkout surface.
 Learning: Isolated GUI verification that must land on an in-project surface needs a seeded session.json pointing at the checkout under test; otherwise the verification can be blocked before the changed UI is reachable.
 Future Action: Before sharing a manual GUI verification URL from a temp HOME, seed ~/.gwt/session.json with the target checkout tab and verify the served URL reaches the intended screen.
+
+## 2026-06-02 — gwt-register-spec: register phase/complete は owned --spec id を使う（start --spec 0 なら 0）
+
+Type: lesson
+Context: register start --spec 0 で owner_spec=0。その後 register phase --spec <real-n> は "state owns SPEC-Some(0), got --spec <n>" で拒否される。CLI は phase で placeholder→実 id の rebind をしない（SKILL.md の "bind the real spec id" 文言と挙動が不一致）。
+Learning: 実 SPEC Issue は issue spec create / issue spec <n> --edit spec で正しく作成・投入される。register の lifecycle 記録だけが owned id に紐づく。phase/complete は --spec 0（owned id）で実行すれば milestone 記録と stop-block 解除ができる。
+Future Action: gwt-register-spec を register start --spec 0 で開始した場合、phase/complete は新 issue 番号ではなく --spec 0 を使う。または issue 番号確定後に register start を実 id で 1 回だけ実行する。
+
+## 2026-06-02 — SPEC-2970 Usage 検証: 実 Claude /api/oauth/usage は 200 で取得可・gwt 二重起動は GWT_FORCE_NEW_INSTANCE=1
+
+Type: lesson
+Context: Provider Usage 機能の視覚検証で、(1) 既存 gwt が single-instance lock を持つため検証用 2 つ目を起動できなかった、(2) Claude account usage が取れるか不明だった、(3) 検証用 session を seed する際 session.toml の agent_id 形式でつまづいた。
+Learning: (1) 2つ目の gwt 検証インスタンスは GWT_FORCE_NEW_INSTANCE=1 と --no-tray --no-open で起動できる（HOME 隔離 + CODEX_HOME=実ディレクトリ で実 Codex を読ませる）。(2) 実トークン(Keychain `security find-generic-password -s "Claude Code-credentials" -w` の claudeAiOauth.accessToken)で `GET https://api.anthropic.com/api/oauth/usage` は HTTP 200。応答は five_hour/seven_day/seven_day_sonnet を含み、resets_at は RFC3339 `+00:00` オフセット、seven_day_opus 等は null、未知の sub-window キー多数。(3) Session の agent_id は serde adjacently-tagged (`#[serde(tag="type",content="value")]`) なので toml では `agent_id = { type = "Codex" }`。
+Future Action: GUI 視覚検証で本番 gwt と衝突する場合は GWT_FORCE_NEW_INSTANCE=1 + 隔離 HOME + CODEX_HOME 実ディレクトリで起動する。Claude usage パーサは null sub-window と +00:00 オフセットと未知キーを許容する defensive parse を維持する。
+
+## 2026-06-02 — Claude usage: macOS は Keychain の token が live、~/.claude/.credentials.json は stale/expired のことがある
+
+Type: lesson
+Context: SPEC-2970 で Claude account usage が 401 auth expired になった。原因は resolve_claude_creds が .credentials.json を先に読み、その accessToken が expiresAt 過去で失効していたため。Keychain (security find-generic-password -s "Claude Code-credentials" -w) の token は live で同 endpoint が 200 を返す。
+Learning: macOS では Keychain が live token の真実。resolve は Keychain 優先 → file fallback にする。ただし GUI でない detached プロセスから security を叩くと keychain ACL prompt が応答できず失敗し得る（実 GUI アプリは初回 Always Allow で解決）。headless 検証では CLAUDE_CONFIG_DIR を worktree 内一時ディレクトリに向け、Keychain から取り出した最新 token を .credentials.json として置けば file fallback で 200 を再現できる。claude_home は CLAUDE_CONFIG_DIR env を尊重する。
+Future Action: Claude token は Keychain 優先・file fallback。失効 access token のときは将来 refreshToken での更新も検討。検証時は CLAUDE_CONFIG_DIR + 一時 .credentials.json で実データ再現し、token file は確認後に削除する。
+
+## 2026-06-02 — Removing a derivation path: check sibling reminder guards for the same is_unassigned early-return
+
+Type: lesson
+Context: SPEC-2359 W-11: removed the UserPromptSubmit prompt→title derivation. Unassigned Start Work agents then got no title at all because board_reminder::agent_title_summary_missing still had an is_unassigned() early-return that suppressed the title reminder. The derivation path had already dropped that guard (US-46/FR-179) but the reminder path had not.
+Learning: When you remove one code path that handled a case (e.g. derivation for unassigned agents), grep for the SAME guard (is_unassigned / affiliation early-returns) in sibling paths (reminders, sync) that must now cover the case. A guard that was harmless while the derivation existed becomes a silent gap once it is removed.
+Future Action: After deleting a path that produced some state, search for every other gate keyed on the same condition (e.g. grep is_unassigned) and confirm each still behaves correctly without the deleted path.
+
+## 2026-06-02 — browser-check of hook-driven agent behavior needs keychain symlink + GWT_HOOK_BIN
+
+Type: lesson
+Context: Verifying SPEC-2359 W-11 title behavior in an isolated browser-check instance hit 3 env-only blockers: (1) Start Work git push failed because the macOS login keychain lives at $HOME/Library/Keychains and the isolated HOME had none; (2) materialized agent hooks resolved to the installed /Applications/GWT.app gwtd (old code) not the rebuilt target/debug/gwtd; (3) my standalone CLI hook sim io-errored on the daemon-forward step which only works inside the launched agent.
+Learning: Isolated-HOME browser-check needs: symlink $CHECK_HOME/Library/Keychains -> $HOME/Library/Keychains so osxkeychain can auth git push; set GWT_HOOK_BIN=<repo>/target/debug/gwtd so new worktrees' hooks run the rebuilt binary; verify agent behavior via the projection (CHECK_HOME/.gwt/projects/*/current.json) and the Claude transcript, not a standalone CLI hook invocation (daemon-forward step needs the launch env).
+Future Action: When browser-check must exercise agent hooks against edited Rust, symlink the keychain into the isolated HOME, launch with GWT_HOOK_BIN pointing at target/debug/gwtd, and confirm outcomes by reading the projection + transcript.
+
+## 2026-06-02 — gwt-managed skill ファイル編集は dual-mirror + force-add
+
+Type: workflow
+Context: gwt-fix-issue SKILL.md 強化で新規 references/closure-comment.md を追加した際、git status に出ず原因調査した。
+Learning: `.claude/skills/gwt-*` と `.codex/skills/gwt-*` は .git/info/exclude で除外されており、新規ファイルは untracked 扱い。既存 tracked ファイル(SKILL.md 等)の編集は通常反映される。.codex は distribute.rs が embedded .claude を逐語コピーするが tracked-path 保護で上書きされない手動ミラーで、参照パスのみ .codex/ に書き換える。
+Future Action: skill 編集時は .claude と .codex の両ミラーを同一コミットで更新し、新規 managed skill ファイルは git add -f で tracked 化する。SKILL.md 内の自己参照パスは mirror 側で .codex/ prefix にする。
+
+## 2026-06-02 — SPEC-2970 Claude usage は opt-in 既定 OFF が consent 正。default-on は外部送信を同意なしに発火させる
+
+Type: lesson
+Context: Provider Usage 実装で Claude account 既定を ON にしたところ Codex 自動レビューが P1 指摘: [usage] 未設定の既存ユーザーが GUI 接続直後に opt-in 同意なしで Keychain 読取 + Anthropic /api/oauth/usage 送信を受ける。承認済み SPEC の同意モデルは『Claude アカウント枠のみ opt-in』だった。
+Learning: 外部送信/資格情報読取を伴う機能の既定値は『承認済み SPEC の consent 契約』に従う。デバッグ中の『既定で見たい』要望で default-on にすると spec と矛盾し privacy regression になる。フラグgate は呼び出し経路の最前段(early-return)に置き、未同意時は資格情報にも通信にも一切触れないことを敵対的監査で確認する。per-session のローカル読取は opt-in 不要(FR-017)。
+Future Action: consent を伴う設定の既定は false(opt-in)。SPEC FR の同意モデルとコード default を必ず一致させ、UI 説明文(Settings hint)・FR 全箇所の『既定で有効』表現も同時に掃き出す。視覚検証は隔離 HOME(未 opt-in 状態)で『Enable in Settings』が既定表示されることを確認する。
+
+## 2026-06-02 — 最大化など per-client 表示状態を共有ジオメトリに broadcast すると複数クライアントでチラつく
+
+Type: lesson
+Context: SPEC-2008 の最大化で、ユーザー検証中に激しいチラつきが発生。調査の結果、syncMaximizedWindowsToViewport が各クライアントの可視領域に合わせて共有の最大化ジオメトリへ maximize_window 補正を broadcast しており、異なる viewport サイズの 2 クライアント（検証用 MCP ブラウザ1200px + ユーザーのブラウザ810px）が同時接続するとジオメトリを往復させ続けた。inset 値に依存しない既存設計問題。
+Learning: 最大化の塗りつぶしのような per-client な表示状態を shared workspace geometry に書き戻して全クライアントに broadcast すると、サイズの異なるクライアント間で ping-pong してチラつく。各クライアントが visibleBounds から fill をローカル計算してローカル適用し、共有するのは maximized フラグだけにすると解消する。さらに、エージェント検証時に検証用ブラウザ(Playwright/MCP)を開いたままユーザーに視覚確認を依頼すると、それが第2クライアントになり multi-client バグを誘発し『回帰』に見える。
+Future Action: (1) 最大化/ズーム追従など viewport 依存の表示はローカル描画にし、shared geometry へ補正を broadcast しない。(2) ユーザーに視覚確認を依頼する前に、検証用ブラウザ(MCP/Playwright)を必ず閉じて単一クライアントにする。複数クライアント挙動を確認したい場合は意図的に別サイズで開く。

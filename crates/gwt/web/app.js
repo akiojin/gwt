@@ -3,7 +3,7 @@
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { renderProjectCloneModal as renderProjectCloneModalView } from "/project-clone-modal.js";
-      import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+      import { initOperatorShell, applyTelemetryCounts, applyProviderUsage } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
@@ -97,6 +97,7 @@
         hotkey: __op.hotkey,
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
+        applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
@@ -1924,21 +1925,39 @@
       }
 
       function syncMaximizedWindowsToViewport() {
-        const nextGeometry = maximizedGeometry(visibleBounds(), viewport.zoom);
+        // A maximized window fills THIS client's viewport locally. Re-apply the
+        // fill directly to the element and NEVER send a maximize_window
+        // correction: broadcasting one let two clients with different viewport
+        // sizes ping-pong the shared maximized geometry forever (the flicker
+        // bug). The shared `maximized` flag is enough; the pixel fill is a
+        // per-client view concern computed from each client's visibleBounds.
+        const fill = maximizedGeometry(visibleBounds(), viewport.zoom);
         for (const windowData of activeWorkspace().windows || []) {
-          if (!windowData.maximized) {
+          if (!windowData.maximized || windowData.minimized) {
             continue;
           }
-          if (geometryMatches(windowData.geometry, nextGeometry)) {
+          const element = windowMap.get(windowData.id);
+          if (!element) {
             continue;
           }
-          send({
-            kind: "maximize_window",
-            id: windowData.id,
-            // The frontend now sends the FINAL maximized geometry (zoom-corrected
-            // screen inset); the backend stores it as-is. See maximizedGeometry.
-            bounds: nextGeometry,
-          });
+          const current = {
+            x: parseFloat(element.style.left || "0"),
+            y: parseFloat(element.style.top || "0"),
+            width: parseFloat(element.style.width || "0"),
+            height: parseFloat(element.style.height || "0"),
+          };
+          if (geometryMatches(current, fill)) {
+            continue;
+          }
+          element.style.left = `${fill.x}px`;
+          element.style.top = `${fill.y}px`;
+          element.style.width = `${fill.width}px`;
+          element.style.height = `${fill.height}px`;
+          if (presetSurface(windowData.preset) === "terminal") {
+            // Visual re-fit only (persist=false): never round-trip geometry from
+            // the sync path, so this client cannot churn the shared state.
+            requestAnimationFrame(() => fitTerminal(windowData.id, false));
+          }
         }
       }
 
@@ -3168,6 +3187,508 @@
         }
       }
 
+      // ---- Provider usage & rate limits (SPEC-2970) ----
+      let latestProviderUsage = { accounts: [], sessions: [], consumption: [] };
+
+      const USAGE_PROVIDER_NAME = { codex: "Codex", claude_code: "Claude Code" };
+      const USAGE_WINDOW_LABEL = {
+        five_hour: "5-hour",
+        weekly: "Weekly",
+        opus_weekly: "Opus weekly",
+        sonnet_weekly: "Sonnet weekly",
+        code_review_weekly: "Code review weekly",
+      };
+
+      function usageStateReason(state) {
+        if (!state) return "";
+        switch (state.kind) {
+          case "disabled":
+            return "Enable in Settings";
+          case "no_data":
+            return "No data yet";
+          case "unavailable":
+            return state.reason ? `Unavailable — ${state.reason}` : "Unavailable";
+          case "stale":
+            return `stale ${Math.round((state.age_secs || 0) / 60)}m`;
+          default:
+            return "";
+        }
+      }
+
+      function usageFmtResetAt(iso) {
+        if (!iso) return "";
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleString();
+      }
+
+      function usageFmtTokens(n) {
+        if (n == null) return "—";
+        if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+        if (n >= 1000) return `${Math.round(n / 1000)}k`;
+        return String(n);
+      }
+
+      function applyProviderUsageUi(snapshot) {
+        latestProviderUsage = snapshot || { accounts: [], sessions: [], consumption: [] };
+        try {
+          window.__operatorShell?.applyProviderUsage?.(latestProviderUsage);
+        } catch (e) {
+          console.warn("usage pill update failed", e);
+        }
+        try {
+          refreshUsageHoverIfOpen();
+        } catch {
+          /* no-op */
+        }
+        // Re-render regardless of session count: when a snapshot drops back to
+        // sessions:[] (agent stopped, rollout/transcript unreadable, settings
+        // change) the Active Work footer must clear its stale token/context
+        // instead of keeping the previous poll's values.
+        try {
+          renderActiveWorkOverview();
+        } catch {
+          /* no-op */
+        }
+      }
+
+      function usageForSession(sessionId) {
+        return (
+          (latestProviderUsage.sessions || []).find(
+            (s) => s.session_id === sessionId,
+          ) || null
+        );
+      }
+
+      function buildUsageBar(percent) {
+        const wrap = document.createElement("div");
+        wrap.className = "op-usage-bar";
+        const fill = document.createElement("div");
+        fill.className = "op-usage-bar__fill";
+        const pct = Math.max(0, Math.min(100, Math.round(percent)));
+        fill.style.width = `${pct}%`;
+        if (pct >= 90) fill.dataset.level = "high";
+        else if (pct >= 70) fill.dataset.level = "mid";
+        wrap.appendChild(fill);
+        return wrap;
+      }
+
+      function renderUsageAccountRow(account) {
+        const row = document.createElement("div");
+        row.className = "op-usage-account";
+        row.dataset.provider = account.provider;
+        const head = document.createElement("div");
+        head.className = "op-usage-account__head";
+        const name = document.createElement("span");
+        name.className = "op-usage-account__name";
+        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
+        head.appendChild(name);
+        if (account.plan) {
+          const plan = document.createElement("span");
+          plan.className = "op-usage-account__plan";
+          plan.textContent = account.plan;
+          head.appendChild(plan);
+        }
+        const reason = usageStateReason(account.state);
+        if (reason) {
+          const isDisabled = (account.state && account.state.kind) === "disabled";
+          const r = document.createElement(isDisabled ? "button" : "span");
+          r.className = "op-usage-account__reason";
+          r.textContent = reason;
+          if (isDisabled) {
+            r.type = "button";
+            r.classList.add("op-usage-account__reason--action");
+            r.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (typeof window.__gwtHideUsageHover === "function") {
+                window.__gwtHideUsageHover();
+              }
+              document.dispatchEvent(
+                new CustomEvent("settings:open", { detail: { target: "usage" } }),
+              );
+            });
+          }
+          head.appendChild(r);
+        }
+        row.appendChild(head);
+        for (const w of account.windows || []) {
+          const line = document.createElement("div");
+          line.className = "op-usage-window";
+          const label = document.createElement("span");
+          label.className = "op-usage-window__label";
+          label.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
+          const pct = document.createElement("span");
+          pct.className = "op-usage-window__pct";
+          pct.textContent = `${Math.round(w.used_percent)}%`;
+          line.appendChild(label);
+          line.appendChild(buildUsageBar(w.used_percent));
+          line.appendChild(pct);
+          if (w.resets_at) {
+            const reset = document.createElement("span");
+            reset.className = "op-usage-window__reset";
+            reset.textContent = `↻ ${usageFmtResetAt(w.resets_at)}`;
+            line.appendChild(reset);
+          }
+          row.appendChild(line);
+        }
+        return row;
+      }
+
+      function renderUsageSessionsTable(sessions) {
+        const table = document.createElement("table");
+        table.className = "op-usage-sessions";
+        const thead = document.createElement("thead");
+        const htr = document.createElement("tr");
+        for (const h of ["Session", "Prov", "Model", "Tokens", "Ctx", "Lim"]) {
+          const th = document.createElement("th");
+          th.textContent = h;
+          htr.appendChild(th);
+        }
+        thead.appendChild(htr);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        for (const s of sessions) {
+          const tr = document.createElement("tr");
+          if (s.eligible === false) tr.dataset.ineligible = "true";
+          const cells = [
+            s.session_id ? s.session_id.slice(0, 8) : "—",
+            s.provider === "claude_code" ? "Cl" : "Cx",
+            s.model || "—",
+            usageFmtTokens(s.total_tokens),
+            s.context_left_pct != null ? `${Math.round(s.context_left_pct)}%` : "—",
+            s.limit_reached ? "⚠" : "ok",
+          ];
+          for (const c of cells) {
+            const td = document.createElement("td");
+            td.textContent = c;
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        return table;
+      }
+
+      function consumptionTotal(b) {
+        if (!b) return 0;
+        return (b.input || 0) + (b.output || 0) + (b.cached || 0);
+      }
+
+      function fmtConsumptionBreakdown(b) {
+        if (!b) return "—";
+        return `in ${usageFmtTokens(b.input || 0)} · out ${usageFmtTokens(
+          b.output || 0,
+        )} · cached ${usageFmtTokens(b.cached || 0)}`;
+      }
+
+      function renderConsumptionChart(days) {
+        const chart = document.createElement("div");
+        chart.className = "op-usage-chart";
+        const totals = days.map((d) => consumptionTotal(d.breakdown));
+        const max = Math.max(1, ...totals);
+        days.forEach((d, i) => {
+          const col = document.createElement("div");
+          col.className = "op-usage-chart__col";
+          if (i === days.length - 1) col.dataset.today = "true";
+          const bar = document.createElement("div");
+          bar.className = "op-usage-chart__bar";
+          const total = totals[i];
+          bar.style.height = `${Math.max(2, Math.round((total / max) * 100))}%`;
+          bar.title = `${d.date}: ${usageFmtTokens(total)} tokens`;
+          col.appendChild(bar);
+          chart.appendChild(col);
+        });
+        return chart;
+      }
+
+      function usageFmtResetShort(iso) {
+        if (!iso) return "";
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+          month: "numeric",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      function usageConsumptionFor(provider) {
+        return (
+          (latestProviderUsage.consumption || []).find((c) => c.provider === provider) || null
+        );
+      }
+
+      // One rate-limit window as an aligned row: label · bar · % · reset.
+      function buildUsageWindowRow(w) {
+        const row = document.createElement("div");
+        row.className = "op-usage-win";
+        const lbl = document.createElement("span");
+        lbl.className = "op-usage-win__lbl";
+        lbl.textContent = USAGE_WINDOW_LABEL[w.kind] || w.kind;
+        const bar = buildUsageBar(w.used_percent);
+        bar.classList.add("op-usage-win__bar");
+        const pct = document.createElement("span");
+        pct.className = "op-usage-win__pct";
+        pct.textContent = `${Math.round(w.used_percent)}%`;
+        const reset = document.createElement("span");
+        reset.className = "op-usage-win__reset";
+        reset.textContent = w.resets_at ? `↻ ${usageFmtResetShort(w.resets_at)}` : "";
+        row.appendChild(lbl);
+        row.appendChild(bar);
+        row.appendChild(pct);
+        row.appendChild(reset);
+        return row;
+      }
+
+      // Consumption as an aligned 4-column grid (period × in/out/cached).
+      function buildUsageConsumptionGrid(pc) {
+        const grid = document.createElement("div");
+        grid.className = "op-usage-cgrid";
+        const t = pc.today || {};
+        const w = pc.this_week || {};
+        const cells = [
+          ["hdr", "tokens"],
+          ["colh", "in"],
+          ["colh", "out"],
+          ["colh", "cached"],
+          ["rowh", "Today"],
+          ["num", usageFmtTokens(t.input || 0)],
+          ["num", usageFmtTokens(t.output || 0)],
+          ["num", usageFmtTokens(t.cached || 0)],
+          ["rowh", "Week"],
+          ["num", usageFmtTokens(w.input || 0)],
+          ["num", usageFmtTokens(w.output || 0)],
+          ["num", usageFmtTokens(w.cached || 0)],
+        ];
+        for (const [kind, text] of cells) {
+          const cell = document.createElement("span");
+          cell.className = `op-usage-cgrid__${kind}`;
+          cell.textContent = text;
+          grid.appendChild(cell);
+        }
+        return grid;
+      }
+
+      // A provider card: header (icon · name · plan) + rate-limit windows (or a
+      // degraded reason) + consumption grid + 7-day sparkline. Grouping all of
+      // one provider's data together is the key readability win.
+      function buildUsageProviderCard(account) {
+        const card = document.createElement("div");
+        card.className = "op-usage-card";
+        card.dataset.provider = account.provider;
+
+        const head = document.createElement("div");
+        head.className = "op-usage-card__head";
+        const icon = document.createElement("span");
+        icon.className = "op-usage-card__icon";
+        icon.textContent = account.provider === "claude_code" ? "◇" : "⬡";
+        const name = document.createElement("span");
+        name.className = "op-usage-card__name";
+        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
+        head.appendChild(icon);
+        head.appendChild(name);
+        if (account.plan) {
+          const plan = document.createElement("span");
+          plan.className = "op-usage-card__plan";
+          plan.textContent = account.plan;
+          head.appendChild(plan);
+        }
+        card.appendChild(head);
+
+        const windows = account.windows || [];
+        if (windows.length) {
+          const wins = document.createElement("div");
+          wins.className = "op-usage-wins";
+          for (const w of windows) wins.appendChild(buildUsageWindowRow(w));
+          card.appendChild(wins);
+        } else {
+          const reason = usageStateReason(account.state);
+          if (reason) {
+            const isDisabled = (account.state && account.state.kind) === "disabled";
+            const r = document.createElement(isDisabled ? "button" : "div");
+            r.className = "op-usage-card__reason";
+            r.textContent = reason;
+            if (isDisabled) {
+              r.type = "button";
+              r.classList.add("op-usage-card__reason--action");
+              r.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (typeof window.__gwtHideUsageHover === "function") {
+                  window.__gwtHideUsageHover();
+                }
+                document.dispatchEvent(
+                  new CustomEvent("settings:open", { detail: { target: "usage" } }),
+                );
+              });
+            }
+            card.appendChild(r);
+          }
+        }
+
+        const pc = usageConsumptionFor(account.provider);
+        if (pc) {
+          const cwrap = document.createElement("div");
+          cwrap.className = "op-usage-card__cons";
+          cwrap.appendChild(buildUsageConsumptionGrid(pc));
+          if (Array.isArray(pc.days) && pc.days.length) {
+            cwrap.appendChild(renderConsumptionChart(pc.days));
+          }
+          card.appendChild(cwrap);
+        }
+        return card;
+      }
+
+      // SPEC-2970 — the full usage detail as provider cards + a sessions list,
+      // appended to a container. The hover popover is the single surface for all
+      // usage info (the click-open modal was removed per UX feedback).
+      function buildUsageFullSections(container) {
+        for (const account of latestProviderUsage.accounts || []) {
+          container.appendChild(buildUsageProviderCard(account));
+        }
+        const sessions = latestProviderUsage.sessions || [];
+        const sess = document.createElement("div");
+        sess.className = "op-usage-sess";
+        const sHead = document.createElement("div");
+        sHead.className = "op-usage-sess__head";
+        sHead.textContent = sessions.length ? `Sessions (${sessions.length})` : "Sessions";
+        sess.appendChild(sHead);
+        if (sessions.length) {
+          sess.appendChild(renderUsageSessionsTable(sessions));
+        } else {
+          const empty = document.createElement("p");
+          empty.className = "op-usage-empty";
+          empty.textContent = "No active sessions.";
+          sess.appendChild(empty);
+        }
+        container.appendChild(sess);
+      }
+
+      // ---- Consolidated usage hover popover (SPEC-2970 UX) ----
+      // Hovering the status-bar USAGE cell shows EVERYTHING at once (both
+      // providers' windows with bars + full consumption with charts +
+      // sessions). The click-open modal was removed per UX feedback — the hover
+      // popover is the single surface. Move the cursor into it to scroll/read.
+      let usageHoverEl = null;
+      let usageHoverHideTimer = null;
+      let usageHoverAnchor = null;
+
+      function buildUsageHoverBody() {
+        const wrap = document.createElement("div");
+        wrap.className = "op-usage-hover__body";
+        const head = document.createElement("div");
+        head.className = "op-usage-hover__head";
+        head.textContent = "Usage & Limits";
+        wrap.appendChild(head);
+        buildUsageFullSections(wrap);
+        return wrap;
+      }
+
+      function positionUsageHover() {
+        if (!usageHoverEl || !usageHoverAnchor) return;
+        const r = usageHoverAnchor.getBoundingClientRect();
+        const w = usageHoverEl.offsetWidth;
+        const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+        usageHoverEl.style.left = `${left}px`;
+        usageHoverEl.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
+      }
+
+      function cancelUsageHoverHide() {
+        if (usageHoverHideTimer) {
+          clearTimeout(usageHoverHideTimer);
+          usageHoverHideTimer = null;
+        }
+      }
+
+      function refreshUsageHoverIfOpen() {
+        if (!usageHoverEl || usageHoverEl.hidden) return;
+        while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
+        usageHoverEl.appendChild(buildUsageHoverBody());
+        positionUsageHover();
+      }
+
+      window.__gwtShowUsageHover = (anchor) => {
+        cancelUsageHoverHide();
+        usageHoverAnchor = anchor || usageHoverAnchor;
+        if (!usageHoverEl) {
+          usageHoverEl = document.createElement("div");
+          usageHoverEl.className = "op-usage-hover";
+          usageHoverEl.addEventListener("mouseenter", cancelUsageHoverHide);
+          usageHoverEl.addEventListener("mouseleave", () => window.__gwtHideUsageHover());
+          document.body.appendChild(usageHoverEl);
+        }
+        while (usageHoverEl.firstChild) usageHoverEl.removeChild(usageHoverEl.firstChild);
+        usageHoverEl.appendChild(buildUsageHoverBody());
+        usageHoverEl.hidden = false;
+        usageHoverEl.style.visibility = "hidden";
+        requestAnimationFrame(() => {
+          positionUsageHover();
+          if (usageHoverEl) usageHoverEl.style.visibility = "visible";
+        });
+      };
+
+      window.__gwtHideUsageHover = () => {
+        cancelUsageHoverHide();
+        usageHoverHideTimer = setTimeout(() => {
+          if (usageHoverEl) usageHoverEl.hidden = true;
+          usageHoverHideTimer = null;
+        }, 180);
+      };
+
+      // SPEC-2970 FR-009/FR-013 — Settings "Usage & Limits" panel: Claude
+      // account usage is opt-in (Keychain + network); Codex is local + auto.
+      function renderUsagePanel(panel) {
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+        const section = document.createElement("div");
+        section.className = "settings-section";
+
+        const heading = document.createElement("h3");
+        heading.textContent = "Provider Usage & Limits";
+        section.appendChild(heading);
+
+        const codexNote = document.createElement("p");
+        codexNote.className = "settings-hint";
+        codexNote.textContent =
+          "Codex usage is read from local session files automatically.";
+        section.appendChild(codexNote);
+
+        const label = document.createElement("label");
+        label.className = "settings-toggle";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        const claudeAccount = (latestProviderUsage.accounts || []).find(
+          (a) => a.provider === "claude_code",
+        );
+        checkbox.checked = !!(
+          claudeAccount &&
+          claudeAccount.state &&
+          claudeAccount.state.kind !== "disabled"
+        );
+        checkbox.addEventListener("change", () => {
+          try {
+            send({
+              kind: "set_claude_account_usage_enabled",
+              enabled: checkbox.checked,
+            });
+          } catch {
+            /* no-op */
+          }
+        });
+        const span = document.createElement("span");
+        span.textContent = "Show Claude Code account usage (5-hour / weekly)";
+        label.appendChild(checkbox);
+        label.appendChild(span);
+        section.appendChild(label);
+
+        const consent = document.createElement("p");
+        consent.className = "settings-hint";
+        consent.textContent =
+          "Off by default (opt-in). When enabled, Claude account usage reads your OAuth token from the Keychain / credentials file and requests usage from the Anthropic API (polled at most once every 3 minutes). While disabled, no Keychain read or network request happens. Per-session token usage is read locally and is not affected by this setting.";
+        section.appendChild(consent);
+
+        panel.appendChild(section);
+      }
+
       function activeWorkFocusableAgents(work) {
         const agents = Array.isArray(work?.agents) ? work.agents : [];
         return agents.filter((agent) => {
@@ -3251,6 +3772,42 @@
             agentFocus.title = agent.current_focus;
           }
           card.appendChild(agentFocus);
+        }
+
+        // SPEC-2970 FR-019/FR-020 — per-session usage footer (enhanced CLI
+        // footer): model · tokens · context-left + this provider's account badge.
+        const sessionUsage = usageForSession(agent.session_id);
+        if (sessionUsage) {
+          const footer = createNode("div", "op-agent-usage");
+          if (sessionUsage.model) {
+            footer.appendChild(createNode("span", "op-agent-usage__model", sessionUsage.model));
+          }
+          footer.appendChild(
+            createNode("span", "op-agent-usage__tok", `${usageFmtTokens(sessionUsage.total_tokens)} tok`),
+          );
+          const eligible = sessionUsage.eligible !== false;
+          if (eligible && sessionUsage.context_left_pct != null) {
+            footer.appendChild(
+              createNode("span", "op-agent-usage__ctx", `ctx ${Math.round(sessionUsage.context_left_pct)}%`),
+            );
+          }
+          if (eligible) {
+            const acct = (latestProviderUsage.accounts || []).find(
+              (a) => a.provider === sessionUsage.provider,
+            );
+            const five = acct && (acct.windows || []).find((w) => w.kind === "five_hour");
+            const wk = acct && (acct.windows || []).find((w) => w.kind === "weekly");
+            const parts = [];
+            if (five) parts.push(`5h ${Math.round(five.used_percent)}%`);
+            if (wk) parts.push(`wk ${Math.round(wk.used_percent)}%`);
+            if (parts.length) {
+              footer.appendChild(createNode("span", "op-agent-usage__acct", parts.join(" · ")));
+            }
+          }
+          if (sessionUsage.limit_reached) {
+            footer.appendChild(createNode("span", "op-agent-usage__limit", "limit reached"));
+          }
+          card.appendChild(footer);
         }
 
         const agentActions = createNode("div", "op-agent-actions");
@@ -3754,6 +4311,10 @@
             tabButton.setAttribute("aria-current", "page");
           }
           tabButton.textContent = tab.title;
+          // Native tooltip with the full window title (or dynamic detail) so a
+          // tab truncated by max-width still reveals its title on hover. Mirrors
+          // the titlebar (titleText.title) and window-list row tooltips.
+          tabButton.title = windowTitleTooltip(tab);
           tabButton.addEventListener("click", (event) => {
             event.stopPropagation();
             send({ kind: "activate_window_tab", id: tab.id });
@@ -11133,6 +11694,8 @@
         // Kept distinct from `custom-agents` so External CLI rows and
         // built-in LLM redirection have separate physical UI.
         tabs.appendChild(buildSettingsTab("agent-backends", "Agent Backends", false));
+        // SPEC-2970: provider usage display preferences (Claude opt-in).
+        tabs.appendChild(buildSettingsTab("usage", "Usage & Limits", false));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -11158,9 +11721,16 @@
         panelBackends.dataset.settingsPanel = "agent-backends";
         panelBackends.dataset.role = "settings-scroll";
 
+        const panelUsage = document.createElement("section");
+        panelUsage.className = "settings-panel hidden";
+        panelUsage.setAttribute("role", "tabpanel");
+        panelUsage.dataset.settingsPanel = "usage";
+        panelUsage.dataset.role = "settings-scroll";
+
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
+        bodyEl.appendChild(panelUsage);
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -11186,6 +11756,7 @@
         settingsWindowBodies.add(body);
 
         renderSystemPanel(panelSystem);
+        renderUsagePanel(panelUsage);
         // Always request fresh system settings on open so the dropdown
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
@@ -11922,17 +12493,33 @@
           id: windowData.id,
           geometryRevision: workspaceGeometryRevision(windowData),
         });
+        // SPEC-2008: a maximized window fills THIS client's viewport locally.
+        // Each client computes its own fill and never renders/persists the
+        // shared geometry while maximized, so two clients with different
+        // viewport sizes cannot ping-pong the shared maximized geometry (the
+        // flicker bug). See syncMaximizedWindowsToViewport — it re-fills locally
+        // and never broadcasts a maximize_window correction.
+        const maximizedFill =
+          windowData.maximized && !windowData.minimized
+            ? maximizedGeometry(visibleBounds(), viewport.zoom)
+            : null;
+        const targetGeometry = maximizedFill || windowData.geometry;
         const dimensionsChanged =
-          applyWorkspaceGeometry &&
-          (previousWidth !== windowData.geometry.width ||
-            previousHeight !== windowData.geometry.height);
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
+          (previousWidth !== targetGeometry.width ||
+            previousHeight !== targetGeometry.height);
         const shouldPersistTerminalGeometry =
-          applyWorkspaceGeometry &&
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           ((wasMinimized && !windowData.minimized) || dimensionsChanged);
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
-        if (applyWorkspaceGeometry) {
+        if (maximizedFill) {
+          element.style.left = `${maximizedFill.x}px`;
+          element.style.top = `${maximizedFill.y}px`;
+          element.style.width = `${maximizedFill.width}px`;
+          element.style.height = `${maximizedFill.height}px`;
+        } else if (applyWorkspaceGeometry) {
           element.style.left = `${windowData.geometry.x}px`;
           element.style.top = `${windowData.geometry.y}px`;
           element.style.width = `${windowData.geometry.width}px`;
@@ -11943,7 +12530,7 @@
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         if (
-          applyWorkspaceGeometry &&
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           presetSurface(windowData.preset) === "terminal" &&
           !windowData.minimized
         ) {
@@ -12253,6 +12840,13 @@
           case "window_list":
             windowListEntries = event.windows || [];
             frontendUnits.projectWorkspaceShell.renderWindowList();
+            break;
+          case "provider_usage":
+            applyProviderUsageUi({
+              accounts: event.accounts || [],
+              sessions: event.sessions || [],
+              consumption: event.consumption || [],
+            });
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);

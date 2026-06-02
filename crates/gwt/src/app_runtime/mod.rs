@@ -438,6 +438,11 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
+        FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
+            FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")
         }
@@ -3236,6 +3241,10 @@ pub struct AppRuntime {
     /// AppRuntime construction or unit tests that never call
     /// `set_server_url`).
     pub(crate) server_url: Option<String>,
+    /// SPEC-2970: notifies the background usage poller to refresh immediately
+    /// (e.g. after the Claude opt-in toggle changes). `None` in unit tests and
+    /// before `set_usage_refresh` is called during startup wiring.
+    pub(crate) usage_refresh: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl ProjectTabRuntime {
@@ -3325,6 +3334,7 @@ impl AppRuntime {
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
+            usage_refresh: None,
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -3361,6 +3371,15 @@ impl AppRuntime {
             // semantics that regressed Done on subsequent update events).
             // Idempotent via `work_items.migration.json` marker.
             let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
+                &tab.project_root,
+            );
+            // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
+            // clear of legacy prompt-derived title_summary / current_focus so
+            // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
+            // display fallback and agent re-authoring. Idempotent via
+            // `agent_identity.migration.json`; never re-clears agent-authored
+            // values written after the marker.
+            let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
                 &tab.project_root,
             );
         }
@@ -3738,6 +3757,32 @@ impl AppRuntime {
         self.server_url = Some(url);
     }
 
+    /// SPEC-2970: wire the usage poller's refresh handle so frontend toggles
+    /// can request an immediate re-poll.
+    pub(crate) fn set_usage_refresh(&mut self, refresh: std::sync::Arc<tokio::sync::Notify>) {
+        self.usage_refresh = Some(refresh);
+    }
+
+    /// SPEC-2970 FR-009/FR-013: persist the Claude account-usage opt-in and
+    /// request an immediate refresh.
+    fn set_claude_account_usage_enabled_events(&self, enabled: bool) -> Vec<OutboundEvent> {
+        if let Err(error) = gwt_config::Settings::update_global(|settings| {
+            settings.usage.claude_account_enabled = enabled;
+            Ok(())
+        }) {
+            tracing::warn!(%error, "failed to persist Claude usage opt-in");
+        }
+        self.request_usage_refresh_events()
+    }
+
+    /// SPEC-2970 FR-022: nudge the background poller to refresh now.
+    fn request_usage_refresh_events(&self) -> Vec<OutboundEvent> {
+        if let Some(refresh) = &self.usage_refresh {
+            refresh.notify_one();
+        }
+        Vec::new()
+    }
+
     pub(crate) fn handle_frontend_event(
         &mut self,
         client_id: ClientId,
@@ -3745,7 +3790,20 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         log_frontend_user_action(&client_id, &event);
         match event {
-            FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
+            FrontendEvent::FrontendReady => {
+                // SPEC-2970: kick an immediate usage poll on connect so the
+                // status-bar pill populates right away instead of waiting for
+                // the next 30s poller tick (otherwise a freshly loaded page
+                // shows an empty usage cell).
+                if let Some(refresh) = &self.usage_refresh {
+                    refresh.notify_one();
+                }
+                self.frontend_sync_events(&client_id)
+            }
+            FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
+                self.set_claude_account_usage_enabled_events(enabled)
+            }
+            FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady { bounds } => {
                 self.startup_auto_resume_ready_events(bounds)
             }
@@ -6250,17 +6308,34 @@ impl AppRuntime {
         project_root: &Path,
         projection: &gwt_core::workspace_projection::WorkspaceProjection,
     ) -> bool {
+        // SPEC-2359 Phase W-11 (US-58 / FR-344): resolve the effective window
+        // title with the display fallback chain — the agent-authored
+        // `title_summary` first, then the linked Issue/SPEC title, then `None`
+        // (which lets the frontend fall back to the neutral agent label). The
+        // raw prompt is never written into a title, so it can never appear here.
+        let issue_fallback_title = projection
+            .linked_issues
+            .first()
+            .map(|issue| issue.number)
+            .and_then(|number| {
+                let cache_root =
+                    gwt::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root);
+                gwt::issue_cache::load_issue_title_from_cache(&cache_root, number)
+            });
+
         let updates = projection
             .agents
             .iter()
             .filter_map(|agent| {
+                let window_id = self.resolve_title_sync_window_id(agent, project_root)?;
                 let title = agent
                     .title_summary
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())?;
-                let window_id = self.resolve_title_sync_window_id(agent, project_root)?;
-                Some((window_id, title.to_string(), agent.current_focus.clone()))
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| issue_fallback_title.clone());
+                Some((window_id, title, agent.current_focus.clone()))
             })
             .collect::<Vec<_>>();
 
@@ -6274,7 +6349,7 @@ impl AppRuntime {
             };
             if tab
                 .workspace
-                .set_dynamic_title_with_detail(&address.raw_id, Some(title), detail)
+                .set_dynamic_title_with_detail(&address.raw_id, title, detail)
             {
                 changed = true;
             }
@@ -10860,6 +10935,7 @@ exit 1
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
+            usage_refresh: None,
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();

@@ -308,30 +308,36 @@ pub(super) fn format_language_directive(lang: &str) -> String {
 
 pub(super) fn title_summary_required_reminder(lang: &str) -> &'static str {
     match reminder_language(lang) {
-        ReminderLanguage::Ja => "# Agent Title Required\n\
+        ReminderLanguage::Ja => "# Agent Title — 応答する前に必ず設定\n\
 \n\
-この Agent session にはまだ短い `title-summary` が設定されていません。実装や検証に入る前に、現在の作業目的を Workspace に明示してください。\n\
+この Agent window にはまだ `title-summary` が設定されていません。ユーザーへの応答を始める前に、**最初のアクションとして**この window の作業の目的を title-summary に設定してください。これは任意ではありません。\n\
 \n\
-必須コマンド例:\n\
-  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<現在の作業内容>' --title-summary '<短い作業タイトル>'\n\
+まず最初に実行:\n\
+  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<現在の作業内容>' --title-summary '<作業の目的（短い作業名）>'\n\
 \n\
-必要に応じて同じ短いタイトルを Board milestone にも付けます:\n\
-  gwtd board post --kind status --title-summary '<短い作業タイトル>' --body '<現在の状態 / 理由 / 次>'\n\
+ルール:\n\
+- title-summary には「何の作業か（作業の目的）」を書きます。状態や結果ではありません。\n\
+- 入力された生プロンプトをそのままコピーしないでください。\n\
+- 目的がまだ固まっていない場合でも、それっぽい暫定の目的を今すぐ設定し、目的が定まったら同じ title-summary を更新します（応答を遅らせないでください）。\n\
+- 例: `エージェントタイトル目的化`。不可: `…完了`、`…中`、生プロンプトのコピー。\n\
 \n\
-`title-summary` は Agent window tab と Workspace summary 用の短い作業名です。状態や結果ではなく「何の作業か」を書いてください。例: `エージェントタイトル改善`。不可: `エージェントタイトル改善完了`、`エージェントタイトル改善中`。完了/進行中/ブロック中などの状態は `--status`、`--current-focus`、`--summary`、または Board `--body` に分けてください。\n\
+完了/進行中/ブロック中などの状態は `--status`、`--current-focus`、`--summary`、または Board `--body` に分けてください。設定が済むまで毎ターンこの指示を再掲します。\n\
 \n\
 **Use language: ja** for narrative outputs（Board 投稿本文、Workspace summaries、Agent title-summary）。gwtd subcommands、flags、code examples は English のまま。\n",
-        ReminderLanguage::En => "# Agent Title Required\n\
+        ReminderLanguage::En => "# Agent Title — set it before you respond\n\
 \n\
-This Agent session does not have a short `title-summary` yet. Before implementation or verification work, explicitly publish the current work purpose to Workspace.\n\
+This Agent window has no `title-summary` yet. Before you start responding to the user, your **first action** must set this window's work purpose as its title-summary. This is not optional.\n\
 \n\
-Required command shape:\n\
-  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work title>'\n\
+Run this first:\n\
+  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work purpose>'\n\
 \n\
-When useful, use the same short title on the Board milestone:\n\
-  gwtd board post --kind status --title-summary '<short work title>' --body '<current state / reason / next>'\n\
+Rules:\n\
+- title-summary = the purpose of the work, not its status or result.\n\
+- Do not copy the raw prompt into the title.\n\
+- Even if the purpose is not settled yet, set a plausible provisional purpose now and update the same title-summary once it is confirmed (do not delay your response for it).\n\
+- Good: `Agent title purpose`. Bad: `... complete`, `... in progress`, a copy of the raw prompt.\n\
 \n\
-`title-summary` is the short work name for Agent window tabs and Workspace summaries. Describe what the work is, not its status or result. Good: `Agent title improvement`. Bad: `Agent title improvement complete`, `Agent title improvement in progress`. Keep completion/progress/blocker state in `--status`, `--current-focus`, `--summary`, or Board `--body`.\n\
+Keep completion/progress/blocker state in `--status`, `--current-focus`, `--summary`, or Board `--body`. This instruction repeats every turn until the title is set.\n\
 \n\
 **Use language: en** for narrative outputs (Board post bodies, Workspace summaries, and Agent title-summary; gwtd subcommands, flags, and code examples stay English).\n",
     }
