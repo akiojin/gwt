@@ -100,7 +100,13 @@ fn tray_autostart_pins_status_surface() {
     // Mechanism variants are part of the WebSocket protocol surface; pin
     // them so a casual rename does not break the Settings page contract
     // before Phase 8 ships.
-    for mechanism in ["LoginItems", "LaunchAgent", "Registry", "XdgAutostart"] {
+    for mechanism in [
+        "LoginItems",
+        "LaunchAgent",
+        "AppService",
+        "Registry",
+        "XdgAutostart",
+    ] {
         assert!(
             TRAY_AUTOSTART.contains(mechanism),
             "AutostartMechanism must include {mechanism}"
