@@ -1924,21 +1924,39 @@
       }
 
       function syncMaximizedWindowsToViewport() {
-        const nextGeometry = maximizedGeometry(visibleBounds(), viewport.zoom);
+        // A maximized window fills THIS client's viewport locally. Re-apply the
+        // fill directly to the element and NEVER send a maximize_window
+        // correction: broadcasting one let two clients with different viewport
+        // sizes ping-pong the shared maximized geometry forever (the flicker
+        // bug). The shared `maximized` flag is enough; the pixel fill is a
+        // per-client view concern computed from each client's visibleBounds.
+        const fill = maximizedGeometry(visibleBounds(), viewport.zoom);
         for (const windowData of activeWorkspace().windows || []) {
-          if (!windowData.maximized) {
+          if (!windowData.maximized || windowData.minimized) {
             continue;
           }
-          if (geometryMatches(windowData.geometry, nextGeometry)) {
+          const element = windowMap.get(windowData.id);
+          if (!element) {
             continue;
           }
-          send({
-            kind: "maximize_window",
-            id: windowData.id,
-            // The frontend now sends the FINAL maximized geometry (zoom-corrected
-            // screen inset); the backend stores it as-is. See maximizedGeometry.
-            bounds: nextGeometry,
-          });
+          const current = {
+            x: parseFloat(element.style.left || "0"),
+            y: parseFloat(element.style.top || "0"),
+            width: parseFloat(element.style.width || "0"),
+            height: parseFloat(element.style.height || "0"),
+          };
+          if (geometryMatches(current, fill)) {
+            continue;
+          }
+          element.style.left = `${fill.x}px`;
+          element.style.top = `${fill.y}px`;
+          element.style.width = `${fill.width}px`;
+          element.style.height = `${fill.height}px`;
+          if (presetSurface(windowData.preset) === "terminal") {
+            // Visual re-fit only (persist=false): never round-trip geometry from
+            // the sync path, so this client cannot churn the shared state.
+            requestAnimationFrame(() => fitTerminal(windowData.id, false));
+          }
         }
       }
 
@@ -3754,6 +3772,10 @@
             tabButton.setAttribute("aria-current", "page");
           }
           tabButton.textContent = tab.title;
+          // Native tooltip with the full window title (or dynamic detail) so a
+          // tab truncated by max-width still reveals its title on hover. Mirrors
+          // the titlebar (titleText.title) and window-list row tooltips.
+          tabButton.title = windowTitleTooltip(tab);
           tabButton.addEventListener("click", (event) => {
             event.stopPropagation();
             send({ kind: "activate_window_tab", id: tab.id });
@@ -11922,17 +11944,33 @@
           id: windowData.id,
           geometryRevision: workspaceGeometryRevision(windowData),
         });
+        // SPEC-2008: a maximized window fills THIS client's viewport locally.
+        // Each client computes its own fill and never renders/persists the
+        // shared geometry while maximized, so two clients with different
+        // viewport sizes cannot ping-pong the shared maximized geometry (the
+        // flicker bug). See syncMaximizedWindowsToViewport — it re-fills locally
+        // and never broadcasts a maximize_window correction.
+        const maximizedFill =
+          windowData.maximized && !windowData.minimized
+            ? maximizedGeometry(visibleBounds(), viewport.zoom)
+            : null;
+        const targetGeometry = maximizedFill || windowData.geometry;
         const dimensionsChanged =
-          applyWorkspaceGeometry &&
-          (previousWidth !== windowData.geometry.width ||
-            previousHeight !== windowData.geometry.height);
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
+          (previousWidth !== targetGeometry.width ||
+            previousHeight !== targetGeometry.height);
         const shouldPersistTerminalGeometry =
-          applyWorkspaceGeometry &&
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           ((wasMinimized && !windowData.minimized) || dimensionsChanged);
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
-        if (applyWorkspaceGeometry) {
+        if (maximizedFill) {
+          element.style.left = `${maximizedFill.x}px`;
+          element.style.top = `${maximizedFill.y}px`;
+          element.style.width = `${maximizedFill.width}px`;
+          element.style.height = `${maximizedFill.height}px`;
+        } else if (applyWorkspaceGeometry) {
           element.style.left = `${windowData.geometry.x}px`;
           element.style.top = `${windowData.geometry.y}px`;
           element.style.width = `${windowData.geometry.width}px`;
@@ -11943,7 +11981,7 @@
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         if (
-          applyWorkspaceGeometry &&
+          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           presetSurface(windowData.preset) === "terminal" &&
           !windowData.minimized
         ) {
