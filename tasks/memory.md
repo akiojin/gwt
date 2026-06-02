@@ -6410,3 +6410,17 @@ Type: lesson
 Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by crates/gwt/web/app.js. Frontend unit verification first failed at the Playwright embedded routes coverage because ROOT_MODULES did not include the new file.
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
+
+## 2026-06-01 — gwt crate は bin/lib で別クレートルート: 共有モジュールは bin から gwt:: で参照
+
+Type: lesson
+Context: main.rs(bin gwt) は独自の mod ツリー(app_runtime, board_view 等)を持ち、共有モジュールは gwt::<mod> で参照する。一方 cli/* は lib.rs 配下で crate::<mod> が正しい。
+Learning: gwt crate は [[bin]] gwt=src/main.rs と lib.rs が別クレートルート。bin 側ソース(app_runtime/board_view)からは lib のモジュールを gwt:: で参照し、lib 側ソース(cli/*)は crate:: で参照する。
+Future Action: lib に新規 pub mod を足して bin から使う場合は gwt::<mod>、lib 内から使う場合は crate::<mod> を使い分ける。コンパイル前に呼び出し元が bin/lib どちらかを確認する。
+
+## 2026-06-02 — Board provider tests read the global ~/.gwt/config.toml
+
+Type: lesson
+Context: board_provider::provider() reads Settings::load() (global config) on every call. cli::board + cli::hook::board_reminder + cli::env unit tests exercise provider() indirectly. dirs::home_dir() (used by Settings::global_config_path) ignores HOME/USERPROFILE env on Windows (dirs 6), so these tests CANNOT be isolated from the machine config via ScopedEnvVar HOME/USERPROFILE.
+Learning: If the dev machine's config.toml has [board] provider = slack/teams, ~33 board lib tests fail with 'Slack is not signed in' because provider() resolves a remote provider with no token. This is collateral, not a code defect. Attempting env-based HOME isolation in these tests caused ordering-dependent regressions (env::set_var races across parallel/sequential tests).
+Future Action: Keep the dev machine ~/.gwt/config.toml at provider = local while running 'cargo test -p gwt'. Switch to slack/teams only for manual GUI e2e, then switch back. Do NOT add ScopedEnvVar HOME guards to board tests to work around it. Configure Slack/Teams via the Settings UI (BackendEvent UpdateBoardProviderConfig), not by editing config.toml.

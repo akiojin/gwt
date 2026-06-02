@@ -142,6 +142,156 @@ fn codex_trust_managed_hooks_enabled(settings: &Settings) -> bool {
     settings.agent.codex_trust_managed_hooks != Some(false)
 }
 
+// --- Board provider configuration (SPEC-2963 FR-006) ------------------------
+// Non-secret provider fields (client id, default channel, tenant id) live in
+// `[board.slack]` / `[board.teams]` of `config.toml`; the OAuth client secret
+// is captured here too but routed to the secure credential store, never to
+// `config.toml`. The settings UI edits these so the user does not hand-edit
+// `config.toml`.
+
+use crate::board_remote::token_store;
+
+/// Snapshot of the editable provider configuration surfaced to the settings UI.
+/// Secrets are never returned — only a `*_has_secret` flag so the UI can show
+/// "configured" without echoing the value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoardProviderConfigSnapshot {
+    pub slack_client_id: Option<String>,
+    pub slack_default_channel: Option<String>,
+    pub slack_has_secret: bool,
+    pub teams_client_id: Option<String>,
+    pub teams_tenant_id: Option<String>,
+    pub teams_default_channel: Option<String>,
+}
+
+fn load_settings_or_default(path: &Path) -> Result<Settings, SystemSettingsError> {
+    if path.exists() {
+        Settings::load_from_path(path).map_err(|err| SystemSettingsError::Storage(err.to_string()))
+    } else {
+        Ok(Settings::default())
+    }
+}
+
+fn normalize_field(value: &Option<String>) -> Option<String> {
+    value
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Read the current provider config from `path` and secret presence from
+/// `credentials_dir`.
+pub fn read_board_provider_config_in(
+    path: &Path,
+    credentials_dir: &Path,
+) -> Result<BoardProviderConfigSnapshot, SystemSettingsError> {
+    let settings = load_settings_or_default(path)?;
+    let slack_has_secret = token_store::load_secret_in(credentials_dir, "slack")
+        .ok()
+        .flatten()
+        .is_some();
+    Ok(BoardProviderConfigSnapshot {
+        slack_client_id: settings.board.slack.client_id.clone(),
+        slack_default_channel: settings.board.slack.default_channel.clone(),
+        slack_has_secret,
+        teams_client_id: settings.board.teams.client_id.clone(),
+        teams_tenant_id: settings.board.teams.tenant_id.clone(),
+        teams_default_channel: settings.board.teams.default_channel.clone(),
+    })
+}
+
+/// Read the current provider config using the default credentials directory.
+pub fn read_board_provider_config(
+    path: &Path,
+) -> Result<BoardProviderConfigSnapshot, SystemSettingsError> {
+    read_board_provider_config_in(path, &token_store::default_dir())
+}
+
+/// Persist provider config: non-secret fields to `path`, the client secret to
+/// `credentials_dir`. A `Some("")` field clears that value; `None` leaves it
+/// unchanged. The secret follows the same rule but is never written to
+/// `config.toml`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_board_provider_config_in(
+    path: &Path,
+    credentials_dir: &Path,
+    provider: &str,
+    client_id: Option<String>,
+    default_channel: Option<String>,
+    tenant_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<BoardProviderConfigSnapshot, SystemSettingsError> {
+    let (_, kind) = validate_board_provider(provider)?;
+    let provider_key = match kind {
+        BoardProviderKind::Slack => "slack",
+        BoardProviderKind::Teams => "teams",
+        BoardProviderKind::Local => {
+            return Err(SystemSettingsError::InvalidBoardProvider(
+                "local has no provider configuration".to_string(),
+            ))
+        }
+    };
+
+    let mut settings = load_settings_or_default(path)?;
+    match kind {
+        BoardProviderKind::Slack => {
+            if let Some(v) = &client_id {
+                settings.board.slack.client_id = normalize_field(&Some(v.clone()));
+            }
+            if let Some(v) = &default_channel {
+                settings.board.slack.default_channel = normalize_field(&Some(v.clone()));
+            }
+        }
+        BoardProviderKind::Teams => {
+            if let Some(v) = &client_id {
+                settings.board.teams.client_id = normalize_field(&Some(v.clone()));
+            }
+            if let Some(v) = &tenant_id {
+                settings.board.teams.tenant_id = normalize_field(&Some(v.clone()));
+            }
+            if let Some(v) = &default_channel {
+                settings.board.teams.default_channel = normalize_field(&Some(v.clone()));
+            }
+        }
+        BoardProviderKind::Local => unreachable!(),
+    }
+    settings
+        .save(path)
+        .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
+
+    if let Some(secret) = client_secret {
+        let trimmed = secret.trim();
+        let result = if trimmed.is_empty() {
+            token_store::clear_secret_in(credentials_dir, provider_key)
+        } else {
+            token_store::save_secret_in(credentials_dir, provider_key, trimmed)
+        };
+        result.map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
+    }
+
+    read_board_provider_config_in(path, credentials_dir)
+}
+
+/// Persist provider config using the default credentials directory.
+pub fn write_board_provider_config(
+    path: &Path,
+    provider: &str,
+    client_id: Option<String>,
+    default_channel: Option<String>,
+    tenant_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<BoardProviderConfigSnapshot, SystemSettingsError> {
+    write_board_provider_config_in(
+        path,
+        &token_store::default_dir(),
+        provider,
+        client_id,
+        default_channel,
+        tenant_id,
+        client_secret,
+    )
+}
+
 /// Build the `BackendEvent` reply for `FrontendEvent::GetSystemSettings`.
 pub fn get_event(path: &Path) -> BackendEvent {
     match read_settings(path) {
@@ -355,5 +505,161 @@ mod tests {
         }
         let reloaded = Settings::load_from_path(&path).unwrap();
         assert_eq!(reloaded.board.provider, BoardProviderKind::Teams);
+    }
+
+    #[test]
+    fn write_slack_provider_config_routes_secret_to_store_not_config() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+
+        let snapshot = write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "slack",
+            Some("2389371082.11261832736740".to_string()),
+            Some("C0B74NMMALX".to_string()),
+            None,
+            Some("super-secret".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.slack_client_id.as_deref(),
+            Some("2389371082.11261832736740")
+        );
+        assert_eq!(
+            snapshot.slack_default_channel.as_deref(),
+            Some("C0B74NMMALX")
+        );
+        assert!(snapshot.slack_has_secret);
+
+        // Non-secret fields persisted to config.toml.
+        let reloaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(
+            reloaded.board.slack.client_id.as_deref(),
+            Some("2389371082.11261832736740")
+        );
+        // Secret never written to config.toml; lives only in the store.
+        let toml_text = std::fs::read_to_string(&path).unwrap();
+        assert!(!toml_text.contains("super-secret"));
+        assert_eq!(
+            token_store::load_secret_in(creds.path(), "slack")
+                .unwrap()
+                .as_deref(),
+            Some("super-secret")
+        );
+    }
+
+    #[test]
+    fn write_provider_config_empty_secret_clears_store() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+
+        write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "slack",
+            None,
+            None,
+            None,
+            Some("seed".to_string()),
+        )
+        .unwrap();
+        assert!(
+            read_board_provider_config_in(&path, creds.path())
+                .unwrap()
+                .slack_has_secret
+        );
+
+        // Explicit empty secret clears it; None would leave it untouched.
+        let snapshot = write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "slack",
+            None,
+            None,
+            None,
+            Some("   ".to_string()),
+        )
+        .unwrap();
+        assert!(!snapshot.slack_has_secret);
+    }
+
+    #[test]
+    fn write_teams_provider_config_persists_tenant_and_channel() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+
+        let snapshot = write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "teams",
+            Some("app-123".to_string()),
+            Some("team/chan".to_string()),
+            Some("tenant-xyz".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(snapshot.teams_client_id.as_deref(), Some("app-123"));
+        assert_eq!(snapshot.teams_tenant_id.as_deref(), Some("tenant-xyz"));
+        assert_eq!(snapshot.teams_default_channel.as_deref(), Some("team/chan"));
+
+        let reloaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(
+            reloaded.board.teams.tenant_id.as_deref(),
+            Some("tenant-xyz")
+        );
+    }
+
+    #[test]
+    fn write_provider_config_rejects_local() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+        assert!(write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "local",
+            None,
+            None,
+            None,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn write_provider_config_some_empty_clears_field_none_keeps() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let creds = tempdir().unwrap();
+
+        write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "slack",
+            Some("C123".to_string()),
+            Some("CHAN".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // None leaves client_id intact; Some("") clears default_channel.
+        let snapshot = write_board_provider_config_in(
+            &path,
+            creds.path(),
+            "slack",
+            None,
+            Some("".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(snapshot.slack_client_id.as_deref(), Some("C123"));
+        assert_eq!(snapshot.slack_default_channel, None);
     }
 }

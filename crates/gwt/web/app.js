@@ -11042,6 +11042,16 @@
         // SPEC-2963: remote provider sign-in state + last sign-in message.
         boardAuth: { slack: false, teams: false },
         boardAuthMessage: "",
+        // SPEC-2963: editable (non-secret) provider config for the settings UI.
+        // Secrets are never echoed back; `*HasSecret` flags reflect store state.
+        boardConfig: {
+          slackClientId: "",
+          slackDefaultChannel: "",
+          slackHasSecret: false,
+          teamsClientId: "",
+          teamsTenantId: "",
+          teamsDefaultChannel: "",
+        },
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -11402,10 +11412,10 @@
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
-        // SPEC-2959: Board provider selector. `local` is the only implemented
-        // backend; `slack` / `teams` are reserved (Issue #2960) and rendered
-        // disabled so the option set advertises the roadmap without letting
-        // the user pick an unimplemented provider.
+        // SPEC-2959/2963: Board provider selector. `local` keeps the Board
+        // offline; `slack` / `teams` are network-backed and selectable. Picking
+        // a remote provider reveals its config form (client id / channel /
+        // secret) and a sign-in affordance below.
         const boardSection = createDiv("settings-section");
         const boardLabel = document.createElement("label");
         boardLabel.className = "settings-label";
@@ -11453,6 +11463,112 @@
         // selected remote provider. Local needs no sign-in.
         const selectedProvider = systemSettingsState.boardProvider || "local";
         if (selectedProvider === "slack" || selectedProvider === "teams") {
+          // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
+          // config.toml; the client secret is routed to the secure credential
+          // store and never echoed back (placeholder shows "configured").
+          const cfg = systemSettingsState.boardConfig || {};
+          const configForm = createDiv("settings-section board-config-form");
+          configForm.dataset.provider = selectedProvider;
+
+          const makeField = (id, labelText, value, opts = {}) => {
+            const wrap = createDiv("settings-field");
+            const fieldLabel = document.createElement("label");
+            fieldLabel.className = "settings-label";
+            fieldLabel.setAttribute("for", id);
+            fieldLabel.textContent = labelText;
+            wrap.appendChild(fieldLabel);
+            const input = document.createElement("input");
+            input.className = "settings-input";
+            input.id = id;
+            input.type = opts.password ? "password" : "text";
+            input.value = value || "";
+            if (opts.placeholder) input.placeholder = opts.placeholder;
+            if (opts.autocomplete) input.autocomplete = opts.autocomplete;
+            wrap.appendChild(input);
+            configForm.appendChild(wrap);
+            return input;
+          };
+
+          let clientIdInput;
+          let defaultChannelInput;
+          let tenantIdInput;
+          let secretInput;
+          if (selectedProvider === "slack") {
+            clientIdInput = makeField(
+              "settings-board-slack-client-id",
+              "Client ID",
+              cfg.slackClientId,
+              { placeholder: "e.g. 2389371082.1126…" },
+            );
+            defaultChannelInput = makeField(
+              "settings-board-slack-channel",
+              "Default channel ID",
+              cfg.slackDefaultChannel,
+              { placeholder: "e.g. C0B74NMMALX" },
+            );
+            secretInput = makeField(
+              "settings-board-slack-secret",
+              "Client secret",
+              "",
+              {
+                password: true,
+                autocomplete: "new-password",
+                placeholder: cfg.slackHasSecret
+                  ? "configured — leave blank to keep"
+                  : "required for Slack sign-in",
+              },
+            );
+          } else {
+            clientIdInput = makeField(
+              "settings-board-teams-client-id",
+              "Application (client) ID",
+              cfg.teamsClientId,
+              { placeholder: "Entra app id" },
+            );
+            tenantIdInput = makeField(
+              "settings-board-teams-tenant-id",
+              "Tenant ID",
+              cfg.teamsTenantId,
+              { placeholder: "tenant id / common / organizations" },
+            );
+            defaultChannelInput = makeField(
+              "settings-board-teams-channel",
+              "Default channel",
+              cfg.teamsDefaultChannel,
+              { placeholder: "team_id/channel_id" },
+            );
+          }
+
+          const saveBtn = createNode(
+            "button",
+            "wizard-button",
+            "Save configuration",
+          );
+          saveBtn.type = "button";
+          saveBtn.addEventListener("click", () => {
+            const payload = {
+              kind: "update_board_provider_config",
+              provider: selectedProvider,
+              client_id: clientIdInput ? clientIdInput.value.trim() : "",
+              default_channel: defaultChannelInput
+                ? defaultChannelInput.value.trim()
+                : "",
+            };
+            if (selectedProvider === "teams") {
+              payload.tenant_id = tenantIdInput ? tenantIdInput.value.trim() : "";
+            }
+            if (selectedProvider === "slack" && secretInput) {
+              // Only send the secret when the user typed one, so an empty box
+              // does not clear an already-configured secret.
+              if (secretInput.value.length > 0) {
+                payload.client_secret = secretInput.value;
+              }
+            }
+            send(payload);
+          });
+          configForm.appendChild(saveBtn);
+          boardSection.appendChild(configForm);
+
           const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
           const signedIn = auth[selectedProvider] === true;
           const authRow = createDiv("settings-section board-auth-row");
@@ -13189,12 +13305,20 @@
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
           case "board_auth_status":
-            // SPEC-2963: remote provider sign-in state.
+            // SPEC-2963: remote provider sign-in state + editable config view.
             systemSettingsState.boardAuth = {
               slack: event.slack === true,
               teams: event.teams === true,
             };
             systemSettingsState.boardAuthMessage = event.message || "";
+            systemSettingsState.boardConfig = {
+              slackClientId: event.slack_client_id || "",
+              slackDefaultChannel: event.slack_default_channel || "",
+              slackHasSecret: event.slack_has_secret === true,
+              teamsClientId: event.teams_client_id || "",
+              teamsTenantId: event.teams_tenant_id || "",
+              teamsDefaultChannel: event.teams_default_channel || "",
+            };
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings":

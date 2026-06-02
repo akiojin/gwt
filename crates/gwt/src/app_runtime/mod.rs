@@ -835,6 +835,9 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::BoardProviderSignOut { provider } => {
             FrontendUserActionLog::new("board_provider_sign_out", "settings").target(provider)
         }
+        FrontendEvent::UpdateBoardProviderConfig { provider, .. } => {
+            FrontendUserActionLog::new("update_board_provider_config", "settings").target(provider)
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
@@ -4171,6 +4174,20 @@ impl AppRuntime {
             FrontendEvent::BoardProviderSignOut { provider } => {
                 self.board_provider_sign_out_events(client_id, &provider)
             }
+            FrontendEvent::UpdateBoardProviderConfig {
+                provider,
+                client_id: provider_client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            } => self.board_provider_config_update_events(
+                client_id,
+                &provider,
+                provider_client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            ),
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
@@ -4345,20 +4362,65 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2963: reply with remote Board provider sign-in state.
+    /// SPEC-2963: reply with remote Board provider sign-in state plus the
+    /// editable (non-secret) provider configuration for the settings UI.
     fn board_auth_status_events(
         &self,
         client_id: ClientId,
         message: Option<String>,
     ) -> Vec<OutboundEvent> {
+        // The provider config view is best-effort: if the config path or file
+        // cannot be read we still report sign-in state with empty inputs.
+        let config = gwt_config::Settings::global_config_path()
+            .and_then(|path| gwt::system_settings::read_board_provider_config(&path).ok())
+            .unwrap_or_default();
         vec![OutboundEvent::reply(
             client_id,
             BackendEvent::BoardAuthStatus {
                 slack: gwt::board_remote::signin::is_signed_in("slack"),
                 teams: gwt::board_remote::signin::is_signed_in("teams"),
                 message,
+                slack_client_id: config.slack_client_id,
+                slack_default_channel: config.slack_default_channel,
+                slack_has_secret: config.slack_has_secret,
+                teams_client_id: config.teams_client_id,
+                teams_tenant_id: config.teams_tenant_id,
+                teams_default_channel: config.teams_default_channel,
             },
         )]
+    }
+
+    /// SPEC-2963: persist remote Board provider configuration captured in the
+    /// settings UI, then reply with the refreshed auth/config view. Non-secret
+    /// fields go to `config.toml`; the client secret goes to the secure store.
+    #[allow(clippy::too_many_arguments)]
+    fn board_provider_config_update_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+        provider_client_id: Option<String>,
+        default_channel: Option<String>,
+        tenant_id: Option<String>,
+        client_secret: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(path) = gwt_config::Settings::global_config_path() else {
+            return self.board_auth_status_events(
+                client_id,
+                Some("unable to resolve home directory (`~/.gwt/config.toml`)".to_string()),
+            );
+        };
+        let message = match gwt::system_settings::write_board_provider_config(
+            &path,
+            provider,
+            provider_client_id,
+            default_channel,
+            tenant_id,
+            client_secret,
+        ) {
+            Ok(_) => Some(format!("Saved {provider} configuration.")),
+            Err(error) => Some(format!("Failed to save configuration: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
     }
 
     /// SPEC-2963: begin OAuth sign-in for a remote Board provider by opening the

@@ -191,6 +191,49 @@ test("System tab exposes remote provider sign-in affordance + auth status (SPEC-
   );
 });
 
+test("System tab exposes remote provider config form that saves via update_board_provider_config (SPEC-2963)", () => {
+  // FR-006: client_id / default_channel / tenant_id / secret editable from the
+  // UI instead of hand-editing config.toml.
+  assert.match(
+    appSource,
+    /board-config-form/,
+    "expected a provider config form container",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-slack-client-id"/,
+    "Slack client id input must exist",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-slack-secret"/,
+    "Slack client secret input must exist",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-teams-tenant-id"/,
+    "Teams tenant id input must exist",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"update_board_provider_config"/,
+    "Save button must send update_board_provider_config",
+  );
+  // The secret must only be sent when the user typed one (empty box keeps the
+  // stored secret), so it is conditional rather than always included.
+  assert.match(
+    appSource,
+    /secretInput\.value\.length\s*>\s*0/,
+    "secret must be sent only when the user typed a value",
+  );
+  // Dispatch must store the non-secret config view for prefill.
+  assert.match(
+    appSource,
+    /slackClientId:\s*event\.slack_client_id/,
+    "dispatch must prefill slack client id from board_auth_status",
+  );
+});
+
 test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
   assert.match(
     appSource,

@@ -29,11 +29,16 @@ pub fn sessions() -> &'static OAuthSessions {
     SESSIONS.get_or_init(OAuthSessions::default)
 }
 
+/// Resolve the Slack client secret: the `GWT_SLACK_CLIENT_SECRET` env var wins
+/// (useful for CI / one-off overrides), otherwise the value the user saved from
+/// the settings UI into the secure credential store (FR-006). Never read from
+/// `config.toml`.
 fn slack_client_secret() -> Option<String> {
     std::env::var("GWT_SLACK_CLIENT_SECRET")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .or_else(|| token_store::load_secret("slack").ok().flatten())
 }
 
 fn non_empty(value: &Option<String>) -> Option<String> {

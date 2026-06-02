@@ -655,6 +655,24 @@ pub enum FrontendEvent {
     BoardProviderSignOut {
         provider: String,
     },
+    /// SPEC-2963: persist remote Board provider configuration from the settings
+    /// UI. Non-secret fields (`client_id`, `default_channel`, `tenant_id`) are
+    /// written to `config.toml`; `client_secret` is routed to the secure
+    /// credential store, never to `config.toml` (FR-006). Each `Some("")`
+    /// clears that field; `None` leaves it unchanged. Backend replies with
+    /// [`BackendEvent::BoardAuthStatus`] carrying the refreshed config view.
+    UpdateBoardProviderConfig {
+        /// `slack` or `teams`.
+        provider: String,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        default_channel: Option<String>,
+        #[serde(default)]
+        tenant_id: Option<String>,
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
     /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
@@ -1447,13 +1465,28 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
     },
-    /// SPEC-2963: remote Board provider sign-in state + an optional status
-    /// message (e.g. after starting sign-in).
+    /// SPEC-2963: remote Board provider sign-in state, the editable provider
+    /// configuration (non-secret), and an optional status message. The settings
+    /// UI uses the `*_client_id` / `*_default_channel` / `*_tenant_id` fields to
+    /// prefill its inputs and the `*_has_secret` flags to show "configured"
+    /// without ever echoing the secret.
     BoardAuthStatus {
         slack: bool,
         teams: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slack_client_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slack_default_channel: Option<String>,
+        #[serde(default)]
+        slack_has_secret: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_client_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_tenant_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_default_channel: Option<String>,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -3432,6 +3465,53 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "workspace_projection_prune_error");
         assert_eq!(value["message"], "scan failed: permission denied");
+    }
+
+    #[test]
+    fn frontend_event_update_board_provider_config_round_trips() {
+        // SPEC-2963 FR-006: settings UI sends non-secret + secret fields here.
+        let payload = r#"{"kind":"update_board_provider_config","provider":"slack","client_id":"C-id","default_channel":"CHAN","client_secret":"sek"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateBoardProviderConfig");
+        match event {
+            FrontendEvent::UpdateBoardProviderConfig {
+                provider,
+                client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            } => {
+                assert_eq!(provider, "slack");
+                assert_eq!(client_id.as_deref(), Some("C-id"));
+                assert_eq!(default_channel.as_deref(), Some("CHAN"));
+                assert_eq!(tenant_id, None);
+                assert_eq!(client_secret.as_deref(), Some("sek"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_board_auth_status_carries_config_view_without_secret() {
+        let event = BackendEvent::BoardAuthStatus {
+            slack: true,
+            teams: false,
+            message: Some("Saved slack configuration.".to_string()),
+            slack_client_id: Some("C-id".to_string()),
+            slack_default_channel: Some("CHAN".to_string()),
+            slack_has_secret: true,
+            teams_client_id: None,
+            teams_tenant_id: None,
+            teams_default_channel: None,
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "board_auth_status");
+        assert_eq!(value["slack"], true);
+        assert_eq!(value["slack_client_id"], "C-id");
+        assert_eq!(value["slack_has_secret"], true);
+        // The secret value itself is never part of the wire payload.
+        assert!(value.get("slack_client_secret").is_none());
+        assert!(value.get("client_secret").is_none());
     }
 
     #[test]

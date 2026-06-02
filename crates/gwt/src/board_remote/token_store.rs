@@ -90,6 +90,54 @@ pub fn clear(provider: &str) -> io::Result<()> {
     clear_in(&default_dir(), provider)
 }
 
+// --- Client secret storage (SPEC-2963 FR-006) -------------------------------
+// The OAuth client secret (e.g. Slack) is sensitive and must not live in
+// `config.toml`. It is stored as a permission-restricted plain file alongside
+// the tokens so the settings UI can capture it instead of an env var.
+
+fn secret_file(dir: &Path, provider: &str) -> PathBuf {
+    dir.join(format!("board-{provider}-secret"))
+}
+
+/// Save the client secret for `provider` under `dir`.
+pub fn save_secret_in(dir: &Path, provider: &str, secret: &str) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let path = secret_file(dir, provider);
+    fs::write(&path, secret.as_bytes())?;
+    restrict_permissions(&path)?;
+    Ok(())
+}
+
+/// Load the client secret for `provider` from `dir`, if present (trimmed).
+pub fn load_secret_in(dir: &Path, provider: &str) -> io::Result<Option<String>> {
+    let path = secret_file(dir, provider);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)?;
+    let trimmed = raw.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+/// Remove the stored client secret for `provider` under `dir` (idempotent).
+pub fn clear_secret_in(dir: &Path, provider: &str) -> io::Result<()> {
+    match fs::remove_file(secret_file(dir, provider)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Save the client secret into the default credentials directory.
+pub fn save_secret(provider: &str, secret: &str) -> io::Result<()> {
+    save_secret_in(&default_dir(), provider, secret)
+}
+
+/// Load the client secret from the default credentials directory.
+pub fn load_secret(provider: &str) -> io::Result<Option<String>> {
+    load_secret_in(&default_dir(), provider)
+}
+
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -139,6 +187,23 @@ mod tests {
         save_in(dir.path(), "teams", &token("secret")).unwrap();
         assert!(dir.path().join("board-teams.json").exists());
         assert!(!dir.path().join("config.toml").exists());
+    }
+
+    #[test]
+    fn client_secret_save_load_clear_roundtrip() {
+        let dir = tempdir().unwrap();
+        assert_eq!(load_secret_in(dir.path(), "slack").unwrap(), None);
+        save_secret_in(dir.path(), "slack", "  s3cr3t  ").unwrap();
+        // stored trimmed; never in config.toml.
+        assert_eq!(
+            load_secret_in(dir.path(), "slack").unwrap().as_deref(),
+            Some("s3cr3t")
+        );
+        assert!(dir.path().join("board-slack-secret").exists());
+        assert!(!dir.path().join("config.toml").exists());
+        clear_secret_in(dir.path(), "slack").unwrap();
+        assert_eq!(load_secret_in(dir.path(), "slack").unwrap(), None);
+        clear_secret_in(dir.path(), "slack").unwrap(); // idempotent
     }
 
     #[test]
