@@ -417,6 +417,54 @@ Board.
 > afterward without affecting an existing session — only a fresh sign-in needs
 > the registered redirect URL again.
 
+### Use Microsoft Teams as the Board backend (experimental)
+
+> Teams support is implemented but not yet verified end to end against a real
+> tenant. The steps below reflect the Microsoft identity / Graph requirements.
+
+#### 1. Register an Entra (Azure AD) app
+
+1. <https://entra.microsoft.com> → **App registrations → New registration**.
+2. Name it `gwt` (single-tenant is fine).
+3. **Redirect URI**: choose the **Mobile and desktop applications** (public
+   client) platform and enter **exactly**:
+
+   ```text
+   http://127.0.0.1:8765/oauth/callback
+   ```
+
+   - Use `127.0.0.1` (the host gwt sends) and match gwt's OAuth callback port
+     (default `8765`; the port is ignored for loopback matching, so
+     `http://127.0.0.1/oauth/callback` also works).
+   - If the portal rejects an http-loopback value, add it via the app
+     **Manifest** as `replyUrlsWithType` with `"type": "InstalledClient"`.
+   - ⚠️ **Do not register it under "Web"** — the public-client token exchange
+     sends no client secret and a Web registration fails with
+     `AADSTS invalid_client`.
+4. **Authentication → Advanced settings → Allow public client flows → Yes**.
+
+#### 2. Grant Microsoft Graph delegated permissions
+
+**API permissions → Add a permission → Microsoft Graph → Delegated**:
+`ChannelMessage.Send`, `ChannelMessage.Read.All`, `Channel.ReadBasic.All`,
+`offline_access`. Grant admin consent if your tenant requires it.
+
+#### 3. Find the team_id / channel_id
+
+In Teams, open the channel → **Get link to channel**. In the URL,
+`groupId=<GUID>` is the **team_id**, and the URL-decoded `19:...@thread.tacv2`
+(after `/channel/`) is the **channel_id**. gwt's **Default channel** is
+`<team_id>/<channel_id>`. (Alternatively, Graph Explorer:
+`GET /me/joinedTeams`, then `GET /teams/{id}/channels`.)
+
+#### 4. Configure gwt and sign in
+
+**Settings → Board provider → Teams** → enter **Application (client) ID**,
+**Tenant ID**, and **Default channel** (`team_id/channel_id`) → **Save** →
+**Sign in**. Posts appear as the signed-in user (Graph delegated; app-only
+channel posting is not supported). You must be a **member** of the target team
+and channel — otherwise Graph returns `403` and gwt shows an actionable hint.
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons

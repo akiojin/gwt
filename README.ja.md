@@ -402,6 +402,52 @@ Slack の Bot は参加済みのチャンネルしか読み書きできません
 > 読み書きはトークンのみで動作するため、以降はポートが変わったり塞がっても既存
 > セッションには影響しません（再サインイン時のみ登録済みリダイレクト URL が必要）。
 
+### Microsoft Teams を Board バックエンドにする（実験的）
+
+> Teams 対応は実装済みだが実テナントでの end-to-end 検証は未実施。以下は Microsoft
+> identity / Graph の要件に基づく手順です。
+
+#### 1. Entra (Azure AD) アプリを登録
+
+1. <https://entra.microsoft.com> → **アプリの登録 → 新規登録**。
+2. 名前 `gwt`（シングルテナントで可）。
+3. **リダイレクト URI**: プラットフォームで **「モバイルおよびデスクトップ
+   アプリケーション（パブリック クライアント）」** を選び、**正確に**入力:
+
+   ```text
+   http://127.0.0.1:8765/oauth/callback
+   ```
+
+   - `127.0.0.1`（gwt が送るホスト）を使い、gwt の OAuth callback port（既定
+     `8765`）に合わせる（loopback ではポートが照合で無視されるため
+     `http://127.0.0.1/oauth/callback` でも可）。
+   - ポータルが http-loopback を拒否する場合は、アプリの **マニフェスト** で
+     `replyUrlsWithType` に `"type": "InstalledClient"` として追加。
+   - ⚠️ **「Web」で登録しないこと** — public client のトークン交換はシークレットを
+     送らないため、Web 登録だと `AADSTS invalid_client` で失敗します。
+4. **認証 → 詳細設定 → パブリック クライアント フローを許可する → はい**。
+
+#### 2. Microsoft Graph 委任アクセス許可を付与
+
+**API のアクセス許可 → アクセス許可の追加 → Microsoft Graph → 委任**:
+`ChannelMessage.Send` / `ChannelMessage.Read.All` / `Channel.ReadBasic.All` /
+`offline_access`。テナントが要求する場合は管理者の同意を付与。
+
+#### 3. team_id / channel_id を取得
+
+Teams でチャンネル → **チャンネルへのリンクを取得**。URL の `groupId=<GUID>` が
+**team_id**、`/channel/` 直後の URL デコードした `19:...@thread.tacv2` が
+**channel_id**。gwt の **Default channel** は `<team_id>/<channel_id>`。
+（または Graph Explorer: `GET /me/joinedTeams` → `GET /teams/{id}/channels`。）
+
+#### 4. gwt で設定 → サインイン
+
+**Settings → Board provider → Teams** に **Application (client) ID** /
+**Tenant ID** / **Default channel**（`team_id/channel_id`）を入力 → **Save** →
+**Sign in**。投稿はサインインユーザー名義（Graph 委任。app-only 投稿は非対応）。
+対象 team/channel に**参加している**必要があります（未参加だと Graph が `403` を返し、
+gwt が対処メッセージを表示）。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小
