@@ -38,11 +38,18 @@ pub struct BoardPostRequest {
     pub(crate) id: String,
     pub(crate) entry_kind: BoardEntryKind,
     pub(crate) body: String,
+    /// SPEC-2963: optional post title/subject from the composer.
+    pub(crate) title: Option<String>,
     pub(crate) parent_id: Option<String>,
     pub(crate) topics: Vec<String>,
     pub(crate) owners: Vec<String>,
     pub(crate) targets: Vec<String>,
     pub(crate) mentions: Vec<BoardMention>,
+    /// SPEC-2959: composer "To:" target Work (workspace id), or `None` for the
+    /// active-workspace default.
+    pub(crate) target_workspace: Option<String>,
+    /// SPEC-2959: post to the General lane (broadcast, empty audience).
+    pub(crate) broadcast: bool,
 }
 
 impl AppRuntime {
@@ -55,11 +62,14 @@ impl AppRuntime {
             id,
             entry_kind,
             body,
+            title,
             parent_id,
             topics,
             owners,
             targets,
             mentions,
+            target_workspace,
+            broadcast,
         } = request;
 
         let Some(address) = self.window_lookup.get(&id) else {
@@ -123,19 +133,19 @@ impl AppRuntime {
         let mentions = coordination::normalize_board_mentions(&mentions);
 
         if let Some(parent_id) = parent_id.as_deref() {
-            let parent_exists = match coordination::board_entry_exists(&tab.project_root, parent_id)
-            {
-                Ok(parent_exists) => parent_exists,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BoardError {
-                            id,
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            };
+            let parent_exists =
+                match gwt::board_provider::board_entry_exists(&tab.project_root, parent_id) {
+                    Ok(parent_exists) => parent_exists,
+                    Err(error) => {
+                        return vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::BoardError {
+                                id,
+                                message: error.to_string(),
+                            },
+                        )];
+                    }
+                };
             if !parent_exists {
                 return vec![OutboundEvent::reply(
                     client_id,
@@ -157,13 +167,21 @@ impl AppRuntime {
             topics,
             owners,
         );
+        if let Some(title) = title {
+            entry = entry.with_title(title);
+        }
         if !targets.is_empty() {
             entry = entry.with_target_owners(targets);
         }
         if !mentions.is_empty() {
             entry = entry.with_mentions(mentions);
         }
-        let audience = match post_audience_for_gui(&tab.project_root, &entry.mentions) {
+        let audience = match post_audience_for_gui(
+            &tab.project_root,
+            &entry.mentions,
+            target_workspace.as_deref(),
+            broadcast,
+        ) {
             Ok(audience) => audience,
             Err(error) => {
                 return vec![OutboundEvent::reply(
@@ -178,15 +196,19 @@ impl AppRuntime {
         if let Some(audience) = audience {
             entry = entry.with_audience(audience);
         }
-        match coordination::post_entry(&tab.project_root, entry) {
+        match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
-                let latest_entry = snapshot.board.entries.last().cloned();
+                let mut entries = snapshot.board.entries;
+                // Capture the milestone entry before attaching the serialize-only
+                // `body_html`, so workspace milestone persistence stays clean.
+                let latest_entry = entries.last().cloned();
+                attach_board_body_html(&mut entries);
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::BoardEntries {
                         id,
-                        entries: snapshot.board.entries,
+                        entries,
                         has_more_before: snapshot.board.has_more_before,
                     },
                 )];
@@ -481,4 +503,14 @@ fn sanitize_board_list(values: &[String]) -> Vec<String> {
         sanitized.push(trimmed.to_string());
     }
     sanitized
+}
+
+/// Populate the serialize-only `body_html` display field on each entry from its
+/// Markdown `body` (SPEC-2963). Called at every `BoardEntries` emit boundary so
+/// the web UI renders server-sanitized HTML, while the JSONL event log (which
+/// `skip_serializing`s a `None` `body_html`) never stores it.
+pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
+    for entry in entries.iter_mut() {
+        entry.body_html = Some(gwt::board_remote::markdown::markdown_to_html(&entry.body));
+    }
 }

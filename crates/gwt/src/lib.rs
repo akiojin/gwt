@@ -2,6 +2,8 @@ pub mod agent_backend_dispatch;
 pub(crate) mod agent_project_state;
 pub mod backend_service;
 pub mod board_audience;
+pub mod board_provider;
+pub mod board_remote;
 pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;

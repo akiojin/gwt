@@ -149,12 +149,28 @@ pub fn post_audience_for_session(
 pub fn post_audience_for_gui(
     repo_path: &Path,
     mentions: &[BoardMention],
+    target_workspace: Option<&str>,
+    broadcast: bool,
 ) -> gwt_core::Result<Option<Vec<String>>> {
+    // SPEC-2959 FR-021: an explicit General/broadcast post carries no audience.
+    if broadcast {
+        return Ok(None);
+    }
     let projection = load_workspace_projection(repo_path)?;
     let mut audience = Vec::new();
-    if let Some(projection) = projection.as_ref() {
-        if let Some(workspace_id) = gui_workspace_id(projection) {
-            push_unique(&mut audience, workspace_id);
+    match target_workspace
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // SPEC-2959 FR-020: the composer "To:" selector pins the post to a
+        // specific Work, overriding the active-workspace default.
+        Some(workspace_id) => push_unique(&mut audience, workspace_id.to_string()),
+        None => {
+            if let Some(projection) = projection.as_ref() {
+                if let Some(workspace_id) = gui_workspace_id(projection) {
+                    push_unique(&mut audience, workspace_id);
+                }
+            }
         }
     }
     collect_mention_audience(&mut audience, projection.as_ref(), mentions);
@@ -182,5 +198,35 @@ fn collect_mention_audience(
             }
             BoardMentionTargetKind::User | BoardMentionTargetKind::Branch => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn gui_audience_broadcast_returns_none() {
+        // SPEC-2959 FR-021: General/broadcast posts carry no audience.
+        let dir = tempdir().unwrap();
+        let audience = post_audience_for_gui(dir.path(), &[], None, true).unwrap();
+        assert_eq!(audience, None);
+    }
+
+    #[test]
+    fn gui_audience_explicit_target_workspace_pins_lane() {
+        // SPEC-2959 FR-020: an explicit "To:" workspace overrides the default.
+        let dir = tempdir().unwrap();
+        let audience = post_audience_for_gui(dir.path(), &[], Some("ws-x"), false).unwrap();
+        assert_eq!(audience, Some(vec!["ws-x".to_string()]));
+    }
+
+    #[test]
+    fn gui_audience_blank_target_falls_back_to_default() {
+        // Whitespace target with no workspace projection resolves to no audience.
+        let dir = tempdir().unwrap();
+        let audience = post_audience_for_gui(dir.path(), &[], Some("  "), false).unwrap();
+        assert_eq!(audience, None);
     }
 }
