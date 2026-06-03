@@ -539,9 +539,12 @@ pub struct HostPackageRunnerFallbackReport {
 pub fn apply_host_package_runner_fallback_checked(
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<HostPackageRunnerFallbackReport, String> {
+    // Issue #2981: resolve a Windows-spawnable npx (prefers `npx.cmd`) instead of
+    // a bare `npx` that `CreateProcess` cannot launch after a failed bunx probe.
+    let fallback_executable = gwt_agent::resolve_host_npx_fallback_executable(&config.env_vars);
     apply_host_package_runner_fallback_checked_with_probe_and_repair(
         config,
-        "npx".to_string(),
+        fallback_executable,
         default_windows_npx_cache_base(),
         probe_host_package_runner_outcome,
         repair_windows_npx_cache,
@@ -1860,7 +1863,12 @@ mod tests {
             .expect("resolution must never abort the launch");
 
         assert!(report.switched_to_fallback);
-        assert_eq!(config.command, "npx");
+        // Issue #2981: the fallback now resolves the npx executable on PATH
+        // (mirroring the primary runner) instead of emitting a bare `"npx"`.
+        assert_eq!(
+            config.command,
+            temp.path().join("npx").display().to_string()
+        );
         assert_eq!(config.args.first().map(String::as_str), Some("--yes"));
     }
 
