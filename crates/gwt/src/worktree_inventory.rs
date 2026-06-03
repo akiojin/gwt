@@ -59,14 +59,21 @@ pub fn enumerate_worktrees_with_sessions_dir(
     active_root: Option<&Path>,
     sessions_dir: &Path,
 ) -> Result<Vec<WorktreeEntry>, InventoryError> {
-    let manager = WorktreeManager::new(repo_root);
+    // `repo_root` may be a "workspace home" directory that contains a child
+    // bare repo but is not itself a git work tree (workspace home without a
+    // default worktree). Running `git worktree list` directly in that home
+    // dir fails with "not a git repository (or any of the parent
+    // directories): .git". Resolve the main/bare repo first so the listing
+    // runs inside the actual git directory; `main_worktree_root` already
+    // handles linked worktrees, normal repos, and child-bare layouts.
+    let main_root = main_worktree_root(repo_root).ok();
+    let list_root = main_root.as_deref().unwrap_or(repo_root);
+    let manager = WorktreeManager::new(list_root);
     let infos = manager
         .list()
         .map_err(|err| InventoryError::List(err.to_string()))?;
 
-    let canonical_main = main_worktree_root(repo_root)
-        .ok()
-        .map(|path| canonicalize_or(path.as_path()));
+    let canonical_main = main_root.map(|path| canonicalize_or(path.as_path()));
     let canonical_active = active_root.map(canonicalize_or);
     let session_ids_by_worktree = load_session_ids_by_worktree(sessions_dir);
 
