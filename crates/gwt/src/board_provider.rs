@@ -9,7 +9,7 @@
 //! instead of calling `gwt_core::coordination` directly. With `board.provider
 //! = local` (the default and only implemented backend) the shims delegate to
 //! `LocalProvider`, so behavior is identical to the pre-abstraction path.
-//! A future Slack/Teams adapter (Issue #2960) plugs in via [`resolve`].
+//! A future Slack/Teams adapter (Issue #2960) plugs in via [`provider`].
 
 use std::path::Path;
 
