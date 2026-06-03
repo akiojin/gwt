@@ -7858,7 +7858,7 @@
         titleField.appendChild(createNode("span", "mock-label", "Title (optional)"));
         const titleInput = document.createElement("input");
         titleInput.type = "text";
-        titleInput.className = "board-title-input settings-input";
+        titleInput.className = "board-title-input";
         titleInput.maxLength = 150;
         titleInput.value = state.composerTitle || "";
         titleInput.placeholder = "Short subject for this post";
