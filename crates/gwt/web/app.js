@@ -3334,41 +3334,6 @@
         return row;
       }
 
-      function renderUsageSessionsTable(sessions) {
-        const table = document.createElement("table");
-        table.className = "op-usage-sessions";
-        const thead = document.createElement("thead");
-        const htr = document.createElement("tr");
-        for (const h of ["Session", "Prov", "Model", "Tokens", "Ctx", "Lim"]) {
-          const th = document.createElement("th");
-          th.textContent = h;
-          htr.appendChild(th);
-        }
-        thead.appendChild(htr);
-        table.appendChild(thead);
-        const tbody = document.createElement("tbody");
-        for (const s of sessions) {
-          const tr = document.createElement("tr");
-          if (s.eligible === false) tr.dataset.ineligible = "true";
-          const cells = [
-            s.session_id ? s.session_id.slice(0, 8) : "—",
-            s.provider === "claude_code" ? "Cl" : "Cx",
-            s.model || "—",
-            usageFmtTokens(s.total_tokens),
-            s.context_left_pct != null ? `${Math.round(s.context_left_pct)}%` : "—",
-            s.limit_reached ? "⚠" : "ok",
-          ];
-          for (const c of cells) {
-            const td = document.createElement("td");
-            td.textContent = c;
-            tr.appendChild(td);
-          }
-          tbody.appendChild(tr);
-        }
-        table.appendChild(tbody);
-        return table;
-      }
-
       function consumptionTotal(b) {
         if (!b) return 0;
         return (b.input || 0) + (b.output || 0) + (b.cached || 0);
@@ -3539,29 +3504,16 @@
         return card;
       }
 
-      // SPEC-2970 — the full usage detail as provider cards + a sessions list,
-      // appended to a container. The hover popover is the single surface for all
-      // usage info (the click-open modal was removed per UX feedback).
+      // SPEC-2970 — the full usage detail as provider cards, appended to a
+      // container. The hover popover is the single surface for all usage info
+      // (the click-open modal was removed per UX feedback). The per-session
+      // list was removed per UX feedback — it grew to hundreds of rows and
+      // overwhelmed the popover; per-session token usage still drives each
+      // agent's inline footer (see usageForSession).
       function buildUsageFullSections(container) {
         for (const account of latestProviderUsage.accounts || []) {
           container.appendChild(buildUsageProviderCard(account));
         }
-        const sessions = latestProviderUsage.sessions || [];
-        const sess = document.createElement("div");
-        sess.className = "op-usage-sess";
-        const sHead = document.createElement("div");
-        sHead.className = "op-usage-sess__head";
-        sHead.textContent = sessions.length ? `Sessions (${sessions.length})` : "Sessions";
-        sess.appendChild(sHead);
-        if (sessions.length) {
-          sess.appendChild(renderUsageSessionsTable(sessions));
-        } else {
-          const empty = document.createElement("p");
-          empty.className = "op-usage-empty";
-          empty.textContent = "No active sessions.";
-          sess.appendChild(empty);
-        }
-        container.appendChild(sess);
       }
 
       // ---- Consolidated usage hover popover (SPEC-2970 UX) ----

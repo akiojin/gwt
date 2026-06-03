@@ -42,6 +42,16 @@ pub fn lock_path(gwt_home: &Path, user_id: &str) -> PathBuf {
     gwt_home.join("run").join(format!("tray-{user_id}.lock"))
 }
 
+/// Lock path for a force-spawned secondary instance
+/// (`GWT_FORCE_NEW_INSTANCE`). PID-scoped so it never contends with — or
+/// clobbers — the canonical `tray-<user>.lock` that other launches read for
+/// discovery. The forced instance owns this file and removes it on drop.
+pub fn forced_lock_path(gwt_home: &Path, user_id: &str, pid: u32) -> PathBuf {
+    gwt_home
+        .join("run")
+        .join(format!("tray-{user_id}-forced-{pid}.lock"))
+}
+
 /// Resolve the OS-level user id used as the lock scope. Falls back to
 /// the OS env vars if the `whoami` crate cannot infer the username, and
 /// to a fixed sentinel as a last resort so the lock path is always
@@ -146,8 +156,34 @@ pub enum TrayLockError {
 /// `TrayLockError::AlreadyRunning` so the caller can print the running
 /// instance's URL on stderr and exit gracefully.
 pub fn acquire(gwt_home: &Path) -> Result<TrayLockHandle, TrayLockError> {
+    acquire_inner(
+        gwt_home,
+        crate::gui_single_instance::force_new_instance_requested(),
+    )
+}
+
+/// Inner acquisition with the `GWT_FORCE_NEW_INSTANCE` decision injected so
+/// the override behaviour is unit-testable without mutating process env.
+///
+/// When `force_new_instance` is set the override targets a PID-scoped path
+/// ([`forced_lock_path`]) instead of the canonical one, so a second instance
+/// always acquires a fresh lock, binds its own server port, and never touches
+/// the primary instance's lock file or its advertised URL — matching the GUI
+/// lock's escape-hatch semantics (SPEC #2920 parity).
+fn acquire_inner(
+    gwt_home: &Path,
+    force_new_instance: bool,
+) -> Result<TrayLockHandle, TrayLockError> {
     let user_id = current_user_id();
-    let path = lock_path(gwt_home, &user_id);
+    let path = if force_new_instance {
+        tracing::warn!(
+            target: "gwt_tray_lock",
+            "GWT_FORCE_NEW_INSTANCE override: using a PID-scoped tray lock so this instance coexists with the primary one"
+        );
+        forced_lock_path(gwt_home, &user_id, std::process::id())
+    } else {
+        lock_path(gwt_home, &user_id)
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| TrayLockError::Io {
             path: path.clone(),
@@ -337,6 +373,58 @@ mod tests {
         }
         let read_back = read_lock_contents(&path).expect("read existing lock contents");
         assert_eq!(read_back.url, "http://127.0.0.1:55555/");
+    }
+
+    #[test]
+    fn forced_new_instance_uses_distinct_pid_scoped_path() {
+        // SPEC #2920 escape-hatch parity: GWT_FORCE_NEW_INSTANCE must let a
+        // second instance start without clobbering the primary's lock. The
+        // forced path is PID-scoped so it never collides with the canonical
+        // `tray-<user>.lock` discovered by other launches.
+        let user_id = "alice";
+        let canonical = lock_path(Path::new("/tmp/gwt-home"), user_id);
+        let forced = forced_lock_path(Path::new("/tmp/gwt-home"), user_id, 4242);
+        assert_ne!(canonical, forced);
+        assert_eq!(
+            forced,
+            PathBuf::from("/tmp/gwt-home/run/tray-alice-forced-4242.lock")
+        );
+    }
+
+    #[test]
+    fn forced_acquire_coexists_and_preserves_primary_lock() {
+        // The forced acquisition must succeed even while the canonical lock
+        // is held, must use a different file, and dropping it must NOT remove
+        // the primary lock file (only its own PID-scoped file).
+        let tmp = TempDir::new().expect("tempdir");
+        let gwt_home = tmp.path();
+        let primary = acquire_inner(gwt_home, false).expect("primary acquire");
+        let canonical = lock_path(gwt_home, &current_user_id());
+        assert_eq!(primary.path(), canonical);
+
+        let forced = acquire_inner(gwt_home, true)
+            .expect("forced acquire must succeed even with the primary lock held");
+        assert_ne!(
+            forced.path(),
+            canonical,
+            "forced instance must use a distinct lock path"
+        );
+        assert!(forced.path().exists(), "forced lock file must exist");
+        assert!(
+            canonical.exists(),
+            "primary lock must remain after forced acquire"
+        );
+
+        let forced_path = forced.path().to_path_buf();
+        drop(forced);
+        assert!(
+            canonical.exists(),
+            "dropping the forced instance must not remove the primary lock file"
+        );
+        assert!(
+            !forced_path.exists(),
+            "forced instance must clean up its own PID-scoped lock file on drop"
+        );
     }
 
     #[test]
