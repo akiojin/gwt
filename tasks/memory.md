@@ -6459,3 +6459,10 @@ Type: lesson
 Context: gwt SPEC-2963 Teams provider. User registered Entra public-client app (client_id 164f7884..., tenant 0ff7b59c...), signed in via gwt; agent verified E2E.
 Learning: Teams delegated OAuth + Graph post/read/reply works end-to-end: gwt posts a channel message via TeamsProvider, read back via GET /teams/{team}/channels/{chan}/messages matches, and --parent reply lands as a Graph reply with replyToId=parent. channel_id can be @thread.skype (older) as well as @thread.tacv2; gwt split_channel(team/channel) handles it. Note: gwt does NOT request User.Read, so Graph /me returns Authorization_RequestDenied — this is expected and does NOT mean the token is invalid; ChannelMessage.Send/Read.All operations succeed. The fixed OAuth callback port (8765) + Mobile/desktop public-client Entra registration worked.
 Future Action: All three Board providers (Local/Slack/Teams) are now E2E-verified. For Teams verification: check post/read/reply via Graph directly, not /me (which needs User.Read gwt doesn't request).
+
+## 2026-06-03 — gwt bin tests read real ~/.gwt/config.toml board.provider (cfg(test) seam is lib-only)
+
+Type: lesson
+Context: SPEC-2963 検証中、cargo test -p gwt --bin gwt の app_runtime board テスト8件が config.toml の provider=teams で失敗。board_provider::current_kind() の cfg(test) thread-local override(default Local)は gwt LIB を --test ビルドした時のみ有効。bin(main.rs/app_runtime)テストは LIB を通常依存としてリンクするため override が効かず、Settings::load().board.provider(実機 config)を読む。Windows の dirs 6 は HOME/USERPROFILE を無視するため ScopedEnvVar による隔離も効かない。
+Learning: bin crate のテストは LIB の #[cfg(test)] seam に到達できない。machine の ~/.gwt/config.toml に board.provider=slack/teams が設定されていると bin board テストが remote provider を使い失敗する。CI は board.provider 未設定→default Local なので緑。
+Future Action: gwt の board 関連 bin テストをローカル実行する前に ~/.gwt/config.toml の [board] provider を local(または未設定)にする。lib テスト(cargo test -p gwt --lib)は cfg(test) override で hermetic なので config 非依存。恒久対策が必要なら current_kind() に non-test でも効く env override seam を入れて bin テストで設定する案を検討。
