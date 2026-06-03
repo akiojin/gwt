@@ -15,6 +15,7 @@ use crate::{
     board_config::BoardConfig,
     error::{ConfigError, Result},
     profile::ProfilesConfig,
+    usage_config::UsageConfig,
     voice_config::VoiceConfig,
 };
 
@@ -47,6 +48,8 @@ pub struct Settings {
     pub ai: AISettings,
     /// Board provider selection (SPEC-2959). Defaults to `local`.
     pub board: BoardConfig,
+    /// Provider usage display configuration (SPEC-2970).
+    pub usage: UsageConfig,
 }
 
 impl Default for Settings {
@@ -66,6 +69,7 @@ impl Default for Settings {
             agent: AgentConfig::default(),
             ai: AISettings::default(),
             board: BoardConfig::default(),
+            usage: UsageConfig::default(),
         }
     }
 }
@@ -155,6 +159,17 @@ mod tests {
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+    }
+
+    #[test]
+    fn legacy_config_without_usage_section_defaults() {
+        // A config written before SPEC-2970 has no [usage] table; Codex
+        // (local-only) defaults on while Claude account usage stays opt-in
+        // and defaults off (FR-009/FR-013 consent model).
+        let s: Settings =
+            toml::from_str("default_base_branch = \"main\"\ndebug = false\n").unwrap();
+        assert!(s.usage.codex_enabled);
+        assert!(!s.usage.claude_account_enabled);
     }
 
     #[test]

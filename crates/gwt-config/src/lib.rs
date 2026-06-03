@@ -11,6 +11,7 @@ pub mod error;
 pub mod locale;
 pub mod profile;
 pub mod settings;
+pub mod usage_config;
 pub mod voice_config;
 
 pub use agent_config::AgentConfig;
@@ -24,4 +25,5 @@ pub use locale::{
 };
 pub use profile::{Profile, ProfilesConfig};
 pub use settings::Settings;
+pub use usage_config::UsageConfig;
 pub use voice_config::VoiceConfig;

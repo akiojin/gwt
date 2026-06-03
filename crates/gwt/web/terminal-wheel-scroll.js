@@ -1,5 +1,7 @@
 const PIXELS_PER_LINE = 32;
 const PAGE_LINES = 24;
+export const APPLICATION_SCROLL_PAGE_UP = "\x1b[5~";
+export const APPLICATION_SCROLL_PAGE_DOWN = "\x1b[6~";
 
 export function isWindowsHost(windowRef = globalThis) {
   const navigator = windowRef?.navigator || globalThis.navigator || {};
@@ -43,11 +45,35 @@ export function isTerminalMouseTrackingActive(terminal) {
   return typeof mouseTrackingMode === "string" && mouseTrackingMode !== "none";
 }
 
+export function hasNormalScrollback(terminal) {
+  return Number(terminal?.buffer?.active?.baseY || 0) > 0;
+}
+
+export function applicationScrollInputForWheel(
+  event,
+  { terminal, enabled } = {},
+) {
+  const isEnabled = typeof enabled === "function" ? enabled() : Boolean(enabled);
+  if (!isEnabled || !event || event.ctrlKey || event.metaKey || hasNormalScrollback(terminal)) {
+    return null;
+  }
+  const deltaY = Number(event.deltaY || 0);
+  if (deltaY < 0) {
+    return APPLICATION_SCROLL_PAGE_UP;
+  }
+  if (deltaY > 0) {
+    return APPLICATION_SCROLL_PAGE_DOWN;
+  }
+  return null;
+}
+
 export function createTerminalWheelScrollController({
   terminalRoot,
   terminal,
   window = globalThis,
   isWindowsHost: hostCheck,
+  isApplicationScrollFallbackEnabled,
+  sendTerminalInput,
   pixelsPerLine = PIXELS_PER_LINE,
   pageLines = PAGE_LINES,
 } = {}) {
@@ -59,6 +85,17 @@ export function createTerminalWheelScrollController({
   }
 
   const handleWheel = (event) => {
+    const applicationScrollInput = applicationScrollInputForWheel(event, {
+      terminal,
+      enabled: isApplicationScrollFallbackEnabled,
+    });
+    if (applicationScrollInput && typeof sendTerminalInput === "function") {
+      event.preventDefault();
+      event.stopPropagation();
+      sendTerminalInput(applicationScrollInput);
+      return;
+    }
+
     if (
       !shouldOverrideTerminalWheel(event, {
         window,

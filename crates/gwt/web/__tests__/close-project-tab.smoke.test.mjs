@@ -46,8 +46,6 @@ test("close button sends close_project_tab immediately when no agents are runnin
     projectTabs,
     tabs: [makeTab()],
     activeTabId: "tab-1",
-    indexStatusByProjectRoot: new Map(),
-    aggregateProjectTabDotState: () => "ready",
     send: (payload) => sends.push(payload),
     requestCloseProjectTab: (tabId) => requestCloseCalls.push(tabId),
   });
@@ -82,8 +80,6 @@ test("close button routes through requestCloseProjectTab when agents are running
       }),
     ],
     activeTabId: "tab-1",
-    indexStatusByProjectRoot: new Map(),
-    aggregateProjectTabDotState: () => "ready",
     send: (payload) => sends.push(payload),
     requestCloseProjectTab: (tabId) => requestCloseCalls.push(tabId),
   });
@@ -103,8 +99,6 @@ test("close button falls back to direct send when requestCloseProjectTab is not 
     projectTabs,
     tabs: [makeTab()],
     activeTabId: "tab-1",
-    indexStatusByProjectRoot: new Map(),
-    aggregateProjectTabDotState: () => "ready",
     send: (payload) => sends.push(payload),
   });
   const closeBtn = projectTabs.querySelector(

@@ -88,6 +88,22 @@ pub fn issue_cache_root_for_repo_path_or_detached(repo_path: &Path) -> PathBuf {
     issue_cache_root_for_repo_path(repo_path).unwrap_or_else(detached_issue_cache_root)
 }
 
+/// SPEC-2359 Phase W-11 (US-58 / FR-344): read a cached Issue/SPEC title for
+/// the linked-issue display fallback used by Agent window titles. Returns the
+/// trimmed `title` from `<cache_root>/<issue_number>/meta.json`, or `None`
+/// when the cache entry is missing, unreadable, or has an empty title.
+pub fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Option<String> {
+    let path = cache_root.join(issue_number.to_string()).join("meta.json");
+    let bytes = fs::read(&path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {

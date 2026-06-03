@@ -1,38 +1,14 @@
-use std::{fs, path::Path};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::workspace_projection::{
-    load_or_default_workspace_projection, load_workspace_projection, save_workspace_projection,
-    update_workspace_projection_with_journal, WorkspaceAgentAffiliationStatus,
-    WorkspaceAgentSummary, WorkspaceProjection, WorkspaceProjectionUpdate, WorkspaceStatusCategory,
+    load_or_default_workspace_projection, save_workspace_projection,
+    WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+    WorkspaceStatusCategory,
 };
 
-use super::{HookError, HookOutput, IntentBoundaryEvent};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspacePromptIdentity {
-    pub title_summary: String,
-    pub current_focus: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceIdentityHookResult {
-    pub updated: bool,
-    pub identity: Option<WorkspacePromptIdentity>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MissingIdentity {
-    title_summary: bool,
-    current_focus: bool,
-}
-
-impl MissingIdentity {
-    fn complete(self) -> bool {
-        !self.title_summary && !self.current_focus
-    }
-}
+use super::HookError;
 
 /// SessionStart hook: ensure the running agent session is present in the
 /// Workspace projection's `agents[]` before any further coordination CLI
@@ -44,24 +20,34 @@ impl MissingIdentity {
 /// Registration is idempotent: if the launch flow has already registered
 /// the session (with `Assigned` affiliation, a workspace_id, etc.) we
 /// leave that record untouched so the richer launch-time state survives.
+///
+/// SPEC-2359 Phase W-11 (US-58 / FR-341 / FR-342): the hook no longer
+/// derives `title_summary` from the prompt or from the linked Issue. The
+/// `title_summary` field now means "the purpose the agent authored". Empty
+/// values are resolved at display time via the fallback chain (agent title
+/// → linked Issue/SPEC title → neutral label) in the title sync layer.
 pub(crate) fn handle_session_start() -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {
         return Ok(());
     };
     ensure_coordination_assets_for_session(&session);
-    let mut projection = load_or_default_workspace_projection(&session.worktree_path)?;
-    projection.project_root = session.worktree_path.clone();
+    let project_state_root = project_state_root_for_session(&session);
+    let mut projection = load_or_default_workspace_projection(&project_state_root)?;
+    projection.project_root = project_state_root.clone();
     let now = Utc::now();
     let registered = register_session_in_projection(&mut projection, &session, now);
-    let derived = derive_title_summary_from_owner(&mut projection, &session);
-    if derived {
-        projection.updated_at = now;
-    }
-    if registered || derived {
-        save_workspace_projection(&session.worktree_path, &projection)?;
-        crate::cli::workspace::publish_workspace_change(&session.worktree_path);
+    if registered {
+        save_workspace_projection(&project_state_root, &projection)?;
+        crate::cli::workspace::publish_workspace_change(&project_state_root);
     }
     Ok(())
+}
+
+fn project_state_root_for_session(session: &Session) -> PathBuf {
+    crate::agent_project_state::canonical_project_state_root_for_session(
+        session,
+        &session.worktree_path,
+    )
 }
 
 /// SPEC-2359 Phase U-9 (FR-177): re-materialize coordination skill + hook
@@ -92,66 +78,6 @@ fn coordination_assets_need_refresh(worktree: &Path) -> bool {
     let codex_needs = codex_dir.is_dir() && (!codex_skill.exists() || !codex_hooks.exists());
     let claude_needs = claude_dir.is_dir() && (!claude_skill.exists() || !claude_settings.exists());
     codex_needs || claude_needs
-}
-
-/// SPEC-2359 Phase U-9 (FR-173 / FR-174): auto-derive `title_summary`
-/// from the workspace's first linked Issue/SPEC at SessionStart when the
-/// agent has no explicit title yet. Existing explicit values are never
-/// overwritten (US-43 non-destructive contract). Missing cache entries
-/// are a silent no-op so owner-less sessions stay empty and fall back to
-/// the existing empty-trigger reminder path.
-fn derive_title_summary_from_owner(
-    projection: &mut WorkspaceProjection,
-    session: &Session,
-) -> bool {
-    let issue_cache_root =
-        crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&session.worktree_path);
-    derive_title_summary_from_owner_with_cache(projection, &session.id, &issue_cache_root)
-}
-
-fn derive_title_summary_from_owner_with_cache(
-    projection: &mut WorkspaceProjection,
-    session_id: &str,
-    issue_cache_root: &Path,
-) -> bool {
-    let Some(agent_idx) = projection
-        .agents
-        .iter()
-        .position(|agent| agent.session_id == session_id)
-    else {
-        return false;
-    };
-    if projection.agents[agent_idx]
-        .title_summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        return false;
-    }
-    let Some(issue) = projection.linked_issues.first() else {
-        return false;
-    };
-    let issue_number = issue.number;
-    let title = match load_issue_title_from_cache(issue_cache_root, issue_number) {
-        Some(value) => value,
-        None => return false,
-    };
-    projection.agents[agent_idx].title_summary = Some(title);
-    true
-}
-
-fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Option<String> {
-    let path = cache_root.join(issue_number.to_string()).join("meta.json");
-    let bytes = fs::read(&path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let title = value.get("title")?.as_str()?.trim();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title.to_string())
-    }
 }
 
 /// Insert a stub `WorkspaceAgentSummary` for `session` if no agent with
@@ -199,97 +125,33 @@ fn workspace_agent_summary_from_session(
     }
 }
 
-pub(crate) fn handle_user_prompt_submit(
-    input: &str,
-) -> Result<WorkspaceIdentityHookResult, HookError> {
+/// UserPromptSubmit hook.
+///
+/// SPEC-2359 Phase W-11 (US-58 / US-59 / FR-341): this hook no longer
+/// derives `title_summary` / `current_focus` from the prompt. Writing the
+/// raw prompt into the title produced titles like "あなたの目的は何ですか"
+/// instead of the work purpose. The agent now authors the purpose via
+/// `gwtd workspace update --title-summary` (provisional → confirmed), and
+/// the title sync layer resolves empty values through the display fallback.
+///
+/// The hook still performs the Phase W-10 (US-57) canonical Project State
+/// split repair so that a later `gwtd workspace update --agent-session`
+/// from the agent reaches the projection record that owns the live window.
+pub(crate) fn handle_user_prompt_submit(_input: &str) -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: None,
-        });
+        return Ok(());
     };
-    handle_user_prompt_submit_for_session(input, &session)
+    handle_user_prompt_submit_for_session(&session)
 }
 
-fn handle_user_prompt_submit_for_session(
-    input: &str,
-    session: &Session,
-) -> Result<WorkspaceIdentityHookResult, HookError> {
-    let Some(missing) = missing_identity_for_session(session)? else {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: None,
-        });
-    };
-    if missing.complete() {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: None,
-        });
-    }
-
-    let Some(prompt) = prompt_from_hook_input(input) else {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: None,
-        });
-    };
-    let Some(identity) = derive_identity_from_prompt(&prompt) else {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: None,
-        });
-    };
-
-    let Some(update) = workspace_projection_update_for_identity(&session.id, missing, &identity)
-    else {
-        return Ok(WorkspaceIdentityHookResult {
-            updated: false,
-            identity: Some(identity),
-        });
-    };
-
-    update_workspace_projection_with_journal(&session.worktree_path, update)?;
-    crate::cli::workspace::publish_workspace_change(&session.worktree_path);
-
-    Ok(WorkspaceIdentityHookResult {
-        updated: true,
-        identity: Some(identity),
-    })
-}
-
-pub(crate) fn append_identity_context(
-    output: HookOutput,
-    result: WorkspaceIdentityHookResult,
-) -> HookOutput {
-    if !result.updated {
-        return output;
-    };
-    let Some(identity) = result.identity else {
-        return output;
-    };
-    let text = format!(
-        "# Workspace Identity Updated\n\nUserPromptSubmit has set this Agent window / Workspace identity from the prompt.\n\n- title-summary: `{}`\n- current-focus: {}\n\nIf this identity is inaccurate, correct it before continuing with `gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<focus>' --title-summary '<short work name>'`.",
-        identity.title_summary, identity.current_focus
-    );
-    append_user_prompt_context(output, text)
-}
-
-fn append_user_prompt_context(output: HookOutput, text: String) -> HookOutput {
-    match output {
-        HookOutput::HookSpecificAdditionalContext {
-            event: IntentBoundaryEvent::UserPromptSubmit,
-            text: existing,
-        } => HookOutput::hook_specific_additional_context(
-            IntentBoundaryEvent::UserPromptSubmit,
-            format!("{text}\n\n{existing}"),
-        ),
-        HookOutput::Silent => HookOutput::hook_specific_additional_context(
-            IntentBoundaryEvent::UserPromptSubmit,
-            text,
-        ),
-        other => other,
-    }
+fn handle_user_prompt_submit_for_session(session: &Session) -> Result<(), HookError> {
+    let project_state_root = project_state_root_for_session(session);
+    crate::agent_project_state::repair_split_agent_state_if_needed(
+        &project_state_root,
+        &session.worktree_path,
+        &session.id,
+    )?;
+    Ok(())
 }
 
 fn current_session_from_env() -> Result<Option<Session>, HookError> {
@@ -310,286 +172,13 @@ fn current_session_from_env() -> Result<Option<Session>, HookError> {
         .map_err(HookError::Io)
 }
 
-fn missing_identity_for_session(session: &Session) -> Result<Option<MissingIdentity>, HookError> {
-    let Some(projection) = load_workspace_projection(&session.worktree_path)? else {
-        return Ok(None);
-    };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session.id)
-    else {
-        return Ok(None);
-    };
-    // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも初回
-    // UserPromptSubmit で prompt-based identity derivation を発火させるため、
-    // is_unassigned() による early-return は撤去した。non-destructive 原則
-    // (FR-166 / FR-180) は missing_identity_for_agent の空判定で維持される。
-    Ok(Some(missing_identity_for_agent(agent)))
-}
-
-fn missing_identity_for_agent(
-    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
-) -> MissingIdentity {
-    MissingIdentity {
-        title_summary: agent
-            .title_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none(),
-        current_focus: agent
-            .current_focus
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none(),
-    }
-}
-
-fn workspace_projection_update_for_identity(
-    session_id: &str,
-    missing: MissingIdentity,
-    identity: &WorkspacePromptIdentity,
-) -> Option<WorkspaceProjectionUpdate> {
-    let title_summary = missing
-        .title_summary
-        .then(|| identity.title_summary.clone());
-    let current_focus = missing
-        .current_focus
-        .then(|| identity.current_focus.clone());
-    if title_summary.is_none() && current_focus.is_none() {
-        return None;
-    }
-    Some(WorkspaceProjectionUpdate {
-        title: None,
-        status_category: None,
-        status_text: None,
-        owner: None,
-        next_action: None,
-        summary: None,
-        agent_session_id: Some(session_id.to_string()),
-        agent_current_focus: current_focus,
-        agent_title_summary: title_summary,
-    })
-}
-
-pub(crate) fn derive_identity_from_prompt(prompt: &str) -> Option<WorkspacePromptIdentity> {
-    let focus = sanitize_prompt_focus(prompt)?;
-    let title_summary = derive_title_summary(&focus)?;
-    if super::super::validate_title_summary_work_name("--title-summary", &title_summary).is_err() {
-        return None;
-    }
-    Some(WorkspacePromptIdentity {
-        title_summary,
-        current_focus: truncate_chars(&focus, 160),
-    })
-}
-
-fn derive_title_summary(focus: &str) -> Option<String> {
-    let lower = focus.to_ascii_lowercase();
-    if lower.contains("workspace")
-        && (focus.contains("ウィンドウ")
-            || lower.contains("window")
-            || focus.contains("何をしている")
-            || focus.contains("把握"))
-        && (lower.contains("ux") || focus.contains("識別") || focus.contains("把握"))
-    {
-        return Some("Workspace識別UX不具合".to_string());
-    }
-    if (focus.contains("エージェントウィンドウ") || lower.contains("agent window"))
-        && (focus.contains("更新") || focus.contains("タイトル") || lower.contains("title"))
-        && (focus.contains("不具合")
-            || focus.contains("されません")
-            || focus.contains("直っていません")
-            || lower.contains("bug"))
-    {
-        return Some("エージェントウィンドウ更新不具合".to_string());
-    }
-
-    let first = focus
-        .split(['\n', '。', '.', '？', '?', '！', '!'])
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    let first = trim_request_suffixes(first);
-    let title = truncate_chars(&first, 30);
-    (!title.trim().is_empty()).then_some(title)
-}
-
-fn sanitize_prompt_focus(prompt: &str) -> Option<String> {
-    let without_blocks = strip_fenced_blocks(prompt);
-    let mut lines = Vec::new();
-    for raw in without_blocks.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('<') || line.starts_with("# ") {
-            continue;
-        }
-        let line = line
-            .strip_prefix("$gwt-discussion")
-            .or_else(|| line.strip_prefix("$gwt-build-spec"))
-            .or_else(|| line.strip_prefix("$gwt-fix-issue"))
-            .unwrap_or(line)
-            .trim();
-        if !line.is_empty() {
-            lines.push(line);
-        }
-    }
-    let joined = lines.join(" ");
-    let normalized = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!normalized.is_empty()).then_some(normalized)
-}
-
-fn strip_fenced_blocks(value: &str) -> String {
-    let mut out = String::new();
-    let mut in_fence = false;
-    for line in value.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn trim_request_suffixes(value: &str) -> String {
-    let suffixes = [
-        "ちゃんと考えて対応してください",
-        "対応してください",
-        "修正してください",
-        "実装してください",
-        "調査してください",
-        "お願いします",
-        "してください",
-    ];
-    let mut out = value.trim().to_string();
-    for suffix in suffixes {
-        if out.ends_with(suffix) {
-            out.truncate(out.len() - suffix.len());
-            break;
-        }
-    }
-    out.trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '。' | '.' | '、' | ','))
-        .to_string()
-}
-
-fn truncate_chars(value: &str, max: usize) -> String {
-    let value = value.trim();
-    if value.chars().count() <= max {
-        return value.to_string();
-    }
-    value.chars().take(max).collect::<String>()
-}
-
-fn prompt_from_hook_input(input: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(input).ok()?;
-    string_at_any(
-        &value,
-        &[
-            &["prompt"],
-            &["user_prompt"],
-            &["userPrompt"],
-            &["message"],
-            &["message", "content"],
-            &["message", "text"],
-            &["input"],
-            &["input", "content"],
-            &["input", "text"],
-        ],
-    )
-    .or_else(|| latest_message_content(&value))
-    .or_else(|| {
-        string_at_any(&value, &[&["transcript_path"], &["transcriptPath"]])
-            .and_then(|path| prompt_from_transcript_path(Path::new(&path)))
-    })
-}
-
-fn latest_message_content(value: &serde_json::Value) -> Option<String> {
-    let messages = value.get("messages")?.as_array()?;
-    messages.iter().rev().find_map(|message| {
-        let role = message.get("role").and_then(serde_json::Value::as_str);
-        if role.is_some_and(|role| role != "user") {
-            return None;
-        }
-        value_to_text(message.get("content")?)
-    })
-}
-
-fn prompt_from_transcript_path(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    text.lines().rev().find_map(|line| {
-        let value: serde_json::Value = serde_json::from_str(line).ok()?;
-        if let Some(prompt) = string_at_any(&value, &[&["lastPrompt"], &["last_prompt"]]) {
-            return Some(prompt);
-        }
-        if !is_transcript_user_record(&value) {
-            return None;
-        }
-        value
-            .get("message")
-            .and_then(|message| value_to_text(message.get("content")?))
-            .or_else(|| string_at_any(&value, &[&["text"]]))
-    })
-}
-
-fn is_transcript_user_record(value: &serde_json::Value) -> bool {
-    string_at_any(
-        value,
-        &[
-            &["type"],
-            &["role"],
-            &["message", "role"],
-            &["event", "role"],
-        ],
-    )
-    .is_some_and(|role| role.eq_ignore_ascii_case("user"))
-}
-
-fn string_at_any(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
-    paths.iter().find_map(|path| {
-        let mut current = value;
-        for key in *path {
-            current = current.get(*key)?;
-        }
-        current
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
-}
-
-fn value_to_text(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => Some(text.trim().to_string()),
-        serde_json::Value::Array(items) => {
-            let parts = items
-                .iter()
-                .filter_map(|item| {
-                    item.as_str()
-                        .map(str::to_string)
-                        .or_else(|| string_at_any(item, &[&["text"], &["content"]]))
-                })
-                .map(|part| part.trim().to_string())
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>();
-            (!parts.is_empty()).then(|| parts.join("\n"))
-        }
-        serde_json::Value::Object(_) => string_at_any(value, &[&["text"], &["content"]]),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use gwt_agent::{AgentId, Session};
     use gwt_core::workspace_projection::{
-        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
-        WorkspaceStatusCategory,
+        load_workspace_projection, save_workspace_projection, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
     };
 
     use super::*;
@@ -622,6 +211,26 @@ mod tests {
 
     fn fresh_session(repo: &std::path::Path) -> Session {
         Session::new(repo.to_path_buf(), "work/test-session", AgentId::Codex)
+    }
+
+    fn assigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: Some(repo.to_path_buf()),
+            branch: Some("work/identity".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
+            updated_at: Utc::now(),
+        }
     }
 
     #[test]
@@ -691,341 +300,46 @@ mod tests {
         assert!(agent.is_assigned());
     }
 
-    fn assigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
-        WorkspaceAgentSummary {
-            session_id: session_id.to_string(),
-            window_id: None,
-            agent_id: "codex".to_string(),
-            display_name: "Codex".to_string(),
-            status_category: WorkspaceStatusCategory::Active,
-            current_focus: None,
-            title_summary: None,
-            worktree_path: Some(repo.to_path_buf()),
-            branch: Some("work/identity".to_string()),
-            last_board_entry_id: None,
-            last_board_entry_kind: None,
-            coordination_scope: None,
-            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
-            workspace_id: None,
-            updated_at: Utc::now(),
-        }
-    }
-
+    /// SPEC-2359 Phase W-11 (US-58 / US-59 / SC-225): UserPromptSubmit must
+    /// NOT write `title_summary` / `current_focus` from the prompt. A session
+    /// whose agent has empty identity keeps it empty after the hook runs;
+    /// the agent (not the hook) authors the purpose.
     #[test]
-    fn derive_identity_from_prompt_identifies_workspace_window_ux() {
-        let prompt = "$gwt-discussion 単なるタイトル更新と思っているかもしれませんが、現在のWorkspace運用の場合、どのウィンドウで何をしているのか？を把握できないとUX的には最悪です。";
-
-        let identity = derive_identity_from_prompt(prompt).expect("identity");
-
-        assert_eq!(identity.title_summary, "Workspace識別UX不具合");
-        assert!(
-            identity
-                .current_focus
-                .contains("どのウィンドウで何をしているのか"),
-            "{}",
-            identity.current_focus
-        );
-    }
-
-    fn unassigned_agent(session_id: &str, repo: &std::path::Path) -> WorkspaceAgentSummary {
-        let mut a = assigned_agent(session_id, repo);
-        a.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
-        a.workspace_id = None;
-        a
-    }
-
-    #[test]
-    fn missing_identity_for_session_does_not_skip_unassigned_agents() {
-        // SPEC-2359 Phase U-10 / US-46 (FR-179): unassigned session でも
-        // missing_identity_for_session が `Some(MissingIdentity)` を返し、
-        // 後続の auto-derive が発火可能であること。
+    fn user_prompt_submit_does_not_write_identity_from_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let agent = unassigned_agent("session-unassigned", &repo);
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260602-0056");
+        std::fs::create_dir_all(&worktree).expect("worktree");
 
-        // 直接 missing_identity_for_agent を呼ぶ side-channel test
-        // (missing_identity_for_session は projection IO に依存するため、
-        // ここでは agent 単体で missing 判定が affiliation 非依存である
-        // ことを示す)
-        let missing = missing_identity_for_agent(&agent);
-        assert!(missing.title_summary, "unassigned + empty title -> missing");
-        assert!(missing.current_focus, "unassigned + empty focus -> missing");
-    }
+        let mut session = fresh_session(&worktree);
+        session.id = "session-no-derive".to_string();
+        session.project_state_root = Some(project_root.clone());
 
-    #[test]
-    fn user_prompt_submit_derives_identity_for_unassigned_agent() {
-        // SPEC-2359 Phase U-10 / US-46: 「フォントが見にくいので修正して」
-        // のような prompt で unassigned session の title が auto-derive される。
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let agent = unassigned_agent("session-unassigned", &repo);
-
-        let payload = serde_json::json!({
-            "session_id": "claude-provider-session",
-            "prompt": "$gwt-discussion フォントが見にくいので修正してください。"
-        });
-
-        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
-        let identity = derive_identity_from_prompt(&prompt).expect("identity");
-        let update = workspace_projection_update_for_identity(
-            "session-unassigned",
-            missing_identity_for_agent(&agent),
-            &identity,
-        )
-        .expect("update must build for unassigned + missing identity");
-
-        assert_eq!(
-            update.agent_session_id.as_deref(),
-            Some("session-unassigned")
-        );
-        assert!(
-            update.agent_title_summary.is_some(),
-            "title must be derived for unassigned + missing"
-        );
-        let title = update.agent_title_summary.unwrap();
-        assert!(!title.is_empty(), "derived title must not be empty");
-        let title_chars = title.chars().count();
-        assert!(
-            title_chars <= 30,
-            "derived title should be concise (got {} chars: {})",
-            title_chars,
-            title
-        );
-        assert!(
-            update.agent_current_focus.is_some(),
-            "focus must also be derived"
-        );
-    }
-
-    #[test]
-    fn user_prompt_submit_preserves_explicit_identity_for_unassigned_agent() {
-        // US-46 でも US-43 の non-destructive 原則 (FR-166 / FR-180) を
-        // 維持する: unassigned でも explicit title があれば上書きしない。
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let mut agent = unassigned_agent("session-keep", &repo);
-        agent.title_summary = Some("Existing custom title".to_string());
-        agent.current_focus = Some("Existing focus".to_string());
-
-        let missing = missing_identity_for_agent(&agent);
-        assert!(
-            !missing.title_summary,
-            "explicit title must be considered NOT missing"
-        );
-        assert!(
-            !missing.current_focus,
-            "explicit focus must be considered NOT missing"
-        );
-        assert!(missing.complete(), "no derive should fire");
-    }
-
-    #[test]
-    fn user_prompt_submit_builds_update_for_missing_workspace_identity() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let agent = assigned_agent("session-1", &repo);
-
-        let payload = serde_json::json!({
-            "session_id": "codex-provider-session",
-            "prompt": "$gwt-discussion エージェントウィンドウの更新がいまだにされません。今回の場合であれば「エージェントウィンドウの更新不具合」などが表示されるべきです。"
-        });
-
-        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
-        let identity = derive_identity_from_prompt(&prompt).expect("identity");
-        let update = workspace_projection_update_for_identity(
-            "session-1",
-            missing_identity_for_agent(&agent),
-            &identity,
-        )
-        .expect("projection update");
-
-        assert_eq!(update.agent_session_id.as_deref(), Some("session-1"));
-        assert_eq!(
-            update.agent_title_summary.as_deref(),
-            Some("エージェントウィンドウ更新不具合")
-        );
-        assert!(
-            update
-                .agent_current_focus
-                .as_deref()
-                .is_some_and(|focus| focus.contains("エージェントウィンドウの更新")),
-            "{:?}",
-            update.agent_current_focus
-        );
-    }
-
-    #[test]
-    fn user_prompt_submit_does_not_overwrite_existing_identity() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-
-        let mut agent = assigned_agent("session-1", &repo);
-        agent.title_summary = Some("明示タイトル".to_string());
-        agent.current_focus = Some("明示 focus".to_string());
-
-        let missing = missing_identity_for_agent(&agent);
-
-        assert!(missing.complete(), "{missing:?}");
-        let identity = WorkspacePromptIdentity {
-            title_summary: "エージェントウィンドウ更新不具合".to_string(),
-            current_focus: "エージェントウィンドウの更新がされません".to_string(),
-        };
-        assert!(
-            workspace_projection_update_for_identity("session-1", missing, &identity).is_none()
-        );
-    }
-
-    #[test]
-    fn user_prompt_submit_uses_transcript_path_when_prompt_field_is_absent() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let transcript = temp.path().join("transcript.jsonl");
-        std::fs::write(
-            &transcript,
-            r#"{"type":"last-prompt","lastPrompt":"単なるタイトル更新と思っているかもしれませんが、現在のWorkspace運用の場合、どのウィンドウで何をしているのか？を把握できないとUX的には最悪です。"}"#,
-        )
-        .expect("transcript");
-
-        let payload = serde_json::json!({
-            "session_id": "codex-provider-session",
-            "transcript_path": transcript
-        });
-
-        let prompt = prompt_from_hook_input(&payload.to_string()).expect("prompt");
-        let identity = derive_identity_from_prompt(&prompt).expect("identity");
-
-        assert_eq!(identity.title_summary, "Workspace識別UX不具合");
-    }
-
-    fn write_issue_cache_meta(cache_root: &std::path::Path, number: u64, title: &str) {
-        let dir = cache_root.join(number.to_string());
-        std::fs::create_dir_all(&dir).expect("issue dir");
-        let meta = serde_json::json!({
-            "number": number,
-            "title": title,
-            "labels": [],
-            "state": "open",
-            "updated_at": "2026-05-20T00:00:00Z",
-            "comment_ids": [],
-        });
-        std::fs::write(dir.join("meta.json"), meta.to_string()).expect("meta");
-    }
-
-    fn projection_with_linked_issue(
-        repo: &std::path::Path,
-        session_id: &str,
-        issue_number: u64,
-    ) -> WorkspaceProjection {
-        let mut projection = projection_for(repo);
-        projection
-            .linked_issues
-            .push(gwt_core::workspace_projection::WorkspaceIssueLink {
-                number: issue_number,
-                title: None,
-                url: None,
-            });
-        let mut agent = assigned_agent(session_id, repo);
+        let mut projection = projection_for(&project_root);
+        let mut agent = assigned_agent(&session.id, &worktree);
         agent.title_summary = None;
         agent.current_focus = None;
         projection.agents.push(agent);
-        projection
-    }
+        save_workspace_projection(&project_root, &projection).expect("save projection");
 
-    #[test]
-    fn session_start_derives_title_summary_from_owner_issue_cache() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let cache_root = temp.path().join("cache");
-        write_issue_cache_meta(&cache_root, 2359, "Workspace / Start Work");
+        handle_user_prompt_submit_for_session(&session).expect("handle prompt");
 
-        let session_id = "session-derive";
-        let mut projection = projection_with_linked_issue(&repo, session_id, 2359);
-
-        let updated =
-            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
-
-        assert!(
-            updated,
-            "auto-derive must apply when title is empty and cache exists"
+        let after = load_workspace_projection(&project_root)
+            .expect("load projection")
+            .expect("projection present");
+        let agent = after
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session.id)
+            .expect("agent present");
+        assert_eq!(
+            agent.title_summary, None,
+            "hook must not derive title_summary from prompt"
         );
         assert_eq!(
-            projection.agents[0].title_summary.as_deref(),
-            Some("Workspace / Start Work"),
-            "title must be sourced from issue cache meta.json"
+            agent.current_focus, None,
+            "hook must not derive current_focus from prompt"
         );
-    }
-
-    #[test]
-    fn session_start_does_not_overwrite_existing_title_summary() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let cache_root = temp.path().join("cache");
-        write_issue_cache_meta(&cache_root, 2359, "Workspace / Start Work");
-
-        let session_id = "session-explicit";
-        let mut projection = projection_with_linked_issue(&repo, session_id, 2359);
-        projection.agents[0].title_summary = Some("Custom title".to_string());
-
-        let updated =
-            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
-
-        assert!(!updated, "explicit title must be preserved");
-        assert_eq!(
-            projection.agents[0].title_summary.as_deref(),
-            Some("Custom title")
-        );
-    }
-
-    #[test]
-    fn session_start_owner_absent_keeps_title_summary_empty() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let cache_root = temp.path().join("cache");
-
-        let session_id = "session-no-owner";
-        let mut projection = projection_for(&repo);
-        let mut agent = assigned_agent(session_id, &repo);
-        agent.title_summary = None;
-        projection.agents.push(agent);
-
-        let updated =
-            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
-
-        assert!(!updated, "no linked_issues -> no-op");
-        assert_eq!(projection.agents[0].title_summary, None);
-    }
-
-    #[test]
-    fn session_start_owner_cache_missing_is_silent_noop() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let cache_root = temp.path().join("cache");
-        // cache_root exists conceptually but contains no entry for issue 9999
-
-        let session_id = "session-missing-cache";
-        let mut projection = projection_with_linked_issue(&repo, session_id, 9999);
-
-        let updated =
-            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
-
-        assert!(!updated, "missing cache file must be a silent no-op");
-        assert_eq!(projection.agents[0].title_summary, None);
-    }
-
-    #[test]
-    fn session_start_owner_cache_with_empty_title_is_noop() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let cache_root = temp.path().join("cache");
-        write_issue_cache_meta(&cache_root, 7, "   ");
-
-        let session_id = "session-empty-title";
-        let mut projection = projection_with_linked_issue(&repo, session_id, 7);
-
-        let updated =
-            derive_title_summary_from_owner_with_cache(&mut projection, session_id, &cache_root);
-
-        assert!(!updated, "empty/whitespace title must not be applied");
-        assert_eq!(projection.agents[0].title_summary, None);
     }
 
     #[test]
@@ -1090,26 +404,5 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         // No .codex, no .claude at all — worktree is not managed.
         assert!(!coordination_assets_need_refresh(temp.path()));
-    }
-
-    #[test]
-    fn transcript_path_ignores_non_user_text_records() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let transcript = temp.path().join("transcript.jsonl");
-        std::fs::write(
-            &transcript,
-            concat!(
-                r#"{"type":"user","text":"エージェントウィンドウの更新がいまだにされません。"}"#,
-                "\n",
-                r#"{"type":"assistant","text":"実装方針を説明します。"}"#,
-                "\n"
-            ),
-        )
-        .expect("transcript");
-
-        let prompt = prompt_from_transcript_path(&transcript).expect("prompt");
-
-        assert!(prompt.contains("エージェントウィンドウの更新"), "{prompt}");
-        assert!(!prompt.contains("実装方針"), "{prompt}");
     }
 }

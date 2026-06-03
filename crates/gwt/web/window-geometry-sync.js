@@ -14,8 +14,11 @@ function positiveFiniteNumber(value, fallback) {
 }
 
 // Screen-space inset (px) between a maximized window and the visible viewport
-// edges. Mirrors `ARRANGE_PADDING` in crates/gwt/src/workspace.rs.
-const MAXIMIZE_SCREEN_INSET = 24;
+// edges. A "complete maximize" fills the entire canvas work area edge-to-edge
+// (between the project bar and the status strip), so this inset is 0. The
+// division-by-zoom logic below is kept intact so any future non-zero inset
+// would still render as a constant SCREEN-space gap regardless of zoom.
+const MAXIMIZE_SCREEN_INSET = 0;
 
 /**
  * Compute a maximized window's geometry from the visible viewport bounds.
@@ -24,10 +27,9 @@ const MAXIMIZE_SCREEN_INSET = 24;
  * the window is positioned inside `#canvas-stage`, which applies
  * `scale(zoom)`. The inset is a constant SCREEN-space gap, so it must be
  * divided by zoom: `screenInset = worldInset * zoom`, hence
- * `worldInset = MAXIMIZE_SCREEN_INSET / zoom`. The previous code added a raw
- * `MAXIMIZE_SCREEN_INSET` in world units, which rendered as
- * `MAXIMIZE_SCREEN_INSET * zoom` screen px and drifted the maximized window off
- * the viewport at any zoom != 1.
+ * `worldInset = MAXIMIZE_SCREEN_INSET / zoom`. With a zero inset the geometry
+ * equals `bounds` verbatim at every zoom, so the maximized window spans the
+ * full canvas work area and never drifts off the viewport.
  */
 export function maximizedGeometry(bounds, zoom = 1) {
   const normalizedZoom = positiveFiniteNumber(zoom, 1);

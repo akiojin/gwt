@@ -1,6 +1,87 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.52.0] - 2026-06-02
+
+### Bug Fixes
+
+- **autostart:** MacOS 13+ の Login Items 表示名を GWT にする (SMAppService 移行)
+- Show agent window title purpose instead of raw prompt (SPEC-2359 W-11)
+- Enforce agent sets a provisional title before responding (SPEC-2359 W-11)
+- Fire title reminder for Unassigned agents (SPEC-2359 W-11 root cause)
+- **usage:** Claude アカウント枠取得を opt-in 既定 OFF に戻し空 snapshot で stale footer を消す
+
+### Documentation
+
+- **gwt-fix-issue:** Closure コメント必須テンプレと gwt-verify 明示保証を追加
+- **memory:** Record gwt-managed skill dual-mirror + force-add workflow
+
+### Features
+
+- **usage:** Codex/Claude の使用量・レートリミット・消費をステータスバーに表示
+- **workspace:** タブホバーでタイトル表示と余白ゼロの完全最大化（複数クライアントのチラつき修正）
+
+### Miscellaneous Tasks
+
+- Record SPEC-2359 W-11 lessons in memory log
+- Merge origin/develop into work/20260602-1035
+- Tasks/memory.md に最大化 per-client チラつきの再発防止 lesson を追記
+
+### Testing
+
+- **usage:** Cover usage reader fs-walk and poller window paths
+
+## [9.51.0] - 2026-06-02
+
+### Bug Fixes
+
+- **launch:** Prefer npx for claude latest on non-windows
+- **ui:** Keep agent tty free of overlays
+- **diagnostics:** Remove stale gwt serve guidance
+- **launch:** Print pre-pty errors in terminal
+- **gui:** Support Windows Ctrl+C terminal copy
+- Restore agent terminal scrollback snapshots
+- Recover launch wizard close on reconnect
+- **ui:** Remove status strip server url
+- **launch-wizard:** Preserve open errors on reconnect
+- Clarify branch detail status
+- Restore tray about and move autostart to settings
+- Persist agent project state root
+- **workspace:** Align identity hook state root
+- Preserve terminal snapshot boundary scrollback
+- Avoid duplicate terminal snapshot visible rows
+
+### Documentation
+
+- Record branch notice hidden lesson
+- Rename fresh gwt browser check skill
+- Avoid start work in fresh browser checks
+- Remove redundant skill prefix
+- Rename browser check skill
+- Fix memory markdownlint URL formatting
+
+### Features
+
+- Show running agent activity on project tabs
+
+### Miscellaneous Tasks
+
+- Record rare verification lesson
+- Merge develop into status strip branch
+- Merge develop into branch detail status branch
+- Merge develop into branch detail status branch
+- Merge develop into title fix branch
+- Merge origin/develop into work/20260601-0908
+- Merge origin/develop into work/20260601-0908
+- Merge origin/develop into work/20260601-0908
+
+### Testing
+
+- Cover launch wizard reconnect e2e
+- Stabilize launch wizard reconnect e2e
+- **launch-wizard:** Align embedded contract with tombstones
+- Cover running agent project tab dot
+
 ## [9.50.1] - 2026-06-01
 
 ### Bug Fixes
@@ -213,7 +294,6 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - Update kanban visual test data Workspace to Work
-
 
 ## [9.45.1] - 2026-05-25
 

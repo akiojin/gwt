@@ -182,6 +182,12 @@ pub enum FileAttachment {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
+    SetClaudeAccountUsageEnabled {
+        enabled: bool,
+    },
+    /// Request an immediate usage refresh (SPEC-2970 FR-022).
+    RefreshUsage,
     StartupAutoResumeReady {
         bounds: WindowGeometry,
     },
@@ -696,6 +702,15 @@ pub enum FrontendEvent {
         #[serde(default)]
         board_provider: Option<String>,
     },
+    /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
+    /// the current OS autostart registration state for this user.
+    GetAutostartStatus,
+    /// SPEC #2920 Phase 11: Settings > System > Launch GWT at login changed.
+    /// Backend installs or uninstalls the per-user autostart registration and
+    /// replies with the authoritative status on success.
+    UpdateAutostart {
+        enabled: bool,
+    },
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
     /// archive→delete transitions. `ids` limits the action to specific
@@ -1047,6 +1062,14 @@ pub enum BackendEvent {
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
+    },
+    /// Provider usage snapshot: account-level windows + per-session usage +
+    /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
+    /// types directly.
+    ProviderUsage {
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        sessions: Vec<gwt_core::usage::SessionUsage>,
+        consumption: Vec<gwt_core::usage::ProviderConsumption>,
     },
     TerminalOutput {
         id: String,
@@ -1521,6 +1544,21 @@ pub enum BackendEvent {
     SystemSettingsError {
         message: String,
     },
+    /// SPEC #2920 Phase 11: response to
+    /// [`FrontendEvent::GetAutostartStatus`] or
+    /// [`FrontendEvent::UpdateAutostart`]. Carries the authoritative
+    /// per-user OS autostart registration state.
+    AutostartStatus {
+        enabled: bool,
+        mechanism: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        install_path: Option<String>,
+    },
+    /// SPEC #2920 Phase 11: error reply for autostart status/update. The
+    /// frontend surfaces this inline in Settings > System.
+    AutostartError {
+        message: String,
+    },
     /// SPEC-2359 US-41: response to [`FrontendEvent::WorkspaceProjectionPrune`].
     /// `mode` is `"dry_run"` or `"applied"`; counts reflect the plan executed
     /// against `~/.gwt/projects/*/workspace/`.
@@ -1627,6 +1665,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "window_list",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
     ),
@@ -1976,6 +2019,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "autostart_status",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "autostart_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "workspace_projection_prune_result",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2020,6 +2073,7 @@ impl BackendEvent {
             BackendEvent::WorkspaceState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
@@ -2094,6 +2148,8 @@ impl BackendEvent {
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
+            BackendEvent::AutostartStatus { .. } => "autostart_status",
+            BackendEvent::AutostartError { .. } => "autostart_error",
             BackendEvent::WorkspaceProjectionPruneResult { .. } => {
                 "workspace_projection_prune_result"
             }
