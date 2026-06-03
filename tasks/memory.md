@@ -6578,3 +6578,10 @@ Type: lesson
 Context: SPEC-2008 の最大化で、ユーザー検証中に激しいチラつきが発生。調査の結果、syncMaximizedWindowsToViewport が各クライアントの可視領域に合わせて共有の最大化ジオメトリへ maximize_window 補正を broadcast しており、異なる viewport サイズの 2 クライアント（検証用 MCP ブラウザ1200px + ユーザーのブラウザ810px）が同時接続するとジオメトリを往復させ続けた。inset 値に依存しない既存設計問題。
 Learning: 最大化の塗りつぶしのような per-client な表示状態を shared workspace geometry に書き戻して全クライアントに broadcast すると、サイズの異なるクライアント間で ping-pong してチラつく。各クライアントが visibleBounds から fill をローカル計算してローカル適用し、共有するのは maximized フラグだけにすると解消する。さらに、エージェント検証時に検証用ブラウザ(Playwright/MCP)を開いたままユーザーに視覚確認を依頼すると、それが第2クライアントになり multi-client バグを誘発し『回帰』に見える。
 Future Action: (1) 最大化/ズーム追従など viewport 依存の表示はローカル描画にし、shared geometry へ補正を broadcast しない。(2) ユーザーに視覚確認を依頼する前に、検証用ブラウザ(MCP/Playwright)を必ず閉じて単一クライアントにする。複数クライアント挙動を確認したい場合は意図的に別サイズで開く。
+
+## 2026-06-02 — Release push が coverage gate で落ちたら新規マージcoードへtest追加で回復する
+
+Type: lesson
+Context: /release で develop push 時、pre-push hook の cargo llvm-cov gate が 89.90% < 90% で失敗。release commit 自体は version/CHANGELOG のみだが、直近 squash merge された feature コード (usage モジュール) のテスト不足が原因。PR squash merge は local pre-push hook を経由しないため負債が develop に蓄積し、release push で初めて顕在化する。
+Learning: scripts/check-coverage-threshold.mjs が target/coverage-summary.json から filtered line coverage を算出。未カバーは network/async 経路と fs-walk 経路に集中。fs-walk 経路 (rollouts_modified_since / transcripts_modified_since / read_*_consumption) は tempdir で安全 (parallel-safe, env 非変更) にテストでき、複数モジュールを横断的にカバーできる。env 変数を変える test は --test-threads=1 でない通常 test で flaky。
+Future Action: release push が coverage gate で落ちたら --no-verify でバイパスせず、coverage-summary.json を node で解析して missing 行が多い新規ファイルを特定し、tempdir ベースの pure/fs-walk test を追加して >=90% を回復してから push する。閾値ギリギリ (margin <0.2%) の場合は run 間変動で再 flake しうるため余裕を持たせる。
