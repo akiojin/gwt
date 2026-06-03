@@ -6293,7 +6293,7 @@ fn main() -> std::io::Result<()> {
             } else {
                 eprintln!("gwt browser URL: {url}");
                 eprintln!(
-                    "gwt: another tray-resident gwt instance is already running for this user"
+                    "gwt: another tray-resident gwt instance is already running for this user (set GWT_FORCE_NEW_INSTANCE=1 to start a second, coexisting instance)"
                 );
             }
             return Ok(());

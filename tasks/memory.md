@@ -6634,3 +6634,17 @@ Type: lesson
 Context: SPEC-2008 の最大化で、ユーザー検証中に激しいチラつきが発生。調査の結果、syncMaximizedWindowsToViewport が各クライアントの可視領域に合わせて共有の最大化ジオメトリへ maximize_window 補正を broadcast しており、異なる viewport サイズの 2 クライアント（検証用 MCP ブラウザ1200px + ユーザーのブラウザ810px）が同時接続するとジオメトリを往復させ続けた。inset 値に依存しない既存設計問題。
 Learning: 最大化の塗りつぶしのような per-client な表示状態を shared workspace geometry に書き戻して全クライアントに broadcast すると、サイズの異なるクライアント間で ping-pong してチラつく。各クライアントが visibleBounds から fill をローカル計算してローカル適用し、共有するのは maximized フラグだけにすると解消する。さらに、エージェント検証時に検証用ブラウザ(Playwright/MCP)を開いたままユーザーに視覚確認を依頼すると、それが第2クライアントになり multi-client バグを誘発し『回帰』に見える。
 Future Action: (1) 最大化/ズーム追従など viewport 依存の表示はローカル描画にし、shared geometry へ補正を broadcast しない。(2) ユーザーに視覚確認を依頼する前に、検証用ブラウザ(MCP/Playwright)を必ず閉じて単一クライアントにする。複数クライアント挙動を確認したい場合は意図的に別サイズで開く。
+
+## 2026-06-03 — 新しい singleton/lock 機構を足す時は既存のエスケープハッチ(env override)を引き継ぐ
+
+Type: lesson
+Context: SPEC #2920 の per-user tray single-instance lock (cli/tray/lock.rs::acquire, main.rs:6283) が、レガシー gui_single_instance ロックの GWT_FORCE_NEW_INSTANCE エスケープハッチを引き継がず、debug でも 2 つ目のインスタンスを起動できなかった。ユーザーは env で回避できるはずと認識していた。
+Learning: front-door に新しいロック層を追加すると、旧ロックが honor していた env override が暗黙に失効する。tray lock は force 時に PID スコープの forced_lock_path を使い正規ロックを汚さず共存させる形で修正した。
+Future Action: singleton/lock/exclusive 系の機構を新設・置換する時は、既存ロックの bypass/override(特に GWT_FORCE_NEW_INSTANCE 等の env)を新経路にも必ず移植し、TDD で回避経路を固定する。
+
+## 2026-06-03 — 視覚検証で GWT_FORCE_NEW_INSTANCE 共存インスタンスを使わない(共有 ~/.gwt が不安定)
+
+Type: lesson
+Context: SESSIONS 一覧削除の視覚確認のため GWT_FORCE_NEW_INSTANCE=1 で dev ビルドを GWT.app と並行起動したが、同じ ~/.gwt を共有するため issues 再インデックスがループし、dev 側 usage poller が provider_usage を配信せず USAGE セルが hidden のまま(accounts 空判定)になった。WebSocket/telemetry は正常だった。
+Learning: 2 つの gwt インスタンスが同一 ~/.gwt を共有すると stateful subsystem(index/usage poller)が競合し live 検証が不安定になる。単一インスタンス(GWT.app)では browser からでも usage は正常表示される。
+Future Action: GUI の視覚検証は単一インスタンスで行う。dev を確認したい時は既存インスタンスを終了して dev を唯一の tray-resident として起動する。共存は lock 検証用に留め、live データ表示の検証には使わない。

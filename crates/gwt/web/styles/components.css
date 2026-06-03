@@ -4751,21 +4751,6 @@ kbd.op-kbd {
   text-align: right;
 }
 
-/* Sessions block in the hover popover. */
-.op-usage-sess {
-  border-top: 1px solid var(--color-border, rgba(127, 127, 127, 0.25));
-  padding-top: 10px;
-  margin-top: 4px;
-}
-
-.op-usage-sess__head {
-  font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
-  margin-bottom: 6px;
-}
-
 /* Detail modal */
 .op-usage-modal-overlay {
   position: fixed;
@@ -4943,33 +4928,6 @@ kbd.op-kbd {
   font-size: var(--type-xs, 0.72rem);
   color: var(--color-text-muted, #9aa0ad);
   white-space: nowrap;
-}
-
-.op-usage-sessions {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--type-sm, 0.85rem);
-}
-
-.op-usage-sessions th,
-.op-usage-sessions td {
-  text-align: left;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
-}
-
-.op-usage-sessions th {
-  color: var(--color-text-muted, #9aa0ad);
-  font-weight: 600;
-}
-
-.op-usage-sessions tr[data-ineligible="true"] {
-  opacity: 0.5;
-}
-
-.op-usage-empty {
-  color: var(--color-text-muted, #9aa0ad);
-  font-style: italic;
 }
 
 /* Daily/weekly consumption (SPEC-2970 extension) */
