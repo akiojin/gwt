@@ -8,7 +8,8 @@
 //! file, handshake protocol, and `DaemonBootstrapAction`. `Start` honours
 //! that contract: if a usable endpoint already exists for the cwd
 //! [`RuntimeScope`], we exit 0 with a "already running" notice; otherwise
-//! we generate a fresh `auth_token`, persist a new [`DaemonEndpoint`], and
+//! we generate a fresh `auth_token`, persist a new
+//! [`gwt_core::daemon::DaemonEndpoint`], and
 //! enter the listen loop.
 
 #[cfg(unix)]

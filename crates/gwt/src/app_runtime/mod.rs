@@ -831,9 +831,26 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::GetSystemSettings => {
             FrontendUserActionLog::new("get_system_settings", "settings")
         }
+        FrontendEvent::GetBoardAuthStatus => {
+            FrontendUserActionLog::new("get_board_auth_status", "settings")
+        }
+        FrontendEvent::BoardProviderSignIn { provider } => {
+            FrontendUserActionLog::new("board_provider_sign_in", "settings").target(provider)
+        }
+        FrontendEvent::BoardProviderSignOut { provider } => {
+            FrontendUserActionLog::new("board_provider_sign_out", "settings").target(provider)
+        }
+        FrontendEvent::UpdateBoardProviderConfig { provider, .. } => {
+            FrontendUserActionLog::new("update_board_provider_config", "settings").target(provider)
+        }
+        FrontendEvent::UpdateBoardOauthPort { port } => {
+            FrontendUserActionLog::new("update_board_oauth_port", "settings")
+                .target(port.to_string())
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
+            ..
         } => FrontendUserActionLog::new("update_system_settings", "settings")
             .target(language)
             .force(codex_trust_managed_hooks.unwrap_or(false)),
@@ -3072,23 +3089,35 @@ fn validate_server_url(allowed: Option<&str>, requested: &str) -> bool {
 /// that have already cleared [`validate_server_url`]). The opener receives
 /// the URL via argv directly, never through a shell, so URL contents cannot
 /// trigger shell metacharacter expansion.
+/// Build the `(program, args)` that opens `url` in the OS default browser.
+///
+/// Windows deliberately uses `rundll32 url.dll,FileProtocolHandler <url>`
+/// instead of `cmd /C start "" <url>`. `cmd.exe` re-parses its command line with
+/// shell rules, so a URL's `&` (the query-string separator) is treated as a
+/// command separator: the browser receives only the text up to the first `&`
+/// and every later parameter is dropped. For OAuth authorize URLs that silently
+/// strips `redirect_uri`, `scope`, and `state`, producing Slack's
+/// "redirect_uri did not match" / "No scopes requested" errors. `rundll32`
+/// (like `open` / `xdg-open`) receives the URL as a single CreateProcess
+/// argument and hands the full string to the default protocol handler, so `&`
+/// and `%` survive verbatim.
+fn os_url_open_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(target_os = "windows") {
+        (
+            "rundll32.exe",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        )
+    } else {
+        ("xdg-open", vec![url.to_string()])
+    }
+}
+
 fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
     use std::process::Command;
-    let child = if cfg!(target_os = "macos") {
-        let mut cmd = Command::new("open");
-        cmd.arg(url);
-        cmd.spawn()?
-    } else if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
-        // The empty "" before the URL is required by `start` so that a URL
-        // beginning with quoted text is not interpreted as a window title.
-        cmd.args(["/C", "start", "", url]);
-        cmd.spawn()?
-    } else {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(url);
-        cmd.spawn()?
-    };
+    let (program, args) = os_url_open_command(url);
+    let child = Command::new(program).args(&args).spawn()?;
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
@@ -4079,22 +4108,28 @@ impl AppRuntime {
                 id,
                 entry_kind,
                 body,
+                title,
                 parent_id,
                 topics,
                 owners,
                 targets,
                 mentions,
+                target_workspace,
+                broadcast,
             } => self.post_board_entry_events(
                 &client_id,
                 BoardPostRequest {
                     id,
                     entry_kind,
                     body,
+                    title,
                     parent_id,
                     topics,
                     owners,
                     targets,
                     mentions,
+                    target_workspace,
+                    broadcast,
                 },
             ),
             FrontendEvent::OpenBoardOriginAgent {
@@ -4232,10 +4267,40 @@ impl AppRuntime {
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
+            FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
+            FrontendEvent::BoardProviderSignIn { provider } => {
+                self.board_provider_sign_in_events(client_id, &provider)
+            }
+            FrontendEvent::BoardProviderSignOut { provider } => {
+                self.board_provider_sign_out_events(client_id, &provider)
+            }
+            FrontendEvent::UpdateBoardProviderConfig {
+                provider,
+                client_id: provider_client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            } => self.board_provider_config_update_events(
+                client_id,
+                &provider,
+                provider_client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            ),
+            FrontendEvent::UpdateBoardOauthPort { port } => {
+                self.board_oauth_port_update_events(client_id, port)
+            }
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
-            } => self.system_settings_update_events(client_id, language, codex_trust_managed_hooks),
+                board_provider,
+            } => self.system_settings_update_events(
+                client_id,
+                language,
+                codex_trust_managed_hooks,
+                board_provider,
+            ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
                 self.autostart_update_events(client_id, enabled)
@@ -4404,6 +4469,128 @@ impl AppRuntime {
         }
     }
 
+    /// SPEC-2963: reply with remote Board provider sign-in state plus the
+    /// editable (non-secret) provider configuration for the settings UI.
+    fn board_auth_status_events(
+        &self,
+        client_id: ClientId,
+        message: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id,
+            gwt::system_settings::board_auth_status_event(message),
+        )]
+    }
+
+    /// SPEC-2963: persist remote Board provider configuration captured in the
+    /// settings UI, then reply with the refreshed auth/config view. Non-secret
+    /// fields go to `config.toml`; the client secret goes to the secure store.
+    #[allow(clippy::too_many_arguments)]
+    fn board_provider_config_update_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+        provider_client_id: Option<String>,
+        default_channel: Option<String>,
+        tenant_id: Option<String>,
+        client_secret: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(path) = gwt_config::Settings::global_config_path() else {
+            return self.board_auth_status_events(
+                client_id,
+                Some("unable to resolve home directory (`~/.gwt/config.toml`)".to_string()),
+            );
+        };
+        let message = match gwt::system_settings::write_board_provider_config(
+            &path,
+            provider,
+            provider_client_id,
+            default_channel,
+            tenant_id,
+            client_secret,
+        ) {
+            Ok(_) => Some(format!("Saved {provider} configuration.")),
+            Err(error) => Some(format!("Failed to save configuration: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
+    /// SPEC-2963 FR-005: persist the fixed OAuth callback port, then reply with
+    /// the refreshed auth/config view. The new port binds on the next launch.
+    fn board_oauth_port_update_events(&self, client_id: ClientId, port: u16) -> Vec<OutboundEvent> {
+        let Some(path) = gwt_config::Settings::global_config_path() else {
+            return self.board_auth_status_events(
+                client_id,
+                Some("unable to resolve home directory (`~/.gwt/config.toml`)".to_string()),
+            );
+        };
+        let message = match gwt::system_settings::write_oauth_redirect_port(&path, port) {
+            Ok(saved) => Some(format!(
+                "Saved OAuth callback port {saved}. Restart gwt and register \
+                 http://127.0.0.1:{saved}/oauth/callback in the provider app."
+            )),
+            Err(error) => Some(format!("Failed to save OAuth port: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
+    /// SPEC-2963: begin OAuth sign-in for a remote Board provider by opening the
+    /// browser to the authorize URL (redirect back to the embedded server).
+    fn board_provider_sign_in_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+    ) -> Vec<OutboundEvent> {
+        let kind = match provider.trim().to_ascii_lowercase().as_str() {
+            "slack" => gwt_config::BoardProviderKind::Slack,
+            "teams" => gwt_config::BoardProviderKind::Teams,
+            other => {
+                return self.board_auth_status_events(
+                    client_id,
+                    Some(format!("Unknown provider '{other}'")),
+                );
+            }
+        };
+        // The OAuth redirect uses a fixed loopback callback port (from
+        // settings.board.oauth_redirect_port), not the embedded server's
+        // ephemeral URL, so sign-in works regardless of how the GUI server
+        // bound. The dedicated callback listener is started at server boot.
+        let settings = gwt_config::Settings::load().unwrap_or_default();
+        let message = match gwt::board_remote::signin::begin_signin(kind, &settings) {
+            Ok(authorize_url) => match open_url_with_os_default(&authorize_url) {
+                Ok(()) => Some(format!(
+                    "Opened the browser to sign in to {provider}. Complete it, then Refresh."
+                )),
+                Err(error) => Some(format!("Failed to open browser: {error}")),
+            },
+            Err(reason) => Some(reason),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
+    /// SPEC-2963: clear stored credentials for a remote Board provider.
+    fn board_provider_sign_out_events(
+        &self,
+        client_id: ClientId,
+        provider: &str,
+    ) -> Vec<OutboundEvent> {
+        let key = match provider.trim().to_ascii_lowercase().as_str() {
+            "slack" => "slack",
+            "teams" => "teams",
+            other => {
+                return self.board_auth_status_events(
+                    client_id,
+                    Some(format!("Unknown provider '{other}'")),
+                );
+            }
+        };
+        let message = match gwt::board_remote::signin::sign_out(key) {
+            Ok(()) => Some(format!("Signed out of {provider}.")),
+            Err(error) => Some(format!("Failed to sign out: {error}")),
+        };
+        self.board_auth_status_events(client_id, message)
+    }
+
     fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -4428,6 +4615,7 @@ impl AppRuntime {
         client_id: ClientId,
         language: String,
         codex_trust_managed_hooks: Option<bool>,
+        board_provider: Option<String>,
     ) -> Vec<OutboundEvent> {
         let path = match gwt_config::Settings::global_config_path() {
             Some(p) => p,
@@ -4443,7 +4631,12 @@ impl AppRuntime {
         };
         vec![OutboundEvent::reply(
             client_id,
-            gwt::system_settings::update_event(&path, language, codex_trust_managed_hooks),
+            gwt::system_settings::update_event(
+                &path,
+                language,
+                codex_trust_managed_hooks,
+                board_provider,
+            ),
         )]
     }
 
@@ -6037,19 +6230,23 @@ impl AppRuntime {
             }
         };
         let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_snapshot(&project_root)
+            gwt::board_provider::load_snapshot(&project_root)
         } else {
-            gwt_core::coordination::load_snapshot_for_scope(&project_root, &scope)
+            gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
         };
         match snapshot_result {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardEntries {
-                    id: id.to_string(),
-                    entries: snapshot.board.entries,
-                    has_more_before: snapshot.board.has_more_before,
-                },
-            )],
+            Ok(snapshot) => {
+                let mut entries = snapshot.board.entries;
+                board::attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardEntries {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: snapshot.board.has_more_before,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
@@ -6128,9 +6325,9 @@ impl AppRuntime {
             }
         };
         let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
-            gwt_core::coordination::load_entries_before(&project_root, before_entry_id, limit)
+            gwt::board_provider::load_entries_before(&project_root, before_entry_id, limit)
         } else {
-            gwt_core::coordination::load_entries_before_for_scope(
+            gwt::board_provider::load_entries_before_for_scope(
                 &project_root,
                 before_entry_id,
                 limit,
@@ -6138,14 +6335,18 @@ impl AppRuntime {
             )
         };
         match page_result {
-            Ok(page) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardHistoryPage {
-                    id: id.to_string(),
-                    entries: page.entries,
-                    has_more_before: page.has_more_before,
-                },
-            )],
+            Ok(page) => {
+                let mut entries = page.entries;
+                board::attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardHistoryPage {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: page.has_more_before,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
@@ -6227,7 +6428,7 @@ impl AppRuntime {
         &mut self,
         project_root: &Path,
     ) -> Vec<OutboundEvent> {
-        let Ok(snapshot) = gwt_core::coordination::load_snapshot(project_root) else {
+        let Ok(snapshot) = gwt::board_provider::load_snapshot(project_root) else {
             return Vec::new();
         };
 
@@ -6251,13 +6452,15 @@ impl AppRuntime {
                 let board = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
                     snapshot.board.clone()
                 } else {
-                    gwt_core::coordination::load_snapshot_for_scope(&tab.project_root, &scope)
+                    gwt::board_provider::load_snapshot_for_scope(&tab.project_root, &scope)
                         .map(|snapshot| snapshot.board)
                         .unwrap_or_else(|_| snapshot.board.clone())
                 };
+                let mut entries = board.entries;
+                board::attach_board_body_html(&mut entries);
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
                     id: window_id,
-                    entries: board.entries,
+                    entries,
                     has_more_before: board.has_more_before,
                 }));
             }
@@ -18547,6 +18750,9 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "I will take the next slice".to_string(),
+                title: None,
+                target_workspace: None,
+                broadcast: false,
                 parent_id: Some(parent.id.clone()),
                 topics: vec!["coordination".to_string(), "phase-1b".to_string()],
                 owners: vec!["2018".to_string()],
@@ -18644,6 +18850,9 @@ exit 1
                 id: window_id.clone(),
                 entry_kind: BoardEntryKind::Next,
                 body: "Reply to older context".to_string(),
+                title: None,
+                target_workspace: None,
+                broadcast: false,
                 parent_id: Some(parent_id.clone()),
                 topics: vec![],
                 owners: vec![],
@@ -18692,6 +18901,9 @@ exit 1
                 id: window_id,
                 entry_kind: BoardEntryKind::Next,
                 body: "Run final verification".to_string(),
+                title: None,
+                target_workspace: None,
+                broadcast: false,
                 parent_id: None,
                 topics: vec!["start-work".to_string()],
                 owners: vec!["SPEC-2359".to_string()],
@@ -20726,8 +20938,8 @@ exit 1
 
         let scope = super::board::gui_default_board_scope_for_project(&repo)
             .expect("resolve GUI board scope");
-        let post_audience =
-            gwt::board_audience::post_audience_for_gui(&repo, &[]).expect("resolve post audience");
+        let post_audience = gwt::board_audience::post_audience_for_gui(&repo, &[], None, false)
+            .expect("resolve post audience");
 
         assert_eq!(
             scope,
@@ -21989,5 +22201,25 @@ exit 1
         let event = super::skipped_lines_warning(&diagnostics);
 
         assert!(event.message.contains("Skipped 1 malformed line "));
+    }
+
+    #[test]
+    fn os_url_open_command_keeps_oauth_query_intact_and_avoids_cmd() {
+        // Regression: `cmd /C start "" <url>` truncated OAuth authorize URLs at
+        // the first `&`, dropping redirect_uri/scope/state and breaking Slack
+        // sign-in. The opener must pass the whole URL as one argument and must
+        // not route through cmd.exe (whose shell parsing splits on `&`).
+        let url = "https://slack.com/oauth/v2/authorize?client_id=A&redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Foauth%2Fcallback&scope=chat%3Awrite%2Cchannels%3Aread&state=xyz";
+        let (program, args) = super::os_url_open_command(url);
+
+        assert!(
+            args.iter().any(|arg| arg == url),
+            "the full URL must be passed as a single intact argument, got {args:?}"
+        );
+        assert_ne!(program, "cmd", "must not open URLs through cmd.exe");
+        assert!(
+            !args.iter().any(|arg| arg.contains("start")),
+            "must not use the cmd `start` builtin which splits on &: {args:?}"
+        );
     }
 }

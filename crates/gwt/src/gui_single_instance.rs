@@ -300,7 +300,11 @@ fn detect_other_kind_active(
     }
 }
 
-fn force_new_instance_requested() -> bool {
+/// Whether `GWT_FORCE_NEW_INSTANCE` is set to a truthy value
+/// (`1`/`true`/`yes`/`on`, case-insensitive). Public so the SPEC #2920
+/// tray-resident lock can honour the same escape hatch as the GUI lock,
+/// keeping the override's semantics uniform across both front-door locks.
+pub fn force_new_instance_requested() -> bool {
     match std::env::var(FORCE_NEW_INSTANCE_ENV) {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();

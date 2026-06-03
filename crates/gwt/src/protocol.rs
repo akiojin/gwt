@@ -432,6 +432,9 @@ pub enum FrontendEvent {
         id: String,
         entry_kind: BoardEntryKind,
         body: String,
+        /// SPEC-2963: optional post title/subject from the composer.
+        #[serde(default)]
+        title: Option<String>,
         parent_id: Option<String>,
         topics: Vec<String>,
         owners: Vec<String>,
@@ -439,6 +442,14 @@ pub enum FrontendEvent {
         targets: Vec<String>,
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
+        /// SPEC-2959: composer "To:" selection. Pins the post to a specific
+        /// Work lane (its workspace id). `None` uses the active-workspace default.
+        #[serde(default)]
+        target_workspace: Option<String>,
+        /// SPEC-2959: when `true`, post to the General lane (empty audience)
+        /// regardless of `target_workspace` or the active workspace.
+        #[serde(default)]
+        broadcast: bool,
     },
     OpenBoardOriginAgent {
         id: String,
@@ -640,6 +651,44 @@ pub enum FrontendEvent {
     /// [`BackendEvent::SystemSettings`] containing the current global
     /// `[ai].language` value (`auto` / `en` / `ja`).
     GetSystemSettings,
+    /// SPEC-2963: query remote Board provider sign-in state. Backend replies
+    /// with [`BackendEvent::BoardAuthStatus`].
+    GetBoardAuthStatus,
+    /// SPEC-2963: begin OAuth sign-in for a remote Board provider
+    /// (`slack` / `teams`). Backend opens the browser and replies with
+    /// [`BackendEvent::BoardAuthStatus`] (message describes next steps).
+    BoardProviderSignIn {
+        provider: String,
+    },
+    /// SPEC-2963: clear stored credentials for a remote Board provider.
+    BoardProviderSignOut {
+        provider: String,
+    },
+    /// SPEC-2963: persist remote Board provider configuration from the settings
+    /// UI. Non-secret fields (`client_id`, `default_channel`, `tenant_id`) are
+    /// written to `config.toml`; `client_secret` is routed to the secure
+    /// credential store, never to `config.toml` (FR-006). Each `Some("")`
+    /// clears that field; `None` leaves it unchanged. Backend replies with
+    /// [`BackendEvent::BoardAuthStatus`] carrying the refreshed config view.
+    UpdateBoardProviderConfig {
+        /// `slack` or `teams`.
+        provider: String,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        default_channel: Option<String>,
+        #[serde(default)]
+        tenant_id: Option<String>,
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
+    /// SPEC-2963 FR-005: persist the fixed loopback OAuth callback port from the
+    /// settings UI. `0` resets to the default (8765). Backend replies with
+    /// [`BackendEvent::BoardAuthStatus`] carrying the canonical port. Takes
+    /// effect on the next launch (the callback listener binds at server boot).
+    UpdateBoardOauthPort {
+        port: u16,
+    },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
     /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
@@ -648,6 +697,10 @@ pub enum FrontendEvent {
         language: String,
         #[serde(default)]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: Board provider selection (`local` / `slack` / `teams`).
+        /// `None` leaves the persisted value unchanged.
+        #[serde(default)]
+        board_provider: Option<String>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -1441,6 +1494,36 @@ pub enum BackendEvent {
         language: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_provider: Option<String>,
+    },
+    /// SPEC-2963: remote Board provider sign-in state, the editable provider
+    /// configuration (non-secret), and an optional status message. The settings
+    /// UI uses the `*_client_id` / `*_default_channel` / `*_tenant_id` fields to
+    /// prefill its inputs and the `*_has_secret` flags to show "configured"
+    /// without ever echoing the secret.
+    BoardAuthStatus {
+        slack: bool,
+        teams: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slack_client_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slack_default_channel: Option<String>,
+        #[serde(default)]
+        slack_has_secret: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_client_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_tenant_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        teams_default_channel: Option<String>,
+        /// Fixed loopback port for the OAuth callback. The settings UI shows the
+        /// redirect URL `http://127.0.0.1:<port>/oauth/callback` to register.
+        #[serde(default)]
+        oauth_redirect_port: u16,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -1450,6 +1533,9 @@ pub enum BackendEvent {
         language: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
+        /// SPEC-2959: persisted Board provider echoed back for reconciliation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_provider: Option<String>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -2059,6 +2145,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::SystemSettings { .. } => "system_settings",
+            BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
             BackendEvent::AutostartStatus { .. } => "autostart_status",
@@ -3448,6 +3535,66 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "workspace_projection_prune_error");
         assert_eq!(value["message"], "scan failed: permission denied");
+    }
+
+    #[test]
+    fn frontend_event_update_board_provider_config_round_trips() {
+        // SPEC-2963 FR-006: settings UI sends non-secret + secret fields here.
+        let payload = r#"{"kind":"update_board_provider_config","provider":"slack","client_id":"C-id","default_channel":"CHAN","client_secret":"sek"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateBoardProviderConfig");
+        match event {
+            FrontendEvent::UpdateBoardProviderConfig {
+                provider,
+                client_id,
+                default_channel,
+                tenant_id,
+                client_secret,
+            } => {
+                assert_eq!(provider, "slack");
+                assert_eq!(client_id.as_deref(), Some("C-id"));
+                assert_eq!(default_channel.as_deref(), Some("CHAN"));
+                assert_eq!(tenant_id, None);
+                assert_eq!(client_secret.as_deref(), Some("sek"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_event_update_board_oauth_port_round_trips() {
+        let payload = r#"{"kind":"update_board_oauth_port","port":9123}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateBoardOauthPort");
+        match event {
+            FrontendEvent::UpdateBoardOauthPort { port } => assert_eq!(port, 9123),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_board_auth_status_carries_config_view_without_secret() {
+        let event = BackendEvent::BoardAuthStatus {
+            slack: true,
+            teams: false,
+            message: Some("Saved slack configuration.".to_string()),
+            slack_client_id: Some("C-id".to_string()),
+            slack_default_channel: Some("CHAN".to_string()),
+            slack_has_secret: true,
+            teams_client_id: None,
+            teams_tenant_id: None,
+            teams_default_channel: None,
+            oauth_redirect_port: 8765,
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "board_auth_status");
+        assert_eq!(value["slack"], true);
+        assert_eq!(value["slack_client_id"], "C-id");
+        assert_eq!(value["slack_has_secret"], true);
+        assert_eq!(value["oauth_redirect_port"], 8765);
+        // The secret value itself is never part of the wire payload.
+        assert!(value.get("slack_client_secret").is_none());
+        assert!(value.get("client_secret").is_none());
     }
 
     #[test]

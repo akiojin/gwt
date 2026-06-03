@@ -3,8 +3,8 @@ use std::io;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
-        load_snapshot, load_snapshot_for_scope, normalize_board_audience, normalize_board_mentions,
-        post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardMention,
+        normalize_board_audience, normalize_board_mentions, AuthorKind, BoardAudienceScope,
+        BoardEntry, BoardMention,
     },
     paths::gwt_sessions_dir,
 };
@@ -14,6 +14,7 @@ use crate::{
     board_audience::{
         current_session_board_scope, gui_default_board_scope, post_audience_for_session,
     },
+    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry},
     cli::{CliEnv, CliParseError},
 };
 
@@ -27,7 +28,7 @@ pub enum BoardCommand {
         all: bool,
     },
     /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
-    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
+    /// [--title <text>] [--title-summary <text>] [--parent <id>] [--topic <t>]*
     /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
     Post(Box<BoardPostCommand>),
 }
@@ -37,6 +38,10 @@ pub struct BoardPostCommand {
     pub kind: String,
     pub body: Option<String>,
     pub file: Option<String>,
+    /// SPEC-2963: optional post title/subject (rendered as the Teams subject /
+    /// Slack header block / board card heading). Distinct from `title_summary`,
+    /// which is the short agent window-title label.
+    pub title: Option<String>,
     pub title_summary: Option<String>,
     pub parent: Option<String>,
     pub topics: Vec<String>,
@@ -127,6 +132,7 @@ pub(super) fn run<E: CliEnv>(
                 kind,
                 body,
                 file,
+                title,
                 title_summary,
                 parent,
                 topics,
@@ -165,6 +171,9 @@ pub(super) fn run<E: CliEnv>(
                 topics,
                 owners,
             );
+            if let Some(title) = title {
+                entry = entry.with_title(title);
+            }
             if let Some(title_summary) = title_summary {
                 entry = entry.with_title_summary(title_summary);
             }
@@ -263,6 +272,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut kind: Option<String> = None;
     let mut body: Option<String> = None;
     let mut file: Option<String> = None;
+    let mut title: Option<String> = None;
     let mut title_summary: Option<String> = None;
     let mut parent: Option<String> = None;
     let mut topics = Vec::new();
@@ -294,6 +304,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                     return Err(CliParseError::MissingFlag("-f"));
                 }
                 file = Some(args[i].clone());
+            }
+            "--title" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--title"));
+                }
+                title = Some(args[i].clone());
             }
             "--title-summary" => {
                 i += 1;
@@ -352,6 +369,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
+        title,
         title_summary,
         parent,
         topics,
@@ -647,6 +665,7 @@ mod tests {
                 kind: "request".into(),
                 body: Some("hello".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],
@@ -678,6 +697,7 @@ mod tests {
                 kind: "claim".into(),
                 body: Some("I claim feature/foo".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -710,6 +730,7 @@ mod tests {
                 kind: "question".into(),
                 body: Some("Can you confirm this?".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -766,6 +787,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("cross-workspace update".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -801,7 +823,39 @@ mod tests {
                     "Implementing the title-summary contract across several subsystems".into()
                 ),
                 file: None,
+                title: None,
                 title_summary: Some("Title summary contract".into()),
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_accepts_title() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("**bold** body"),
+            s("--title"),
+            s("Release notes"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("**bold** body".into()),
+                file: None,
+                title: Some("Release notes".into()),
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
@@ -843,6 +897,7 @@ mod tests {
                 kind: "claim".into(),
                 body: Some("taking the migration".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -876,6 +931,7 @@ mod tests {
                 kind: "question".into(),
                 body: Some("Can you confirm this?".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -926,6 +982,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("scoped to two workspaces".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -953,6 +1010,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("audienced status".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -998,6 +1056,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("broadcast post".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1040,6 +1099,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("Implement current focus title sync".into()),
                 file: None,
+                title: None,
                 title_summary: Some("Current focus title sync".into()),
                 parent: None,
                 topics: vec![],
@@ -1101,6 +1161,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("current workspace update".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1151,6 +1212,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("unassigned broadcast".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1177,6 +1239,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("forced broadcast".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1226,6 +1289,7 @@ mod tests {
                 kind: "claim".into(),
                 body: Some("Materialize actionable Unassigned Agents before Board audience".into()),
                 file: None,
+                title: None,
                 title_summary: Some("Workspace materialization".into()),
                 parent: None,
                 topics: vec!["workspace-materialization".into()],
@@ -1295,6 +1359,7 @@ mod tests {
                 kind: "claim".into(),
                 body: Some("Intentional broadcast for cross-workspace coordination".into()),
                 file: None,
+                title: None,
                 title_summary: Some("Workspace materialization".into()),
                 parent: None,
                 topics: vec!["workspace-materialization".into()],
@@ -1373,6 +1438,7 @@ mod tests {
                 kind: "handoff".into(),
                 body: Some("handoff across workspaces".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1439,6 +1505,7 @@ mod tests {
                 kind: "status".into(),
                 body: Some("test post without session env".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec![],
@@ -1485,6 +1552,7 @@ mod tests {
                 kind: "request".into(),
                 body: Some("Need a board".into()),
                 file: None,
+                title: None,
                 title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],

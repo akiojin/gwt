@@ -23,7 +23,7 @@ pub(super) fn load_board_events(
             },
         )];
     };
-    match gwt_core::coordination::load_snapshot(&tab.project_root) {
+    match gwt::board_provider::load_snapshot(&tab.project_root) {
         Ok(snapshot) => {
             let entries = snapshot
                 .board

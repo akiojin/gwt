@@ -1,6 +1,67 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.53.0] - 2026-06-03
+
+### Bug Fixes
+
+- **board:** Teams OAuth に PKCE(S256) を実装 (SPEC-2963)
+- **board:** Slack OAuth authorize URLをSlack v2仕様に修正する
+- **board:** OAuth認可URLがWindowsで&以降切り捨てられる不具合を修正
+- **board:** OAuthコールバック後に設定UIへサインイン状態を自動反映する
+- **board:** Slack設定フォームのプレースホルダを汎用例に置換
+- **board:** Teams providerを実機E2E向けに堅牢化
+- **board:** Stop composer Title and body fields from overlapping
+- **usage:** 使用量 popover からセッション一覧を削除
+- **tray:** GWT_FORCE_NEW_INSTANCE で tray lock を回避可能にする
+
+### Documentation
+
+- **readme:** SlackをBoardバックエンドにする手順を追加
+- **readme:** Teams を Board バックエンドにする手順を追加(実験的)
+- Fix broken intra-doc links failing CI rustdoc
+- Fix markdownlint violations in tasks/memory.md
+
+### Features
+
+- **board:** BoardProvider 抽象と board.provider 設定を導入 (SPEC-2959 Phase A)
+- **board:** 設定 System タブに Board provider selector を追加 (SPEC-2959 Phase B)
+- **board:** Composer 投稿先 (To:) backend を追加 (SPEC-2959 Phase C)
+- **board:** Board を Work 単位レーンのスレッド表示にする (SPEC-2959 Phase D)
+- **board:** Remote provider の設定と token store を追加 (SPEC-2963 Phase 1)
+- **board:** Remote provider OAuth flow コアを追加 (SPEC-2963 Phase 2)
+- **board:** Remote provider の cache と mapping を追加 (SPEC-2963 Phase 3 基盤)
+- **board:** SlackProvider 本体を実装 (SPEC-2963 Phase 3)
+- **board:** Provider 解決を remote 実装へ結線 (SPEC-2963 Phase 4)
+- **board:** OAuth サインインセッション核を追加 (SPEC-2963 Phase 5 core)
+- **board:** Provider サインイン orchestration core を追加 (SPEC-2963 Phase 5)
+- **board:** Embedded server に OAuth /oauth/callback route を追加 (SPEC-2963 Phase 5)
+- **board:** TeamsProvider (Microsoft Graph) を実装 (SPEC-2963 Phase 6)
+- **board:** 設定UIにremote providerサインイン動線を追加 (SPEC-2963 Phase 5)
+- **board:** 設定UIからSlack/Teams provider設定を編集可能にする
+- **board:** OAuthコールバックポートを設定可能にする(既定8765・固定redirect)
+- **board:** Support post title and Markdown formatting across providers
+
+### Miscellaneous Tasks
+
+- Tasks/memory.md に release push coverage gate 回復 lesson を追記
+- **memory:** SlackのOAuth/not_in_channel知見を記録
+- **memory:** OAuth redirect portはサインイン時のみ必要という知見を記録
+- **memory:** Teams Entra は public client 必須という知見を記録
+- **memory:** Teams Board provider の実機 E2E 検証完了を記録
+- **memory:** Record gwt bin tests read real config.toml board.provider
+- Merge origin/develop into work/20260601-1023
+- Tasks/memory.md に tray lock env / 共存検証の lesson を追記
+
+### Refactor
+
+- **board:** Provider選択をテストでhermeticにする
+
+### Testing
+
+- **board:** 既存 entry の互換レーン表示テストを追加 (SPEC-2959 Phase E)
+- **board:** Provider override テストを hermetic にする
+
 ## [9.52.0] - 2026-06-02
 
 ### Bug Fixes
