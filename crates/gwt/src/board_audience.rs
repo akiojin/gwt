@@ -204,7 +204,240 @@ fn collect_mention_audience(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use gwt_core::workspace_projection::{
+        save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceStatusCategory,
+    };
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn agent(
+        session_id: &str,
+        affiliation: WorkspaceAgentAffiliationStatus,
+        workspace_id: Option<&str>,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: affiliation,
+            workspace_id: workspace_id.map(str::to_string),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn projection_with(id: &str, agents: Vec<WorkspaceAgentSummary>) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project(PathBuf::from("/tmp/p"));
+        projection.id = id.to_string();
+        projection.agents = agents;
+        projection
+    }
+
+    fn mention(kind: BoardMentionTargetKind, target: &str) -> BoardMention {
+        BoardMention {
+            target_kind: kind,
+            target: target.to_string(),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn private_helpers_resolve_workspace_audiences() {
+        let assigned = agent(
+            "s-1",
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-a"),
+        );
+        let unassigned = agent("s-2", WorkspaceAgentAffiliationStatus::Unassigned, None);
+        let proj = projection_with("", vec![assigned.clone(), unassigned.clone()]);
+
+        // workspace_id_for_agent: unassigned -> None; assigned -> its own id.
+        assert_eq!(workspace_id_for_agent(&proj, &unassigned), None);
+        assert_eq!(
+            workspace_id_for_agent(&proj, &assigned).as_deref(),
+            Some("ws-a")
+        );
+        // Assigned with no explicit workspace_id falls back to the projection id.
+        let assigned_no_ws = agent("s-3", WorkspaceAgentAffiliationStatus::Assigned, None);
+        let proj_id = projection_with("ws-proj", vec![assigned_no_ws.clone()]);
+        assert_eq!(
+            workspace_id_for_agent(&proj_id, &assigned_no_ws).as_deref(),
+            Some("ws-proj")
+        );
+
+        // gui_workspace_id: empty id falls through to the first assigned agent;
+        // a non-empty id wins directly; no assigned agents -> None.
+        assert_eq!(gui_workspace_id(&proj).as_deref(), Some("ws-a"));
+        assert_eq!(gui_workspace_id(&proj_id).as_deref(), Some("ws-proj"));
+        assert_eq!(
+            gui_workspace_id(&projection_with("", vec![unassigned.clone()])),
+            None
+        );
+
+        // push_workspace_for_session: known session pushes, unknown is false.
+        let mut audience = Vec::new();
+        assert!(push_workspace_for_session(&mut audience, &proj, "s-1"));
+        assert_eq!(audience, vec!["ws-a".to_string()]);
+        assert!(!push_workspace_for_session(&mut audience, &proj, "missing"));
+
+        // push_workspace_for_agent: blank target is a no-op; a match pushes.
+        let mut by_agent = Vec::new();
+        push_workspace_for_agent(&mut by_agent, &proj, "   ");
+        assert!(by_agent.is_empty());
+        push_workspace_for_agent(&mut by_agent, &proj, "codex");
+        assert_eq!(by_agent, vec!["ws-a".to_string()]);
+
+        // collect_mention_audience exercises every target kind.
+        let mut mentions = Vec::new();
+        collect_mention_audience(
+            &mut mentions,
+            Some(&proj),
+            &[
+                mention(BoardMentionTargetKind::Workspace, "ws-explicit"),
+                mention(BoardMentionTargetKind::Session, "s-1"),
+                mention(BoardMentionTargetKind::Agent, "Codex"),
+                mention(BoardMentionTargetKind::User, "akiojin"),
+                mention(BoardMentionTargetKind::Branch, "work/x"),
+            ],
+        );
+        assert!(mentions.contains(&"ws-explicit".to_string()));
+        assert!(mentions.contains(&"ws-a".to_string()));
+    }
+
+    #[test]
+    fn session_scope_reads_projection_from_disk() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        save_workspace_projection(
+            repo,
+            &projection_with(
+                "ws-main",
+                vec![agent(
+                    "s-assigned",
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                    Some("ws-main"),
+                )],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            current_session_board_scope(repo, Some("s-assigned")).unwrap(),
+            BoardAudienceScope::Workspace("ws-main".to_string())
+        );
+        // Unknown session within a present projection -> All.
+        assert_eq!(
+            current_session_board_scope(repo, Some("s-unknown")).unwrap(),
+            BoardAudienceScope::All
+        );
+        // No session id short-circuits to All.
+        assert_eq!(
+            current_session_board_scope(repo, None).unwrap(),
+            BoardAudienceScope::All
+        );
+
+        save_workspace_projection(
+            repo,
+            &projection_with(
+                "ws-main",
+                vec![agent(
+                    "s-unassigned",
+                    WorkspaceAgentAffiliationStatus::Unassigned,
+                    None,
+                )],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            current_session_board_scope(repo, Some("s-unassigned")).unwrap(),
+            BoardAudienceScope::Broadcast
+        );
+    }
+
+    #[test]
+    fn gui_default_scope_reads_projection_from_disk() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        save_workspace_projection(
+            repo,
+            &projection_with(
+                "ws-gui",
+                vec![agent(
+                    "s-1",
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                    Some("ws-gui"),
+                )],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            gui_default_board_scope(repo).unwrap(),
+            BoardAudienceScope::Workspace("ws-gui".to_string())
+        );
+
+        // Only unassigned agents -> Broadcast.
+        save_workspace_projection(
+            repo,
+            &projection_with(
+                "",
+                vec![agent(
+                    "s-2",
+                    WorkspaceAgentAffiliationStatus::Unassigned,
+                    None,
+                )],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            gui_default_board_scope(repo).unwrap(),
+            BoardAudienceScope::Broadcast
+        );
+
+        // No agents at all -> All.
+        save_workspace_projection(repo, &projection_with("", vec![])).unwrap();
+        assert_eq!(
+            gui_default_board_scope(repo).unwrap(),
+            BoardAudienceScope::All
+        );
+    }
+
+    #[test]
+    fn post_audience_for_session_attaches_workspace_and_respects_broadcast() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        // Broadcast short-circuits before any projection load.
+        assert_eq!(
+            post_audience_for_session(repo, None, &[], true).unwrap(),
+            None
+        );
+
+        save_workspace_projection(
+            repo,
+            &projection_with(
+                "ws-post",
+                vec![agent(
+                    "s-1",
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                    Some("ws-post"),
+                )],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            post_audience_for_session(repo, Some("s-1"), &[], false).unwrap(),
+            Some(vec!["ws-post".to_string()])
+        );
+    }
 
     #[test]
     fn gui_audience_broadcast_returns_none() {

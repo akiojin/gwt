@@ -642,4 +642,118 @@ mod tests {
             .unwrap());
         assert!(!prov.board_entry_exists(&root(), "missing").unwrap());
     }
+
+    fn three_message_mock() -> MockHttp {
+        MockHttp {
+            history_body: r#"{"ok":true,"messages":[
+                {"ts":"100.0001","text":"a","username":"U"},
+                {"ts":"200.0002","text":"b","username":"U"},
+                {"ts":"300.0003","text":"c","username":"U"}
+            ]}"#
+            .to_string(),
+            post_body: r#"{"ok":true}"#.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn post_through_mock_form_path() {
+        // Drives MockHttp::post_form + the post_entry happy path on the default
+        // channel (no audience -> CH-DEFAULT).
+        let prov = provider(three_message_mock());
+        let snapshot = prov.post_entry(&root(), entry("hello")).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 3);
+    }
+
+    #[test]
+    fn trait_read_methods_cover_since_recent_and_pagination() {
+        let prov = provider(three_message_mock());
+        let scope = BoardAudienceScope::All;
+
+        // load_snapshot_for_scope delegates to load_snapshot.
+        assert_eq!(
+            prov.load_snapshot_for_scope(&root(), &scope)
+                .unwrap()
+                .board
+                .entries
+                .len(),
+            3
+        );
+
+        // load_entries_since: an epoch-0 `since` returns every cached entry.
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        assert_eq!(prov.load_entries_since(&root(), epoch).unwrap().len(), 3);
+        assert_eq!(
+            prov.load_entries_since_for_scope(&root(), epoch, &scope)
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // has_recent_post_by executes the predicate over every entry.
+        let wide = chrono::Duration::days(1_000_000);
+        assert!(prov
+            .has_recent_post_by(&root(), "nobody", &BoardEntryKind::Status, wide)
+            .is_ok());
+
+        // load_entries_before: empty for limit 0.
+        let zero = prov.load_entries_before(&root(), None, 0).unwrap();
+        assert!(zero.entries.is_empty() && !zero.has_more_before);
+
+        // Newest-2 with more available behind them.
+        let page = prov.load_entries_before(&root(), None, 2).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        assert!(page.has_more_before);
+
+        // Everything strictly before a known id, no more behind.
+        let before = prov
+            .load_entries_before(&root(), Some("200.0002"), 5)
+            .unwrap();
+        assert_eq!(before.entries.len(), 1);
+        assert!(!before.has_more_before);
+
+        // Scope variant delegates.
+        assert_eq!(
+            prov.load_entries_before_for_scope(&root(), None, 2, &scope)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn http_5xx_surfaces_error() {
+        let mock = MockHttp {
+            history_status: 500,
+            ..Default::default()
+        };
+        let err = provider(mock).load_snapshot(&root()).unwrap_err();
+        assert!(err.to_string().contains("http 500"));
+    }
+
+    #[test]
+    fn post_api_error_is_surfaced() {
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            post_body: r#"{"ok":false,"error":"not_in_channel"}"#.to_string(),
+            ..Default::default()
+        };
+        let err = provider(mock).post_entry(&root(), entry("x")).unwrap_err();
+        assert!(err.to_string().contains("not_in_channel"));
+    }
+
+    #[test]
+    fn post_without_resolvable_channel_errors() {
+        // Empty default + no audience => no channel resolves.
+        let prov = SlackProvider::new("t", "", BTreeMap::new(), Box::new(MockHttp::default()), 60);
+        assert!(prov.post_entry(&root(), entry("x")).is_err());
+    }
+
+    #[test]
+    fn post_json_default_is_unsupported() {
+        // The Slack mock does not override post_json, so it hits the trait
+        // default which reports the operation as unsupported.
+        assert!(MockHttp::default().post_json("u", "b", "{}").is_err());
+    }
 }

@@ -310,4 +310,30 @@ mod tests {
     fn strip_html_tags_keeps_text() {
         assert_eq!(strip_html_tags("<strong>Hi</strong><br>there"), "Hithere");
     }
+
+    #[test]
+    fn slack_code_blocks_and_inline_link_code() {
+        // Fenced block with a language: content is literal, never escaped.
+        let fenced = markdown_to_slack_mrkdwn("```rust\nlet x = 1 < 2;\n```");
+        assert!(fenced.contains("```rust"), "{fenced}");
+        assert!(
+            fenced.contains("let x = 1 < 2;"),
+            "code stays literal: {fenced}"
+        );
+
+        // Fenced block without a language.
+        let plain = markdown_to_slack_mrkdwn("```\nplain & raw\n```");
+        assert!(plain.contains("```"), "{plain}");
+        assert!(plain.contains("plain & raw"), "{plain}");
+
+        // Inline code inside link text is buffered into the link rendering.
+        let link = markdown_to_slack_mrkdwn("[run `gwt` now](https://example.com)");
+        assert_eq!(link, "<https://example.com|run `gwt` now>");
+
+        // A soft break between paragraph lines becomes a newline.
+        assert_eq!(
+            markdown_to_slack_mrkdwn("line one\nline two"),
+            "line one\nline two"
+        );
+    }
 }

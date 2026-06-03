@@ -679,4 +679,149 @@ mod tests {
             "html tags stripped for plaintext board"
         );
     }
+
+    fn three_message_mock() -> MockGraph {
+        MockGraph {
+            messages_body: r#"{"value":[
+                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"a"},"from":{"user":{"displayName":"U"}}},
+                {"id":"m2","createdDateTime":"2026-01-01T10:05:00Z","body":{"content":"b"},"from":{"user":{"displayName":"U"}}},
+                {"id":"m3","createdDateTime":"2026-01-01T10:10:00Z","body":{"content":"c"},"from":{"user":{"displayName":"U"}}}
+            ]}"#
+            .to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn second_read_is_served_from_cache() {
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/chan-1",
+            BTreeMap::new(),
+            Box::new(three_message_mock()),
+            60,
+        );
+        assert_eq!(prov.load_snapshot(&root()).unwrap().board.entries.len(), 3);
+        // Within the TTL the second read hits the cache rather than the mock.
+        assert_eq!(prov.load_snapshot(&root()).unwrap().board.entries.len(), 3);
+    }
+
+    #[test]
+    fn channel_with_empty_segment_errors() {
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/",
+            BTreeMap::new(),
+            Box::new(MockGraph::default()),
+            60,
+        );
+        assert!(prov.load_snapshot(&root()).is_err());
+    }
+
+    #[test]
+    fn http_5xx_surfaces_error() {
+        let mock = MockGraph {
+            messages_status: 500,
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+        let err = prov.load_snapshot(&root()).unwrap_err();
+        assert!(err.to_string().contains("http 500"));
+    }
+
+    #[test]
+    fn mapped_channel_tags_entries_with_workspace_audience() {
+        let mut map = BTreeMap::new();
+        map.insert("ws-x".to_string(), "team-1/chan-1".to_string());
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/chan-1",
+            map,
+            Box::new(three_message_mock()),
+            60,
+        );
+        let snapshot = prov.load_snapshot(&root()).unwrap();
+        assert!(snapshot
+            .board
+            .entries
+            .iter()
+            .all(|entry| entry.audience.contains(&"ws-x".to_string())));
+    }
+
+    #[test]
+    fn post_without_resolvable_channel_errors() {
+        let prov = TeamsProvider::new(
+            "tok",
+            "",
+            BTreeMap::new(),
+            Box::new(MockGraph::default()),
+            60,
+        );
+        assert!(prov.post_entry(&root(), entry("x")).is_err());
+    }
+
+    #[test]
+    fn trait_read_methods_cover_since_recent_exists_and_pagination() {
+        let prov = TeamsProvider::new(
+            "tok",
+            "team-1/chan-1",
+            BTreeMap::new(),
+            Box::new(three_message_mock()),
+            60,
+        );
+        let scope = BoardAudienceScope::All;
+
+        assert_eq!(
+            prov.load_snapshot_for_scope(&root(), &scope)
+                .unwrap()
+                .board
+                .entries
+                .len(),
+            3
+        );
+
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        assert_eq!(prov.load_entries_since(&root(), epoch).unwrap().len(), 3);
+        assert_eq!(
+            prov.load_entries_since_for_scope(&root(), epoch, &scope)
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let wide = chrono::Duration::days(1_000_000);
+        assert!(prov
+            .has_recent_post_by(&root(), "nobody", &BoardEntryKind::Status, wide)
+            .is_ok());
+
+        assert!(prov.board_entry_exists(&root(), "m2").unwrap());
+        assert!(!prov.board_entry_exists(&root(), "missing").unwrap());
+
+        let zero = prov.load_entries_before(&root(), None, 0).unwrap();
+        assert!(zero.entries.is_empty() && !zero.has_more_before);
+
+        let page = prov.load_entries_before(&root(), None, 2).unwrap();
+        assert_eq!(page.entries.len(), 2);
+        assert!(page.has_more_before);
+
+        let before = prov.load_entries_before(&root(), Some("m2"), 5).unwrap();
+        assert_eq!(before.entries.len(), 1);
+        assert!(!before.has_more_before);
+
+        assert_eq!(
+            prov.load_entries_before_for_scope(&root(), None, 2, &scope)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn mock_post_form_paths_are_unsupported() {
+        // Teams posts via post_json; the form path is never used and reports so.
+        assert!(MockGraph::default().post_form("u", "b", &[]).is_err());
+        let shared = MockGraphShared(std::sync::Arc::new(MockGraph::default()));
+        assert!(shared.post_form("u", "b", &[]).is_err());
+    }
 }

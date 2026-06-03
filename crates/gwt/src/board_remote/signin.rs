@@ -239,4 +239,28 @@ mod tests {
         assert_eq!(provider_key(BoardProviderKind::Teams), Some("teams"));
         assert_eq!(provider_key(BoardProviderKind::Local), None);
     }
+
+    #[test]
+    fn sessions_returns_process_global_singleton() {
+        // Two calls resolve the same OnceLock-backed instance.
+        let first = sessions() as *const OAuthSessions;
+        let second = sessions() as *const OAuthSessions;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn begin_signin_teams_returns_authorize_url() {
+        // Teams uses a public client (PKCE) and needs no client secret, so this
+        // path is deterministic without env/keychain state.
+        let mut settings = Settings::default();
+        settings.board.teams = TeamsConfig {
+            client_id: Some("T-app".to_string()),
+            ..Default::default()
+        };
+        let url = begin_signin(BoardProviderKind::Teams, &settings).unwrap();
+        assert!(url.starts_with("https://"));
+        assert!(url.contains("T-app"));
+        // PKCE public-client flow advertises a code challenge.
+        assert!(url.contains("code_challenge"));
+    }
 }
