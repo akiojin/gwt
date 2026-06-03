@@ -180,6 +180,27 @@ Pass `--no-auto-build` to disable this behavior; in that case the runner returns
 {"ok": false, "error_code": "INDEX_MISSING", "error": "index not found at ..."}
 ```
 
+## Empty corpus is a tooling failure, not "no results"
+
+`search-specs` and `search-issues` build their corpus from the GitHub Issue
+cache (`~/.gwt/cache/issues/<repo-hash>/`). When that cache is empty or
+unpopulated for the repo-hash, an auto-build search would index zero documents.
+Instead of silently returning `ok: true` with an empty list — which reads as
+"no existing SPEC/Issue owner" and causes duplicate creation — the runner
+returns a diagnostic:
+
+```json
+{"ok": false, "error_code": "EMPTY_CORPUS", "scope": "specs",
+ "issue_cache_dir": "~/.gwt/cache/issues/<repo-hash>",
+ "issue_cache_populated": false,
+ "error": "specs search corpus is empty: ... Refresh the cache ... and retry ..."}
+```
+
+When you see `EMPTY_CORPUS`, **do not conclude that no owner exists.** Refresh
+the issue cache (open the project in the gwt GUI to sync, or run a `gwtd issue`
+sync) and retry the search. Only an `ok: true` result with an empty list from a
+*populated* cache means the repository genuinely has no matching SPEC/Issue.
+
 ## Index update commands
 
 These are run automatically by the gwt GUI watcher (or by the runner's
