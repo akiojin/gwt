@@ -6655,3 +6655,10 @@ Type: lesson
 Context: SESSIONS 一覧削除の視覚確認のため GWT_FORCE_NEW_INSTANCE=1 で dev ビルドを GWT.app と並行起動したが、同じ ~/.gwt を共有するため issues 再インデックスがループし、dev 側 usage poller が provider_usage を配信せず USAGE セルが hidden のまま(accounts 空判定)になった。WebSocket/telemetry は正常だった。
 Learning: 2 つの gwt インスタンスが同一 ~/.gwt を共有すると stateful subsystem(index/usage poller)が競合し live 検証が不安定になる。単一インスタンス(GWT.app)では browser からでも usage は正常表示される。
 Future Action: GUI の視覚検証は単一インスタンスで行う。dev を確認したい時は既存インスタンスを終了して dev を唯一の tray-resident として起動する。共存は lock 検証用に留め、live データ表示の検証には使わない。
+
+## 2026-06-04 — Host launch fallback executable must reuse platform-aware runner resolution, not hardcode bare names
+
+Type: failure-pattern
+Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が bare "npx" をハードコードしており、Windows では CreateProcess が POSIX shim(npx) を spawn できず program not found で PTY 開始前に失敗。primary runner は package_runner_candidates で npx.cmd を優先(SPEC-1921 FR-080)していたが fallback だけがこの解決をバイパスしていた。
+Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
+Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。
