@@ -27,11 +27,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::board_provider::{has_recent_post_by, load_entries_since_for_scope};
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::coordination::{
-    has_recent_post_by, load_entries_since_for_scope, load_reminders_state, write_reminders_state,
-    BoardEntryKind, RemindersState,
+    load_reminders_state, write_reminders_state, BoardEntryKind, RemindersState,
 };
 use gwt_core::workspace_projection::WorkspaceProjection;
 

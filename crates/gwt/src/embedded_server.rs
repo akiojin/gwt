@@ -16,7 +16,7 @@ use axum::{
         HeaderMap, StatusCode,
     },
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -227,6 +227,9 @@ impl EmbeddedServer {
             runtime,
             IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             0,
+            // 0 disables the dedicated fixed-port OAuth listener so parallel
+            // tests never contend on a shared loopback port.
+            0,
             proxy,
             clients,
             pty_writers,
@@ -238,10 +241,12 @@ impl EmbeddedServer {
     /// IP / port and install the access-log middleware. Used by the current
     /// browser-server route for both loopback defaults and operator-chosen
     /// `--bind` / `--port`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_with_bind(
         runtime: &Runtime,
         bind: IpAddr,
         port: u16,
+        oauth_redirect_port: u16,
         proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
@@ -316,6 +321,9 @@ impl EmbeddedServer {
             get(embedded_web::font_jetbrains_mono_handler),
         )
         .route("/healthz", get(health_handler))
+        // SPEC-2963 Phase 5: OAuth redirect target for remote Board provider
+        // sign-in. Completes the flow against the process-global session store.
+        .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/internal/attachment-upload-token",
             get(attachment_upload_token_handler),
@@ -339,6 +347,46 @@ impl EmbeddedServer {
             access_log.clone(),
             access_log_middleware,
         ));
+
+        // SPEC-2963 FR-005: dedicated fixed-port loopback OAuth callback
+        // listener. The OAuth redirect_uri must be a stable, pre-registered URL
+        // (`http://127.0.0.1:<oauth_redirect_port>/oauth/callback`), but the
+        // main server uses an ephemeral / operator-chosen port. Bind the fixed
+        // loopback port and serve the same router so `/oauth/callback` is
+        // reachable there. Skipped when disabled (`0`, e.g. tests) or when the
+        // main server already listens on that port (no double-bind).
+        let oauth_listener = if oauth_redirect_port != 0 && oauth_redirect_port != addr.port() {
+            match runtime.block_on(TcpListener::bind((
+                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                oauth_redirect_port,
+            ))) {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    eprintln!(
+                        "gwt: OAuth callback port {oauth_redirect_port} is unavailable \
+                         ({error}); remote Board sign-in may fail until it is freed or \
+                         changed in Settings."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(oauth_listener) = oauth_listener {
+            let oauth_app = app.clone();
+            runtime.spawn(async move {
+                if let Err(error) = axum::serve(
+                    oauth_listener,
+                    oauth_app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                {
+                    eprintln!("embedded OAuth callback server error: {error}");
+                }
+            });
+        }
 
         runtime.spawn(async move {
             let server = axum::serve(
@@ -399,6 +447,74 @@ fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState>
 
 pub async fn health_handler() -> &'static str {
     "ok"
+}
+
+/// Query parameters on the OAuth redirect (SPEC-2963 Phase 5).
+#[derive(Debug, Deserialize)]
+struct OAuthCallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn oauth_result_page(title: &str, message: &str) -> Html<String> {
+    Html(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
+         <body style=\"font-family:system-ui,sans-serif;padding:2.5rem;max-width:34rem;margin:auto\">\
+         <h2>{title}</h2><p>{message}</p>\
+         <p style=\"color:#666\">You can close this tab and return to gwt.</p></body></html>"
+    ))
+}
+
+/// OAuth redirect handler: completes the remote Board provider sign-in against
+/// the process-global session store. On success it broadcasts a refreshed
+/// [`gwt::BackendEvent::BoardAuthStatus`] to every connected client so the
+/// settings UI flips to "Signed in" without a manual Refresh (SPEC-2963
+/// FR-012). The token exchange itself is self-contained (global session +
+/// token store); only the broadcast needs the shared [`ServerState`].
+async fn oauth_callback_handler(
+    State(state): State<ServerState>,
+    Query(params): Query<OAuthCallbackQuery>,
+) -> Html<String> {
+    if let Some(error) = params.error.as_deref().filter(|value| !value.is_empty()) {
+        return oauth_result_page("Sign-in failed", error);
+    }
+    let (Some(code), Some(oauth_state)) = (params.code, params.state) else {
+        return oauth_result_page("Sign-in failed", "Missing authorization code or state.");
+    };
+    // The token exchange is blocking (reqwest); run it off the async worker.
+    let outcome = tokio::task::spawn_blocking(move || {
+        let poster = gwt::board_remote::http::ReqwestHttpClient::new();
+        gwt::board_remote::oauth_session::complete_callback(
+            gwt::board_remote::signin::sessions(),
+            &code,
+            &oauth_state,
+            &poster,
+            &gwt::board_remote::token_store::default_dir(),
+            chrono::Utc::now(),
+        )
+    })
+    .await;
+    match outcome {
+        Ok(Ok(provider_key)) => {
+            // Push the refreshed auth/config view to all connected gwt clients
+            // so the Settings panel reflects the new sign-in immediately.
+            state.clients.dispatch(vec![OutboundEvent::broadcast(
+                gwt::system_settings::board_auth_status_event(Some(format!(
+                    "Signed in to {provider_key}."
+                ))),
+            )]);
+            oauth_result_page(
+                "Signed in",
+                &format!("Connected the {provider_key} Board provider."),
+            )
+        }
+        Ok(Err(reason)) => oauth_result_page("Sign-in failed", &reason),
+        Err(_) => oauth_result_page("Sign-in failed", "Internal error completing sign-in."),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1317,6 +1433,7 @@ mod tests {
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             0,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,
@@ -1342,6 +1459,7 @@ mod tests {
             &runtime,
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             0,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,
@@ -1393,6 +1511,7 @@ mod tests {
             &runtime,
             tray_args.bind,
             tray_args.port,
+            0, // no dedicated OAuth listener in tests
             proxy,
             clients,
             pty_writers,

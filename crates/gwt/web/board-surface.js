@@ -156,3 +156,112 @@ export function applyBoardMentionNotificationFocus(state, entryId) {
   state.focusEntryId = entryId || null;
   state.pendingFocusScroll = Boolean(entryId);
 }
+
+// --- SPEC-2959: Work-lane grouping ------------------------------------------
+
+const GENERAL_LANE_KEY = "__general__";
+
+function nonEmptyString(value) {
+  const trimmed = String(value || "").trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// SPEC-2959 FR-015: lane label resolves title_summary → workspace title →
+// branch → workspace id.
+function laneLabelFor(workspace, key) {
+  if (!workspace) return key;
+  return (
+    nonEmptyString(workspace.titleSummary)
+    || nonEmptyString(workspace.title)
+    || nonEmptyString(workspace.branch)
+    || key
+  );
+}
+
+// SPEC-2959 FR-010: lane key is the first audience workspace id; otherwise the
+// entry's origin_branch resolved to a known workspace; otherwise General.
+function laneKeyForEntry(entry, byId, byBranch) {
+  const audience = normalizedBoardWorkspaceAudience(entry);
+  if (audience.length > 0) {
+    const known = audience.find((id) => byId.has(id));
+    return known || audience[0];
+  }
+  const branch = nonEmptyString(entry?.origin_branch);
+  if (branch && byBranch.has(branch)) {
+    return byBranch.get(branch).id;
+  }
+  return GENERAL_LANE_KEY;
+}
+
+function makeLane(key, byId) {
+  if (key === GENERAL_LANE_KEY) {
+    return {
+      key,
+      isGeneral: true,
+      label: "General",
+      lifecycle: "",
+      isDone: false,
+      latestAt: "",
+      entries: [],
+    };
+  }
+  const workspace = byId.get(key);
+  const lifecycle = String(workspace?.lifecycle || "").toLowerCase();
+  return {
+    key,
+    isGeneral: false,
+    label: laneLabelFor(workspace, key),
+    lifecycle,
+    isDone: lifecycle === "done" || lifecycle === "archived",
+    latestAt: "",
+    entries: [],
+  };
+}
+
+/**
+ * Group Board entries into Work lanes (SPEC-2959).
+ *
+ * `options.workspaces` is an array of `{ id, titleSummary?, title?, branch?,
+ * lifecycle? }`. Returns lanes ordered by most-recent activity, with
+ * Done/Archived lanes pushed to the end. Each lane's `entries` stay in
+ * chronological (created_at ascending) order.
+ */
+export function groupBoardLanes(entries, options = {}) {
+  const workspaces = Array.isArray(options.workspaces) ? options.workspaces : [];
+  const byId = new Map();
+  const byBranch = new Map();
+  for (const workspace of workspaces) {
+    const id = nonEmptyString(workspace?.id);
+    if (id) byId.set(id, { ...workspace, id });
+    const branch = nonEmptyString(workspace?.branch);
+    if (branch && id) byBranch.set(branch, { ...workspace, id });
+  }
+
+  const lanes = new Map();
+  for (const entry of entries || []) {
+    const key = laneKeyForEntry(entry, byId, byBranch);
+    let lane = lanes.get(key);
+    if (!lane) {
+      lane = makeLane(key, byId);
+      lanes.set(key, lane);
+    }
+    lane.entries.push(entry);
+    const at = String(entry?.updated_at || entry?.created_at || "");
+    if (at > lane.latestAt) lane.latestAt = at;
+  }
+
+  const ordered = [...lanes.values()];
+  for (const lane of ordered) {
+    lane.entries.sort((a, b) =>
+      String(a?.created_at || "").localeCompare(String(b?.created_at || "")),
+    );
+  }
+  // SPEC-2959 FR-012/FR-013: activity-desc, with Done/Archived lanes last.
+  ordered.sort((a, b) => {
+    if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+    return String(b.latestAt).localeCompare(String(a.latestAt));
+  });
+  return ordered;
+}
+
+export { GENERAL_LANE_KEY };

@@ -1260,11 +1260,14 @@ mod tests {
                 id: "tab-1::board-1".to_string(),
                 entry_kind: gwt_core::coordination::BoardEntryKind::Status,
                 body: "done".to_string(),
+                title: None,
                 parent_id: None,
                 topics: Vec::new(),
                 owners: Vec::new(),
                 targets: Vec::new(),
                 mentions: Vec::new(),
+                target_workspace: None,
+                broadcast: false,
             }
         ));
     }
@@ -6391,10 +6394,18 @@ fn main() -> std::io::Result<()> {
     // Defaults preserve the documented loopback + ephemeral behaviour
     // (see README trust-boundary note).
     let (bind_addr, bind_port) = (tray_args.bind, tray_args.port);
+    // SPEC-2963 FR-005: bind a dedicated fixed loopback port for the OAuth
+    // callback so remote Board sign-in works regardless of the (ephemeral or
+    // operator-chosen) main port. Read fresh from config so a Settings change
+    // takes effect on the next launch.
+    let oauth_redirect_port = gwt_config::Settings::load()
+        .map(|settings| settings.board.oauth_redirect_port)
+        .unwrap_or(gwt_config::DEFAULT_OAUTH_REDIRECT_PORT);
     let mut server = EmbeddedServer::start_with_bind(
         &runtime,
         bind_addr,
         bind_port,
+        oauth_redirect_port,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
         pty_writers,

@@ -150,6 +150,135 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
 });
 
+test("System tab Board provider select offers Local/Slack/Teams as selectable (SPEC-2963)", () => {
+  // SPEC-2963 Phase 5: slack/teams are now real, selectable options (sign-in
+  // gated rather than disabled "coming soon").
+  assert.match(
+    appSource,
+    /id\s*=\s*"settings-system-board-provider"/,
+    "expected a Board provider select with the canonical id",
+  );
+  for (const provider of ["local", "slack", "teams"]) {
+    assert.match(
+      appSource,
+      new RegExp(`value:\\s*"${provider}"`),
+      `${provider} must be a Board provider option`,
+    );
+  }
+});
+
+test("System tab exposes remote provider sign-in affordance + auth status (SPEC-2963)", () => {
+  assert.match(appSource, /"board-auth-status"/, "expected an auth status element");
+  assert.match(
+    appSource,
+    /kind:\s*"board_provider_sign_in",\s*provider:\s*selectedProvider/,
+    "Sign in button must send board_provider_sign_in",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"board_provider_sign_out",\s*provider:\s*selectedProvider/,
+    "Sign out button must send board_provider_sign_out",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"get_board_auth_status"/,
+    "panel must fetch board auth status",
+  );
+  assert.match(
+    appSource,
+    /case\s+"board_auth_status":/,
+    "dispatch must handle board_auth_status",
+  );
+});
+
+test("System tab exposes remote provider config form that saves via update_board_provider_config (SPEC-2963)", () => {
+  // FR-006: client_id / default_channel / tenant_id / secret editable from the
+  // UI instead of hand-editing config.toml.
+  assert.match(
+    appSource,
+    /board-config-form/,
+    "expected a provider config form container",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-slack-client-id"/,
+    "Slack client id input must exist",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-slack-secret"/,
+    "Slack client secret input must exist",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-teams-tenant-id"/,
+    "Teams tenant id input must exist",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"update_board_provider_config"/,
+    "Save button must send update_board_provider_config",
+  );
+  // The secret must only be sent when the user typed one (empty box keeps the
+  // stored secret), so it is conditional rather than always included.
+  assert.match(
+    appSource,
+    /secretInput\.value\.length\s*>\s*0/,
+    "secret must be sent only when the user typed a value",
+  );
+  // Dispatch must store the non-secret config view for prefill.
+  assert.match(
+    appSource,
+    /slackClientId:\s*event\.slack_client_id/,
+    "dispatch must prefill slack client id from board_auth_status",
+  );
+  // The secret field clears after Save by design; an explicit saved-state note
+  // must make persistence obvious instead of looking like data loss.
+  assert.match(
+    appSource,
+    /board-secret-state/,
+    "a client-secret saved-state indicator must exist",
+  );
+  assert.match(
+    appSource,
+    /A client secret is saved/,
+    "the saved-state indicator must confirm the secret persisted",
+  );
+});
+
+test("System tab exposes an editable OAuth callback port + redirect URL hint (SPEC-2963 FR-005)", () => {
+  // The OAuth redirect must use a fixed, registerable loopback port; the UI
+  // exposes it (default 8765) and shows the exact URL to register.
+  assert.match(
+    appSource,
+    /"settings-board-oauth-port"/,
+    "OAuth callback port input must exist",
+  );
+  assert.match(
+    appSource,
+    /127\.0\.0\.1:\$\{[^}]+\}\/oauth\/callback/,
+    "the redirect URL hint must show http://127.0.0.1:<port>/oauth/callback",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"update_board_oauth_port"/,
+    "Save port must send update_board_oauth_port",
+  );
+  assert.match(
+    appSource,
+    /oauthRedirectPort:\s*event\.oauth_redirect_port/,
+    "dispatch must prefill the OAuth port from board_auth_status",
+  );
+});
+
+test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
+  assert.match(
+    appSource,
+    /kind:\s*"update_system_settings",[\s\S]*?board_provider:\s*next/,
+    "Board provider select onChange must send update_system_settings with board_provider",
+  );
+});
+
 test("System tab exposes Launch GWT at login autostart control", () => {
   assert.match(
     appSource,

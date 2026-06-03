@@ -79,16 +79,38 @@ test("Board surface wires all active Work ids into currentWorkspaceIds (SPEC-235
   assert.match(appSource, /currentWorkspaceId:\s*currentProjectWorkspaceId/);
 });
 
-test("Board message body preserves multiline plaintext", () => {
+test("Board message body renders sanitized server Markdown with a plaintext fallback (SPEC-2963)", () => {
+  // The card body reuses the Knowledge markdown renderer, which sets innerHTML
+  // from the server-sanitized `body_html` and falls back to plaintext.
   assert.match(
     appSource,
-    /createNode\("div",\s*"board-message-body",\s*entry\.body\)/,
+    /createKnowledgeMarkdownBody\(entry,\s*"board-message-body"\)/,
   );
   assert.match(
-    indexSource,
-    /\.board-message-body\s*\{[\s\S]*white-space:\s*pre-wrap/,
+    appSource,
+    /function createKnowledgeMarkdownBody[\s\S]{0,400}body_html[\s\S]{0,200}innerHTML/,
   );
-  assert.doesNotMatch(appSource, /board-message-body[\s\S]{0,120}\.innerHTML/);
+  assert.match(
+    appSource,
+    /function createKnowledgeMarkdownBody[\s\S]{0,400}is-plaintext[\s\S]{0,120}textContent/,
+  );
+  // Only the plaintext fallback forces pre-wrap; rendered HTML lays itself out.
+  assert.match(
+    indexSource,
+    /\.board-message-body\.is-plaintext\s*\{[\s\S]*white-space:\s*pre-wrap/,
+  );
+});
+
+test("Board composer offers a title input and the card renders it (SPEC-2963)", () => {
+  // Composer title input wired to state.composerTitle, capped at 150 chars.
+  assert.match(appSource, /board-title-input/);
+  assert.match(appSource, /state\.composerTitle/);
+  assert.match(appSource, /titleInput\.maxLength\s*=\s*150/);
+  // Title is sent in the post payload and the card renders it.
+  assert.match(appSource, /title:\s*title\s*\|\|\s*null/);
+  assert.match(appSource, /createNode\("div",\s*"board-message-title",\s*entry\.title\)/);
+  // Title styling exists.
+  assert.match(indexSource, /\.board-message-title\s*\{/);
 });
 
 test("Board audience helpers match typed self keys and produce visible labels", () => {

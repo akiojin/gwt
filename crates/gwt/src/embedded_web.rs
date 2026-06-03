@@ -2733,28 +2733,35 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_board_message_body_preserves_multiline_plaintext() {
+    fn embedded_web_board_message_body_renders_markdown_with_plaintext_fallback() {
+        // SPEC-2963: the body is authored in Markdown and rendered from the
+        // server-sanitized `body_html`; only the plaintext fallback keeps
+        // pre-wrap to preserve author-provided newlines.
         let html = frontend_bundle_source();
-        let body_block = {
+        let plaintext_block = {
             let start = html
-                .find(".board-message-body {")
-                .expect("expected Board message body CSS block");
+                .find(".board-message-body.is-plaintext {")
+                .expect("expected Board plaintext-fallback CSS block");
             let rest = &html[start..];
             let end = rest.find('}').expect("expected CSS block end");
             &rest[..=end]
         };
 
         assert!(
-            body_block.contains("white-space: pre-wrap"),
-            "Board body must preserve author-provided newlines, got: {body_block}",
+            plaintext_block.contains("white-space: pre-wrap"),
+            "Board plaintext fallback must preserve newlines, got: {plaintext_block}",
         );
         assert!(
-            html.contains("createNode(\"div\", \"board-message-body\", entry.body)"),
-            "Board body must be rendered as plaintext from the canonical body field",
+            html.contains("createKnowledgeMarkdownBody(entry, \"board-message-body\")"),
+            "Board body must render via the shared Markdown renderer",
         );
         assert!(
-            !html.contains("board-message-body`).innerHTML"),
-            "Board body must not switch to HTML rendering for multiline formatting",
+            html.contains("createNode(\"div\", \"board-message-title\", entry.title)"),
+            "Board card must render the optional post title",
+        );
+        assert!(
+            html.contains(".board-message-title {"),
+            "Board title styling must exist",
         );
     }
 

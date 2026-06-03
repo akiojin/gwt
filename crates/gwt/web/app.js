@@ -21,6 +21,8 @@
         boardEntryOriginSessionId,
         boardEntryPreview,
         findBoardEntry,
+        groupBoardLanes,
+        GENERAL_LANE_KEY,
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
@@ -424,6 +426,8 @@
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
             if (
               !systemSettingsState.statusMessage
@@ -437,6 +441,8 @@
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
           } else if (deferred.kind === "system_settings_error") {
@@ -6581,6 +6587,7 @@
             error: "",
             replyParentId: null,
             composerKind: "status",
+            composerTitle: "",
             composerBody: "",
             pendingSubmit: null,
             hasMoreBefore: false,
@@ -7960,6 +7967,48 @@
         updateProfileStatus(windowId);
       }
 
+      // SPEC-2959: the known Work lanes available to the Board, derived from
+      // the active Work projection. Used for lane labels and the composer
+      // "To:" selector.
+      function boardLaneWorkspaces() {
+        const works = Array.isArray(activeWorkProjection?.active_works)
+          ? activeWorkProjection.active_works
+          : [];
+        const result = [];
+        for (const work of works) {
+          const id = String(work?.id || "").trim();
+          if (!id) continue;
+          const agents = Array.isArray(work?.agents) ? work.agents : [];
+          const titleSummary =
+            agents.map((agent) => String(agent?.title_summary || "").trim()).find(Boolean) || "";
+          const branch =
+            String(work?.branch || "").trim() ||
+            agents.map((agent) => String(agent?.branch || "").trim()).find(Boolean) ||
+            "";
+          result.push({
+            id,
+            titleSummary,
+            title: String(work?.title || "").trim(),
+            branch,
+            lifecycle: String(work?.lifecycle_stage || "").trim(),
+          });
+        }
+        return result;
+      }
+
+      // SPEC-2959 FR-018: resolve the composer "To:" value. An explicit, still
+      // valid selection wins; otherwise default to the active Work, else General.
+      function boardComposerTarget(state) {
+        const ids = new Set(boardLaneWorkspaces().map((work) => work.id));
+        const explicit = state?.composerTarget;
+        if (explicit === GENERAL_LANE_KEY) return GENERAL_LANE_KEY;
+        if (explicit && ids.has(explicit)) return explicit;
+        const active = Array.isArray(currentProjectWorkspaceId)
+          ? currentProjectWorkspaceId.find((id) => ids.has(id))
+          : null;
+        return active || GENERAL_LANE_KEY;
+      }
+
       function submitBoardEntry(windowId) {
         const state = ensureBoardState(windowId);
         const body = state.composerBody.trim();
@@ -7968,6 +8017,8 @@
           renderBoard(windowId);
           return;
         }
+        // SPEC-2963: optional post title/subject.
+        const title = (state.composerTitle || "").trim();
         const mentions = mentionsForBoardSubmit(state);
         state.loading = true;
         state.submitting = true;
@@ -7975,18 +8026,30 @@
         const parentId = state.replyParentId || null;
         state.pendingSubmit = {
           body,
+          title,
           parentId,
           existingEntryIds: new Set(state.entries.map((entry) => entry.id)),
         };
+        // SPEC-2959 FR-018..021: resolve the composer "To:" selection into the
+        // post's lane. General → broadcast (empty audience); a Work id pins the
+        // post to that lane; an empty selection lets the backend use the active
+        // workspace default.
+        const target = boardComposerTarget(state);
+        const broadcast = target === GENERAL_LANE_KEY;
+        const targetWorkspace =
+          !broadcast && target && target !== "__default__" ? target : null;
         send({
           kind: "post_board_entry",
           id: windowId,
           entry_kind: state.composerKind,
           body,
+          title: title || null,
           parent_id: parentId,
           topics: [],
           owners: [],
           mentions,
+          target_workspace: targetWorkspace,
+          broadcast,
         });
         renderBoard(windowId);
       }
@@ -8193,7 +8256,10 @@
           );
         }
         let focusTarget = null;
-        for (const entry of visibleEntries) {
+        // SPEC-2959: build a single message card. Reused for every lane so the
+        // bubble layout, reply quote, for-you highlight, and origin actions stay
+        // identical to the previous flat timeline (FR-017).
+        const buildBoardMessageCard = (entry) => {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
           if (authorKind === "user") {
@@ -8255,7 +8321,13 @@
             quote.addEventListener("click", () => focusBoardEntry(entry.parent_id));
             card.appendChild(quote);
           }
-          card.appendChild(createNode("div", "board-message-body", entry.body));
+          if (entry.title) {
+            card.appendChild(createNode("div", "board-message-title", entry.title));
+          }
+          // SPEC-2963: the body is authored in Markdown; render the
+          // server-sanitized `body_html` (falls back to plaintext when absent),
+          // reusing the Knowledge surface's markdown renderer.
+          card.appendChild(createKnowledgeMarkdownBody(entry, "board-message-body"));
           const messageActions = createNode("div", "board-message-actions");
           const replyButton = createNode("button", "board-reply-button", "Reply");
           replyButton.type = "button";
@@ -8277,7 +8349,65 @@
             messageActions.appendChild(originButton);
           }
           card.appendChild(messageActions);
-          timeline.appendChild(card);
+          return card;
+        };
+
+        // SPEC-2959: group the visible entries into Work lanes and render each
+        // lane with a collapsible header. Active/recent lanes are expanded;
+        // Done/Archived lanes default to collapsed (FR-009/012/013/014).
+        if (!state.collapsedLanes) state.collapsedLanes = {};
+        if (!state.laneSeen) state.laneSeen = {};
+        const lanes = groupBoardLanes(visibleEntries, {
+          workspaces: boardLaneWorkspaces(),
+        });
+        for (const lane of lanes) {
+          const explicit = state.collapsedLanes[lane.key];
+          const collapsed = explicit === true || explicit === false ? explicit : lane.isDone;
+          if (state.laneSeen[lane.key] === undefined) {
+            state.laneSeen[lane.key] = lane.entries.length;
+          }
+          const unread = collapsed
+            ? Math.max(0, lane.entries.length - state.laneSeen[lane.key])
+            : 0;
+          if (!collapsed) {
+            state.laneSeen[lane.key] = lane.entries.length;
+          }
+
+          const laneEl = createNode("section", "board-lane");
+          laneEl.dataset.laneKey = lane.key;
+          if (lane.isGeneral) laneEl.classList.add("general");
+          if (lane.isDone) laneEl.classList.add("done");
+          if (collapsed) laneEl.classList.add("collapsed");
+
+          const header = createNode("button", "board-lane-header");
+          header.type = "button";
+          header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          header.appendChild(
+            createNode("span", "board-lane-caret", collapsed ? "▸" : "▾"),
+          );
+          header.appendChild(createNode("span", "board-lane-label", lane.label));
+          header.appendChild(
+            createNode("span", "board-lane-count", String(lane.entries.length)),
+          );
+          if (unread > 0) {
+            const badge = createNode("span", "board-lane-unread", String(unread));
+            badge.setAttribute("aria-label", `${unread} unread in ${lane.label}`);
+            header.appendChild(badge);
+          }
+          header.addEventListener("click", () => {
+            state.collapsedLanes[lane.key] = !collapsed;
+            renderBoard(windowId);
+          });
+          laneEl.appendChild(header);
+
+          if (!collapsed) {
+            const laneBody = createNode("div", "board-lane-body");
+            for (const entry of lane.entries) {
+              laneBody.appendChild(buildBoardMessageCard(entry));
+            }
+            laneEl.appendChild(laneBody);
+          }
+          timeline.appendChild(laneEl);
         }
 
         if (scroller) {
@@ -8328,6 +8458,46 @@
           banner.appendChild(cancel);
           composer.appendChild(banner);
         }
+
+        // SPEC-2959 FR-018/019: composer "To:" selector — default active Work,
+        // with other Works and General (broadcast) selectable.
+        const toField = createNode("label", "board-composer-to");
+        toField.appendChild(createNode("span", "mock-label", "To"));
+        const toSelect = document.createElement("select");
+        toSelect.className = "board-composer-to-select settings-select";
+        const generalOption = document.createElement("option");
+        generalOption.value = GENERAL_LANE_KEY;
+        generalOption.textContent = "General (broadcast)";
+        toSelect.appendChild(generalOption);
+        for (const ws of boardLaneWorkspaces()) {
+          const option = document.createElement("option");
+          option.value = ws.id;
+          option.textContent = ws.titleSummary || ws.title || ws.branch || ws.id;
+          toSelect.appendChild(option);
+        }
+        toSelect.value = boardComposerTarget(state);
+        toSelect.addEventListener("change", (event) => {
+          state.composerTarget = event.target.value;
+        });
+        toField.appendChild(toSelect);
+        composer.appendChild(toField);
+
+        // SPEC-2963: optional post title/subject (Teams subject / Slack header
+        // block / board card heading). Slack caps the header at 150 chars.
+        const titleField = createNode("label", "board-composer-field board-composer-title-field");
+        titleField.appendChild(createNode("span", "mock-label", "Title (optional)"));
+        const titleInput = document.createElement("input");
+        titleInput.type = "text";
+        titleInput.className = "board-title-input";
+        titleInput.maxLength = 150;
+        titleInput.value = state.composerTitle || "";
+        titleInput.placeholder = "Short subject for this post";
+        titleInput.addEventListener("input", () => {
+          state.composerTitle = titleInput.value;
+        });
+        titleField.appendChild(titleInput);
+        composer.appendChild(titleField);
+
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");
@@ -11592,6 +11762,22 @@
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        // SPEC-2959/2963: selected Board backend (local/slack/teams).
+        boardProvider: "local",
+        // SPEC-2963: remote provider sign-in state + last sign-in message.
+        boardAuth: { slack: false, teams: false },
+        boardAuthMessage: "",
+        // SPEC-2963: editable (non-secret) provider config for the settings UI.
+        // Secrets are never echoed back; `*HasSecret` flags reflect store state.
+        boardConfig: {
+          slackClientId: "",
+          slackDefaultChannel: "",
+          slackHasSecret: false,
+          teamsClientId: "",
+          teamsTenantId: "",
+          teamsDefaultChannel: "",
+          oauthRedirectPort: 8765,
+        },
         autostartEnabled: false,
         autostartPreviousEnabled: false,
         autostartMechanism: "",
@@ -11713,6 +11899,8 @@
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
         send({ kind: "get_system_settings" });
+        // SPEC-2963: also fetch remote Board provider sign-in state.
+        send({ kind: "get_board_auth_status" });
         send({ kind: "get_autostart_status" });
 
         renderSettingsAgentList();
@@ -11967,6 +12155,272 @@
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        // SPEC-2959/2963: Board provider selector. `local` keeps the Board
+        // offline; `slack` / `teams` are network-backed and selectable. Picking
+        // a remote provider reveals its config form (client id / channel /
+        // secret) and a sign-in affordance below.
+        const boardSection = createDiv("settings-section");
+        const boardLabel = document.createElement("label");
+        boardLabel.className = "settings-label";
+        boardLabel.setAttribute("for", "settings-system-board-provider");
+        boardLabel.textContent = "Board provider";
+        boardSection.appendChild(boardLabel);
+
+        const boardSelect = document.createElement("select");
+        boardSelect.className = "settings-select";
+        boardSelect.id = "settings-system-board-provider";
+        for (const opt of [
+          { value: "local", text: "Local (offline)" },
+          { value: "slack", text: "Slack" },
+          { value: "teams", text: "Teams" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          boardSelect.appendChild(option);
+        }
+        boardSelect.value = systemSettingsState.boardProvider || "local";
+        boardSelect.addEventListener("change", (e) => {
+          const next = e.target.value;
+          systemSettingsState.boardProvider = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({
+            kind: "update_system_settings",
+            language: systemSettingsState.language || "auto",
+            board_provider: next,
+          });
+          renderSystemPanelInAllSettingsWindows();
+        });
+        boardSection.appendChild(boardSelect);
+
+        const boardHelp = document.createElement("p");
+        boardHelp.className = "settings-help";
+        boardHelp.textContent =
+          "Where the coordination Board is stored. Local keeps the Board offline and " +
+          "on this machine. Slack / Teams require sign-in and are network-backed.";
+        boardSection.appendChild(boardHelp);
+
+        // SPEC-2963 FR-011/FR-012: sign-in affordance + auth status for the
+        // selected remote provider. Local needs no sign-in.
+        const selectedProvider = systemSettingsState.boardProvider || "local";
+        if (selectedProvider === "slack" || selectedProvider === "teams") {
+          // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
+          // config.toml; the client secret is routed to the secure credential
+          // store and never echoed back (placeholder shows "configured").
+          const cfg = systemSettingsState.boardConfig || {};
+          const configForm = createDiv("settings-section board-config-form");
+          configForm.dataset.provider = selectedProvider;
+
+          const makeField = (id, labelText, value, opts = {}) => {
+            const wrap = createDiv("settings-field");
+            const fieldLabel = document.createElement("label");
+            fieldLabel.className = "settings-label";
+            fieldLabel.setAttribute("for", id);
+            fieldLabel.textContent = labelText;
+            wrap.appendChild(fieldLabel);
+            const input = document.createElement("input");
+            input.className = "settings-input";
+            input.id = id;
+            input.type = opts.password ? "password" : "text";
+            input.value = value || "";
+            if (opts.placeholder) input.placeholder = opts.placeholder;
+            if (opts.autocomplete) input.autocomplete = opts.autocomplete;
+            wrap.appendChild(input);
+            configForm.appendChild(wrap);
+            return input;
+          };
+
+          let clientIdInput;
+          let defaultChannelInput;
+          let tenantIdInput;
+          let secretInput;
+          if (selectedProvider === "slack") {
+            clientIdInput = makeField(
+              "settings-board-slack-client-id",
+              "Client ID",
+              cfg.slackClientId,
+              { placeholder: "e.g. 1234567890.1234567890" },
+            );
+            defaultChannelInput = makeField(
+              "settings-board-slack-channel",
+              "Default channel ID",
+              cfg.slackDefaultChannel,
+              { placeholder: "e.g. C0123456789" },
+            );
+            secretInput = makeField(
+              "settings-board-slack-secret",
+              "Client secret",
+              "",
+              {
+                password: true,
+                autocomplete: "new-password",
+                placeholder: cfg.slackHasSecret
+                  ? "configured — leave blank to keep"
+                  : "required for Slack sign-in",
+              },
+            );
+            // The secret is stored securely and never echoed back, so the
+            // field intentionally clears after Save. Show an explicit saved
+            // state so it is obvious the secret persisted (id used by tests).
+            const secretState = createNode(
+              "p",
+              "settings-help board-secret-state",
+              cfg.slackHasSecret
+                ? "✓ A client secret is saved (the field stays blank for security)."
+                : "No client secret saved yet.",
+            );
+            secretState.dataset.hasSecret = cfg.slackHasSecret ? "true" : "false";
+            configForm.appendChild(secretState);
+          } else {
+            clientIdInput = makeField(
+              "settings-board-teams-client-id",
+              "Application (client) ID",
+              cfg.teamsClientId,
+              { placeholder: "Entra app id" },
+            );
+            tenantIdInput = makeField(
+              "settings-board-teams-tenant-id",
+              "Tenant ID",
+              cfg.teamsTenantId,
+              { placeholder: "tenant id / common / organizations" },
+            );
+            defaultChannelInput = makeField(
+              "settings-board-teams-channel",
+              "Default channel",
+              cfg.teamsDefaultChannel,
+              { placeholder: "team_id/channel_id" },
+            );
+          }
+
+          const saveBtn = createNode(
+            "button",
+            "wizard-button",
+            "Save configuration",
+          );
+          saveBtn.type = "button";
+          saveBtn.addEventListener("click", () => {
+            const payload = {
+              kind: "update_board_provider_config",
+              provider: selectedProvider,
+              client_id: clientIdInput ? clientIdInput.value.trim() : "",
+              default_channel: defaultChannelInput
+                ? defaultChannelInput.value.trim()
+                : "",
+            };
+            if (selectedProvider === "teams") {
+              payload.tenant_id = tenantIdInput ? tenantIdInput.value.trim() : "";
+            }
+            if (selectedProvider === "slack" && secretInput) {
+              // Only send the secret when the user typed one, so an empty box
+              // does not clear an already-configured secret.
+              if (secretInput.value.length > 0) {
+                payload.client_secret = secretInput.value;
+              }
+            }
+            send(payload);
+          });
+          configForm.appendChild(saveBtn);
+          boardSection.appendChild(configForm);
+
+          // SPEC-2963 FR-005: fixed OAuth callback port. The redirect_uri must
+          // exactly match a URL registered in the provider app; gwt binds this
+          // loopback port so sign-in works regardless of the (ephemeral) GUI
+          // server port. Editable so a busy 8765 can be changed.
+          const oauthPort = Number(cfg.oauthRedirectPort) || 8765;
+          const oauthForm = createDiv("settings-section board-oauth-port-form");
+          const portField = createDiv("settings-field");
+          const portLabel = document.createElement("label");
+          portLabel.className = "settings-label";
+          portLabel.setAttribute("for", "settings-board-oauth-port");
+          portLabel.textContent = "OAuth callback port";
+          portField.appendChild(portLabel);
+          const portInput = document.createElement("input");
+          portInput.className = "settings-input";
+          portInput.id = "settings-board-oauth-port";
+          portInput.type = "number";
+          portInput.min = "1";
+          portInput.max = "65535";
+          portInput.value = String(oauthPort);
+          portField.appendChild(portInput);
+          oauthForm.appendChild(portField);
+
+          const redirectHint = createNode(
+            "p",
+            "settings-help board-oauth-redirect-hint",
+            "",
+          );
+          const renderRedirectHint = () => {
+            const p = Number(portInput.value) || oauthPort;
+            redirectHint.textContent =
+              "Register this exact Redirect URL in the Slack/Teams app: " +
+              `http://127.0.0.1:${p}/oauth/callback`;
+          };
+          renderRedirectHint();
+          portInput.addEventListener("input", renderRedirectHint);
+          oauthForm.appendChild(redirectHint);
+
+          const savePortBtn = createNode("button", "wizard-button", "Save port");
+          savePortBtn.type = "button";
+          savePortBtn.addEventListener("click", () => {
+            const next = Number(portInput.value);
+            send({
+              kind: "update_board_oauth_port",
+              port: Number.isFinite(next) && next > 0 ? Math.floor(next) : 0,
+            });
+          });
+          oauthForm.appendChild(savePortBtn);
+          boardSection.appendChild(oauthForm);
+
+          const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
+          const signedIn = auth[selectedProvider] === true;
+          const authRow = createDiv("settings-section board-auth-row");
+          const statusText = createNode(
+            "span",
+            "board-auth-status",
+            signedIn
+              ? `Signed in to ${selectedProvider}`
+              : `Not signed in to ${selectedProvider}`,
+          );
+          statusText.dataset.signedIn = signedIn ? "true" : "false";
+          authRow.appendChild(statusText);
+
+          const signInBtn = createNode(
+            "button",
+            "wizard-button",
+            signedIn ? "Re-sign in" : "Sign in",
+          );
+          signInBtn.type = "button";
+          signInBtn.addEventListener("click", () => {
+            send({ kind: "board_provider_sign_in", provider: selectedProvider });
+          });
+          authRow.appendChild(signInBtn);
+
+          if (signedIn) {
+            const signOutBtn = createNode("button", "text-button", "Sign out");
+            signOutBtn.type = "button";
+            signOutBtn.addEventListener("click", () => {
+              send({ kind: "board_provider_sign_out", provider: selectedProvider });
+            });
+            authRow.appendChild(signOutBtn);
+          }
+
+          const refreshBtn = createNode("button", "text-button", "Refresh");
+          refreshBtn.type = "button";
+          refreshBtn.addEventListener("click", () => {
+            send({ kind: "get_board_auth_status" });
+          });
+          authRow.appendChild(refreshBtn);
+          boardSection.appendChild(authRow);
+
+          if (systemSettingsState.boardAuthMessage) {
+            boardSection.appendChild(
+              createNode("p", "settings-help", systemSettingsState.boardAuthMessage),
+            );
+          }
+        }
+
         const autostartSection = createDiv("settings-section");
         const autostartLabel = document.createElement("label");
         autostartLabel.className = "settings-checkbox-label";
@@ -12020,6 +12474,7 @@
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
         renderSystemPanelStatus(panel);
       }
@@ -13134,6 +13589,9 @@
               if (state.composerBody.trim() === pendingSubmit.body) {
                 state.composerBody = "";
               }
+              if ((state.composerTitle || "").trim() === (pendingSubmit.title || "")) {
+                state.composerTitle = "";
+              }
               state.replyParentId = null;
               state.pendingSubmit = null;
               state.submitting = false;
@@ -13731,6 +14189,24 @@
             }
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
+          case "board_auth_status":
+            // SPEC-2963: remote provider sign-in state + editable config view.
+            systemSettingsState.boardAuth = {
+              slack: event.slack === true,
+              teams: event.teams === true,
+            };
+            systemSettingsState.boardAuthMessage = event.message || "";
+            systemSettingsState.boardConfig = {
+              slackClientId: event.slack_client_id || "",
+              slackDefaultChannel: event.slack_default_channel || "",
+              slackHasSecret: event.slack_has_secret === true,
+              teamsClientId: event.teams_client_id || "",
+              teamsTenantId: event.teams_tenant_id || "",
+              teamsDefaultChannel: event.teams_default_channel || "",
+              oauthRedirectPort: event.oauth_redirect_port || 8765,
+            };
+            renderSystemPanelInAllSettingsWindows();
+            break;
           case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
@@ -13739,6 +14215,7 @@
                 kind: "system_settings",
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
+                board_provider: event.board_provider,
               })
             ) {
               break;
@@ -13746,6 +14223,8 @@
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
             // Don't clobber an in-flight "Saving…" status; only seed when no
             // pending feedback is shown.
@@ -13762,6 +14241,7 @@
                 kind: "system_settings_updated",
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
+                board_provider: event.board_provider,
               })
             ) {
               break;
@@ -13769,6 +14249,8 @@
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.boardProvider =
+              event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
             systemSettingsState.statusKind = "success";
             renderSystemPanelInAllSettingsWindows();

@@ -6411,6 +6411,62 @@ Context: SPEC-1919 added /terminal-copy-shortcut.js as a root module imported by
 Learning: When adding a root-level web module imported by app.js, keep three contracts in sync: crates/gwt/src/embedded_web.rs asset registry, scripts/run-frontend-unit-tests.sh coverage, and crates/gwt/playwright/tests/_helpers/embedded-frontend.ts ROOT_MODULES.
 Future Action: Before final verification for app.js root imports, run scripts/run-frontend-unit-tests.sh and check the Playwright embedded route parity test instead of assuming the Rust embedded registry is sufficient.
 
+## 2026-06-01 — gwt crate は bin/lib で別クレートルート: 共有モジュールは bin から gwt:: で参照
+
+Type: lesson
+Context: main.rs(bin gwt) は独自の mod ツリー(app_runtime, board_view 等)を持ち、共有モジュールは gwt::<mod> で参照する。一方 `cli/*` は lib.rs 配下で crate::<mod> が正しい。
+Learning: gwt crate は [[bin]] gwt=src/main.rs と lib.rs が別クレートルート。bin 側ソース(app_runtime/board_view)からは lib のモジュールを gwt:: で参照し、lib 側ソース(cli/*)は crate:: で参照する。
+Future Action: lib に新規 pub mod を足して bin から使う場合は gwt::<mod>、lib 内から使う場合は crate::<mod> を使い分ける。コンパイル前に呼び出し元が bin/lib どちらかを確認する。
+
+## 2026-06-02 — Board provider tests read the global ~/.gwt/config.toml
+
+Type: lesson
+Context: board_provider::provider() reads Settings::load() (global config) on every call. cli::board + cli::hook::board_reminder + cli::env unit tests exercise provider() indirectly. dirs::home_dir() (used by Settings::global_config_path) ignores HOME/USERPROFILE env on Windows (dirs 6), so these tests CANNOT be isolated from the machine config via ScopedEnvVar HOME/USERPROFILE.
+Learning: If the dev machine's config.toml has [board] provider = slack/teams, ~33 board lib tests fail with 'Slack is not signed in' because provider() resolves a remote provider with no token. This is collateral, not a code defect. Attempting env-based HOME isolation in these tests caused ordering-dependent regressions (env::set_var races across parallel/sequential tests).
+Future Action: Keep the dev machine ~/.gwt/config.toml at provider = local while running 'cargo test -p gwt'. Switch to slack/teams only for manual GUI e2e, then switch back. Do NOT add ScopedEnvVar HOME guards to board tests to work around it. Configure Slack/Teams via the Settings UI (BackendEvent UpdateBoardProviderConfig), not by editing config.toml.
+
+## 2026-06-02 — Slack OAuth v2 authorize URL requires comma-separated scopes and no response_type
+
+Type: lesson
+Context: gwt Board Slack provider sign-in (SPEC-2963). build_authorize_url in crates/gwt/src/board_remote/oauth.rs originally joined scopes with a space and unconditionally added response_type=code for all providers.
+Learning: Slack OAuth v2 (/oauth/v2/authorize) needs scope as a COMMA-separated list; a space-separated list is parsed as one invalid scope and Slack fails with 'No scopes requested'. Slack also does NOT define response_type (it nudges toward the OIDC sign-in flow); omit it. Microsoft/Teams is the opposite: space-separated scopes + response_type=code required. Also: Slack DOES accept `http://127.0.0.1` loopback redirect URLs (no https forced), but the redirect_uri must match the registered URL EXACTLY incl. host (127.0.0.1 != localhost), port, /oauth/callback path, no trailing slash, and the app must be reinstalled after changing Redirect URLs/scopes.
+Future Action: For any OAuth provider, branch the scope separator and response_type by provider (Slack: comma + no response_type; MS: space + response_type=code). When a desktop app uses a loopback redirect, the port must be STABLE/pre-registered — gwt's default ephemeral server port breaks OAuth, so OAuth needs a fixed callback port (follow-up). Tell users to register 127.0.0.1 (not localhost), click Save URLs, and Reinstall to Workspace.
+
+## 2026-06-02 — Slack bot must join the channel before conversations.history / chat.postMessage
+
+Type: lesson
+Context: gwt Board SlackProvider (SPEC-2963). After OAuth sign-in succeeds and the xoxb- bot token is stored, reading the Board surfaced 'slack conversations.history error: not_in_channel' for the configured default channel.
+Learning: A Slack bot token with channels:history/channels:read/chat:write still cannot read history or post to a channel unless the bot is a MEMBER of that channel. conversations.history returns not_in_channel and chat.postMessage fails until the bot joins. chat:write.public would allow posting to public channels without joining, but reading history always requires membership.
+Future Action: Tell users to invite the gwt bot to the target channel (/invite @gwt, or channel Integrations > Add apps) after sign-in. Optional enhancement: on not_in_channel, have SlackProvider call conversations.join (needs channels:join scope added to SLACK_SCOPES + re-auth) and retry, for public channels only.
+
+## 2026-06-02 — OAuth redirect port only matters during sign-in, not ongoing Board ops
+
+Type: lesson
+Context: gwt Board remote provider (SPEC-2963). The fixed OAuth callback port (default 8765) is used to build redirect_uri for authorize + code->token exchange.
+Learning: redirect_uri/port is only consumed during the interactive sign-in flow (authorize request + oauth token exchange). After the access token is stored, all Board read/write use the Bearer token with no redirect, so changing/losing the port does NOT break an existing session. Slack bot tokens (xoxb-) typically never expire (no refresh_token). Microsoft/Teams tokens expire but refresh uses grant_type=refresh_token with NO redirect_uri, so refresh needs no port either. The port is needed again only for a fresh sign-in (sign-out -> sign-in, or after refresh_token revocation).
+Future Action: When reasoning about the fixed-port requirement: it must be stable/registerable at sign-in time only. Post-auth port changes are safe for existing sessions; only the next sign-in needs the new redirect URL registered. Do not over-engineer port stability for ongoing operation.
+
+## 2026-06-02 — Teams Entra app must be public client (Mobile/desktop), not Web
+
+Type: lesson
+Context: gwt Teams Board provider OAuth (SPEC-2963). Audited against MS docs before user E2E.
+Learning: Teams uses delegated auth-code + PKCE with NO client_secret, so the Entra app MUST register the `http://127.0.0.1:8765/oauth/callback` redirect under the 'Mobile and desktop applications' (public client) platform with 'Allow public client flows'=Yes. Registering under 'Web' makes Entra treat it as a confidential client and the secret-less token exchange fails with AADSTS invalid_client. The Azure portal may reject http-loopback in the redirect textbox; add via app Manifest replyUrlsWithType type=InstalledClient, and note loopback port is ignored for matching (`http://127.0.0.1/oauth/callback` matches any port). The signed-in user must be a member of the target team/channel or Graph returns 403 (Teams analogue of Slack not_in_channel). Graph 'list channel messages' is NOT a metered/protected API (Teams APIs unmetered since 2025-08-25) - no Microsoft approval gate; do not confuse with channel.getAllMessages export.
+Future Action: When documenting/supporting Teams OAuth: emphasize public-client/Mobile-desktop registration + Allow public client flows + 127.0.0.1 exact host + membership. gwt code is correct (response_mode=query pinned, contentType=text, system/deleted filtered, 403 self-diagnoses).
+
+## 2026-06-02 — Teams Board provider E2E verified against real Microsoft Graph
+
+Type: lesson
+Context: gwt SPEC-2963 Teams provider. User registered Entra public-client app (client_id 164f7884..., tenant 0ff7b59c...), signed in via gwt; agent verified E2E.
+Learning: Teams delegated OAuth + Graph post/read/reply works end-to-end: gwt posts a channel message via TeamsProvider, read back via GET /teams/{team}/channels/{chan}/messages matches, and --parent reply lands as a Graph reply with replyToId=parent. channel_id can be @thread.skype (older) as well as @thread.tacv2; gwt split_channel(team/channel) handles it. Note: gwt does NOT request User.Read, so Graph /me returns Authorization_RequestDenied — this is expected and does NOT mean the token is invalid; ChannelMessage.Send/Read.All operations succeed. The fixed OAuth callback port (8765) + Mobile/desktop public-client Entra registration worked.
+Future Action: All three Board providers (Local/Slack/Teams) are now E2E-verified. For Teams verification: check post/read/reply via Graph directly, not /me (which needs User.Read gwt doesn't request).
+
+## 2026-06-03 — gwt bin tests read real ~/.gwt/config.toml board.provider (cfg(test) seam is lib-only)
+
+Type: lesson
+Context: SPEC-2963 検証中、cargo test -p gwt --bin gwt の app_runtime board テスト8件が config.toml の provider=teams で失敗。board_provider::current_kind() の cfg(test) thread-local override(default Local)は gwt LIB を --test ビルドした時のみ有効。bin(main.rs/app_runtime)テストは LIB を通常依存としてリンクするため override が効かず、Settings::load().board.provider(実機 config)を読む。Windows の dirs 6 は HOME/USERPROFILE を無視するため ScopedEnvVar による隔離も効かない。
+Learning: bin crate のテストは LIB の #[cfg(test)] seam に到達できない。machine の ~/.gwt/config.toml に board.provider=slack/teams が設定されていると bin board テストが remote provider を使い失敗する。CI は board.provider 未設定→default Local なので緑。
+Future Action: gwt の board 関連 bin テストをローカル実行する前に ~/.gwt/config.toml の [board] provider を local(または未設定)にする。lib テスト(cargo test -p gwt --lib)は cfg(test) override で hermetic なので config 非依存。恒久対策が必要なら current_kind() に non-test でも効く env override seam を入れて bin テストで設定する案を検討。
+
 ## 2026-06-01 — Isolated HOME live checks must avoid Start Work auth traps
 
 Type: lesson

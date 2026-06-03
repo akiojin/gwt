@@ -327,6 +327,147 @@ phase (Validate -> Backup -> Bareify -> Worktrees -> Submodules -> Tracking ->
 Cleanup -> Done). On success the project tab reloads onto the new branch
 worktree without restarting the app.
 
+## Board providers (Local / Slack / Teams)
+
+The coordination **Board** can be backed by one of three providers, selected in
+**Settings → System → Board provider**:
+
+- **Local** (default) — filesystem-backed, offline, per-worktree. No setup.
+- **Slack** — posts/reads live in a Slack channel via the Slack Web API.
+- **Teams** — Microsoft Teams channel via Microsoft Graph. *Experimental: the
+  code is implemented but has not yet been verified end to end against a real
+  tenant. Treat as preview.*
+
+Switching the provider swaps the entire Board content: each provider is its own
+store, so the previously shown entries become invisible while the new provider
+is active (switching back restores them). Secrets and OAuth tokens are stored in
+a permission-restricted credential store under `~/.gwt/credentials/`, never in
+`config.toml`.
+
+### Use Slack as the Board backend
+
+> 📷 *Screenshot placeholders are marked below. The Slack admin screens live at
+> `api.slack.com` (account-specific) and the gwt screen is under Settings →
+> System; add captures at each marked step.*
+
+#### 1. Create a Slack app
+
+1. Go to <https://api.slack.com/apps> → **Create New App** → **From scratch**.
+2. Name it (e.g. `gwt`) and pick the target workspace → **Create App**.
+   - 📷 *Screenshot: Create App dialog.*
+
+#### 2. Add the redirect URL
+
+1. In the app, open **OAuth & Permissions → Redirect URLs → Add New Redirect URL**.
+2. Enter **exactly** the gwt OAuth callback URL and **Save URLs**:
+
+   ```text
+   http://127.0.0.1:8765/oauth/callback
+   ```
+
+   - Use `127.0.0.1` (not `localhost`), keep the `/oauth/callback` path, and no
+     trailing slash. This must match gwt's **OAuth callback port** (default
+     `8765`, changeable in Settings — see step 5). gwt shows the exact URL to
+     register next to the port field.
+   - 📷 *Screenshot: Redirect URLs with the callback saved.*
+
+#### 3. Add bot scopes
+
+1. **OAuth & Permissions → Scopes → Bot Token Scopes** → add:
+   `chat:write`, `channels:history`, `channels:read`.
+2. **Install App → Install to Workspace** (re-install after changing scopes /
+   redirect URLs so they take effect).
+   - 📷 *Screenshot: Bot Token Scopes list.*
+
+#### 4. Copy the credentials
+
+From **Basic Information → App Credentials**, note the **Client ID** and
+**Client Secret**. Also pick the **Channel ID** of the target channel (in Slack:
+channel → **View channel details** → bottom of the dialog).
+
+#### 5. Configure gwt
+
+1. In gwt, open **Settings → System → Board provider** and select **Slack**.
+2. Fill the form and **Save configuration**:
+   - **Client ID**, **Default channel ID**, **Client secret** (the secret is
+     stored securely and never written to `config.toml`; the field clears after
+     saving and shows "✓ A client secret is saved").
+   - Optionally change the **OAuth callback port** (default `8765`); the form
+     shows the exact Redirect URL to register in step 2. Changing it takes
+     effect on the next launch.
+   - 📷 *Screenshot: gwt Settings → System → Board provider = Slack (config form).*
+3. Click **Sign in** → the browser opens the Slack consent screen → **Allow**.
+   The callback page shows "Signed in / Connected the slack Board provider" and
+   gwt flips to "Signed in to slack".
+   - 📷 *Screenshot: Slack consent screen and the "Signed in" result.*
+
+#### 6. Invite the bot to the channel
+
+A Slack bot can only read or post in channels it has joined. In the target
+channel, run:
+
+```text
+/invite @gwt
+```
+
+(replace `gwt` with your app name). Until the bot is a member, the Board shows
+`conversations.history error: not_in_channel`. After inviting, posts made from
+the gwt Board appear in the Slack channel, and channel messages appear on the
+Board.
+
+> The OAuth callback port only matters during sign-in. Once a token is stored,
+> Board reads/writes use the token alone, so the port can change or be busy
+> afterward without affecting an existing session — only a fresh sign-in needs
+> the registered redirect URL again.
+
+### Use Microsoft Teams as the Board backend (experimental)
+
+> Teams support is implemented but not yet verified end to end against a real
+> tenant. The steps below reflect the Microsoft identity / Graph requirements.
+
+#### 1. Register an Entra (Azure AD) app
+
+1. <https://entra.microsoft.com> → **App registrations → New registration**.
+2. Name it `gwt` (single-tenant is fine).
+3. **Redirect URI**: choose the **Mobile and desktop applications** (public
+   client) platform and enter **exactly**:
+
+   ```text
+   http://127.0.0.1:8765/oauth/callback
+   ```
+
+   - Use `127.0.0.1` (the host gwt sends) and match gwt's OAuth callback port
+     (default `8765`; the port is ignored for loopback matching, so
+     `http://127.0.0.1/oauth/callback` also works).
+   - If the portal rejects an http-loopback value, add it via the app
+     **Manifest** as `replyUrlsWithType` with `"type": "InstalledClient"`.
+   - ⚠️ **Do not register it under "Web"** — the public-client token exchange
+     sends no client secret and a Web registration fails with
+     `AADSTS invalid_client`.
+4. **Authentication → Advanced settings → Allow public client flows → Yes**.
+
+#### 2. Grant Microsoft Graph delegated permissions
+
+**API permissions → Add a permission → Microsoft Graph → Delegated**:
+`ChannelMessage.Send`, `ChannelMessage.Read.All`, `Channel.ReadBasic.All`,
+`offline_access`. Grant admin consent if your tenant requires it.
+
+#### 3. Find the team_id / channel_id
+
+In Teams, open the channel → **Get link to channel**. In the URL,
+`groupId=<GUID>` is the **team_id**, and the URL-decoded `19:...@thread.tacv2`
+(after `/channel/`) is the **channel_id**. gwt's **Default channel** is
+`<team_id>/<channel_id>`. (Alternatively, Graph Explorer:
+`GET /me/joinedTeams`, then `GET /teams/{id}/channels`.)
+
+#### 4. Configure gwt and sign in
+
+**Settings → Board provider → Teams** → enter **Application (client) ID**,
+**Tenant ID**, and **Default channel** (`team_id/channel_id`) → **Save** →
+**Sign in**. Posts appear as the signed-in user (Graph delegated; app-only
+channel posting is not supported). You must be a **member** of the target team
+and channel — otherwise Graph returns `403` and gwt shows an actionable hint.
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons
