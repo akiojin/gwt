@@ -17101,6 +17101,125 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = (0..1_000)
+            .flat_map(|_| {
+                runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. }))
+                .count(),
+            0
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::WindowState { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::TerminalStatus { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let first_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let duplicate_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let changed_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Running", "session-1"));
+
+        assert!(first_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+        assert!(
+            duplicate_events.is_empty(),
+            "unchanged RuntimeState hooks should not fan out status events"
+        );
+        assert!(changed_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::WindowState {
+                state: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+        assert!(changed_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+        let _ = runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::WorkspaceState { .. })
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
     fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

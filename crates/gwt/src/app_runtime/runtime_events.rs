@@ -184,6 +184,9 @@ impl AppRuntime {
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
+        if self.window_hook_states.get(&window_id).copied() == Some(hook_state) {
+            return events;
+        }
         self.window_hook_states
             .insert(window_id.clone(), hook_state);
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
