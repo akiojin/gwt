@@ -8987,6 +8987,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::Submit => "submit",
+            gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }
     }
 

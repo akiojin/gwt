@@ -3499,6 +3499,31 @@ mod tests {
     }
 
     #[test]
+    fn frontend_event_launch_wizard_goto_step_round_trips() {
+        // SPEC-2014 FR-128 / SC-084: progress rail クリックの goto_step action。
+        use crate::launch_wizard::{LaunchWizardAction, WizardPhase};
+        let payload =
+            r#"{"kind":"launch_wizard_action","action":{"kind":"goto_step","phase":"runtime"}}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize launch_wizard goto_step");
+        match event {
+            FrontendEvent::LaunchWizardAction { action, .. } => match action {
+                LaunchWizardAction::GotoStep { phase } => {
+                    assert_eq!(phase, WizardPhase::Runtime);
+                }
+                other => panic!("unexpected action: {other:?}"),
+            },
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let action = LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Confirm,
+        };
+        let value = serde_json::to_value(&action).expect("serialize goto_step");
+        assert_eq!(value["kind"], "goto_step");
+        assert_eq!(value["phase"], "confirm");
+    }
+
+    #[test]
     fn frontend_event_workspace_projection_prune_defaults() {
         let payload = r#"{"kind":"workspace_projection_prune"}"#;
         let event: FrontendEvent = serde_json::from_str(payload).expect("deserialize defaults");
