@@ -1492,6 +1492,12 @@ pub struct RemindersState {
     /// the title changes.
     #[serde(default)]
     pub phase_changed_in_window: bool,
+    /// Issue #2987: timestamp of the most recent memory-update reminder
+    /// injection. The board-reminder hook throttles the reminder using this
+    /// timestamp so it does not fire on every UserPromptSubmit turn. `None`
+    /// until the reminder fires for the first time.
+    #[serde(default)]
+    pub last_memory_reminded_at: Option<DateTime<Utc>>,
 }
 
 /// Directory that stores per-agent-session reminder sidecar files.
