@@ -6,7 +6,7 @@
 
 - **この AGENTS.md は gwt リポジトリ専用**のローカル運用ルールであり、gwt が開く任意プロジェクト向けの汎用 Agent 指示ではない。
 - gwt を使って他プロジェクトを開発する場合、そのプロジェクト自身の `AGENTS.md` / `CLAUDE.md` / README 等を優先する。
-- gwt 共通の Agent 運用（Board/Workspace 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Workspace の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
+- gwt 共通の Agent 運用（Board/Work 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Work の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
 
 ## エージェント運用原則
 
@@ -213,9 +213,9 @@
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
-### Board / Workspace 運用ガイダンスの所在
+### Board / Work 運用ガイダンスの所在
 
-Board / Workspace の operational rules（投稿 kind、audience selection、body template、
+Board / Work の operational rules（投稿 kind、audience selection、body template、
 tool-unit post 禁止 など）は AGENTS.md には書かない。canonical source は
 `crates/gwt-skills/src/coordination_guidance.rs` のみで、そこから 2 つの経路に配信される:
 
@@ -227,7 +227,7 @@ tool-unit post 禁止 など）は AGENTS.md には書かない。canonical sour
   `board_reminder.rs` が動的注入する reminder text。`GWT_SESSION_ID` 環境変数が
   設定された session で発火する。
 
-Board は coordination/history log、Workspace は current state という分離は維持する。
+Board は coordination/history log、Work は current state という分離は維持する。
 新しい kind や mention 構文の更新は canonical source を編集して再 materialize する。
 AGENTS.md には複製しない（複製ドリフトが SPEC-1935 で問題化したため）。
 
