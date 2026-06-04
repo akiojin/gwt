@@ -6697,3 +6697,10 @@ Type: lesson
 Context: SPEC-2012 visual verification was blocked twice because the isolated browser-check HOME had no Git HTTPS credentials and the user attempted Start Work/Launch flows that created remote work branches.
 Learning: For UI verification that needs an Agent window, prepare the fresh checkout with a current-branch Agent window before handing off the URL. For Claude Code startup auto-resume, the seeded session must include exact agent_session_id plus lifecycle evidence such as last_hook_event_at or last_completed_stop_at; otherwise it is filtered out.
 Future Action: When using browser-check for Agent-window behavior, never ask the user to Start Work in the isolated HOME. Seed or launch the required current-branch Agent window first, verify with headless/browser checks that no branch-auth error is present, then share the URL.
+
+## 2026-06-04 — Fresh Claude verification can be blocked by existing live Work agent focus
+
+Type: lesson
+Context: SPEC-2012 visual verification needed a Claude Code window in an isolated browser-check HOME. Launch Wizard normal mode appeared to close successfully but did not create Claude while a live Codex pane was already assigned to the same Work.
+Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
+Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
