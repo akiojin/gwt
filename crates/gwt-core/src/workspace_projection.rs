@@ -214,6 +214,61 @@ pub fn recompute_lifecycle_stage(
     }
 }
 
+/// SPEC-2359 Phase W-12 (FR-349): the agent-session-centric Work lifecycle.
+///
+/// Distinct from [`WorkspaceLifecycleStage`] (the U-6 status-derived chip with
+/// Planning/InReview/Archived). This 4-state model treats a Work as one agent
+/// session: it is `Active` while the agent runs, `Paused` once the agent stops
+/// but the user has not closed it, and `Done` / `Discarded` only on an explicit
+/// user close. Agent stop alone never closes a Work (FR-350).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkActiveLifecycleState {
+    #[default]
+    Active,
+    Paused,
+    Done,
+    Discarded,
+}
+
+/// Live runtime state of the agent session that owns a Work, used as the
+/// driver for [`recompute_work_active_lifecycle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkAgentRuntime {
+    /// The owning agent session has a live window / running process.
+    Running,
+    /// The owning agent session exists but is stopped / exited.
+    Stopped,
+    /// No live agent session is associated (e.g. resumed-later Work).
+    None,
+}
+
+/// Explicit close recorded when the user closes a Work from the Work surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCloseKind {
+    Done,
+    Discarded,
+}
+
+/// SPEC-2359 Phase W-12 (FR-349/FR-350): derive the agent-session Work
+/// lifecycle. An explicit user close wins; otherwise the live agent runtime
+/// decides: `Running` → `Active`, `Stopped` / `None` → `Paused`. Agent stop
+/// alone must never yield `Done` / `Discarded` (FR-350) — only a user close does.
+pub fn recompute_work_active_lifecycle(
+    agent_runtime: WorkAgentRuntime,
+    closed: Option<WorkCloseKind>,
+) -> WorkActiveLifecycleState {
+    match closed {
+        Some(WorkCloseKind::Done) => WorkActiveLifecycleState::Done,
+        Some(WorkCloseKind::Discarded) => WorkActiveLifecycleState::Discarded,
+        None => match agent_runtime {
+            WorkAgentRuntime::Running => WorkActiveLifecycleState::Active,
+            WorkAgentRuntime::Stopped | WorkAgentRuntime::None => WorkActiveLifecycleState::Paused,
+        },
+    }
+}
+
 /// SPEC-2359 Phase U-6 (FR-131): sentinel default for `created_at` when a
 /// legacy `workspace.json` is read without the field present. The retroactive
 /// migration in `workspace_projection_migration` detects this value and
@@ -4675,5 +4730,42 @@ mod tests {
 
         assert_eq!(local, remote);
         assert_eq!(local, ref_remote);
+    }
+
+    #[test]
+    fn work_active_lifecycle_runs_active_when_agent_running() {
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Running, None),
+            WorkActiveLifecycleState::Active
+        );
+    }
+
+    #[test]
+    fn work_active_lifecycle_pauses_when_agent_stopped_or_absent_and_not_closed() {
+        // FR-350: agent stop alone never closes a Work; it becomes Paused.
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Stopped, None),
+            WorkActiveLifecycleState::Paused
+        );
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::None, None),
+            WorkActiveLifecycleState::Paused
+        );
+    }
+
+    #[test]
+    fn work_active_lifecycle_respects_explicit_user_close() {
+        // Explicit user close wins over runtime, even while the agent is running.
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Running, Some(WorkCloseKind::Done)),
+            WorkActiveLifecycleState::Done
+        );
+        assert_eq!(
+            recompute_work_active_lifecycle(
+                WorkAgentRuntime::Stopped,
+                Some(WorkCloseKind::Discarded)
+            ),
+            WorkActiveLifecycleState::Discarded
+        );
     }
 }
