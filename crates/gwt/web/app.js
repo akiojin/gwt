@@ -484,6 +484,18 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let renderedProjectTabsKey = "";
+
+      function projectTabsRenderKey(state) {
+        return JSON.stringify({
+          active_tab_id: state?.active_tab_id || null,
+          tabs: (state?.tabs || []).map((tab) => ({
+            id: tab?.id || "",
+            title: tab?.title || "",
+            project_root: tab?.project_root || "",
+          })),
+        });
+      }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
@@ -2288,7 +2300,11 @@
               recent_projects: [],
             };
             setVersionState(appState.app_version, versionState.latest);
-            renderProjectTabs();
+            const nextProjectTabsKey = projectTabsRenderKey(appState);
+            if (renderedProjectTabsKey !== nextProjectTabsKey) {
+              renderedProjectTabsKey = nextProjectTabsKey;
+              renderProjectTabs();
+            }
             renderProjectPicker();
             updateActionAvailability();
             const tab = activeProjectTab();

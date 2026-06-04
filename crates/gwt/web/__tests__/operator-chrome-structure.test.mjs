@@ -211,6 +211,53 @@ test("workspace_state hot path leaves Active Work overview redraw to active_work
   );
 });
 
+test("workspace_state hot path gates Project Tabs redraw by tab shell key", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    appSource,
+    /let\s+renderedProjectTabsKey\s*=/,
+    "app.js must track the last rendered Project Tabs shell key",
+  );
+  assert.match(
+    appSource,
+    /function\s+projectTabsRenderKey\s*\(/,
+    "app.js must define a Project Tabs shell key helper",
+  );
+  assert.match(
+    renderAppStateBody,
+    /projectTabsRenderKey\s*\(\s*appState\s*\)/,
+    "renderAppState must derive the next Project Tabs shell key from appState",
+  );
+  assert.match(
+    renderAppStateBody,
+    /renderedProjectTabsKey[\s\S]*!==[\s\S]*nextProjectTabsKey[\s\S]*renderProjectTabs\(\)/,
+    "renderAppState must redraw Project Tabs only when the shell key changes",
+  );
+});
+
+test("Project Tabs shell key ignores workspace geometry but includes tab identity", () => {
+  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Project Tabs shell key must include active_tab_id",
+  );
+  for (const field of ["id", "title", "project_root"]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Project Tabs shell key must include tab ${field}`,
+    );
+  }
+  for (const workspaceField of ["workspace", "windows", "geometry", "viewport"]) {
+    assert.doesNotMatch(
+      keyBody,
+      new RegExp(`\\b${workspaceField}\\b`),
+      `Project Tabs shell key must ignore ${workspaceField}`,
+    );
+  }
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
