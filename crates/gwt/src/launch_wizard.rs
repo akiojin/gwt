@@ -71,6 +71,17 @@ pub enum LaunchWizardStep {
     CodexFastMode,
 }
 
+/// SPEC-2014 FR-126/FR-128: progress rail クリックジャンプ（GotoStep）の対象フェーズ。
+/// ManualSetup（ConfigureAndStart）の Setup 3ステップ + 入口を表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WizardPhase {
+    Path,
+    Settings,
+    Runtime,
+    Confirm,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardOptionView {
     pub value: String,
@@ -281,6 +292,8 @@ pub struct LaunchWizardView {
     pub show_back_button: bool,
     pub show_manual_setup: bool,
     pub show_runtime_confirmation: bool,
+    /// SPEC-2014 FR-127: ManualSetup の Confirm ステップ（読み取りサマリ + Launch）。
+    pub show_confirm: bool,
     // SPEC-2014 Amendment 2026-05-20 (FR-057): gate the Linked issue section
     // so it only renders when the wizard was opened through the Knowledge
     // Issue Bridge (linked_issue_kind == Some(Issue) AND number is some).
@@ -294,6 +307,8 @@ pub struct LaunchWizardView {
     /// Legacy Codex-only compatibility field for older frontend payloads.
     pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
+    /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
+    pub phase: WizardPhase,
     pub error: Option<String>,
 }
 
@@ -861,6 +876,10 @@ pub enum LaunchWizardAction {
         enabled: bool,
     },
     Submit,
+    /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
+    GotoStep {
+        phase: WizardPhase,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -902,6 +921,15 @@ pub struct LaunchWizardState {
     pub linked_issue_number: Option<u64>,
     start_method_selected: bool,
     manual_setup_initialized: bool,
+    /// SPEC-2014 FR-126/FR-127: ManualSetup で Runtime ステップから Confirm へ
+    /// 進んだか。Runtime(編集) と Confirm(サマリ+Launch) を区別する。QuickStart /
+    /// 即起動系では使用しない（常に false）。
+    runtime_confirmed: bool,
+    /// SPEC-2014 FR-128: 解決済み状態のまま Settings フォームへ戻った（Back/rail）か。
+    /// resolved を破棄せず Settings を再表示し、branch 不変なら再解決を避ける（SC-082）。
+    settings_revisited: bool,
+    /// SPEC-2014 FR-128: 最後に runtime を解決した branch 名。branch 変更検出に使う。
+    resolved_branch_name: Option<String>,
 }
 
 impl LaunchWizardState {
@@ -984,6 +1012,9 @@ impl LaunchWizardState {
             linked_issue_number: context.linked_issue_number,
             start_method_selected: false,
             manual_setup_initialized: false,
+            runtime_confirmed: false,
+            settings_revisited: false,
+            resolved_branch_name: None,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -1214,6 +1245,7 @@ impl LaunchWizardState {
             show_back_button,
             show_manual_setup,
             show_runtime_confirmation,
+            show_confirm: self.show_confirm(),
             show_linked_issue: matches!(
                 self.context.linked_issue_kind,
                 Some(LinkedIssueKind::Issue)
@@ -1226,6 +1258,7 @@ impl LaunchWizardState {
             fast_mode,
             codex_fast_mode: self.codex_fast_mode && self.agent_is_codex(),
             launch_summary: self.launch_summary_view(),
+            phase: self.current_phase(),
             error: self.error.clone(),
         }
     }
@@ -1307,6 +1340,9 @@ impl LaunchWizardState {
         self.runtime_context_resolved = false;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        self.runtime_confirmed = false;
+        self.settings_revisited = false;
+        self.resolved_branch_name = None;
         self.context.worktree_path = None;
         self.context.docker_context = None;
         self.context.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
@@ -1321,6 +1357,8 @@ impl LaunchWizardState {
         self.runtime_context_resolved = false;
         self.runtime_resolution_pending = true;
         self.runtime_resolution_message = Some(message.into());
+        self.runtime_confirmed = false;
+        self.settings_revisited = false;
         self.error = None;
     }
 
@@ -1333,6 +1371,10 @@ impl LaunchWizardState {
         self.runtime_context_resolved = true;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        // SPEC-2014 FR-127/FR-128: 解決完了直後は Runtime ステップ（Confirm 未確認）。
+        self.runtime_confirmed = false;
+        self.settings_revisited = false;
+        self.resolved_branch_name = Some(self.branch_name.clone());
     }
 
     pub fn set_hydration_error(&mut self, error: String) {
@@ -1360,6 +1402,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::Submit => {
                 self.submit_panel();
+            }
+            LaunchWizardAction::GotoStep { phase } => {
+                self.goto_phase(phase);
             }
             LaunchWizardAction::ApplyQuickStart { index, mode } => {
                 self.apply_quick_start_action(index, mode);
@@ -1434,7 +1479,16 @@ impl LaunchWizardState {
                 self.codex_fast_mode = enabled && self.agent_is_codex();
             }
             LaunchWizardAction::Back => {
+                if self.show_confirm() {
+                    // SPEC-2014 FR-124: Confirm から Runtime ステップへ戻す。
+                    self.runtime_confirmed = false;
+                    return;
+                }
                 if self.show_runtime_confirmation() {
+                    // SPEC-2014 FR-124/FR-125/FR-128: Runtime から Settings フォームへ
+                    // 戻す。runtime 解決結果・選択を破棄せず（resolved 保持）Settings を
+                    // 再表示する。branch 不変なら次の前進で再解決しない（SC-082）。
+                    self.settings_revisited = true;
                     return;
                 }
                 if self.show_back_button() {
@@ -1804,7 +1858,93 @@ impl LaunchWizardState {
             self.branch_name = trimmed.to_string();
         }
 
+        // SPEC-2014 FR-128: Settings を再訪（解決済みのまま）してから Submit した場合、
+        // branch が変わっていれば再解決し、不変ならそのまま Runtime ステップへ戻る。
+        if self.manual_setup_initialized && self.settings_revisited {
+            self.advance_settings_to_runtime();
+            return;
+        }
+
+        // SPEC-2014 FR-127: ConfigureAndStart の Setup で Runtime ステップ（解決済み・
+        // 未確認）から Submit すると Confirm ステップへ進む。実 Launch は Confirm での
+        // み発生する。即起動系（manual_setup_initialized=false）は経由しない（FR-129）。
+        if self.manual_setup_initialized && self.runtime_context_resolved && !self.runtime_confirmed
+        {
+            self.runtime_confirmed = true;
+            return;
+        }
+
         self.finish_launch_request();
+    }
+
+    /// SPEC-2014 FR-128: Settings 再訪状態から Runtime ステップへ進む。branch が
+    /// 解決時から変わっていれば無副作用の再解決をトリガし、不変なら resolved を保った
+    /// まま Runtime を再表示する（SC-082）。
+    fn advance_settings_to_runtime(&mut self) {
+        self.settings_revisited = false;
+        if self.branch_changed_since_resolution() {
+            self.runtime_context_resolved = false;
+            self.finish_launch_request();
+        }
+    }
+
+    fn branch_changed_since_resolution(&self) -> bool {
+        self.resolved_branch_name.as_deref() != Some(self.branch_name.as_str())
+    }
+
+    /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ移動する。
+    /// 未到達・未解決のフェーズへのジャンプは無視する。
+    fn goto_phase(&mut self, target: WizardPhase) {
+        if self.is_hydrating || self.runtime_resolution_pending {
+            return;
+        }
+        match target {
+            WizardPhase::Path => {
+                self.start_method_selected = false;
+                self.settings_revisited = false;
+                self.runtime_confirmed = false;
+                self.completion = None;
+            }
+            WizardPhase::Settings => {
+                if !self.manual_setup_initialized {
+                    return;
+                }
+                self.settings_revisited = true;
+                self.runtime_confirmed = false;
+            }
+            WizardPhase::Runtime => {
+                if !self.manual_setup_initialized || !self.runtime_context_resolved {
+                    return;
+                }
+                if self.settings_revisited {
+                    self.advance_settings_to_runtime();
+                } else {
+                    self.runtime_confirmed = false;
+                }
+            }
+            WizardPhase::Confirm => {
+                if !self.manual_setup_initialized || !self.runtime_context_resolved {
+                    return;
+                }
+                if self.settings_revisited && self.branch_changed_since_resolution() {
+                    return;
+                }
+                self.settings_revisited = false;
+                self.runtime_confirmed = true;
+            }
+        }
+    }
+
+    fn current_phase(&self) -> WizardPhase {
+        if self.show_confirm() {
+            WizardPhase::Confirm
+        } else if self.show_runtime_confirmation() {
+            WizardPhase::Runtime
+        } else if self.show_manual_setup() {
+            WizardPhase::Settings
+        } else {
+            WizardPhase::Path
+        }
     }
 
     fn finish_launch_request(&mut self) {
@@ -1852,6 +1992,8 @@ impl LaunchWizardState {
                 }
                 self.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 self.start_method_selected = true;
+                self.runtime_confirmed = false;
+                self.settings_revisited = false;
                 self.step = LaunchWizardStep::LaunchTarget;
                 self.selected = step_default_selection(self.step, self);
                 self.completion = None;
@@ -2611,15 +2753,21 @@ impl LaunchWizardState {
     }
 
     fn show_manual_setup(&self) -> bool {
-        self.launch_path == LaunchWizardLaunchPath::ManualSetup && !self.show_start_methods()
+        // SPEC-2014 FR-126: Settings フォームは Runtime / Confirm ステップでない時のみ。
+        // settings_revisited（解決済みのまま Settings 再訪）でも true になる。
+        self.launch_path == LaunchWizardLaunchPath::ManualSetup
+            && !self.show_start_methods()
+            && !self.show_runtime_confirmation()
+            && !self.show_confirm()
     }
 
     fn show_back_button(&self) -> bool {
+        // SPEC-2014 FR-123: Back は Path 入口以外の全フェーズ（Settings/Runtime/
+        // Confirm）で表示する。runtime 確認画面でも非表示にしない。
         self.start_method_selected
             && self.launch_path == LaunchWizardLaunchPath::ManualSetup
             && !self.is_hydrating
             && !self.runtime_resolution_pending
-            && !self.show_runtime_confirmation()
     }
 
     fn show_start_methods(&self) -> bool {
@@ -2630,11 +2778,28 @@ impl LaunchWizardState {
     }
 
     fn show_runtime_confirmation(&self) -> bool {
+        // SPEC-2014 FR-126: Runtime ステップ（解決済みだが Confirm 未確認）。
+        // ConfigureAndStart の Setup 3ステップで Confirm へ進むと Runtime 編集 UI を
+        // 隠す。QuickStart / 即起動系（manual_setup_initialized=false）は Confirm を
+        // 使わず従来どおり確認即起動する（FR-129）。
         self.runtime_context_resolved
+            && !self.settings_revisited
+            && !(self.runtime_confirmed && self.manual_setup_initialized)
             && matches!(
                 self.launch_path,
                 LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
             )
+    }
+
+    /// SPEC-2014 FR-127: ManualSetup（ConfigureAndStart の Setup 3ステップ）の Confirm
+    /// ステップ（読み取りサマリ + Launch）。Runtime ステップで Submit すると
+    /// `runtime_confirmed` が立ちここに入る。即起動系は経由しない（FR-129）。
+    fn show_confirm(&self) -> bool {
+        self.runtime_context_resolved
+            && !self.settings_revisited
+            && self.runtime_confirmed
+            && self.manual_setup_initialized
+            && self.launch_path == LaunchWizardLaunchPath::ManualSetup
     }
 
     fn primary_action_label(&self) -> String {
@@ -2651,6 +2816,13 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::FocusSession => "Focus".to_string(),
             LaunchWizardLaunchPath::QuickStart | LaunchWizardLaunchPath::ManualSetup
                 if !self.runtime_context_resolved =>
+            {
+                "Continue".to_string()
+            }
+            // SPEC-2014 FR-127: ConfigureAndStart の Setup で Runtime ステップ（解決済み
+            // だが未確認）は Confirm へ進む「Continue」。実 Launch は Confirm でのみ。
+            LaunchWizardLaunchPath::ManualSetup
+                if self.manual_setup_initialized && !self.runtime_confirmed =>
             {
                 "Continue".to_string()
             }
@@ -2686,25 +2858,44 @@ impl LaunchWizardState {
             LaunchWizardLaunchPath::ManualSetup => "Setup",
             LaunchWizardLaunchPath::FocusSession => "Focus",
         };
-        let runtime_confirmation_active = self.show_runtime_confirmation();
-        let setup_state = if self.launch_path == LaunchWizardLaunchPath::ManualSetup {
-            if self.runtime_context_resolved || self.runtime_resolution_pending {
-                "done"
-            } else {
-                "active"
+        // SPEC-2014 FR-126: rail の各ステップ状態を current_phase から導出する。
+        let phase = self.current_phase();
+        let is_manual = self.launch_path == LaunchWizardLaunchPath::ManualSetup;
+        let setup_state = if !is_manual {
+            "done"
+        } else {
+            match phase {
+                WizardPhase::Path => "pending",
+                WizardPhase::Settings => "active",
+                WizardPhase::Runtime | WizardPhase::Confirm => "done",
             }
-        } else {
-            "done"
         };
-        let runtime_state = if self.runtime_resolution_pending || runtime_confirmation_active {
+        let runtime_state = if self.runtime_resolution_pending {
             "active"
-        } else if self.runtime_context_resolved {
-            "done"
         } else {
-            "pending"
+            match phase {
+                WizardPhase::Runtime => "active",
+                WizardPhase::Confirm => "done",
+                WizardPhase::Settings => {
+                    if self.runtime_context_resolved {
+                        "done"
+                    } else {
+                        "pending"
+                    }
+                }
+                WizardPhase::Path => {
+                    if self.runtime_context_resolved
+                        && self.launch_path != LaunchWizardLaunchPath::FocusSession
+                    {
+                        "done"
+                    } else {
+                        "pending"
+                    }
+                }
+            }
         };
         let start_state = if self.launch_path == LaunchWizardLaunchPath::FocusSession
-            || (self.runtime_context_resolved && !runtime_confirmation_active)
+            || phase == WizardPhase::Confirm
         {
             "active"
         } else {
@@ -6635,6 +6826,12 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
+        // SPEC-2014 FR-126: Settings フォーム項目は ConfigureAndStart の Settings
+        // ステップ（未解決）で表示される。
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "codex".to_string(),
         });
@@ -6681,6 +6878,12 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
+        // SPEC-2014 FR-126: Settings フォーム項目は ConfigureAndStart の Settings
+        // ステップ（未解決）で表示される。
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "claude".to_string(),
@@ -6752,7 +6955,12 @@ mod tests {
         });
 
         assert!(state.view().fast_mode);
-        state.apply(LaunchWizardAction::Submit);
+        // SPEC-2014 FR-127: ConfigureAndStart は Runtime→Confirm→Launch の3段。
+        state.apply(LaunchWizardAction::Submit); // Runtime -> Confirm
+        assert!(state.completion.is_none());
+        assert!(state.view().show_confirm);
+        assert!(state.view().fast_mode);
+        state.apply(LaunchWizardAction::Submit); // Confirm -> Launch
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
@@ -7856,6 +8064,263 @@ mod tests {
                 .iter()
                 .any(|step| step.key == "start" && step.state == "pending"),
             "Start must stay pending while Runtime choices are still visible",
+        );
+    }
+
+    #[test]
+    fn back_from_runtime_confirmation_returns_to_settings_preserving_runtime_selection() {
+        // SPEC-2014 US-37 / FR-123..FR-125 / SC-077, SC-078:
+        // Runtime 確認画面で Back が表示され、押下すると Settings へ戻って
+        // runtime target 等の選択が保持される。
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion,
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+        state.completion = None;
+
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature-current")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature-current"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        let view = state.view();
+        assert!(
+            view.show_runtime_confirmation,
+            "setup path must reach the runtime confirmation screen",
+        );
+        assert_eq!(view.selected_runtime_target, "docker");
+        // SC-077 / FR-123: Back must be visible on the runtime confirmation screen.
+        assert!(
+            view.show_back_button,
+            "FR-123: Back must be visible on the runtime confirmation screen",
+        );
+
+        // FR-124: Back returns to the Settings form instead of being a no-op.
+        state.apply(LaunchWizardAction::Back);
+        let backed = state.view();
+        assert!(
+            state.completion.is_none(),
+            "Back from runtime confirmation must not cancel the wizard",
+        );
+        assert!(
+            backed.show_manual_setup,
+            "FR-124: Back from runtime confirmation returns to the Settings form",
+        );
+        assert!(!backed.show_runtime_confirmation);
+        // SC-078 / FR-125: runtime target selection is preserved across Back.
+        assert_eq!(
+            backed.selected_runtime_target, "docker",
+            "FR-125: runtime target selection must be preserved on Back",
+        );
+    }
+
+    #[test]
+    fn manual_setup_runtime_step_advances_to_confirm_before_launch() {
+        // SPEC-2014 US-38 / FR-127 / SC-081:
+        // ManualSetup は Runtime ステップで Submit すると Confirm（読み取りサマリ）へ
+        // 進み、Confirm で Submit して初めて Launch する。
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+        state.mark_runtime_context_unresolved();
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::Submit);
+        assert!(matches!(
+            state.completion,
+            Some(LaunchWizardCompletion::ResolveRuntime(_))
+        ));
+        state.completion = None;
+
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: "feature/current".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature-current")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature-current"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+
+        // Runtime ステップ: 編集 UI が見え、primary は Confirm へ進む "Continue"。
+        let view = state.view();
+        assert!(
+            view.show_runtime_confirmation,
+            "runtime step is shown after resolve"
+        );
+        assert!(!view.show_confirm, "confirm step is not active yet");
+        assert_eq!(view.primary_action_label, "Continue");
+
+        // Runtime → Submit → Confirm（Launch しない）。
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            state.completion.is_none(),
+            "FR-127: advancing from runtime to confirm must not launch",
+        );
+        let view = state.view();
+        assert!(
+            view.show_confirm,
+            "confirm step is shown after runtime submit"
+        );
+        assert!(
+            !view.show_runtime_confirmation,
+            "runtime edit UI is hidden on the confirm step",
+        );
+        assert!(
+            !view.launch_summary.is_empty(),
+            "confirm step shows the read-only launch summary",
+        );
+        assert_eq!(view.primary_action_label, "Launch");
+
+        // Confirm → Submit → Launch（唯一の実起動点）。
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            matches!(state.completion, Some(LaunchWizardCompletion::Launch(_))),
+            "FR-127: launch happens only from the confirm step",
+        );
+
+        // FR-124: Confirm から Back すると Runtime ステップへ戻る。
+        state.completion = None;
+        state.apply(LaunchWizardAction::Back);
+        let view = state.view();
+        assert!(
+            view.show_runtime_confirmation,
+            "FR-124: Back from confirm returns to the runtime step",
+        );
+        assert!(!view.show_confirm);
+    }
+
+    fn manual_setup_to_runtime_step(branch_name: &str) -> LaunchWizardState {
+        // ConfigureAndStart で Settings → Runtime（解決済み）まで進めた state を返す。
+        let mut ctx = context(branch(branch_name), branch_name);
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["app".to_string()],
+            suggested_service: Some("app".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.apply(LaunchWizardAction::Submit);
+        state.completion = None;
+        state.apply_runtime_context(LaunchWizardHydration {
+            selected_branch: None,
+            normalized_branch_name: branch_name.to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-runtime")),
+            quick_start_root: PathBuf::from("/tmp/repo-runtime"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profiles: Some(Default::default()),
+        });
+        state
+    }
+
+    #[test]
+    fn progress_rail_goto_jumps_between_setup_phases() {
+        // SPEC-2014 FR-128 / SC-080: rail クリックで Settings/Runtime/Confirm を移動。
+        let mut state = manual_setup_to_runtime_step("feature/current");
+        assert_eq!(state.view().phase, WizardPhase::Runtime);
+        assert_eq!(state.view().selected_runtime_target, "docker");
+
+        // Runtime -> Confirm
+        state.apply(LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Confirm,
+        });
+        assert_eq!(state.view().phase, WizardPhase::Confirm);
+        assert!(state.view().show_confirm);
+
+        // Confirm -> Settings（resolved 保持、選択保持）
+        state.apply(LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Settings,
+        });
+        let view = state.view();
+        assert_eq!(view.phase, WizardPhase::Settings);
+        assert!(view.show_manual_setup);
+        assert_eq!(view.selected_runtime_target, "docker");
+
+        // Settings -> Runtime（branch 不変 → 再解決なし）
+        state.apply(LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Runtime,
+        });
+        assert_eq!(state.view().phase, WizardPhase::Runtime);
+        assert!(
+            state.completion.is_none(),
+            "SC-082: unchanged branch must not re-resolve on rail jump",
+        );
+    }
+
+    #[test]
+    fn settings_resubmit_reresolves_runtime_only_when_branch_changes() {
+        // SPEC-2014 FR-128 / SC-082
+        let mut state = manual_setup_to_runtime_step("feature/current");
+
+        // Settings へ戻り、branch 不変のまま Submit → 再解決しない。
+        state.apply(LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Settings,
+        });
+        assert!(state.view().show_manual_setup);
+        state.completion = None;
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            state.completion.is_none(),
+            "SC-082: unchanged branch must not re-resolve",
+        );
+        assert_eq!(state.view().phase, WizardPhase::Runtime);
+
+        // Settings へ戻り branch を変更 → 再解決する。
+        state.apply(LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Settings,
+        });
+        state.branch_name = "feature/other".to_string();
+        state.completion = None;
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            matches!(
+                state.completion,
+                Some(LaunchWizardCompletion::ResolveRuntime(_))
+            ),
+            "SC-082: changed branch must re-resolve runtime",
         );
     }
 
