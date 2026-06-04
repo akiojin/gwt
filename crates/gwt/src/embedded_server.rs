@@ -1419,6 +1419,65 @@ mod tests {
         server.shutdown();
     }
 
+    #[test]
+    fn embedded_server_preserves_unicode_attachment_upload_filename() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let upload_store = AttachmentUploadStore::in_system_temp();
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
+                .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let token_response: serde_json::Value = client
+            .get(format!("{}internal/attachment-upload-token", server.url()))
+            .send()
+            .expect("token request")
+            .json()
+            .expect("token json");
+        let token = token_response
+            .get("token")
+            .and_then(|value| value.as_str())
+            .expect("token field")
+            .to_string();
+
+        let upload_response: serde_json::Value = client
+            .post(format!(
+                "{}internal/attachments/upload?filename=%E8%B3%87%E6%96%99%20%E6%97%A5%E6%9C%AC%E8%AA%9E.txt&mime_type=text%2Fplain&size=7",
+                server.url()
+            ))
+            .header("x-gwt-upload-token", token)
+            .body("nihongo")
+            .send()
+            .expect("unicode filename upload request")
+            .json()
+            .expect("unicode filename upload json");
+        assert_eq!(
+            upload_response
+                .get("filename")
+                .and_then(|value| value.as_str()),
+            Some("資料 日本語.txt")
+        );
+        let upload_id = upload_response
+            .get("upload_id")
+            .and_then(|value| value.as_str())
+            .expect("upload id");
+
+        let uploaded = upload_store
+            .take(upload_id)
+            .expect("take upload")
+            .expect("uploaded file registered");
+        assert_eq!(uploaded.filename, "資料 日本語.txt");
+        assert_eq!(uploaded.size, 7);
+        assert_eq!(
+            std::fs::read(uploaded.path).expect("read uploaded temp"),
+            b"nihongo"
+        );
+
+        server.shutdown();
+    }
+
     // ---------------------------------------------------------------
     // SPEC-1942 US-14: bind / port surface + access log middleware
     // ---------------------------------------------------------------

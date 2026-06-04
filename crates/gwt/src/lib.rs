@@ -122,14 +122,14 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
-    ActiveWorkProjectionView, AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase,
-    CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
-    FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
-    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget, ProfileEntryView,
-    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkspaceExecutionContainerView,
-    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView,
-    WorkspaceWorkEventView, WorkspaceWorkItemView,
+    ActiveWorkProjectionView, AppStateView, ArrangeMode, AttachmentProgressPhase, BackendEvent,
+    BranchEntriesPhase, CustomAgentErrorCode, FileAttachment, FileContentErrorKind,
+    FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
+    GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
+    IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
+    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
+    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;

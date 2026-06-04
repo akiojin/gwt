@@ -1432,6 +1432,10 @@
         return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
       }
 
+      function workspaceWindowElement(windowId) {
+        return windowMap.get(windowId) || null;
+      }
+
       function windowGroupId(windowData) {
         return windowData?.tab_group_id || windowData?.id || "";
       }
@@ -4424,12 +4428,29 @@
         return files.reduce((total, file) => total + (file.size || 0), 0);
       }
 
+      function displayAttachmentBasename(filename) {
+        const value = String(filename || "").trim();
+        const parts = value.split(/[\\/]+/).filter(Boolean);
+        return parts.at(-1) || "file";
+      }
+
       function attachmentFileCountLabel(count) {
         return `${count} ${count === 1 ? "file" : "files"}`;
       }
 
-      function ensureAttachmentProgressSurface() {
-        let surface = document.querySelector(".attachment-progress");
+      function createAttachmentOperationId() {
+        const random =
+          typeof globalThis.crypto?.randomUUID === "function"
+            ? globalThis.crypto.randomUUID()
+            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        return `attachment-${random}`;
+      }
+
+      const attachmentProgressControllers = new Map();
+
+      function ensureAttachmentProgressSurface(windowId) {
+        const host = workspaceWindowElement(windowId) || document.body;
+        let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;
         }
@@ -4441,27 +4462,43 @@
         surface.innerHTML = `
           <div class="attachment-progress__row">
             <span class="attachment-progress__label"></span>
-            <button class="attachment-progress__cancel" type="button" title="Cancel upload">Cancel</button>
           </div>
           <div class="attachment-progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div class="attachment-progress__bar"></div>
           </div>
         `;
-        document.body.appendChild(surface);
+        host.appendChild(surface);
         return surface;
       }
 
-      function createAttachmentProgressController(files) {
-        const surface = ensureAttachmentProgressSurface();
+      function attachmentPhaseLabel(phase, fallback = "") {
+        switch (phase) {
+          case "queued":
+            return "Queued";
+          case "staging":
+            return "Staging";
+          case "injecting":
+            return "Injecting";
+          case "attached":
+            return "Attached";
+          case "failed":
+            return fallback || "Could not attach";
+          default:
+            return fallback || "Uploading";
+        }
+      }
+
+      function createAttachmentProgressController(windowId, files, operationId = createAttachmentOperationId()) {
+        const surface = ensureAttachmentProgressSurface(windowId);
         const label = surface.querySelector(".attachment-progress__label");
         const track = surface.querySelector(".attachment-progress__track");
         const bar = surface.querySelector(".attachment-progress__bar");
-        const cancel = surface.querySelector(".attachment-progress__cancel");
         const abortController = new AbortController();
-        const totalBytes = totalFileBytes(files);
         const fileCount = files.length;
         const state = {
           phase: "Uploading",
+          filename: fileCount === 1 ? displayAttachmentBasename(files[0]?.name) : "",
+          totalBytes: totalFileBytes(files),
           loadedBytes: 0,
           failed: false,
           done: false,
@@ -4469,12 +4506,12 @@
         };
 
         function percent() {
-          if (totalBytes <= 0) {
+          if (state.totalBytes <= 0) {
             return state.done ? 100 : 0;
           }
           return Math.max(
             0,
-            Math.min(100, Math.round((state.loadedBytes / totalBytes) * 100)),
+            Math.min(100, Math.round((state.loadedBytes / state.totalBytes) * 100)),
           );
         }
 
@@ -4483,13 +4520,13 @@
             return;
           }
           const value = percent();
-          const suffix = totalBytes > 0 ? ` · ${value}%` : "";
+          const filename = state.filename ? ` · ${state.filename}` : "";
+          const suffix = state.totalBytes > 0 ? ` · ${value}%` : "";
           surface.hidden = false;
           surface.dataset.state = state.failed ? "error" : state.done ? "done" : "active";
-          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${suffix}`;
+          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${filename}${suffix}`;
           track.setAttribute("aria-valuenow", String(value));
           bar.style.width = `${value}%`;
-          cancel.hidden = state.done || state.failed;
         }
 
         function showNow() {
@@ -4498,17 +4535,16 @@
         }
 
         render();
-        cancel.onclick = () => {
-          abortController.abort();
-          fail("Upload cancelled.");
-        };
 
         function setPhase(phase) {
           state.phase = phase;
           render();
         }
 
-        function setUploadProgress(loadedBytes) {
+        function setUploadProgress(loadedBytes, totalBytes = null) {
+          if (Number.isFinite(totalBytes) && totalBytes >= 0) {
+            state.totalBytes = totalBytes;
+          }
           state.loadedBytes = Math.max(0, loadedBytes || 0);
           render();
         }
@@ -4516,11 +4552,13 @@
         function succeed() {
           state.done = true;
           state.phase = "Attached";
+          state.loadedBytes = state.totalBytes;
           if (state.visible) {
             render();
             setTimeout(() => {
               if (surface.dataset.state === "done") {
                 surface.hidden = true;
+                attachmentProgressControllers.delete(operationId);
               }
             }, 700);
           }
@@ -4532,13 +4570,66 @@
           showNow();
         }
 
-        return {
+        function applyBackendProgress(event) {
+          if (event.filename) {
+            state.filename = displayAttachmentBasename(event.filename);
+          }
+          if (Number.isFinite(event.bytes_total)) {
+            state.totalBytes = event.bytes_total;
+          }
+          if (Number.isFinite(event.bytes_done)) {
+            state.loadedBytes = event.bytes_done;
+          }
+          if (event.phase === "failed") {
+            fail(event.message || "Could not attach");
+            return;
+          }
+          if (event.phase === "attached") {
+            succeed();
+            return;
+          }
+          setPhase(attachmentPhaseLabel(event.phase));
+        }
+
+        const controller = {
+          operationId,
           signal: abortController.signal,
           setPhase,
           setUploadProgress,
           succeed,
           fail,
+          applyBackendProgress,
         };
+        attachmentProgressControllers.set(operationId, controller);
+        return controller;
+      }
+
+      function handleAttachmentProgress(event) {
+        const operationId = event?.operation_id || "";
+        if (!operationId) {
+          return;
+        }
+        let controller = attachmentProgressControllers.get(operationId);
+        if (!controller) {
+          controller = createAttachmentProgressController(
+            event.id,
+            [
+              {
+                name: event.filename || "file",
+                size: event.bytes_total || 0,
+              },
+            ],
+            operationId,
+          );
+        }
+        controller.applyBackendProgress(event);
+      }
+
+      function attachmentFilesFromNativePaths(paths) {
+        return paths.map((path) => ({
+          name: displayAttachmentBasename(path),
+          size: 0,
+        }));
       }
 
       let attachmentUploadTokenPromise = null;
@@ -4613,11 +4704,14 @@
           const uploaded = await uploadAttachmentFile(file, {
             signal: progress.signal,
             onProgress: ({ loaded }) => {
-              progress.setUploadProgress(completedBytes + (loaded || 0));
+              progress.setUploadProgress(completedBytes + (loaded || 0), totalBytes);
             },
           });
           completedBytes += file.size || uploaded?.size || 0;
-          progress.setUploadProgress(totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0);
+          progress.setUploadProgress(
+            totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0,
+            totalBytes,
+          );
           attachments.push({
             source: "uploaded",
             upload_id: uploaded.upload_id,
@@ -4631,22 +4725,22 @@
 
       async function uploadPastedImage(windowId, blob, { mimeType, filename } = {}) {
         const file = uploadFileFromImageBlob(blob, mimeType, filename);
-        const progress = createAttachmentProgressController([file]);
+        const progress = createAttachmentProgressController(windowId, [file]);
         try {
           const uploaded = await uploadAttachmentFile(file, {
             signal: progress.signal,
-            onProgress: ({ loaded }) => progress.setUploadProgress(loaded || 0),
+            onProgress: ({ loaded, total }) => progress.setUploadProgress(loaded || 0, total),
           });
-          progress.setPhase("Attaching");
+          progress.setPhase("Queued");
           send({
             kind: "paste_image_uploaded",
             id: windowId,
+            operation_id: progress.operationId,
             upload_id: uploaded.upload_id,
             mime_type: uploaded.mime_type ?? file.type ?? mimeType ?? "",
             filename: uploaded.filename || file.name || filename || null,
             size: uploaded.size ?? file.size ?? 0,
           });
-          progress.succeed();
         } catch (_error) {
           progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
           showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
@@ -4987,16 +5081,16 @@
           return;
         }
 
-        const progress = createAttachmentProgressController(files);
+        const progress = createAttachmentProgressController(windowId, files);
         try {
           const attachments = await uploadFilesAsAttachments(files, progress);
-          progress.setPhase("Attaching");
+          progress.setPhase("Queued");
           send({
             kind: "attach_files",
             id: windowId,
+            operation_id: progress.operationId,
             files: attachments,
           });
-          progress.succeed();
         } catch (_error) {
           progress.fail(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
           showFileDropAlert(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
@@ -5054,9 +5148,15 @@
           if (!windowId) {
             return;
           }
+          const progress = createAttachmentProgressController(
+            windowId,
+            attachmentFilesFromNativePaths(paths),
+          );
+          progress.setPhase("Queued");
           send({
             kind: "attach_files",
             id: windowId,
+            operation_id: progress.operationId,
             files: paths.map((path) => ({
               source: "native_path",
               path,
@@ -13267,6 +13367,9 @@
               event.status,
               event.detail,
             );
+            break;
+          case "attachment_progress":
+            handleAttachmentProgress(event);
             break;
           case "window_state":
             frontendUnits.terminalHost.applyStatus(event.window_id, event.state);

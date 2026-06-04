@@ -19,10 +19,11 @@ use gwt::{
     load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
     read_binary_chunk, read_text_file,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
-    workspace_state_path, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, BranchListEntry,
-    ContentLimits, DockerWizardContext, FileContentError, FrontendEvent, HookForwardTarget,
-    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
+    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
+    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -925,6 +926,14 @@ enum UserEvent {
     LaunchProgress {
         window_id: String,
         message: String,
+    },
+    AttachmentPromptReady {
+        client_id: ClientId,
+        window_id: String,
+        operation_id: String,
+        prompt: String,
+        file_count: usize,
+        filename: Option<String>,
     },
     LaunchWizardRuntimeResolved {
         wizard_id: String,
@@ -6645,6 +6654,24 @@ fn main() -> std::io::Result<()> {
                         message,
                     },
                 )]);
+            }
+            Event::UserEvent(UserEvent::AttachmentPromptReady {
+                client_id,
+                window_id,
+                operation_id,
+                prompt,
+                file_count,
+                filename,
+            }) => {
+                let events = app.inject_attachment_prompt_events(
+                    client_id,
+                    window_id,
+                    operation_id,
+                    prompt,
+                    file_count,
+                    filename,
+                );
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);

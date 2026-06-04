@@ -787,8 +787,16 @@ mod tests {
         assert!(
             html.contains("kind: \"attach_files\"")
                 && html.contains("source: \"uploaded\"")
-                && html.contains("upload_id"),
-            "expected browser file drops to send uploaded attach_files payloads",
+                && html.contains("upload_id")
+                && html.contains("operation_id"),
+            "expected browser file drops to send uploaded attach_files payloads with operation ids",
+        );
+        assert!(
+            html.contains("attachmentProgressControllers")
+                && html.contains("handleAttachmentProgress")
+                && html.contains("workspaceWindowElement")
+                && !html.contains("attachment-progress__cancel"),
+            "expected attachment progress to be scoped to the Agent window without a Cancel action",
         );
         let drop_start = html
             .find("function installTerminalFileDropHandlers")
@@ -832,8 +840,10 @@ mod tests {
             "expected native drops to map the WebView pointer to the terminal under it",
         );
         assert!(
-            html.contains("source: \"native_path\"") && html.contains("kind: \"attach_files\""),
-            "expected native drops to send native_path attach_files payloads",
+            html.contains("source: \"native_path\"")
+                && html.contains("kind: \"attach_files\"")
+                && html.contains("operation_id"),
+            "expected native drops to send native_path attach_files payloads with operation ids",
         );
     }
 
