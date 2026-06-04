@@ -2300,7 +2300,6 @@
               refreshBoardCurrentWorkspaceId();
             }
             renderWindowList();
-            renderActiveWorkOverview();
           },
         );
       }

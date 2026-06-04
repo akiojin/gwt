@@ -42,6 +42,25 @@ function terminalOptionNumber(name) {
   return Number(match[1]);
 }
 
+function extractFunctionBody(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `expected function ${name} in source`);
+  const open = source.indexOf("{", start);
+  assert.notEqual(open, -1, `expected function ${name} body`);
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(open + 1, i);
+      }
+    }
+  }
+  assert.fail(`unterminated function ${name}`);
+}
+
 // SPEC-2356 — extract every @media block matching the supplied condition,
 // using brace-depth tracking so nested rules don't truncate the body.
 function extractMediaBlocks(css, condition) {
@@ -159,6 +178,36 @@ test("frontend handles active work projection as status-strip telemetry", () => 
     appSource,
     /counts\.branches[\s\S]+activeWorks\.length/,
     "expected Status Strip Work telemetry to count active Works, not only branch-list rows",
+  );
+});
+
+test("workspace_state hot path leaves Active Work overview redraw to active_work_projection", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  assert.doesNotMatch(
+    renderAppStateBody,
+    /renderActiveWorkOverview\s*\(/,
+    "workspace_state renderAppState must not rebuild Active Work overview DOM",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const activeProjectionCase = receiveBody.match(
+    /case\s+"active_work_projection":[\s\S]*?break;/,
+  );
+  assert.ok(activeProjectionCase, "expected active_work_projection receive case");
+  assert.match(
+    activeProjectionCase[0],
+    /activeWorkProjection\s*=\s*event\.projection/,
+    "active_work_projection must still own the projection state",
+  );
+  assert.match(
+    activeProjectionCase[0],
+    /renderActiveWorkOverview\(\);/,
+    "active_work_projection must redraw Active Work overview immediately",
+  );
+  assert.match(
+    activeProjectionCase[0],
+    /workspaceOverviewSurface\.renderWindows\(\);/,
+    "active_work_projection must still refresh Workspace Overview windows",
   );
 });
 
