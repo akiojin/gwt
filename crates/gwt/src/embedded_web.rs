@@ -145,6 +145,11 @@ pub fn socket_receive_dispatcher_js() -> &'static str {
     include_str!("../web/socket-receive-dispatcher.js")
 }
 
+// SPEC-1939 Phase 24 — per-window terminal output batching before xterm write.
+pub fn terminal_output_buffer_js() -> &'static str {
+    include_str!("../web/terminal-output-buffer.js")
+}
+
 // Issue #2698 PR 1 (B7) — interaction-guard primitive that defers
 // destructive wizard re-renders while the user has a native <select>
 // dropdown open.
@@ -329,6 +334,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/socket-receive-dispatcher.js",
         source: socket_receive_dispatcher_js,
         marker: "createSocketReceiveDispatcher",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-output-buffer.js",
+        source: terminal_output_buffer_js,
+        marker: "createTerminalOutputBatcher",
     },
     RootJsModuleAsset {
         path: "/interaction-guard.js",
@@ -875,8 +885,12 @@ mod tests {
     #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
+        let streaming_enqueue = regex::Regex::new(
+            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\);",
+        )
+        .expect("valid regex");
         let streaming_write = regex::Regex::new(
-            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
         .expect("valid regex");
         // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
@@ -906,8 +920,18 @@ mod tests {
             "expected terminal runtime to debounce viewport refreshes",
         );
         assert!(
+            html.contains(
+                r#"import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";"#
+            ),
+            "expected app.js to import the terminal output batcher root module",
+        );
+        assert!(
+            streaming_enqueue.is_match(html),
+            "expected streaming terminal output to enter the per-window batcher after TextDecoder streaming decode",
+        );
+        assert!(
             streaming_write.is_match(html),
-            "expected streaming terminal output to refresh viewport after xterm parses it",
+            "expected terminal output batch flushes to refresh viewport after xterm parses them",
         );
         assert!(
             snapshot_write.is_match(html),
@@ -932,6 +956,10 @@ mod tests {
         assert!(
             html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
             "expected pending terminal viewport refresh frames to be cancelled during cleanup",
+        );
+        assert!(
+            html.contains("terminalOutputBatcher.clear(windowId);"),
+            "expected pending terminal output batches to be cleared on snapshot and removed-window cleanup",
         );
         assert!(
             html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),

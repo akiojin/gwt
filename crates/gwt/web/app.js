@@ -70,6 +70,7 @@
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
+      import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
@@ -183,6 +184,18 @@
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
+      const terminalOutputBatcher = createTerminalOutputBatcher({
+        write: (windowId, text, onWritten) => {
+          const runtime = terminalMap.get(windowId);
+          if (!runtime) {
+            return;
+          }
+          runtime.terminal.write(text, onWritten);
+        },
+        onFlush: (windowId) => {
+          scheduleTerminalViewportRefresh(windowId);
+        },
+      });
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
@@ -5352,9 +5365,10 @@
               return;
             }
             const decoder = decoderMap.get(windowId);
-            runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
-              scheduleTerminalViewportRefresh(windowId);
-            });
+            terminalOutputBatcher.enqueue(
+              windowId,
+              decoder.decode(decodeBase64(base64), { stream: true }),
+            );
           },
         );
       }
@@ -5377,6 +5391,7 @@
           pendingSnapshotMap.set(windowId, base64);
           return;
         }
+        terminalOutputBatcher.clear(windowId);
         const decoder = decoderMap.get(windowId);
         runtime.terminal.reset();
         runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
@@ -12994,6 +13009,7 @@
               windowRuntimeStateMap.delete(windowId);
               pendingOutputMap.delete(windowId);
               pendingSnapshotMap.delete(windowId);
+              terminalOutputBatcher.clear(windowId);
               const profileState = profileStateMap.get(windowId);
               if (profileState) {
                 clearProfileSaveTimer(profileState);
