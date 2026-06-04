@@ -6676,3 +6676,17 @@ Type: failure-pattern
 Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が bare "npx" をハードコードしており、Windows では CreateProcess が POSIX shim(npx) を spawn できず program not found で PTY 開始前に失敗。primary runner は package_runner_candidates で npx.cmd を優先(SPEC-1921 FR-080)していたが fallback だけがこの解決をバイパスしていた。
 Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
 Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。
+
+## 2026-06-04 — Workspace→Work 統合は FR-334 決定済みだが実装未完了（agent guidance 含む）
+
+Type: lesson
+Context: SPEC-2359 FR-334 で canonical naming=Work と決定済み。だが WorkspaceProjection struct(850+行)/workspace_projection.rs/gwtd workspace CLI/.gwt/workspace/ storage/WorkspaceState protocol、特に coordination_guidance.rs:24,79 の agent guidance が今も「Workspace を update しろ」と指示している。
+Learning: enum/UI label だけ Work に統一され、domain/CLI/storage/protocol/agent guidance が未統一の technical debt。agent guidance が残る限り agent は Workspace 用語で作業し続けるため、命名統一の核は coordination_guidance.rs。
+Future Action: Work 系の作業前に coordination_guidance.rs と命名統一の残作業を確認する。FR-334 完遂は SPEC-2359 Phase W-12 (US-66/FR-357/358) で扱う。
+
+## 2026-06-04 — Work 概念モデル = agent session + lifecycle（Board とは分離維持）
+
+Type: lesson
+Context: gwt-discussion で Work UI/UX 全面再設計に合意。Work=agent session 単位(1 agent:1 Work)、lifecycle Active/Paused/Done/Discarded、手動 close まで一覧に残す、Canvas 専用 surface 集約(サイドバー Active Works 撤去)、cleanup は worktree のみ削除、repo-local 追跡で永続コア/揮発ランタイムの 2 層。
+Learning: Work current state と Board は責務分離(event log vs snapshot、shared vs project-scoped、author vs owner)。統合せず board_refs/board_entry_id でリンクする。FR-008 と 2026-05-07 lesson(Board を current state に流用するな、live 照合せよ)を維持。
+Future Action: Work state を Board に統合しようとしない。Active 判定は必ず live session/window 照合を挟む。設計の正本は SPEC-2359 Phase W-12。
