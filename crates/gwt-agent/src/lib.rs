@@ -38,8 +38,8 @@ pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
-    canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
-    ResolvedRunner,
+    canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
+    resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{

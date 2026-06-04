@@ -6669,3 +6669,10 @@ Type: lesson
 Context: gwt-managed worktree 内で cargo test -p gwt --all-features を並行(default threads)実行すると board_audience::tests の gui_default_scope_reads_projection_from_disk / post_audience_for_session_attaches_workspace_and_respects_broadcast が実行ごとに異なるテスト・assertion 行で落ちる。--test-threads=1 では全 PASS。
 Learning: これらのテストは tempdir を repo_path に渡すが、workspace projection の save/load が共有可変状態 (~/.gwt 配下の project-state や env 由来) で並行競合し、projection 読み出しが None/All に化ける。worktree_inventory など無関係な変更の PR 検証でも踏むため、変更起因の regression と誤認しやすい。
 Future Action: cargo test 並行実行で board_audience が落ちたら、まず --test-threads=1 で再実行して flaky か変更起因かを切り分ける。flaky の場合は変更の diff が board_audience/workspace_projection に触れていないことを確認し pre-existing として分離報告する。テスト分離の根本修正は別 Issue で扱う。
+
+## 2026-06-04 — Host launch fallback executable must reuse platform-aware runner resolution, not hardcode bare names
+
+Type: failure-pattern
+Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が bare "npx" をハードコードしており、Windows では CreateProcess が POSIX shim(npx) を spawn できず program not found で PTY 開始前に失敗。primary runner は package_runner_candidates で npx.cmd を優先(SPEC-1921 FR-080)していたが fallback だけがこの解決をバイパスしていた。
+Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
+Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。

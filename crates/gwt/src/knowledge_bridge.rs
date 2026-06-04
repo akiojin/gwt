@@ -199,43 +199,62 @@ impl SemanticSearchClient for RunnerSemanticSearchClient {
         }
         let payload: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("parse semantic search result: {error}"))?;
-        if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            return Err(payload_error(&payload));
-        }
-        Ok(match kind {
-            KnowledgeKind::Issue => payload
-                .get("issueResults")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| {
-                            Some(SemanticSearchHit {
-                                number: value_u64(item.get("number")?)?,
-                                distance: item.get("distance").and_then(Value::as_f64),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            KnowledgeKind::Spec => payload
-                .get("specResults")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| {
-                            Some(SemanticSearchHit {
-                                number: value_u64(item.get("spec_id")?)?,
-                                distance: item.get("distance").and_then(Value::as_f64),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            KnowledgeKind::Pr => Vec::new(),
-        })
+        semantic_hits_from_payload(kind, &payload)
     }
+}
+
+/// Interpret a runner search payload into [`SemanticSearchHit`]s.
+///
+/// Issue #2979: when the runner reports `error_code: "EMPTY_CORPUS"` the issue
+/// cache is unpopulated for this repo-hash. The Knowledge Bridge already
+/// renders cache-backed entries directly and exposes a Refresh affordance, so
+/// an empty semantic corpus is treated as "no semantic hits" rather than a hard
+/// error. Any other non-OK payload remains an error. The agent-facing preflight
+/// (which invokes the runner directly via the gwt-search skill) still sees the
+/// raw diagnostic so its duplicate check does not silently pass with `[]`.
+fn semantic_hits_from_payload(
+    kind: KnowledgeKind,
+    payload: &Value,
+) -> Result<Vec<SemanticSearchHit>, String> {
+    if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        if payload.get("error_code").and_then(Value::as_str) == Some("EMPTY_CORPUS") {
+            return Ok(Vec::new());
+        }
+        return Err(payload_error(payload));
+    }
+    Ok(match kind {
+        KnowledgeKind::Issue => payload
+            .get("issueResults")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(SemanticSearchHit {
+                            number: value_u64(item.get("number")?)?,
+                            distance: item.get("distance").and_then(Value::as_f64),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        KnowledgeKind::Spec => payload
+            .get("specResults")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(SemanticSearchHit {
+                            number: value_u64(item.get("spec_id")?)?,
+                            distance: item.get("distance").and_then(Value::as_f64),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        KnowledgeKind::Pr => Vec::new(),
+    })
 }
 
 pub fn load_knowledge_bridge(
@@ -2003,5 +2022,60 @@ Extra context.
             });
         let err = result.expect_err("missing cache entry must error");
         assert!(err.contains("not in local cache"), "got: {err}");
+    }
+
+    #[test]
+    fn semantic_hits_from_payload_extracts_issue_and_spec_hits() {
+        let issue_hits = semantic_hits_from_payload(
+            KnowledgeKind::Issue,
+            &serde_json::json!({
+                "ok": true,
+                "issueResults": [{"number": 42, "distance": 0.25}]
+            }),
+        )
+        .expect("issue hits");
+        assert_eq!(issue_hits.len(), 1);
+        assert_eq!(issue_hits[0].number, 42);
+
+        let spec_hits = semantic_hits_from_payload(
+            KnowledgeKind::Spec,
+            &serde_json::json!({
+                "ok": true,
+                "specResults": [{"spec_id": 1939, "distance": 0.1}]
+            }),
+        )
+        .expect("spec hits");
+        assert_eq!(spec_hits.len(), 1);
+        assert_eq!(spec_hits[0].number, 1939);
+    }
+
+    #[test]
+    fn semantic_hits_from_payload_treats_empty_corpus_as_no_hits() {
+        // Issue #2979: an unpopulated-cache diagnostic must not crash the GUI
+        // Knowledge Bridge search; it renders cache-backed entries separately.
+        let hits = semantic_hits_from_payload(
+            KnowledgeKind::Spec,
+            &serde_json::json!({
+                "ok": false,
+                "error_code": "EMPTY_CORPUS",
+                "error": "specs search corpus is empty: ..."
+            }),
+        )
+        .expect("empty corpus must degrade to no hits, not an error");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn semantic_hits_from_payload_propagates_other_errors() {
+        let err = semantic_hits_from_payload(
+            KnowledgeKind::Issue,
+            &serde_json::json!({
+                "ok": false,
+                "error_code": "INDEX_UNHEALTHY",
+                "error": "index unhealthy at ..."
+            }),
+        )
+        .expect_err("non-EMPTY_CORPUS failures must surface as errors");
+        assert!(err.contains("index unhealthy"), "got: {err}");
     }
 }
