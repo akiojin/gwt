@@ -6655,3 +6655,17 @@ Type: lesson
 Context: SESSIONS 一覧削除の視覚確認のため GWT_FORCE_NEW_INSTANCE=1 で dev ビルドを GWT.app と並行起動したが、同じ ~/.gwt を共有するため issues 再インデックスがループし、dev 側 usage poller が provider_usage を配信せず USAGE セルが hidden のまま(accounts 空判定)になった。WebSocket/telemetry は正常だった。
 Learning: 2 つの gwt インスタンスが同一 ~/.gwt を共有すると stateful subsystem(index/usage poller)が競合し live 検証が不安定になる。単一インスタンス(GWT.app)では browser からでも usage は正常表示される。
 Future Action: GUI の視覚検証は単一インスタンスで行う。dev を確認したい時は既存インスタンスを終了して dev を唯一の tray-resident として起動する。共存は lock 検証用に留め、live データ表示の検証には使わない。
+
+## 2026-06-04 — worktree 列挙は main_worktree_root を先に解決する
+
+Type: lesson
+Context: File Tree の SELECT WORKTREE ピッカーが workspace home (子に bare repo を持つが home 自体は git work tree でないレイアウト) で 'failed to list worktrees: ... not a git repository ... .git' (exit 128) で失敗した。enumerate_worktrees が git worktree list を tab.project_root で直接実行していたのが原因。
+Learning: gwt は 'workspace home without default worktree' レイアウトをサポートしており、project_root が git work tree でない場合がある。git worktree list はその home から実行すると失敗する。main_worktree_root は first_child_bare_repository で child-bare を解決できるので、worktree 列挙系は必ず main_worktree_root を先に解決してから WorktreeManager に渡す。
+Future Action: git worktree list / WorktreeManager::new を新規に呼ぶコードを書くときは、渡す repo_root が linked worktree / 通常 repo / workspace-home(child-bare) のいずれでも動くよう main_worktree_root で解決してから渡す。
+
+## 2026-06-04 — board_audience テストは並行実行で flaky (workspace projection 共有状態)
+
+Type: lesson
+Context: gwt-managed worktree 内で cargo test -p gwt --all-features を並行(default threads)実行すると board_audience::tests の gui_default_scope_reads_projection_from_disk / post_audience_for_session_attaches_workspace_and_respects_broadcast が実行ごとに異なるテスト・assertion 行で落ちる。--test-threads=1 では全 PASS。
+Learning: これらのテストは tempdir を repo_path に渡すが、workspace projection の save/load が共有可変状態 (~/.gwt 配下の project-state や env 由来) で並行競合し、projection 読み出しが None/All に化ける。worktree_inventory など無関係な変更の PR 検証でも踏むため、変更起因の regression と誤認しやすい。
+Future Action: cargo test 並行実行で board_audience が落ちたら、まず --test-threads=1 で再実行して flaky か変更起因かを切り分ける。flaky の場合は変更の diff が board_audience/workspace_projection に触れていないことを確認し pre-existing として分離報告する。テスト分離の根本修正は別 Issue で扱う。
