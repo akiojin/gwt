@@ -4106,6 +4106,36 @@ body {
   background: var(--color-state-success);
 }
 
+/* SPEC-2014 FR-128 — reached progress steps (active/done) act as click
+   targets that jump the wizard to that phase. Pending steps stay inert. */
+.wizard-progress-step[data-clickable="true"] {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  margin: -4px -6px;
+  padding: 4px 6px;
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.wizard-progress-step[data-clickable="true"]:hover {
+  background: var(--color-surface-elevated);
+}
+
+.wizard-progress-step[data-clickable="true"]:hover .wizard-progress-label {
+  color: var(--color-focus-ring);
+}
+
+.wizard-progress-step[data-clickable="true"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-focus-ring);
+  background: var(--color-surface-elevated);
+}
+
+.wizard-progress-step:not([data-clickable="true"]) {
+  cursor: default;
+}
+
 .wizard-progress-copy {
   display: grid;
   gap: 2px;
@@ -4156,6 +4186,16 @@ body {
   letter-spacing: var(--tracking-mono);
   color: var(--color-text-strong);
   overflow-wrap: anywhere;
+}
+
+/* SPEC-2014 FR-127 — Confirm step read-only summary cards in the wizard
+   body. Reuses the .wizard-summary-item card primitive in a responsive
+   grid so the resolved launch configuration reads as a review pane. */
+.wizard-confirm-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 8px;
+  min-width: 0;
 }
 
 .launch-panel {
