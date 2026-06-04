@@ -12,10 +12,13 @@
 // - the queue is flushed on the next animation frame,
 // - idempotent global-state kinds (e.g. workspace_state) collapse to the
 //   latest occurrence, sparing redundant DOM mutations,
+// - long streamed-event backlogs deliver a bounded chunk before latest state so
+//   tab/project updates are not starved behind terminal output,
 // - per-frame time budget (default 8ms) bounds long tasks; remaining events
 //   defer to the next frame.
 
 const DEFAULT_BUDGET_MS = 8;
+export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
@@ -41,6 +44,7 @@ export function createSocketReceiveDispatcher({
   now,
   budgetMs = DEFAULT_BUDGET_MS,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
+  maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
 } = {}) {
   if (typeof receive !== "function") {
@@ -82,7 +86,9 @@ export function createSocketReceiveDispatcher({
     if (queue.length === 0) {
       return;
     }
-    const ready = coalesceEvents(queue, coalesceKinds);
+    const ready = coalesceEvents(queue, coalesceKinds, {
+      maxStreamedBeforeState,
+    });
     queue.length = 0;
     const start = nowImpl();
     trace("ws_flush_start", {
@@ -176,10 +182,15 @@ export function createSocketReceiveDispatcher({
   return { handle, enqueue, flushNow, pendingCount };
 }
 
-export function coalesceEvents(queue, coalesceKinds = DEFAULT_COALESCE_KINDS) {
+export function coalesceEvents(
+  queue,
+  coalesceKinds = DEFAULT_COALESCE_KINDS,
+  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE } = {},
+) {
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
   }
+  const streamedChunkLimit = normalizeStreamedChunkLimit(maxStreamedBeforeState);
   const lastIndexByKind = new Map();
   for (let i = 0; i < queue.length; i += 1) {
     const event = queue[i];
@@ -212,5 +223,17 @@ export function coalesceEvents(queue, coalesceKinds = DEFAULT_COALESCE_KINDS) {
       streamed.push(event);
     }
   }
-  return streamed.concat(idempotent);
+  if (streamed.length <= streamedChunkLimit || idempotent.length === 0) {
+    return streamed.concat(idempotent);
+  }
+  return streamed
+    .slice(0, streamedChunkLimit)
+    .concat(idempotent, streamed.slice(streamedChunkLimit));
+}
+
+function normalizeStreamedChunkLimit(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_MAX_STREAMED_BEFORE_STATE;
+  }
+  return Math.floor(value);
 }
