@@ -6677,6 +6677,13 @@ Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が b
 Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
 Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。
 
+## 2026-06-04 — Board/storage tests must share env lock
+
+Type: lesson
+Context: SPEC-1974 Board storage split fix exposed flaky tests that write project-scoped coordination/workspace data while HOME/USERPROFILE point at the developer machine.
+Learning: Tests that call project-scoped storage helpers must isolate HOME/USERPROFILE and use the crate-wide env_test_lock/env_lock, not a local Mutex, because cargo test runs modules in parallel.
+Future Action: Before adding tests around Board, workspace projection, or project-scoped paths, acquire the existing crate-wide env lock and point HOME/USERPROFILE at a tempdir.
+
 ## 2026-06-04 — 使用量調査は credentials で課金体系を先に確定し transcript は model別+メイン/サブ分離で集計する
 
 Type: workflow
