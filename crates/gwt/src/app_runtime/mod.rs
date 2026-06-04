@@ -1900,11 +1900,21 @@ fn workspace_agent_summary_work_id(
     )
 }
 
+/// SPEC-2359 Phase W-12 Slice 2 (FR-348): the canonical Work identity for an
+/// active agent. `agent_session_id` is the primary key so that "1 agent
+/// session : 1 Work" holds — two agents on the same branch but with distinct
+/// `session_id`s resolve to distinct Work rows. Legacy agents that report an
+/// empty `session_id` fall back to the historical branch/worktree-derived
+/// identity, then `workspace_id`, then the provided `legacy_fallback`.
 fn active_work_agent_work_id(
     project_root: &Path,
     agent: &gwt::ActiveWorkAgentView,
     legacy_fallback: Option<&str>,
 ) -> Option<String> {
+    let session_id = agent.session_id.trim();
+    if !session_id.is_empty() {
+        return Some(format!("work-session-{session_id}"));
+    }
     let worktree_path = agent.worktree_path.as_deref().map(Path::new);
     gwt_core::workspace_projection::canonical_work_id(
         project_root,
@@ -1938,6 +1948,34 @@ fn projection_matches_active_work(
         })
         .as_deref()
         == Some(work_id)
+}
+
+/// SPEC-2359 Phase W-12 Slice 2 (FR-348): with `agent_session_id` as the
+/// primary Work identity, a session-derived `work_id` no longer matches the
+/// branch-derived id computed from the projection's `git_details`. The current
+/// projection's Work row is now identified by checking whether the group's
+/// representative agent shares the projection's branch or worktree, so the
+/// title / status_text / summary / PR selection driven by `is_current_projection`
+/// keeps choosing the live projection values.
+fn agent_matches_projection_git_details(
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    agent: &gwt::ActiveWorkAgentView,
+) -> bool {
+    let Some(details) = projection.git_details.as_ref() else {
+        return false;
+    };
+    let branch_matches = details
+        .branch
+        .as_deref()
+        .map(normalize_branch_name)
+        .zip(agent.branch.as_deref().map(normalize_branch_name))
+        .is_some_and(|(left, right)| left == right);
+    let worktree_matches = details
+        .worktree_path
+        .as_deref()
+        .zip(agent.worktree_path.as_deref())
+        .is_some_and(|(left, right)| left == Path::new(right));
+    branch_matches || worktree_matches
 }
 
 fn find_active_work_history<'a>(
@@ -1985,8 +2023,10 @@ fn active_work_items_from_projection(
             let first_agent = agents.first();
             let history = find_active_work_history(&work_id, first_agent, works);
             let container = history.and_then(|item| item.execution_containers.first());
-            let is_current_projection =
-                work_id == projection.id || projection_matches_active_work(projection, &work_id);
+            let is_current_projection = work_id == projection.id
+                || projection_matches_active_work(projection, &work_id)
+                || first_agent
+                    .is_some_and(|agent| agent_matches_projection_git_details(projection, agent));
             let active_agents = agents
                 .iter()
                 .filter(|agent| agent.status_category == "active")
@@ -14229,12 +14269,10 @@ exit 1
                 .active_agent_sessions
                 .insert(window_id.to_string(), session);
         }
-        let expected_a =
-            gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/a"), None)
-                .expect("work a id");
-        let expected_b =
-            gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/b"), None)
-                .expect("work b id");
+        // SPEC-2359 Phase W-12 Slice 2 (FR-348): Work identity is
+        // `agent_session_id`-derived, so each live session owns its own row.
+        let expected_a = "work-session-session-a";
+        let expected_b = "work-session-session-b";
 
         let view = runtime
             .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -14256,8 +14294,63 @@ exit 1
                 .any(|agent| agent.session_id == "session-b")));
     }
 
+    /// SPEC-2359 Phase W-12 Slice 2 (FR-348): "1 agent session : 1 Work". When
+    /// the *same* `session_id` surfaces under multiple windows, the agents
+    /// collapse into a single Work row keyed by that session. Distinct sessions
+    /// are covered by
+    /// `app_runtime_active_work_projection_separates_sessions_on_same_branch`.
     #[test]
-    fn app_runtime_active_work_projection_groups_multiple_agents_in_one_work_row() {
+    fn app_runtime_active_work_projection_groups_same_session_windows_in_one_work_row() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        for window_id in ["tab-1::agent-a", "tab-1::agent-b"] {
+            let mut agent = workspace_agent_summary_for_test("session-shared", Some("work-shared"));
+            agent.window_id = Some(window_id.to_string());
+            agent.branch = Some("work/shared".to_string());
+            projection.agents.push(agent);
+        }
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        for window_id in ["tab-1::agent-a", "tab-1::agent-b"] {
+            let mut session = sample_active_agent_session("tab-1", window_id);
+            session.session_id = "session-shared".to_string();
+            session.branch_name = "work/shared".to_string();
+            session.window_id = window_id.to_string();
+            runtime
+                .active_agent_sessions
+                .insert(window_id.to_string(), session);
+        }
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_work_count, 1);
+        assert_eq!(view.active_works.len(), 1);
+        assert_eq!(view.active_works[0].id, "work-session-session-shared");
+        assert_eq!(view.active_works[0].agents.len(), 2);
+        assert!(view.active_works[0]
+            .agents
+            .iter()
+            .all(|agent| agent.session_id == "session-shared"));
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 2 (FR-348): `agent_session_id` is the primary
+    /// Work identity. Two live agents that share the *same* branch but report
+    /// *different* `session_id`s must materialize as two separate Work rows,
+    /// proving "1 agent session : 1 Work".
+    #[test]
+    fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -14293,22 +14386,33 @@ exit 1
                 .active_agent_sessions
                 .insert(window_id.to_string(), session);
         }
-        let expected_work_id =
-            gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/shared"), None)
-                .expect("shared work id");
 
         let view = runtime
             .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
             .expect("projection view");
 
-        assert_eq!(view.active_work_count, 1);
-        assert_eq!(view.active_works.len(), 1);
-        assert_eq!(view.active_works[0].id, expected_work_id);
-        assert_eq!(view.active_works[0].agents.len(), 2);
+        assert_eq!(view.active_work_count, 2);
+        assert_eq!(view.active_works.len(), 2);
+        assert!(view.active_works.iter().all(|work| work.agents.len() == 1));
+        assert!(view.active_works.iter().any(|work| work
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-a")));
+        assert!(view.active_works.iter().any(|work| work
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-b")));
+        // Same branch, different sessions → distinct Work ids.
+        assert_ne!(view.active_works[0].id, view.active_works[1].id);
     }
 
+    /// SPEC-2359 Phase W-12 Slice 2 (FR-348): `agent_session_id` is the primary
+    /// Work identity, taking priority over both the branch-derived
+    /// `canonical_work_id` and the raw `workspace_id`. The resulting Work id is
+    /// `work-session-<session_id>`, and the branch-derived id is *not* used when
+    /// a session is present.
     #[test]
-    fn app_runtime_active_work_projection_uses_branch_derived_work_id_over_workspace_id() {
+    fn app_runtime_active_work_projection_uses_agent_session_id_over_branch_and_workspace_id() {
         let _env_lock = env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -14317,7 +14421,7 @@ exit 1
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let expected_work_id =
+        let branch_derived_work_id =
             gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/test"), None)
                 .expect("canonical work id");
         let mut projection =
@@ -14346,7 +14450,8 @@ exit 1
             .expect("projection view");
 
         assert_eq!(view.active_work_count, 1);
-        assert_eq!(view.active_works[0].id, expected_work_id);
+        assert_eq!(view.active_works[0].id, "work-session-session-a");
+        assert_ne!(view.active_works[0].id, branch_derived_work_id);
         assert_ne!(view.active_works[0].id, "legacy-work-id");
     }
 
