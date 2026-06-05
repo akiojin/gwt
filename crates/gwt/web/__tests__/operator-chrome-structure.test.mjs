@@ -258,6 +258,59 @@ test("Project Tabs shell key ignores workspace geometry but includes tab identit
   }
 });
 
+test("hidden project picker does not rebuild Recent Projects on workspace_state", () => {
+  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  assert.match(
+    appSource,
+    /let\s+renderedRecentProjectsKey\s*=/,
+    "app.js must track the visible picker Recent Projects render key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedRecentProjectsMenuKey\s*=/,
+    "app.js must track the split-menu Recent Projects render key separately",
+  );
+  assert.match(
+    appSource,
+    /function\s+recentProjectsRenderKey\s*\(/,
+    "app.js must define a Recent Projects render key helper",
+  );
+  assert.match(
+    renderProjectPickerBody,
+    /if\s*\(\s*shouldShow\s*\)[\s\S]*renderRecentProjects\(\)/,
+    "renderProjectPicker must render Recent Projects only when the picker is visible",
+  );
+  assert.doesNotMatch(
+    renderProjectPickerBody.replace(/if\s*\(\s*shouldShow\s*\)[\s\S]*?renderRecentProjects\(\)\s*;?/, ""),
+    /renderRecentProjects\(\)/,
+    "renderProjectPicker must not also call renderRecentProjects unconditionally",
+  );
+});
+
+test("Recent Projects render key ignores workspace state and split menu refreshes on open", () => {
+  const keyBody = extractFunctionBody(appSource, "recentProjectsRenderKey");
+  for (const field of ["title", "kind", "path"]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Recent Projects key must include ${field}`,
+    );
+  }
+  for (const workspaceField of ["workspace", "windows", "geometry", "viewport"]) {
+    assert.doesNotMatch(
+      keyBody,
+      new RegExp(`\\b${workspaceField}\\b`),
+      `Recent Projects key must ignore ${workspaceField}`,
+    );
+  }
+  const openMenuBody = extractFunctionBody(appSource, "openOpenProjectMenu");
+  assert.match(
+    openMenuBody,
+    /renderRecentProjectsIntoMenu\s*\(\s*\{\s*force:\s*true\s*\}\s*\)/,
+    "Open Project split menu must force-refresh Recent Projects from current appState when opened",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state

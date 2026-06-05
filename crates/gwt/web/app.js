@@ -485,6 +485,8 @@
         recent_projects: [],
       };
       let renderedProjectTabsKey = "";
+      let renderedRecentProjectsKey = "";
+      let renderedRecentProjectsMenuKey = "";
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -495,6 +497,16 @@
             project_root: tab?.project_root || "",
           })),
         });
+      }
+
+      function recentProjectsRenderKey(state) {
+        return JSON.stringify(
+          (state?.recent_projects || []).map((project) => ({
+            title: project?.title || "",
+            kind: project?.kind || "",
+            path: project?.path || "",
+          })),
+        );
       }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
@@ -2093,7 +2105,12 @@
         }
       }
 
-      function renderRecentProjects() {
+      function renderRecentProjects({ force = false } = {}) {
+        const nextKey = recentProjectsRenderKey(appState);
+        if (!force && renderedRecentProjectsKey === nextKey) {
+          return;
+        }
+        renderedRecentProjectsKey = nextKey;
         recentProjectList.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
@@ -2122,16 +2139,19 @@
             recentProjectList.appendChild(row);
           }
         }
-
-        renderRecentProjectsIntoMenu();
       }
 
       // Issue #2684 — mirror Recent projects inside the split-button dropdown
       // so users can reach them without first closing every project tab.
-      function renderRecentProjectsIntoMenu() {
+      function renderRecentProjectsIntoMenu({ force = false } = {}) {
         if (!openProjectMenuRecent) {
           return;
         }
+        const nextKey = recentProjectsRenderKey(appState);
+        if (!force && renderedRecentProjectsMenuKey === nextKey) {
+          return;
+        }
+        renderedRecentProjectsMenuKey = nextKey;
         openProjectMenuRecent.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
@@ -2182,7 +2202,7 @@
         if (!openProjectMenu || isOpenProjectMenuOpen()) {
           return;
         }
-        renderRecentProjectsIntoMenu();
+        renderRecentProjectsIntoMenu({ force: true });
         openProjectMenu.classList.add("open");
         openProjectMenu.setAttribute("aria-hidden", "false");
         openProjectMenuButton.setAttribute("aria-expanded", "true");
@@ -2270,7 +2290,9 @@
         projectPicker.classList.toggle("visible", shouldShow);
         projectPickerError.hidden = !projectError;
         projectPickerError.textContent = projectError;
-        renderRecentProjects();
+        if (shouldShow) {
+          renderRecentProjects();
+        }
       }
 
       function renderProjectOnboarding(tab) {
