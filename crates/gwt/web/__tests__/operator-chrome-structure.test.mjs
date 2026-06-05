@@ -311,6 +311,92 @@ test("Recent Projects render key ignores workspace state and split menu refreshe
   );
 });
 
+test("viewport-only workspace_state skips unchanged window reconciliation", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    appSource,
+    /let\s+renderedWorkspaceWindowsKey\s*=/,
+    "app.js must track the last reconciled Workspace Windows shell key",
+  );
+  assert.match(
+    appSource,
+    /function\s+workspaceWindowsRenderKey\s*\(/,
+    "app.js must define a Workspace Windows render key helper",
+  );
+
+  const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
+  const keyIndex = renderWorkspaceBody.indexOf(
+    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
+  );
+  const guardIndex = renderWorkspaceBody.indexOf(
+    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+  );
+  const classifyIndex = renderWorkspaceBody.indexOf(
+    "classifyProjectWindowVisibility",
+  );
+  const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
+  const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
+
+  assert.notEqual(applyViewportIndex, -1, "renderWorkspace must apply viewport");
+  assert.ok(keyIndex > applyViewportIndex, "window key guard must run after viewport");
+  assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
+  assert.ok(
+    guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
+    "unchanged window key must return before reconciliation and focus activation",
+  );
+  assert.match(
+    renderWorkspaceBody.slice(guardIndex, classifyIndex),
+    /return\s*;/,
+    "unchanged window key guard must return before reconciliation",
+  );
+});
+
+test("Workspace Windows render key ignores viewport and includes window shell fields", () => {
+  const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Workspace Windows key must include active tab identity",
+  );
+  assert.match(
+    keyBody,
+    /allProjectWindowIds\s*\(\s*\)/,
+    "Workspace Windows key must include all project window ids for stale mounted window cleanup",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Workspace Windows key must include ${field}`,
+    );
+  }
+  assert.doesNotMatch(
+    keyBody,
+    /\bviewport\b/,
+    "Workspace Windows key must ignore viewport-only state",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state

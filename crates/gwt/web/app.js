@@ -487,6 +487,7 @@
       let renderedProjectTabsKey = "";
       let renderedRecentProjectsKey = "";
       let renderedRecentProjectsMenuKey = "";
+      let renderedWorkspaceWindowsKey = "";
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -507,6 +508,37 @@
             path: project?.path || "",
           })),
         );
+      }
+
+      function workspaceWindowsRenderKey(workspace) {
+        const windows = workspace?.windows || [];
+        return JSON.stringify({
+          active_tab_id: appState?.active_tab_id || null,
+          active_window_ids: windows.map((windowData) => windowData?.id || ""),
+          all_project_window_ids: allProjectWindowIds(),
+          windows: windows.map((windowData) => ({
+            id: windowData?.id || "",
+            preset: windowData?.preset || "",
+            title: windowData?.title || "",
+            dynamic_title: windowData?.dynamic_title || "",
+            dynamic_title_detail: windowData?.dynamic_title_detail || "",
+            purpose_title: windowData?.purpose_title || "",
+            agent_id: windowData?.agent_id || "",
+            agent_color: windowData?.agent_color || "",
+            status: windowData?.status || "",
+            geometry: {
+              x: windowData?.geometry?.x ?? 0,
+              y: windowData?.geometry?.y ?? 0,
+              width: windowData?.geometry?.width ?? 0,
+              height: windowData?.geometry?.height ?? 0,
+            },
+            minimized: Boolean(windowData?.minimized),
+            maximized: Boolean(windowData?.maximized),
+            z_index: windowData?.z_index ?? 0,
+            tab_group_id: windowData?.tab_group_id || "",
+            tab_group_active: Boolean(windowData?.tab_group_active),
+          })),
+        });
       }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
@@ -2002,6 +2034,15 @@
             requestAnimationFrame(() => fitTerminal(windowData.id, false));
           }
         }
+      }
+
+      function workspaceHasVisibleMaximizedWindow(workspace) {
+        return (workspace?.windows || []).some(
+          (windowData) =>
+            Boolean(windowData?.maximized) &&
+            !windowData?.minimized &&
+            visibleWindowData(windowData),
+        );
       }
 
       function renderProjectTabs() {
@@ -13008,6 +13049,15 @@
               scopeKey: activeViewportScopeKey(),
             });
             applyViewport();
+
+            const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
+            if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
+              if (workspaceHasVisibleMaximizedWindow(workspace)) {
+                requestAnimationFrame(syncMaximizedWindowsToViewport);
+              }
+              return;
+            }
+            renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
 
             const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
             const ids = new Set(activeWindowIds);
