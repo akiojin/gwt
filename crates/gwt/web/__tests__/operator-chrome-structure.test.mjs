@@ -764,8 +764,11 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
     "if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey)",
   );
   const storeIndex = ensureWindowBody.indexOf(
-    "renderedWindowElementKeys.set(windowData.id, windowElementRenderKey(windowData));",
+    "renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);",
   );
+  const renderKeyCalls = [
+    ...ensureWindowBody.matchAll(/windowElementRenderKey\(windowData\)/g),
+  ];
   const titleIndex = ensureWindowBody.indexOf(".title-text");
   const roleBadgeIndex = ensureWindowBody.indexOf("setWindowRoleBadge");
   const tabsIndex = ensureWindowBody.indexOf("renderWindowTabs");
@@ -778,6 +781,11 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
   assert.notEqual(mountIndex, -1, "ensureWindow must keep preset/body mount logic");
   assert.ok(keyIndex > mountIndex, "per-window key must run after preset/body mounting");
   assert.ok(guardIndex > keyIndex, "ensureWindow must guard on the per-window key");
+  assert.equal(
+    renderKeyCalls.length,
+    1,
+    "ensureWindow must reuse the computed per-window key instead of recomputing it",
+  );
   for (const [label, index] of [
     ["title", titleIndex],
     ["role badge", roleBadgeIndex],
@@ -794,6 +802,11 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
       `unchanged per-window key must return before ${label} writes`,
     );
   }
+  assert.notEqual(
+    storeIndex,
+    -1,
+    "ensureWindow must store the previously computed per-window key",
+  );
   assert.ok(
     statusIndex < storeIndex,
     "ensureWindow must store changed keys after status/detail normalization",

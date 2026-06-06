@@ -13328,7 +13328,7 @@
         element.querySelector(".resize-handle").hidden =
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
-        renderedWindowElementKeys.set(windowData.id, windowElementRenderKey(windowData));
+        renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (
           (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           presetSurface(windowData.preset) === "terminal" &&
