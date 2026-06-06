@@ -864,6 +864,10 @@ pub enum WorkspaceWorkEventKind {
     Split,
     Merge,
     Pr,
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): the owning agent session stopped
+    /// without an explicit user close. The Work is retained as Paused (not Done)
+    /// so it stays on the Work surface until the user closes it.
+    Pause,
     Done,
 }
 
@@ -1381,6 +1385,84 @@ pub fn record_workspace_work_event_paths(
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     append_workspace_work_event_to_path(events_path, &event)?;
     Ok(())
+}
+
+/// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a `Pause` work event so a
+/// Work whose owning agent session stopped is retained in the work history
+/// (and on the Work surface) until the user explicitly closes it. `work_item_id`
+/// is the session-derived canonical Work id (`work-session-<session_id>`), which
+/// matches the live-agent grouping id so a later resume dedupes to one row.
+/// Idempotent for already-closed (Done) Work: the `apply_event` Done-preservation
+/// keeps a terminal Work terminal because the Pause event carries no explicit
+/// `status_category`.
+#[allow(clippy::too_many_arguments)]
+pub fn record_workspace_work_paused_event_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_item_id: &str,
+    title: Option<&str>,
+    summary: Option<&str>,
+    owner: Option<&str>,
+    board_refs: &[String],
+    execution_container: Option<WorkspaceExecutionContainerRef>,
+    agent_session_id: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut event =
+        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Pause, work_item_id, updated_at);
+    event.title = non_empty_clone(title);
+    event.summary = non_empty_clone(summary);
+    event.owner = non_empty_clone(owner);
+    event.agent_session_id = non_empty_clone(agent_session_id);
+    event.execution_container = execution_container;
+    // Pause must not regress a terminal Work, so leave status_category implicit;
+    // record the board refs (if any) so the retained row keeps its provenance.
+    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    for board_ref in board_refs {
+        if let Some(board_ref) = non_empty_clone(Some(board_ref.as_str())) {
+            let mut ref_event =
+                WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, updated_at);
+            ref_event.board_entry_id = Some(board_ref);
+            record_workspace_work_event_paths(work_items_path, events_path, ref_event)?;
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-2359 Phase W-12 Slice 5a (FR-350): convenience wrapper resolving the
+/// project-scoped work_items and work_events paths from `repo_path` and
+/// invoking [`record_workspace_work_paused_event_paths`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_workspace_work_paused_event(
+    repo_path: &Path,
+    work_item_id: &str,
+    title: Option<&str>,
+    summary: Option<&str>,
+    owner: Option<&str>,
+    board_refs: &[String],
+    execution_container: Option<WorkspaceExecutionContainerRef>,
+    agent_session_id: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    copy_legacy_workspace_file_if_needed(
+        &legacy_workspace_work_events_path_for_repo_path(repo_path),
+        &events_path,
+    )?;
+    record_workspace_work_paused_event_paths(
+        &work_items_path,
+        &events_path,
+        work_item_id,
+        title,
+        summary,
+        owner,
+        board_refs,
+        execution_container,
+        agent_session_id,
+        updated_at,
+    )
 }
 
 /// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkspaceWorkEvent`
@@ -2178,6 +2260,9 @@ fn workspace_work_event_status(event: &WorkspaceWorkEvent) -> WorkspaceStatusCat
     event.status_category.unwrap_or(match event.kind {
         WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
         WorkspaceWorkEventKind::Blocked => WorkspaceStatusCategory::Blocked,
+        // Pause keeps the Work incomplete (non-Done) while the agent is stopped;
+        // the Idle status preserves the retained-but-not-running semantics.
+        WorkspaceWorkEventKind::Pause => WorkspaceStatusCategory::Idle,
         WorkspaceWorkEventKind::Start
         | WorkspaceWorkEventKind::Claim
         | WorkspaceWorkEventKind::Update
@@ -4767,5 +4852,100 @@ mod tests {
             ),
             WorkActiveLifecycleState::Discarded
         );
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): recording a Pause event persists
+    /// the Work in the history as a non-Done (incomplete) item keyed by the
+    /// session-derived id, carrying the branch / worktree execution container so
+    /// the Work surface can render the retained Paused row.
+    #[test]
+    fn record_workspace_work_paused_event_retains_incomplete_history_item() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let events_path = temp.path().join("work-events.jsonl");
+        let container = WorkspaceExecutionContainerRef {
+            branch: Some("work/paused".to_string()),
+            worktree_path: Some(temp.path().join("work/paused")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+
+        super::record_workspace_work_paused_event_paths(
+            &work_items_path,
+            &events_path,
+            "work-session-session-paused",
+            Some("Paused persistence"),
+            Some("agent stopped"),
+            Some("SPEC-2359"),
+            &["board-1".to_string()],
+            Some(container),
+            Some("session-paused"),
+            Utc::now(),
+        )
+        .expect("record paused event");
+
+        let projection = super::load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-session-paused")
+            .expect("paused work item");
+        assert!(item.is_incomplete(), "paused Work must stay non-Done");
+        assert_ne!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, None);
+        assert_eq!(item.title, "Paused persistence");
+        assert_eq!(item.execution_containers.len(), 1);
+        assert_eq!(
+            item.execution_containers[0].branch.as_deref(),
+            Some("work/paused")
+        );
+        assert!(item.board_refs.iter().any(|value| value == "board-1"));
+        assert!(item
+            .events
+            .iter()
+            .any(|event| event.kind == WorkspaceWorkEventKind::Pause));
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a Pause event carries no explicit
+    /// status, so the Done-preservation in `apply_event` keeps an already-closed
+    /// (Done) Work terminal — agent stop must never reopen a closed Work.
+    #[test]
+    fn record_workspace_work_paused_event_does_not_reopen_done_work() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let events_path = temp.path().join("work-events.jsonl");
+        let now = Utc::now();
+        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "work-session-x", now);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        super::record_workspace_work_event_paths(&work_items_path, &events_path, done)
+            .expect("record done");
+
+        super::record_workspace_work_paused_event_paths(
+            &work_items_path,
+            &events_path,
+            "work-session-x",
+            Some("Closed Work"),
+            None,
+            None,
+            &[],
+            None,
+            Some("session-x"),
+            now + chrono::Duration::seconds(1),
+        )
+        .expect("record paused event");
+
+        let projection = super::load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-x")
+            .expect("work item");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert!(item.completed_at.is_some());
     }
 }
