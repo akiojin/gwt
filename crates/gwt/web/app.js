@@ -489,6 +489,10 @@
       let renderedRecentProjectsMenuKey = "";
       let renderedWorkspaceWindowsKey = "";
       let renderedWindowListKey = "";
+      let renderedAppVersionLabel = null;
+      let renderedProjectPickerKey = "";
+      let renderedProjectOnboardingKey = "";
+      let renderedActionAvailabilityKey = "";
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -596,6 +600,28 @@
           rows: entries.map(entryKey),
         });
       }
+
+      function projectPickerRenderKey() {
+        const shouldShow = !activeProjectTab();
+        return JSON.stringify({
+          visible: shouldShow,
+          error: projectError || "",
+          recent_projects: shouldShow ? recentProjectsRenderKey(appState) : "",
+        });
+      }
+
+      function projectOnboardingRenderKey(tab) {
+        const visible = Boolean(tab && tab.kind !== "git");
+        return JSON.stringify({
+          visible,
+          kind: visible ? tab.kind || "" : "",
+          project_root: visible ? tab.project_root || "" : "",
+        });
+      }
+
+      function actionAvailabilityRenderKey() {
+        return activeProjectTab() ? "active" : "empty";
+      }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
@@ -668,6 +694,10 @@
 
       function renderAppVersion() {
         const label = formatVersionLabel();
+        if (renderedAppVersionLabel === label) {
+          return;
+        }
+        renderedAppVersionLabel = label;
         appVersionLabel.hidden = !label;
         appVersionLabel.textContent = label;
         appVersionLabel.title = label;
@@ -1760,7 +1790,12 @@
       }
 
       function updateActionAvailability() {
-        const hasActiveTab = Boolean(activeProjectTab());
+        const nextActionAvailabilityKey = actionAvailabilityRenderKey();
+        if (renderedActionAvailabilityKey === nextActionAvailabilityKey) {
+          return;
+        }
+        renderedActionAvailabilityKey = nextActionAvailabilityKey;
+        const hasActiveTab = nextActionAvailabilityKey === "active";
         addButton.disabled = !hasActiveTab;
         tileButton.disabled = !hasActiveTab;
         stackButton.disabled = !hasActiveTab;
@@ -2390,6 +2425,11 @@
       }
 
       function renderProjectPicker() {
+        const nextProjectPickerKey = projectPickerRenderKey();
+        if (renderedProjectPickerKey === nextProjectPickerKey) {
+          return;
+        }
+        renderedProjectPickerKey = nextProjectPickerKey;
         const shouldShow = !activeProjectTab();
         projectPicker.classList.toggle("visible", shouldShow);
         projectPickerError.hidden = !projectError;
@@ -2400,6 +2440,11 @@
       }
 
       function renderProjectOnboarding(tab) {
+        const nextProjectOnboardingKey = projectOnboardingRenderKey(tab);
+        if (renderedProjectOnboardingKey === nextProjectOnboardingKey) {
+          return;
+        }
+        renderedProjectOnboardingKey = nextProjectOnboardingKey;
         if (!tab || tab.kind === "git") {
           projectOnboarding.classList.remove("visible");
           return;

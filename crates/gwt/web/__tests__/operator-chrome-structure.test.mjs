@@ -504,6 +504,133 @@ test("Window List render key ignores viewport and includes row shell fields", ()
   );
 });
 
+test("Static project chrome renderers guard unchanged DOM writes", () => {
+  assert.match(
+    appSource,
+    /let\s+renderedAppVersionLabel\s*=/,
+    "app.js must track the last rendered app version label",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedProjectPickerKey\s*=/,
+    "app.js must track the last rendered Project Picker key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedProjectOnboardingKey\s*=/,
+    "app.js must track the last rendered Project Onboarding key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedActionAvailabilityKey\s*=/,
+    "app.js must track the last rendered action availability key",
+  );
+
+  const renderAppVersionBody = extractFunctionBody(appSource, "renderAppVersion");
+  const versionGuardIndex = renderAppVersionBody.indexOf(
+    "if (renderedAppVersionLabel === label)",
+  );
+  const versionHiddenIndex = renderAppVersionBody.indexOf("appVersionLabel.hidden");
+  assert.ok(
+    versionGuardIndex !== -1 && versionGuardIndex < versionHiddenIndex,
+    "renderAppVersion must return before unchanged label DOM writes",
+  );
+
+  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  const pickerKeyIndex = renderProjectPickerBody.indexOf(
+    "const nextProjectPickerKey = projectPickerRenderKey();",
+  );
+  const pickerGuardIndex = renderProjectPickerBody.indexOf(
+    "if (renderedProjectPickerKey === nextProjectPickerKey)",
+  );
+  const pickerClassIndex = renderProjectPickerBody.indexOf(
+    "projectPicker.classList.toggle",
+  );
+  assert.ok(
+    pickerKeyIndex !== -1 &&
+      pickerGuardIndex > pickerKeyIndex &&
+      pickerGuardIndex < pickerClassIndex,
+    "renderProjectPicker must return before unchanged picker DOM writes",
+  );
+
+  const renderProjectOnboardingBody = extractFunctionBody(appSource, "renderProjectOnboarding");
+  const onboardingKeyIndex = renderProjectOnboardingBody.indexOf(
+    "const nextProjectOnboardingKey = projectOnboardingRenderKey(tab);",
+  );
+  const onboardingGuardIndex = renderProjectOnboardingBody.indexOf(
+    "if (renderedProjectOnboardingKey === nextProjectOnboardingKey)",
+  );
+  const onboardingClassIndex = renderProjectOnboardingBody.indexOf(
+    "projectOnboarding.classList",
+  );
+  assert.ok(
+    onboardingKeyIndex !== -1 &&
+      onboardingGuardIndex > onboardingKeyIndex &&
+      onboardingGuardIndex < onboardingClassIndex,
+    "renderProjectOnboarding must return before unchanged onboarding DOM writes",
+  );
+
+  const updateActionAvailabilityBody = extractFunctionBody(appSource, "updateActionAvailability");
+  const actionKeyIndex = updateActionAvailabilityBody.indexOf(
+    "const nextActionAvailabilityKey = actionAvailabilityRenderKey();",
+  );
+  const actionGuardIndex = updateActionAvailabilityBody.indexOf(
+    "if (renderedActionAvailabilityKey === nextActionAvailabilityKey)",
+  );
+  const disabledIndex = updateActionAvailabilityBody.indexOf("addButton.disabled");
+  assert.ok(
+    actionKeyIndex !== -1 &&
+      actionGuardIndex > actionKeyIndex &&
+      actionGuardIndex < disabledIndex,
+    "updateActionAvailability must return before unchanged disabled-state DOM writes",
+  );
+});
+
+test("Static project chrome keys ignore workspace geometry and include visible transition state", () => {
+  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
+  assert.match(
+    pickerKeyBody,
+    /activeProjectTab\s*\(\s*\)/,
+    "Project Picker key must include visible active-tab state",
+  );
+  assert.match(
+    pickerKeyBody,
+    /projectError/,
+    "Project Picker key must include picker error text",
+  );
+  assert.match(
+    pickerKeyBody,
+    /recentProjectsRenderKey\s*\(/,
+    "Project Picker key must include Recent Projects only when visible",
+  );
+
+  const onboardingKeyBody = extractFunctionBody(appSource, "projectOnboardingRenderKey");
+  for (const field of ["kind", "project_root"]) {
+    assert.match(
+      onboardingKeyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Project Onboarding key must include ${field}`,
+    );
+  }
+
+  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  assert.match(
+    actionKeyBody,
+    /activeProjectTab\s*\(\s*\)/,
+    "Action Availability key must include active-tab availability",
+  );
+
+  for (const keyBody of [pickerKeyBody, onboardingKeyBody, actionKeyBody]) {
+    for (const workspaceField of ["viewport", "windows", "geometry"]) {
+      assert.doesNotMatch(
+        keyBody,
+        new RegExp(`\\b${workspaceField}\\b`),
+        `Static project chrome keys must ignore ${workspaceField}`,
+      );
+    }
+  }
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
