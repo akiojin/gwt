@@ -1287,7 +1287,24 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
 
 test("Runtime status key covers state detail preset visibility and cleanup", () => {
   const keyBody = extractFunctionBody(appSource, "windowRuntimeStatusRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Runtime status key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Runtime status key must not serialize an object on every window_status event",
+  );
   for (const pattern of [
+    /windowId/,
+    /windowMap\.has\s*\(\s*windowId\s*\)/,
     /runtimeState/,
     /effectiveDetail/,
     /windowData\?\.preset/,

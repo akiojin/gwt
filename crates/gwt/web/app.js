@@ -661,15 +661,22 @@
       }
 
       function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
-        return JSON.stringify({
-          id: windowId || "",
-          mounted: windowMap.has(windowId),
-          runtime_state: runtimeState || "",
-          detail: effectiveDetail || "",
-          preset: windowData?.preset || "",
-          runtime_visible: shouldShowRuntimeStatus(windowData),
-          agent_state: mapAgentTelemetryState(runtimeState),
-        });
+        const parts = [];
+        appendRenderKeyPart(parts, "id");
+        appendRenderKeyPart(parts, windowId || "");
+        appendRenderKeyPart(parts, "mounted");
+        appendRenderKeyPart(parts, windowMap.has(windowId));
+        appendRenderKeyPart(parts, "runtime_state");
+        appendRenderKeyPart(parts, runtimeState || "");
+        appendRenderKeyPart(parts, "detail");
+        appendRenderKeyPart(parts, effectiveDetail || "");
+        appendRenderKeyPart(parts, "preset");
+        appendRenderKeyPart(parts, windowData?.preset || "");
+        appendRenderKeyPart(parts, "runtime_visible");
+        appendRenderKeyPart(parts, shouldShowRuntimeStatus(windowData));
+        appendRenderKeyPart(parts, "agent_state");
+        appendRenderKeyPart(parts, mapAgentTelemetryState(runtimeState));
+        return parts.join("");
       }
 
       function windowElementRenderKey(windowData) {
