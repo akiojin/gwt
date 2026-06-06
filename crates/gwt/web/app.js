@@ -488,6 +488,7 @@
       let renderedRecentProjectsKey = "";
       let renderedRecentProjectsMenuKey = "";
       let renderedWorkspaceWindowsKey = "";
+      let renderedWindowListKey = "";
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -538,6 +539,61 @@
             tab_group_id: windowData?.tab_group_id || "",
             tab_group_active: Boolean(windowData?.tab_group_active),
           })),
+        });
+      }
+
+      function windowListRenderKey() {
+        const workspace = activeWorkspace();
+        const workspaceWindows = workspace.windows || [];
+        const workspaceWindowMap = new Map(
+          workspaceWindows.map((windowData) => [windowData.id, windowData]),
+        );
+        const entries =
+          windowListEntries.length > 0
+            ? windowListEntries
+                .map((entry) => workspaceWindowMap.get(entry.id) || entry)
+                .filter(
+                  (entry) =>
+                    workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id),
+                )
+            : workspaceWindows;
+        const entryKey = (entry) => {
+          const runtimeState = runtimeStateForWindow(entry);
+          return {
+            id: entry?.id || "",
+            preset: entry?.preset || "",
+            title: entry?.title || "",
+            dynamic_title: entry?.dynamic_title || "",
+            dynamic_title_detail: entry?.dynamic_title_detail || "",
+            purpose_title: entry?.purpose_title || "",
+            agent_id: entry?.agent_id || "",
+            agent_color: entry?.agent_color || "",
+            status: entry?.status || "",
+            runtime_state: runtimeState,
+            runtime_label: windowRuntimeLabel(runtimeState),
+            role_badge: windowRoleBadgeLabel(entry) || "",
+            display_title: windowDisplayTitle(entry),
+            title_tooltip: windowTitleTooltip(entry),
+            geometry: {
+              x: entry?.geometry?.x ?? 0,
+              y: entry?.geometry?.y ?? 0,
+              width: entry?.geometry?.width ?? 0,
+              height: entry?.geometry?.height ?? 0,
+            },
+            geometry_label: windowGeometryLabel(entry),
+            minimized: Boolean(entry?.minimized),
+            maximized: Boolean(entry?.maximized),
+            z_index: entry?.z_index ?? 0,
+            tab_group_id: entry?.tab_group_id || "",
+            tab_group_active: Boolean(entry?.tab_group_active),
+          };
+        };
+        return JSON.stringify({
+          open: Boolean(windowListOpen),
+          active_tab_id: appState?.active_tab_id || null,
+          window_list_entries: windowListEntries.map(entryKey),
+          active_window_ids: workspaceWindows.map((windowData) => windowData?.id || ""),
+          rows: entries.map(entryKey),
         });
       }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
@@ -1913,9 +1969,15 @@
       function renderWindowList() {
         windowListPanel.hidden = !windowListOpen;
         windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
+        const nextWindowListKey = windowListRenderKey();
         if (!windowListOpen) {
+          renderedWindowListKey = nextWindowListKey;
           return;
         }
+        if (renderedWindowListKey === nextWindowListKey) {
+          return;
+        }
+        renderedWindowListKey = nextWindowListKey;
         const workspaceWindows = activeWorkspace().windows || [];
         const workspaceWindowMap = new Map(
           workspaceWindows.map((windowData) => [windowData.id, windowData]),
@@ -1984,6 +2046,7 @@
         }
         windowListOpen = !windowListOpen;
         windowListEntries = [];
+        renderedWindowListKey = "";
         renderWindowList();
         if (windowListOpen) {
           requestWindowList();

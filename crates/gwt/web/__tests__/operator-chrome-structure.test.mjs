@@ -397,6 +397,113 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
   );
 });
 
+test("Window List skips unchanged row rebuilds after updating open state", () => {
+  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
+  assert.match(
+    appSource,
+    /let\s+renderedWindowListKey\s*=/,
+    "app.js must track the last rendered Window List row key",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowListRenderKey\s*\(/,
+    "app.js must define a Window List render key helper",
+  );
+
+  const hiddenIndex = renderWindowListBody.indexOf("windowListPanel.hidden");
+  const ariaIndex = renderWindowListBody.indexOf("aria-expanded");
+  const keyIndex = renderWindowListBody.indexOf(
+    "const nextWindowListKey = windowListRenderKey();",
+  );
+  const guardIndex = renderWindowListBody.indexOf(
+    "if (renderedWindowListKey === nextWindowListKey)",
+  );
+  const clearIndex = renderWindowListBody.indexOf("windowListPanel.innerHTML = \"\";");
+
+  assert.notEqual(hiddenIndex, -1, "renderWindowList must update panel hidden state");
+  assert.notEqual(ariaIndex, -1, "renderWindowList must update trigger aria-expanded");
+  assert.ok(
+    keyIndex > hiddenIndex && keyIndex > ariaIndex,
+    "Window List key must run after open state updates",
+  );
+  assert.ok(guardIndex > keyIndex, "renderWindowList must guard on the Window List key");
+  assert.ok(
+    guardIndex < clearIndex,
+    "unchanged Window List key must return before row clearing/rebuild",
+  );
+  assert.match(
+    renderWindowListBody.slice(guardIndex, clearIndex),
+    /return\s*;/,
+    "unchanged Window List key guard must return before clearing rows",
+  );
+
+  const toggleWindowListBody = extractFunctionBody(appSource, "toggleWindowList");
+  const invalidateIndex = toggleWindowListBody.indexOf("renderedWindowListKey = \"\";");
+  const renderIndex = toggleWindowListBody.indexOf("renderWindowList();");
+  const requestIndex = toggleWindowListBody.indexOf("requestWindowList();");
+  assert.notEqual(invalidateIndex, -1, "toggleWindowList must invalidate the Window List key");
+  assert.ok(
+    invalidateIndex < renderIndex && renderIndex < requestIndex,
+    "opening Window List must render current rows before requesting backend entries",
+  );
+});
+
+test("Window List render key ignores viewport and includes row shell fields", () => {
+  const keyBody = extractFunctionBody(appSource, "windowListRenderKey");
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Window List key must include active tab identity",
+  );
+  assert.match(
+    keyBody,
+    /windowListEntries/,
+    "Window List key must include server-provided window_list entries",
+  );
+  assert.match(
+    keyBody,
+    /activeWorkspace\s*\(\s*\)/,
+    "Window List key must include active workspace window identity/order",
+  );
+  assert.match(
+    keyBody,
+    /runtimeStateForWindow\s*\(/,
+    "Window List key must include runtime state used by status chips",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Window List key must include ${field}`,
+    );
+  }
+  assert.doesNotMatch(
+    keyBody,
+    /\bviewport\b/,
+    "Window List key must ignore viewport-only state",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
