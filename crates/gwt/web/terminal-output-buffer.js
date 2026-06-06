@@ -7,6 +7,7 @@
 
 export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
+export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
 
 function defaultSchedule(callback) {
   if (typeof requestAnimationFrame === "function") {
@@ -29,6 +30,13 @@ function normalizeMaxWindowsPerFlush(value) {
   return Math.floor(value);
 }
 
+function normalizeMaxTotalCharsPerFlush(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH;
+  }
+  return Math.floor(value);
+}
+
 function defaultMergeChunks(chunks) {
   return chunks.join("");
 }
@@ -39,6 +47,7 @@ export function createTerminalOutputBatcher({
   onFlush,
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
   maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
+  maxTotalCharsPerFlush = DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
   mergeChunks = defaultMergeChunks,
 } = {}) {
   if (typeof write !== "function") {
@@ -48,6 +57,7 @@ export function createTerminalOutputBatcher({
   const onFlushImpl = typeof onFlush === "function" ? onFlush : null;
   const charsPerFlush = normalizeMaxCharsPerFlush(maxCharsPerFlush);
   const windowsPerFlush = normalizeMaxWindowsPerFlush(maxWindowsPerFlush);
+  const totalCharsPerFlush = normalizeMaxTotalCharsPerFlush(maxTotalCharsPerFlush);
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const pendingByWindow = new Map();
@@ -84,17 +94,21 @@ export function createTerminalOutputBatcher({
     return true;
   }
 
-  function takeFlushChunks(entry) {
+  function takeFlushChunks(entry, maxChars = charsPerFlush) {
     const chunks = [];
     let chars = 0;
+    const charLimit =
+      Number.isFinite(maxChars) && maxChars > 0
+        ? Math.min(charsPerFlush, Math.floor(maxChars))
+        : charsPerFlush;
     while (entry.chunks.length > 0) {
       const next = entry.chunks[0];
-      if (chunks.length > 0 && chars + next.length > charsPerFlush) {
+      if (chunks.length > 0 && chars + next.length > charLimit) {
         break;
       }
       chunks.push(entry.chunks.shift());
       chars += next.length;
-      if (chars >= charsPerFlush) {
+      if (chars >= charLimit) {
         break;
       }
     }
@@ -120,14 +134,21 @@ export function createTerminalOutputBatcher({
     }
     let flushed = false;
     let windowsFlushed = 0;
+    let charsFlushed = 0;
     for (const windowId of Array.from(pendingByWindow.keys())) {
       if (windowsFlushed >= windowsPerFlush) {
+        break;
+      }
+      if (windowsFlushed > 0 && charsFlushed >= totalCharsPerFlush) {
         break;
       }
       if (!pendingByWindow.has(windowId)) {
         continue;
       }
-      flushed = flushWindow(windowId) || flushed;
+      const remainingChars = Math.max(1, totalCharsPerFlush - charsFlushed);
+      const result = flushWindow(windowId, remainingChars);
+      flushed = result.flushed || flushed;
+      charsFlushed += result.chars;
       windowsFlushed += 1;
     }
     if (pendingByWindow.size > 0) {
@@ -136,16 +157,16 @@ export function createTerminalOutputBatcher({
     return flushed;
   }
 
-  function flushWindow(windowId) {
+  function flushWindow(windowId, maxChars = charsPerFlush) {
     const entry = pendingByWindow.get(windowId);
     if (!entry) {
-      return false;
+      return { flushed: false, chars: 0 };
     }
     if (entry.chunks.length === 0) {
       pendingByWindow.delete(windowId);
-      return false;
+      return { flushed: false, chars: 0 };
     }
-    const chunks = takeFlushChunks(entry);
+    const chunks = takeFlushChunks(entry, maxChars);
     if (entry.chunks.length === 0) {
       pendingByWindow.delete(windowId);
     }
@@ -154,23 +175,24 @@ export function createTerminalOutputBatcher({
       text = mergeChunksImpl(chunks, windowId);
     } catch (error) {
       console.warn("[terminal-output-buffer] merge failed for %s", windowId, error);
-      return false;
+      return { flushed: false, chars: 0 };
     }
     if (!text) {
-      return false;
+      return { flushed: false, chars: 0 };
     }
     try {
       write(windowId, text, () => notifyFlushed(windowId));
     } catch (error) {
       console.warn("[terminal-output-buffer] write failed for %s", windowId, error);
     }
-    return true;
+    return { flushed: true, chars: text.length };
   }
 
   function flushNow(windowId) {
     let flushed = false;
     while (pendingByWindow.has(windowId)) {
-      if (!flushWindow(windowId)) {
+      const result = flushWindow(windowId);
+      if (!result.flushed) {
         break;
       }
       flushed = true;

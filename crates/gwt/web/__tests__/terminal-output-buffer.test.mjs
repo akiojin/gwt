@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEFAULT_MAX_CHARS_PER_FLUSH,
+  DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
   DEFAULT_MAX_WINDOWS_PER_FLUSH,
   createTerminalOutputBatcher,
 } from "../terminal-output-buffer.js";
@@ -164,6 +165,77 @@ test("multi-window terminal bursts respect the per-frame window budget", () => {
   assert.equal(batcher.pendingWindowCount(), 0);
 });
 
+test("multi-window terminal bursts respect the aggregate per-frame character budget", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxWindowsPerFlush: 8,
+    maxTotalCharsPerFlush: 10,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-0", "aaaaa");
+  batcher.enqueue("agent-1", "bbbbb");
+  batcher.enqueue("agent-2", "ccccc");
+  batcher.enqueue("agent-3", "ddddd");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-0", text: "aaaaa" },
+    { windowId: "agent-1", text: "bbbbb" },
+  ]);
+  assert.equal(batcher.pendingWindowCount(), 2);
+  assert.equal(scheduler.pendingCount(), 1, "remaining text schedules one follow-up frame");
+
+  scheduler.runAll();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-0", text: "aaaaa" },
+    { windowId: "agent-1", text: "bbbbb" },
+    { windowId: "agent-2", text: "ccccc" },
+    { windowId: "agent-3", text: "ddddd" },
+  ]);
+  assert.equal(batcher.pendingWindowCount(), 0);
+});
+
+test("aggregate frame budget does not split a single oversized chunk", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxTotalCharsPerFlush: 10,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-big", "xxxxxxxxxxxx");
+  batcher.enqueue("agent-small", "ok");
+  batcher.enqueue("agent-tail", "zz");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-big", text: "xxxxxxxxxxxx" },
+  ]);
+  assert.equal(batcher.pendingWindowCount(), 2);
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runAll();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-big", text: "xxxxxxxxxxxx" },
+    { windowId: "agent-small", text: "ok" },
+    { windowId: "agent-tail", text: "zz" },
+  ]);
+});
+
 test("flushNow drains a window before its scheduled frame", () => {
   const scheduler = manualScheduler();
   const writes = [];
@@ -267,4 +339,5 @@ test("mergeChunks runs during the scheduled flush with original chunk order", ()
 test("defaults expose bounded per-frame budgets", () => {
   assert.equal(DEFAULT_MAX_CHARS_PER_FLUSH, 65536);
   assert.equal(DEFAULT_MAX_WINDOWS_PER_FLUSH, 8);
+  assert.equal(DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH, DEFAULT_MAX_CHARS_PER_FLUSH);
 });
