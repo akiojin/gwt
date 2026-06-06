@@ -351,6 +351,40 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
 });
 
+test("clamped no-op zoom returns before local viewport apply and persist work", () => {
+  const zoomBody = extractFunctionBody(appSource, "zoomCanvasAt");
+  assert.match(
+    appSource,
+    /function\s+sameViewportValues\s*\(/,
+    "app.js must define a semantic viewport equality helper",
+  );
+  const nextViewportIndex = zoomBody.indexOf("const nextViewport = {");
+  const guardIndex = zoomBody.indexOf("if (sameViewportValues(viewport, nextViewport))");
+  const assignIndex = zoomBody.indexOf("viewport = nextViewport;");
+  const recordIndex = zoomBody.indexOf("recordLocalViewportEdit();");
+  const applyIndex = zoomBody.indexOf("applyViewport();");
+  const persistIndex = zoomBody.indexOf("persistViewport();");
+
+  assert.notEqual(nextViewportIndex, -1, "zoomCanvasAt must compute next viewport first");
+  assert.ok(guardIndex > nextViewportIndex, "no-op guard must inspect the computed viewport");
+  assert.ok(
+    guardIndex < assignIndex
+      && guardIndex < recordIndex
+      && guardIndex < applyIndex
+      && guardIndex < persistIndex,
+    "clamped no-op zoom must return before assignment, local edit tracking, viewport writes, and persist scheduling",
+  );
+  assert.match(
+    zoomBody.slice(guardIndex, assignIndex),
+    /return\s*;/,
+    "same viewport guard must return before changed-zoom apply/persist sequence",
+  );
+  assert.ok(
+    assignIndex < recordIndex && recordIndex < applyIndex && applyIndex < persistIndex,
+    "changed zoom must still assign next viewport before the existing apply/persist sequence",
+  );
+});
+
 test("Workspace Windows render key ignores viewport and includes window shell fields", () => {
   const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
   assert.match(

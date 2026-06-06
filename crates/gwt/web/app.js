@@ -2869,6 +2869,14 @@
         });
       }
 
+      function sameViewportValues(left, right) {
+        return left
+          && right
+          && left.x === right.x
+          && left.y === right.y
+          && left.zoom === right.zoom;
+      }
+
       function canvasCenterAnchor() {
         const rect = canvas.getBoundingClientRect();
         return {
@@ -2881,9 +2889,15 @@
         const clampedZoom = clampRange(nextZoom, 0.6, 2.4);
         const worldX = (anchorX - viewport.x) / viewport.zoom;
         const worldY = (anchorY - viewport.y) / viewport.zoom;
-        viewport.x = anchorX - worldX * clampedZoom;
-        viewport.y = anchorY - worldY * clampedZoom;
-        viewport.zoom = clampedZoom;
+        const nextViewport = {
+          x: anchorX - worldX * clampedZoom,
+          y: anchorY - worldY * clampedZoom,
+          zoom: clampedZoom,
+        };
+        if (sameViewportValues(viewport, nextViewport)) {
+          return;
+        }
+        viewport = nextViewport;
         recordLocalViewportEdit();
         applyViewport();
         persistViewport();
