@@ -1463,6 +1463,25 @@ test("Operator telemetry skips unchanged counts before DOM writes", () => {
   );
 });
 
+test("Operator telemetry key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "telemetry key must append primitive count fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "telemetry key must not serialize a counts object graph",
+  );
+});
+
 test("Operator telemetry key covers status strip fields and branch telemetry uses guard", () => {
   const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
   for (const field of [

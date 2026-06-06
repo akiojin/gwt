@@ -3646,17 +3646,26 @@
       // counts into the bottom strip. We also expose agent count to the
       // sidebar layer for the "Quick" section's hint.
       function operatorTelemetryRenderKey(counts) {
-        return JSON.stringify({
-          active: counts?.active ?? null,
-          idle: counts?.idle ?? null,
-          blocked: counts?.blocked ?? null,
-          done: counts?.done ?? null,
-          agents: counts?.agents ?? null,
-          branches: counts?.branches ?? null,
-          git: counts?.git ?? null,
-          hooks: counts?.hooks ?? null,
-          layers: counts?.layers ?? null,
-        });
+        const parts = [];
+        appendRenderKeyPart(parts, "active");
+        appendRenderKeyPart(parts, counts?.active ?? null);
+        appendRenderKeyPart(parts, "idle");
+        appendRenderKeyPart(parts, counts?.idle ?? null);
+        appendRenderKeyPart(parts, "blocked");
+        appendRenderKeyPart(parts, counts?.blocked ?? null);
+        appendRenderKeyPart(parts, "done");
+        appendRenderKeyPart(parts, counts?.done ?? null);
+        appendRenderKeyPart(parts, "agents");
+        appendRenderKeyPart(parts, counts?.agents ?? null);
+        appendRenderKeyPart(parts, "branches");
+        appendRenderKeyPart(parts, counts?.branches ?? null);
+        appendRenderKeyPart(parts, "git");
+        appendRenderKeyPart(parts, counts?.git ?? null);
+        appendRenderKeyPart(parts, "hooks");
+        appendRenderKeyPart(parts, counts?.hooks ?? null);
+        appendRenderKeyPart(parts, "layers");
+        appendRenderKeyPart(parts, counts?.layers ?? null);
+        return parts.join("");
       }
 
       function applyOperatorTelemetryCounts(counts) {
