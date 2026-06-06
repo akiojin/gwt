@@ -211,6 +211,91 @@ test("workspace_state hot path leaves Active Work overview redraw to active_work
   );
 });
 
+test("Board workspace id sync avoids stringify and reuses active Work id cache", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    appSource,
+    /let\s+currentProjectWorkspaceKey\s*=/,
+    "app.js must track a stable key for the current Board workspace id set",
+  );
+  assert.match(
+    appSource,
+    /let\s+activeWorkProjectionWorkspaceIds\s*=/,
+    "app.js must cache active Work projection workspace ids",
+  );
+  assert.match(
+    appSource,
+    /function\s+syncCurrentProjectWorkspaceIds\s*\(/,
+    "app.js must centralize Board workspace id synchronization",
+  );
+  assert.doesNotMatch(
+    renderAppStateBody,
+    /JSON\.stringify\s*\(/,
+    "workspace_state renderAppState must not serialize workspace id arrays for Board sync",
+  );
+  assert.match(
+    renderAppStateBody,
+    /syncCurrentProjectWorkspaceIds\s*\(\s*deriveCurrentProjectWorkspaceIds\s*\(\s*tab\?\.workspace\s*\|\|\s*\{\}\s*\)\s*,?\s*\)/,
+    "renderAppState must route Board workspace id updates through the shared sync helper",
+  );
+
+  const deriveBody = extractFunctionBody(appSource, "deriveCurrentProjectWorkspaceIds");
+  const cachedProjectionIndex = deriveBody.indexOf("activeWorkProjectionWorkspaceIds");
+  const workspaceAgentsIndex = deriveBody.indexOf("workspaceState?.workspace?.agents");
+  assert.ok(
+    cachedProjectionIndex >= 0,
+    "deriveCurrentProjectWorkspaceIds must read cached active Work projection ids",
+  );
+  assert.ok(
+    workspaceAgentsIndex >= 0,
+    "deriveCurrentProjectWorkspaceIds must keep the workspace-agent fallback",
+  );
+  assert.ok(
+    cachedProjectionIndex < workspaceAgentsIndex,
+    "cached active Work projection ids must be used before walking workspace agents",
+  );
+  assert.doesNotMatch(
+    deriveBody,
+    /activeWorkProjection\.active_works\.map/,
+    "workspace_state id derivation must not remap active_work_projection on every render",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const activeProjectionCase = receiveBody.match(
+    /case\s+"active_work_projection":[\s\S]*?break;/,
+  );
+  assert.ok(activeProjectionCase, "expected active_work_projection receive case");
+  const cacheIndex = activeProjectionCase[0].indexOf(
+    "cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection)",
+  );
+  const syncIndex = activeProjectionCase[0].indexOf("syncCurrentProjectWorkspaceIds(");
+  assert.ok(
+    cacheIndex >= 0,
+    "active_work_projection must update the cached active Work id set",
+  );
+  assert.ok(
+    syncIndex > cacheIndex,
+    "active_work_projection must sync Board ids after refreshing the cache",
+  );
+  assert.doesNotMatch(
+    activeProjectionCase[0],
+    /currentProjectWorkspaceId\s*=\s*deriveCurrentProjectWorkspaceIds/,
+    "active_work_projection must not bypass the shared sync helper",
+  );
+
+  const syncBody = extractFunctionBody(appSource, "syncCurrentProjectWorkspaceIds");
+  assert.match(
+    syncBody,
+    /workIdsKey\s*\(/,
+    "sync helper must compare stable Board workspace id keys",
+  );
+  assert.match(
+    syncBody,
+    /refreshBoardCurrentWorkspaceId\s*\(\s*\)/,
+    "sync helper must still refresh Board states when the id set changes",
+  );
+});
+
 test("workspace_state hot path gates Project Tabs redraw by tab shell key", () => {
   const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
   assert.match(

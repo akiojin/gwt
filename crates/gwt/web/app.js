@@ -2580,11 +2580,9 @@
             const tab = activeProjectTab();
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
-            const nextWorkspaceId = deriveCurrentProjectWorkspaceIds(tab?.workspace || {});
-            if (JSON.stringify(nextWorkspaceId) !== JSON.stringify(currentProjectWorkspaceId)) {
-              currentProjectWorkspaceId = nextWorkspaceId;
-              refreshBoardCurrentWorkspaceId();
-            }
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
+            );
             renderWindowList();
           },
         );
@@ -6999,7 +6997,10 @@
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
       // the Board Work filter. Broadcast entries remain visible everywhere;
       // scoped entries match when their audience includes any active Work id.
+      const WORK_ID_KEY_SEPARATOR = "\u001f";
       let currentProjectWorkspaceId = [];
+      let currentProjectWorkspaceKey = "";
+      let activeWorkProjectionWorkspaceIds = [];
       function uniqueWorkIds(values) {
         const ids = [];
         for (const value of values || []) {
@@ -7008,12 +7009,19 @@
         }
         return ids;
       }
+      function workIdsKey(ids) {
+        return (ids || []).join(WORK_ID_KEY_SEPARATOR);
+      }
+      function cacheActiveWorkProjectionWorkspaceIds(projection) {
+        activeWorkProjectionWorkspaceIds = uniqueWorkIds(
+          Array.isArray(projection?.active_works)
+            ? projection.active_works.map((work) => work?.id)
+            : [],
+        );
+      }
       function deriveCurrentProjectWorkspaceIds(workspaceState) {
-        const activeWorkIds = Array.isArray(activeWorkProjection?.active_works)
-          ? activeWorkProjection.active_works.map((work) => work?.id)
-          : [];
-        if (activeWorkIds.length > 0) {
-          return uniqueWorkIds(activeWorkIds);
+        if (activeWorkProjectionWorkspaceIds.length > 0) {
+          return activeWorkProjectionWorkspaceIds;
         }
         const agents = workspaceState?.workspace?.agents
           || workspaceState?.agents
@@ -7028,6 +7036,17 @@
             )
             .map((agent) => agent.workspace_id),
         );
+      }
+      function syncCurrentProjectWorkspaceIds(nextIds) {
+        const ids = Array.isArray(nextIds) ? nextIds : [];
+        const nextKey = workIdsKey(ids);
+        if (nextKey === currentProjectWorkspaceKey) {
+          return false;
+        }
+        currentProjectWorkspaceId = ids;
+        currentProjectWorkspaceKey = nextKey;
+        refreshBoardCurrentWorkspaceId();
+        return true;
       }
       function refreshBoardCurrentWorkspaceId() {
         for (const state of boardStateMap.values()) {
@@ -13643,10 +13662,10 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
-            currentProjectWorkspaceId = deriveCurrentProjectWorkspaceIds(
-              activeWorkspace() || {},
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
             );
-            refreshBoardCurrentWorkspaceId();
             renderActiveWorkOverview();
             workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
