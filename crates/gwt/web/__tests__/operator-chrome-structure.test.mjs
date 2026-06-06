@@ -631,6 +631,133 @@ test("Static project chrome keys ignore workspace geometry and include visible t
   }
 });
 
+test("Per-window renderer guards unchanged DOM writes after mount and preset sync", () => {
+  assert.match(
+    appSource,
+    /const\s+renderedWindowElementKeys\s*=\s*new\s+Map\s*\(/,
+    "app.js must track per-window element render keys",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowElementRenderKey\s*\(/,
+    "app.js must define a per-window element render key helper",
+  );
+
+  const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
+  const mountIndex = ensureWindowBody.indexOf("mountWindowBody(windowData, element);");
+  const keyIndex = ensureWindowBody.indexOf(
+    "const nextWindowElementKey = windowElementRenderKey(windowData);",
+  );
+  const guardIndex = ensureWindowBody.indexOf(
+    "if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey)",
+  );
+  const storeIndex = ensureWindowBody.indexOf(
+    "renderedWindowElementKeys.set(windowData.id, windowElementRenderKey(windowData));",
+  );
+  const titleIndex = ensureWindowBody.indexOf(".title-text");
+  const roleBadgeIndex = ensureWindowBody.indexOf("setWindowRoleBadge");
+  const tabsIndex = ensureWindowBody.indexOf("renderWindowTabs");
+  const agentColorIndex = ensureWindowBody.indexOf("agentColor");
+  const classIndex = ensureWindowBody.indexOf('classList.toggle("minimized"');
+  const styleIndex = ensureWindowBody.indexOf("element.style.zIndex");
+  const statusIndex = ensureWindowBody.indexOf("applyStatus");
+  const fitIndex = ensureWindowBody.indexOf("fitTerminal");
+
+  assert.notEqual(mountIndex, -1, "ensureWindow must keep preset/body mount logic");
+  assert.ok(keyIndex > mountIndex, "per-window key must run after preset/body mounting");
+  assert.ok(guardIndex > keyIndex, "ensureWindow must guard on the per-window key");
+  for (const [label, index] of [
+    ["title", titleIndex],
+    ["role badge", roleBadgeIndex],
+    ["tab strip", tabsIndex],
+    ["agent color", agentColorIndex],
+    ["class", classIndex],
+    ["style", styleIndex],
+    ["status", statusIndex],
+    ["terminal fit", fitIndex],
+  ]) {
+    assert.notEqual(index, -1, `ensureWindow must still contain ${label} writes`);
+    assert.ok(
+      guardIndex < index,
+      `unchanged per-window key must return before ${label} writes`,
+    );
+  }
+  assert.ok(
+    statusIndex < storeIndex,
+    "ensureWindow must store changed keys after status/detail normalization",
+  );
+  assert.match(
+    ensureWindowBody.slice(guardIndex, titleIndex),
+    /return\s*;/,
+    "unchanged per-window key guard must return before window DOM writes",
+  );
+});
+
+test("Per-window render key covers DOM shell fields and removal cleanup", () => {
+  const keyBody = extractFunctionBody(appSource, "windowElementRenderKey");
+  assert.match(
+    keyBody,
+    /windowDisplayTitle\s*\(/,
+    "per-window key must include displayed title",
+  );
+  assert.match(
+    keyBody,
+    /windowTitleTooltip\s*\(/,
+    "per-window key must include title tooltip",
+  );
+  assert.match(
+    keyBody,
+    /windowTabsFor\s*\(/,
+    "per-window key must include tab strip inputs",
+  );
+  assert.match(
+    keyBody,
+    /detailMap\.get\s*\(\s*windowData\.id\s*\)/,
+    "per-window key must include status detail text",
+  );
+  assert.match(
+    keyBody,
+    /maximizedGeometry\s*\(\s*visibleBounds\s*\(\s*\)\s*,\s*viewport\.zoom\s*\)/,
+    "per-window key must include viewport-relative maximized fill",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `per-window key must include ${field}`,
+    );
+  }
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const cleanupIndex = renderWorkspaceBody.indexOf("renderedWindowElementKeys.delete(windowId);");
+  const removeIndex = renderWorkspaceBody.indexOf("element.remove();");
+  assert.notEqual(cleanupIndex, -1, "window removal must clear per-window render key");
+  assert.ok(
+    cleanupIndex < removeIndex,
+    "per-window render key cleanup must happen before element removal",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state

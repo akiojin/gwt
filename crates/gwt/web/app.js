@@ -197,6 +197,7 @@
         },
       });
       const windowMap = new Map();
+      const renderedWindowElementKeys = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const profileStateMap = new Map();
@@ -598,6 +599,63 @@
           window_list_entries: windowListEntries.map(entryKey),
           active_window_ids: workspaceWindows.map((windowData) => windowData?.id || ""),
           rows: entries.map(entryKey),
+        });
+      }
+
+      function windowElementRenderKey(windowData) {
+        const geometry = windowData.geometry || {};
+        const maximizedFill =
+          windowData.maximized && !windowData.minimized
+            ? maximizedGeometry(visibleBounds(), viewport.zoom)
+            : null;
+        return JSON.stringify({
+          id: windowData.id,
+          preset: windowData.preset || "",
+          title: windowData.title || "",
+          dynamic_title: windowData.dynamic_title || "",
+          dynamic_title_detail: windowData.dynamic_title_detail || "",
+          purpose_title: windowData.purpose_title || "",
+          agent_id: windowData.agent_id || "",
+          agent_color: windowData.agent_color || "",
+          status: windowData.status || "",
+          runtime_state: runtimeStateForWindow(windowData),
+          detail: detailMap.get(windowData.id) || "",
+          display_title: windowDisplayTitle(windowData),
+          title_tooltip: windowTitleTooltip(windowData),
+          role_badge: windowRoleBadgeLabel(windowData),
+          geometry_revision: workspaceGeometryRevision(windowData),
+          geometry: {
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+          },
+          minimized: Boolean(windowData.minimized),
+          maximized: Boolean(windowData.maximized),
+          z_index: windowData.z_index,
+          tab_group_id: windowData.tab_group_id || "",
+          tab_group_active: Boolean(windowData.tab_group_active),
+          maximized_fill: maximizedFill
+            ? {
+                x: maximizedFill.x,
+                y: maximizedFill.y,
+                width: maximizedFill.width,
+                height: maximizedFill.height,
+              }
+            : null,
+          tabs: windowTabsFor(windowData).map((tab) => ({
+            id: tab.id,
+            preset: tab.preset || "",
+            title: tab.title || "",
+            dynamic_title: tab.dynamic_title || "",
+            dynamic_title_detail: tab.dynamic_title_detail || "",
+            purpose_title: tab.purpose_title || "",
+            agent_id: tab.agent_id || "",
+            agent_color: tab.agent_color || "",
+            status: tab.status || "",
+            tab_group_id: tab.tab_group_id || "",
+            tab_group_active: Boolean(tab.tab_group_active),
+          })),
         });
       }
 
@@ -13084,6 +13142,11 @@
           mountWindowBody(windowData, element);
         }
 
+        const nextWindowElementKey = windowElementRenderKey(windowData);
+        if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
+          return;
+        }
+
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
@@ -13137,6 +13200,7 @@
         element.querySelector(".resize-handle").hidden =
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        renderedWindowElementKeys.set(windowData.id, windowElementRenderKey(windowData));
         if (
           (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           presetSurface(windowData.preset) === "terminal" &&
@@ -13202,6 +13266,7 @@
               decoderMap.delete(windowId);
               detailMap.delete(windowId);
               windowRuntimeStateMap.delete(windowId);
+              renderedWindowElementKeys.delete(windowId);
               pendingOutputMap.delete(windowId);
               pendingSnapshotMap.delete(windowId);
               terminalOutputBatcher.clear(windowId);
