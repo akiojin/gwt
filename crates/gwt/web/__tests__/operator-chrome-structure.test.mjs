@@ -1802,13 +1802,13 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     appSource,
-    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showStartMethods = Boolean\([\s\S]*?launchWizard\.show_start_methods[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
-    "expected showManualSetup to be initialized before Runtime confirmation setup gating",
+    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
     appSource,
-    /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*\);/,
-    "expected renderer to derive a dedicated Runtime confirmation state",
+    /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);/,
+    "expected renderer to derive a dedicated Runtime confirmation state outside Confirm",
   );
   assert.match(
     appSource,

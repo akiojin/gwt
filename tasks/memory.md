@@ -6690,3 +6690,17 @@ Type: workflow
 Context: 「Claude Code の使用量が怪しい」調査で Explore サブエージェントが『月$8,462の従量課金』『cacheを5分TTLで毎ターン破壊』『cache_read 11億/per-turn 966k』『無限リトライループ・264回暴走起動』と報告したが全て実データで反証された。実際は ~/.claude/.credentials.json が subscriptionType=max / rateLimitTier=default_claude_max_20x で ANTHROPIC_API_KEY 未設定（ドル従量課金ゼロ・Maxサブスク枠）、cacheは ephemeral_1h TTL、11億はメインとサブエージェント(subagents/配下)の二重計上、retryは有限(100ms bootstrap完了待ち)、264回は1791行の2日間テスト集中だった。真因は Opus 4.8 + 1M context(per-turn最大995k)常用 × 長大セッション × subagent多用で gwt が Opus の81%。
 Learning: 使用量/コスト調査でサブエージェントの定量報告は誇張・二重計上・誤前提を含みやすく鵜呑み厳禁。(1)課金体系は ~/.claude/.credentials.json の subscriptionType/rateLimitTier と ANTHROPIC_API_KEY 有無で先に確定する(サブスク枠かAPI従量かで結論が真逆)。(2)transcript集計はメインセッションとサブエージェント(subagents/*.jsonl)を分離し各assistant messageを1回だけ model別 group_by する。(3)per-turnの input+cache_read が context window(200k/1M)を超えたら集計バグのサイン。
 Future Action: 使用量調査では結論前に自分で credentials 種別確認と jq による model別/二重計上排除の集計を実行し、エージェントの数値と断定を一次データで裏取りする。
+
+## 2026-06-04 — Fresh browser checks must seed agent windows, not rely on Start Work
+
+Type: lesson
+Context: SPEC-2012 visual verification was blocked twice because the isolated browser-check HOME had no Git HTTPS credentials and the user attempted Start Work/Launch flows that created remote work branches.
+Learning: For UI verification that needs an Agent window, prepare the fresh checkout with a current-branch Agent window before handing off the URL. For Claude Code startup auto-resume, the seeded session must include exact agent_session_id plus lifecycle evidence such as last_hook_event_at or last_completed_stop_at; otherwise it is filtered out.
+Future Action: When using browser-check for Agent-window behavior, never ask the user to Start Work in the isolated HOME. Seed or launch the required current-branch Agent window first, verify with headless/browser checks that no branch-auth error is present, then share the URL.
+
+## 2026-06-04 — Fresh Claude verification can be blocked by existing live Work agent focus
+
+Type: lesson
+Context: SPEC-2012 visual verification needed a Claude Code window in an isolated browser-check HOME. Launch Wizard normal mode appeared to close successfully but did not create Claude while a live Codex pane was already assigned to the same Work.
+Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
+Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
