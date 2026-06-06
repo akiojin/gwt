@@ -17409,6 +17409,61 @@ exit 1
     }
 
     #[test]
+    fn app_runtime_duplicate_viewport_update_skips_workspace_broadcast_and_persist() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo,
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let viewport = gwt::CanvasViewport {
+            x: 12.0,
+            y: 34.0,
+            zoom: 1.25,
+        };
+
+        assert_eq!(runtime.update_viewport_events(viewport.clone()).len(), 1);
+        assert_eq!(runtime.persist_dispatcher.enqueued_count(), 1);
+
+        assert!(
+            runtime.update_viewport_events(viewport).is_empty(),
+            "duplicate viewport payload should not broadcast a workspace_state",
+        );
+        assert_eq!(
+            runtime.persist_dispatcher.enqueued_count(),
+            1,
+            "duplicate viewport payload should not enqueue another persist snapshot",
+        );
+
+        assert_eq!(
+            runtime
+                .update_viewport_events(gwt::CanvasViewport {
+                    x: 12.0,
+                    y: 34.0,
+                    zoom: 1.5,
+                })
+                .len(),
+            1,
+            "changed zoom must still broadcast workspace_state",
+        );
+        assert_eq!(
+            runtime.persist_dispatcher.enqueued_count(),
+            2,
+            "changed viewport must still enqueue persistence",
+        );
+    }
+
+    #[test]
     fn app_runtime_geometry_update_rejects_stale_base_revision() {
         let _env_lock = env_test_lock()
             .lock()
