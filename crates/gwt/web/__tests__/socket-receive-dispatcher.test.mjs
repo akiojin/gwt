@@ -189,6 +189,73 @@ test("handle() accepts both WebSocket message events and pre-parsed payloads", (
   ]);
 });
 
+test("handle() defers string WebSocket JSON.parse until scheduled flush", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const originalParse = JSON.parse;
+  let parseCalls = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  JSON.parse = (source, reviver) => {
+    parseCalls += 1;
+    return originalParse.call(JSON, source, reviver);
+  };
+  try {
+    dispatcher.handle({
+      data: JSON.stringify({ kind: "terminal_output", id: "shell", data: "0" }),
+    });
+
+    assert.equal(parseCalls, 0, "string handle() must not parse synchronously");
+    assert.equal(received.length, 0, "receive remains deferred until flush");
+    assert.equal(scheduler.pendingCount(), 1, "one frame is scheduled");
+
+    scheduler.runOnce();
+
+    assert.equal(parseCalls, 1, "flush parses the raw payload before receive()");
+    assert.deepEqual(received, [
+      { kind: "terminal_output", id: "shell", data: "0" },
+    ]);
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
+test("string idempotent events coalesce before full JSON.parse", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const originalParse = JSON.parse;
+  let parseCalls = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  JSON.parse = (source, reviver) => {
+    parseCalls += 1;
+    return originalParse.call(JSON, source, reviver);
+  };
+  try {
+    for (let i = 0; i < 25; i += 1) {
+      dispatcher.handle({
+        data: JSON.stringify({ kind: "workspace_state", revision: i }),
+      });
+    }
+
+    assert.equal(parseCalls, 0, "queued raw strings must not parse during handle()");
+    scheduler.runOnce();
+
+    assert.equal(parseCalls, 1, "only the latest coalesced state is parsed");
+    assert.deepEqual(received, [{ kind: "workspace_state", revision: 24 }]);
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
 test("flushNow synchronously drains pending events without waiting for the scheduler", () => {
   const received = [];
   const scheduler = manualScheduler();

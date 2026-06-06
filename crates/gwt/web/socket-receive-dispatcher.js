@@ -10,6 +10,7 @@
 // `createSocketReceiveDispatcher` wraps `receive` so:
 // - inbound events accumulate in a queue,
 // - the queue is flushed on the next animation frame,
+// - string payloads keep full JSON.parse work inside the scheduled flush budget,
 // - idempotent global-state kinds (e.g. workspace_state) collapse to the
 //   latest occurrence, sparing redundant DOM mutations,
 // - long streamed-event backlogs deliver a bounded chunk before latest state so
@@ -86,7 +87,7 @@ export function createSocketReceiveDispatcher({
     if (queue.length === 0) {
       return;
     }
-    const ready = coalesceEvents(queue, coalesceKinds, {
+    const ready = coalesceQueuedEntries(queue, coalesceKinds, {
       maxStreamedBeforeState,
     });
     queue.length = 0;
@@ -96,24 +97,27 @@ export function createSocketReceiveDispatcher({
     });
     let cursor = 0;
     while (cursor < ready.length) {
-      const event = ready[cursor];
+      const entry = ready[cursor];
+      const eventKind = queuedEntryKind(entry);
       const receiveStart = nowImpl();
       try {
+        const event = queuedEntryPayload(entry);
         receive(event);
         trace("ws_receive", {
           event_kind: event && event.kind,
           duration_ms: nowImpl() - receiveStart,
+          deferred_parse: entry && entry.type === "raw",
         });
       } catch (error) {
         trace("ws_receive", {
-          event_kind: event && event.kind,
+          event_kind: eventKind,
           duration_ms: nowImpl() - receiveStart,
           threw: true,
           error_name: error && error.name,
         });
         console.warn(
           "[ws-dispatcher] receive threw for %s — continuing with remaining events",
-          event && event.kind,
+          eventKind,
           error,
         );
       }
@@ -139,7 +143,7 @@ export function createSocketReceiveDispatcher({
   }
 
   function enqueue(event) {
-    queue.push(event);
+    queue.push(parsedQueueEntry(event));
     if (!scheduled) {
       scheduled = true;
       scheduleImpl(flush);
@@ -147,26 +151,35 @@ export function createSocketReceiveDispatcher({
   }
 
   function handle(messageEvent) {
-    let payload;
     const parseStart = nowImpl();
     if (messageEvent && typeof messageEvent.data === "string") {
-      payload = JSON.parse(messageEvent.data);
+      const entry = rawQueueEntry(messageEvent.data);
+      trace("ws_message", {
+        event_kind: entry.kind,
+        parse_ms: nowImpl() - parseStart,
+        deferred_parse: true,
+      });
+      queue.push(entry);
     } else if (
       messageEvent
       && typeof messageEvent === "object"
       && Object.hasOwn(messageEvent, "kind")
     ) {
-      payload = messageEvent;
+      const entry = parsedQueueEntry(messageEvent);
+      trace("ws_message", {
+        event_kind: entry.kind,
+        parse_ms: nowImpl() - parseStart,
+      });
+      queue.push(entry);
     } else {
       throw new TypeError(
         "createSocketReceiveDispatcher.handle expects a WebSocket message event or parsed payload",
       );
     }
-    trace("ws_message", {
-      event_kind: payload && payload.kind,
-      parse_ms: nowImpl() - parseStart,
-    });
-    enqueue(payload);
+    if (!scheduled) {
+      scheduled = true;
+      scheduleImpl(flush);
+    }
   }
 
   function flushNow() {
@@ -182,10 +195,69 @@ export function createSocketReceiveDispatcher({
   return { handle, enqueue, flushNow, pendingCount };
 }
 
+function parsedQueueEntry(event) {
+  return {
+    type: "parsed",
+    kind: event && event.kind,
+    payload: event,
+  };
+}
+
+const KIND_HINT_PATTERN = /"kind"\s*:\s*"([^"\\]*)"/;
+
+function rawQueueEntry(data) {
+  return {
+    type: "raw",
+    kind: extractKindHint(data),
+    payload: data,
+  };
+}
+
+function extractKindHint(data) {
+  if (typeof data !== "string") {
+    return "";
+  }
+  const match = KIND_HINT_PATTERN.exec(data);
+  return match ? match[1] : "";
+}
+
+function queuedEntryKind(entry) {
+  return entry && entry.kind;
+}
+
+function queuedEntryPayload(entry) {
+  if (entry && entry.type === "raw") {
+    return JSON.parse(entry.payload);
+  }
+  return entry ? entry.payload : entry;
+}
+
+function coalesceQueuedEntries(
+  queue,
+  coalesceKinds = DEFAULT_COALESCE_KINDS,
+  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE } = {},
+) {
+  return coalesceByKind(queue, coalesceKinds, {
+    maxStreamedBeforeState,
+    kindFor: queuedEntryKind,
+  });
+}
+
 export function coalesceEvents(
   queue,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
   { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE } = {},
+) {
+  return coalesceByKind(queue, coalesceKinds, {
+    maxStreamedBeforeState,
+    kindFor: (event) => event && event.kind,
+  });
+}
+
+function coalesceByKind(
+  queue,
+  coalesceKinds = DEFAULT_COALESCE_KINDS,
+  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE, kindFor } = {},
 ) {
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
@@ -193,8 +265,7 @@ export function coalesceEvents(
   const streamedChunkLimit = normalizeStreamedChunkLimit(maxStreamedBeforeState);
   const lastIndexByKind = new Map();
   for (let i = 0; i < queue.length; i += 1) {
-    const event = queue[i];
-    const kind = event && event.kind;
+    const kind = kindFor(queue[i]);
     if (kind && coalesceKinds.has(kind)) {
       lastIndexByKind.set(kind, i);
     }
@@ -214,7 +285,7 @@ export function coalesceEvents(
   const idempotent = [];
   for (let i = 0; i < queue.length; i += 1) {
     const event = queue[i];
-    const kind = event && event.kind;
+    const kind = kindFor(event);
     if (kind && coalesceKinds.has(kind)) {
       if (lastIndexByKind.get(kind) === i) {
         idempotent.push(event);
