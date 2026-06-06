@@ -1746,6 +1746,21 @@ fn workspace_status_category_wire(
     }
 }
 
+/// SPEC-2359 Phase W-12 (FR-349): map the agent-session Work lifecycle state
+/// to its snake_case wire string for [`gwt::ActiveWorkItemView::lifecycle_state`].
+fn work_active_lifecycle_state_wire(
+    state: gwt_core::workspace_projection::WorkActiveLifecycleState,
+) -> &'static str {
+    use gwt_core::workspace_projection::WorkActiveLifecycleState;
+
+    match state {
+        WorkActiveLifecycleState::Active => "active",
+        WorkActiveLifecycleState::Paused => "paused",
+        WorkActiveLifecycleState::Done => "done",
+        WorkActiveLifecycleState::Discarded => "discarded",
+    }
+}
+
 const WORKSPACE_OVERVIEW_JOURNAL_LIMIT: usize = 8;
 const WORKSPACE_CLEANUP_EVENT_ID: &str = "__workspace_cleanup__";
 
@@ -2143,6 +2158,17 @@ fn active_work_items_from_projection(
                         .unwrap_or_default()
                 },
                 agents,
+                // SPEC-2359 Phase W-12 (FR-349): active_work_items groups live
+                // assigned agents, so the owning agent session is Running and
+                // not user-closed → Active.
+                lifecycle_state: work_active_lifecycle_state_wire(
+                    gwt_core::workspace_projection::recompute_work_active_lifecycle(
+                        gwt_core::workspace_projection::WorkAgentRuntime::Running,
+                        None,
+                    ),
+                )
+                .to_string(),
+                closed_at: None,
             }
         })
         .collect()
@@ -5136,6 +5162,16 @@ impl AppRuntime {
             pr_state: None,
             board_refs: Vec::new(),
             agents: agents.clone(),
+            // SPEC-2359 Phase W-12 (FR-349): synthesized from live sessions, so
+            // the owning agent is Running and not user-closed → Active.
+            lifecycle_state: work_active_lifecycle_state_wire(
+                gwt_core::workspace_projection::recompute_work_active_lifecycle(
+                    gwt_core::workspace_projection::WorkAgentRuntime::Running,
+                    None,
+                ),
+            )
+            .to_string(),
+            closed_at: None,
         }];
         Some(gwt::ActiveWorkProjectionView {
             id: tab_id.to_string(),
@@ -14404,6 +14440,80 @@ exit 1
             .any(|agent| agent.session_id == "session-b")));
         // Same branch, different sessions → distinct Work ids.
         assert_ne!(view.active_works[0].id, view.active_works[1].id);
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 2 (FR-349): each `active_works` item carries a
+    /// `lifecycle_state` derived from the agent-session Work lifecycle. Active
+    /// Work rows group a live, assigned, running agent session, so the wire
+    /// state is `"active"` and `closed_at` is None (agent stop alone never
+    /// closes a Work — FR-350).
+    #[test]
+    fn app_runtime_active_work_projection_sets_lifecycle_state_active() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push({
+            let mut agent = workspace_agent_summary_for_test("session-a", Some("work-a"));
+            agent.window_id = Some("tab-1::agent-a".to_string());
+            agent.branch = Some("work/a".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut session = sample_active_agent_session("tab-1", "tab-1::agent-a");
+        session.session_id = "session-a".to_string();
+        session.branch_name = "work/a".to_string();
+        session.window_id = "tab-1::agent-a".to_string();
+        runtime
+            .active_agent_sessions
+            .insert("tab-1::agent-a".to_string(), session);
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_works.len(), 1);
+        assert_eq!(view.active_works[0].lifecycle_state, "active");
+        assert_eq!(view.active_works[0].closed_at, None);
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 2 (FR-349): the `lifecycle_state` field is
+    /// back-compat — a serialized `ActiveWorkItemView` payload that predates the
+    /// field deserializes with `lifecycle_state = "active"` and `closed_at =
+    /// None` via the serde defaults.
+    #[test]
+    fn active_work_item_view_lifecycle_state_back_compat_default() {
+        let legacy = serde_json::json!({
+            "id": "work-1",
+            "title": "Legacy Work",
+            "status_category": "active",
+            "status_text": "1 active agent",
+            "summary": null,
+            "owner": null,
+            "next_action": null,
+            "active_agents": 1,
+            "blocked_agents": 0,
+            "branch": "work/legacy",
+            "worktree_path": null,
+            "pr_number": null,
+            "pr_url": null,
+            "pr_state": null,
+            "board_refs": [],
+            "agents": []
+        });
+        let view: gwt::ActiveWorkItemView =
+            serde_json::from_value(legacy).expect("deserialize legacy active work item");
+        assert_eq!(view.lifecycle_state, "active");
+        assert_eq!(view.closed_at, None);
     }
 
     /// SPEC-2359 Phase W-12 Slice 2 (FR-348): `agent_session_id` is the primary

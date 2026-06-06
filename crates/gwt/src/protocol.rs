@@ -1000,6 +1000,14 @@ pub struct ActiveWorkCleanupCandidateView {
     pub remote_delete_available: bool,
 }
 
+/// SPEC-2359 Phase W-12 (FR-349): default wire value for
+/// [`ActiveWorkItemView::lifecycle_state`] when deserializing payloads that
+/// predate the field. Legacy active Work entries are always live (a group of
+/// an assigned, running agent), so the back-compat default is `"active"`.
+fn default_work_lifecycle_state() -> String {
+    "active".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkItemView {
     pub id: String,
@@ -1018,6 +1026,15 @@ pub struct ActiveWorkItemView {
     pub pr_state: Option<String>,
     pub board_refs: Vec<String>,
     pub agents: Vec<ActiveWorkAgentView>,
+    /// SPEC-2359 Phase W-12 (FR-349): agent-session Work lifecycle state
+    /// (active / paused / done / discarded). Distinct from `status_category`
+    /// which tracks runtime agent activity. Back-compat default is `"active"`.
+    #[serde(default = "default_work_lifecycle_state")]
+    pub lifecycle_state: String,
+    /// SPEC-2359 Phase W-12 (FR-349): RFC3339 timestamp of the explicit user
+    /// close (Done / Discarded). None while the Work is active / paused.
+    #[serde(default)]
+    pub closed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2595,6 +2612,8 @@ mod tests {
                     pr_state: Some("OPEN".to_string()),
                     board_refs: vec!["board-1".to_string()],
                     agents: Vec::new(),
+                    lifecycle_state: "active".to_string(),
+                    closed_at: None,
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
