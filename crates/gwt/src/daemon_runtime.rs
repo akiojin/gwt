@@ -190,16 +190,22 @@ fn live_event_agent_session_id(
             return Some(agent_session_id.into_string());
         }
         HookAgentSessionId::MissingRequiredForCodex => {
-            let gwt_session_id =
-                std::env::var(GWT_SESSION_ID_ENV).unwrap_or_else(|_| "-".to_string());
-            let persisted_agent_session_id = session
+            // Codex omits a usable session_id on tool-use events; fall back to
+            // the persisted resume id (captured at SessionStart). Only warn when
+            // there is genuinely nothing to fall back to, so the common case
+            // does not spam stderr on every tool call.
+            if session
                 .and_then(gwt_agent::Session::exact_resume_session_id)
-                .unwrap_or("-");
-            let source_event = source_event.unwrap_or("-");
-            let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
-            eprintln!(
-                "gwtd hook live event: missing Codex hook session_id kind={kind:?} source_event={source_event} gwt_session_id={gwt_session_id} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}"
-            );
+                .is_none()
+            {
+                let gwt_session_id =
+                    std::env::var(GWT_SESSION_ID_ENV).unwrap_or_else(|_| "-".to_string());
+                let source_event = source_event.unwrap_or("-");
+                let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
+                eprintln!(
+                    "gwtd hook live event: missing Codex hook session_id kind={kind:?} source_event={source_event} gwt_session_id={gwt_session_id} persisted_agent_session_id=- tool_name={tool_name}"
+                );
+            }
         }
         HookAgentSessionId::MissingOptional => {}
     }
