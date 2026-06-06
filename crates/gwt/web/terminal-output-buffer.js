@@ -63,6 +63,7 @@ export function createTerminalOutputBatcher({
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const canWriteImpl = typeof canWrite === "function" ? canWrite : () => true;
   const pendingByWindow = new Map();
+  const quiescedWindows = new Set();
   let scheduled = false;
 
   function entryFor(windowId) {
@@ -92,7 +93,9 @@ export function createTerminalOutputBatcher({
     }
     const entry = entryFor(windowId);
     entry.chunks.push(normalized);
-    scheduleFlush();
+    if (!quiescedWindows.has(windowId) || hasSchedulablePendingWindow()) {
+      scheduleFlush();
+    }
     return true;
   }
 
@@ -147,7 +150,11 @@ export function createTerminalOutputBatcher({
       if (!pendingByWindow.has(windowId)) {
         continue;
       }
+      if (quiescedWindows.has(windowId)) {
+        continue;
+      }
       if (!canWriteImpl(windowId)) {
+        quiescedWindows.add(windowId);
         continue;
       }
       const remainingChars = Math.max(1, totalCharsPerFlush - charsFlushed);
@@ -156,14 +163,17 @@ export function createTerminalOutputBatcher({
       charsFlushed += result.chars;
       windowsFlushed += 1;
     }
-    if (hasEligiblePendingWindow()) {
+    if (hasSchedulablePendingWindow()) {
       scheduleFlush();
     }
     return flushed;
   }
 
-  function hasEligiblePendingWindow() {
+  function hasSchedulablePendingWindow() {
     for (const windowId of pendingByWindow.keys()) {
+      if (quiescedWindows.has(windowId)) {
+        continue;
+      }
       if (canWriteImpl(windowId)) {
         return true;
       }
@@ -178,6 +188,7 @@ export function createTerminalOutputBatcher({
     }
     if (entry.chunks.length === 0) {
       pendingByWindow.delete(windowId);
+      quiescedWindows.delete(windowId);
       return { flushed: false, chars: 0 };
     }
     const chunks = takeFlushChunks(entry, maxChars);
@@ -204,6 +215,7 @@ export function createTerminalOutputBatcher({
 
   function flushNow(windowId) {
     let flushed = false;
+    quiescedWindows.delete(windowId);
     while (pendingByWindow.has(windowId)) {
       const result = flushWindow(windowId);
       if (!result.flushed) {
@@ -215,6 +227,7 @@ export function createTerminalOutputBatcher({
   }
 
   function clear(windowId) {
+    quiescedWindows.delete(windowId);
     return pendingByWindow.delete(windowId);
   }
 
@@ -222,6 +235,7 @@ export function createTerminalOutputBatcher({
     if (!pendingByWindow.has(windowId)) {
       return false;
     }
+    quiescedWindows.delete(windowId);
     scheduleFlush();
     return true;
   }

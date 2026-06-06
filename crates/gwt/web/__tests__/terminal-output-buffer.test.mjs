@@ -276,6 +276,88 @@ test("hidden terminal output remains queued without decode write or scheduler sp
   );
 });
 
+test("quiesced hidden terminal output does not reschedule until reveal", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const eligibility = new Map([["agent-hidden", false]]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden", "hidden-a");
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, []);
+  assert.equal(batcher.pendingCount("agent-hidden"), 1);
+  assert.equal(scheduler.pendingCount(), 0);
+
+  batcher.enqueue("agent-hidden", "hidden-b");
+  batcher.enqueue("agent-hidden", "hidden-c");
+
+  assert.equal(
+    scheduler.pendingCount(),
+    0,
+    "already-quiesced hidden output must not create empty scheduler frames",
+  );
+  assert.equal(batcher.pendingCount("agent-hidden"), 3);
+
+  eligibility.set("agent-hidden", true);
+  assert.equal(batcher.schedulePending("agent-hidden"), true);
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-hidden", text: "hidden-ahidden-bhidden-c" },
+  ]);
+  assert.equal(batcher.pendingCount("agent-hidden"), 0);
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test("quiesced hidden terminal output does not block visible output scheduling", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const eligibility = new Map([
+    ["agent-hidden", false],
+    ["agent-visible", true],
+  ]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden", "hidden-a");
+  scheduler.runOnce();
+  assert.equal(scheduler.pendingCount(), 0);
+
+  batcher.enqueue("agent-hidden", "hidden-b");
+  assert.equal(scheduler.pendingCount(), 0);
+
+  batcher.enqueue("agent-visible", "visible");
+
+  assert.equal(
+    scheduler.pendingCount(),
+    1,
+    "eligible output must still schedule while hidden output is quiesced",
+  );
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [{ windowId: "agent-visible", text: "visible" }]);
+  assert.equal(batcher.pendingCount("agent-hidden"), 2);
+  assert.equal(batcher.pendingWindowCount(), 1);
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
 test("schedulePending resumes hidden queued output through the budgeted flush path", () => {
   const scheduler = manualScheduler();
   const writes = [];
