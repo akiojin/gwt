@@ -738,6 +738,26 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
 test("Window List render key ignores viewport and includes row shell fields", () => {
   const keyBody = extractFunctionBody(appSource, "windowListRenderKey");
   assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Window List key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Window List key must not serialize an object graph while open",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\.map\s*\(/,
+    "Window List key must not allocate mapped arrays while open",
+  );
+  assert.match(
     keyBody,
     /active_tab_id/,
     "Window List key must include active tab identity",

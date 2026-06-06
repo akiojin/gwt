@@ -608,56 +608,99 @@
       function windowListRenderKey() {
         const workspace = activeWorkspace();
         const workspaceWindows = workspace.windows || [];
-        const workspaceWindowMap = new Map(
-          workspaceWindows.map((windowData) => [windowData.id, windowData]),
-        );
-        const entries =
-          windowListEntries.length > 0
-            ? windowListEntries
-                .map((entry) => workspaceWindowMap.get(entry.id) || entry)
-                .filter(
-                  (entry) =>
-                    workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id),
-                )
-            : workspaceWindows;
-        const entryKey = (entry) => {
+        const workspaceWindowMap = new Map();
+        for (const windowData of workspaceWindows) {
+          workspaceWindowMap.set(windowData.id, windowData);
+        }
+        const appendEntryKey = (parts, entry) => {
+          const geometry = entry?.geometry || {};
           const runtimeState = runtimeStateForWindow(entry);
-          return {
-            id: entry?.id || "",
-            preset: entry?.preset || "",
-            title: entry?.title || "",
-            dynamic_title: entry?.dynamic_title || "",
-            dynamic_title_detail: entry?.dynamic_title_detail || "",
-            purpose_title: entry?.purpose_title || "",
-            agent_id: entry?.agent_id || "",
-            agent_color: entry?.agent_color || "",
-            status: entry?.status || "",
-            runtime_state: runtimeState,
-            runtime_label: windowRuntimeLabel(runtimeState),
-            role_badge: windowRoleBadgeLabel(entry) || "",
-            display_title: windowDisplayTitle(entry),
-            title_tooltip: windowTitleTooltip(entry),
-            geometry: {
-              x: entry?.geometry?.x ?? 0,
-              y: entry?.geometry?.y ?? 0,
-              width: entry?.geometry?.width ?? 0,
-              height: entry?.geometry?.height ?? 0,
-            },
-            geometry_label: windowGeometryLabel(entry),
-            minimized: Boolean(entry?.minimized),
-            maximized: Boolean(entry?.maximized),
-            z_index: entry?.z_index ?? 0,
-            tab_group_id: entry?.tab_group_id || "",
-            tab_group_active: Boolean(entry?.tab_group_active),
-          };
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, entry?.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, entry?.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, entry?.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, entry?.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, entry?.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, entry?.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, entry?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, entry?.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, entry?.status || "");
+          appendRenderKeyPart(parts, "runtime_state");
+          appendRenderKeyPart(parts, runtimeState);
+          appendRenderKeyPart(parts, "runtime_label");
+          appendRenderKeyPart(parts, windowRuntimeLabel(runtimeState));
+          appendRenderKeyPart(parts, "role_badge");
+          appendRenderKeyPart(parts, windowRoleBadgeLabel(entry) || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(entry));
+          appendRenderKeyPart(parts, "title_tooltip");
+          appendRenderKeyPart(parts, windowTitleTooltip(entry));
+          appendRenderKeyPart(parts, "geometry");
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, geometry.x ?? 0);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, geometry.y ?? 0);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, geometry.width ?? 0);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, geometry.height ?? 0);
+          appendRenderKeyPart(parts, "geometry_label");
+          appendRenderKeyPart(parts, windowGeometryLabel(entry));
+          appendRenderKeyPart(parts, "minimized");
+          appendRenderKeyPart(parts, Boolean(entry?.minimized));
+          appendRenderKeyPart(parts, "maximized");
+          appendRenderKeyPart(parts, Boolean(entry?.maximized));
+          appendRenderKeyPart(parts, "z_index");
+          appendRenderKeyPart(parts, entry?.z_index ?? 0);
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, entry?.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(entry?.tab_group_active));
         };
-        return JSON.stringify({
-          open: Boolean(windowListOpen),
-          active_tab_id: appState?.active_tab_id || null,
-          window_list_entries: windowListEntries.map(entryKey),
-          active_window_ids: workspaceWindows.map((windowData) => windowData?.id || ""),
-          rows: entries.map(entryKey),
-        });
+        const parts = [];
+        appendRenderKeyPart(parts, "open");
+        appendRenderKeyPart(parts, Boolean(windowListOpen));
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, appState?.active_tab_id || null);
+        appendRenderKeyPart(parts, "window_list_entries");
+        appendRenderKeyPart(parts, windowListEntries.length);
+        for (const entry of windowListEntries) {
+          appendEntryKey(parts, entry);
+        }
+        appendRenderKeyPart(parts, "active_window_ids");
+        appendRenderKeyPart(parts, workspaceWindows.length);
+        for (const windowData of workspaceWindows) {
+          appendRenderKeyPart(parts, windowData?.id || "");
+        }
+        appendRenderKeyPart(parts, "rows");
+        if (windowListEntries.length > 0) {
+          let rowCount = 0;
+          for (const entry of windowListEntries) {
+            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
+              rowCount += 1;
+            }
+          }
+          appendRenderKeyPart(parts, rowCount);
+          for (const entry of windowListEntries) {
+            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
+              appendEntryKey(parts, workspaceWindowMap.get(entry.id) || entry);
+            }
+          }
+        } else {
+          appendRenderKeyPart(parts, workspaceWindows.length);
+          for (const entry of workspaceWindows) {
+            appendEntryKey(parts, entry);
+          }
+        }
+        return parts.join("");
       }
 
       function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
