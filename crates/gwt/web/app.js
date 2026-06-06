@@ -534,35 +534,68 @@
         );
       }
 
+      function appendRenderKeyPart(parts, value) {
+        const text = String(value ?? "");
+        parts.push(String(text.length), ":", text, "\u001f");
+      }
+
       function workspaceWindowsRenderKey(workspace) {
         const windows = workspace?.windows || [];
-        return JSON.stringify({
-          active_tab_id: appState?.active_tab_id || null,
-          active_window_ids: windows.map((windowData) => windowData?.id || ""),
-          all_project_window_ids: allProjectWindowIds(),
-          windows: windows.map((windowData) => ({
-            id: windowData?.id || "",
-            preset: windowData?.preset || "",
-            title: windowData?.title || "",
-            dynamic_title: windowData?.dynamic_title || "",
-            dynamic_title_detail: windowData?.dynamic_title_detail || "",
-            purpose_title: windowData?.purpose_title || "",
-            agent_id: windowData?.agent_id || "",
-            agent_color: windowData?.agent_color || "",
-            status: windowData?.status || "",
-            geometry: {
-              x: windowData?.geometry?.x ?? 0,
-              y: windowData?.geometry?.y ?? 0,
-              width: windowData?.geometry?.width ?? 0,
-              height: windowData?.geometry?.height ?? 0,
-            },
-            minimized: Boolean(windowData?.minimized),
-            maximized: Boolean(windowData?.maximized),
-            z_index: windowData?.z_index ?? 0,
-            tab_group_id: windowData?.tab_group_id || "",
-            tab_group_active: Boolean(windowData?.tab_group_active),
-          })),
-        });
+        const parts = [];
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, appState?.active_tab_id || null);
+        appendRenderKeyPart(parts, "active_window_ids");
+        appendRenderKeyPart(parts, windows.length);
+        for (const windowData of windows) {
+          appendRenderKeyPart(parts, windowData?.id || "");
+        }
+        appendRenderKeyPart(parts, "all_project_window_ids");
+        for (const windowId of allProjectWindowIds()) {
+          appendRenderKeyPart(parts, windowId);
+        }
+        appendRenderKeyPart(parts, "windows");
+        appendRenderKeyPart(parts, windows.length);
+        for (const windowData of windows) {
+          const geometry = windowData?.geometry || {};
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, windowData?.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, windowData?.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, windowData?.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, windowData?.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, windowData?.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, windowData?.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, windowData?.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, windowData?.status || "");
+          appendRenderKeyPart(parts, "geometry");
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, geometry.x ?? 0);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, geometry.y ?? 0);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, geometry.width ?? 0);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, geometry.height ?? 0);
+          appendRenderKeyPart(parts, "minimized");
+          appendRenderKeyPart(parts, Boolean(windowData?.minimized));
+          appendRenderKeyPart(parts, "maximized");
+          appendRenderKeyPart(parts, Boolean(windowData?.maximized));
+          appendRenderKeyPart(parts, "z_index");
+          appendRenderKeyPart(parts, windowData?.z_index ?? 0);
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, windowData?.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(windowData?.tab_group_active));
+        }
+        return parts.join("");
       }
 
       function windowListRenderKey() {

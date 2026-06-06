@@ -594,6 +594,40 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
   );
 });
 
+test("Workspace Windows render key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must provide a primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Workspace Windows key must append primitive key parts directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Workspace Windows key must not serialize a nested object graph",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\bwindows\.map\s*\(/,
+    "Workspace Windows key must not allocate per-window map results",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+windowData\s+of\s+windows\s*\)/,
+    "Workspace Windows key must walk windows with a direct loop",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+windowId\s+of\s+allProjectWindowIds\s*\(\s*\)\s*\)/,
+    "Workspace Windows key must include mounted project window ids with a direct loop",
+  );
+});
+
 test("Window List skips unchanged row rebuilds after updating open state", () => {
   const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
   assert.match(
