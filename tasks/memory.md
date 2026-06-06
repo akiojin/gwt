@@ -6690,3 +6690,10 @@ Type: workflow
 Context: 「Claude Code の使用量が怪しい」調査で Explore サブエージェントが『月$8,462の従量課金』『cacheを5分TTLで毎ターン破壊』『cache_read 11億/per-turn 966k』『無限リトライループ・264回暴走起動』と報告したが全て実データで反証された。実際は ~/.claude/.credentials.json が subscriptionType=max / rateLimitTier=default_claude_max_20x で ANTHROPIC_API_KEY 未設定（ドル従量課金ゼロ・Maxサブスク枠）、cacheは ephemeral_1h TTL、11億はメインとサブエージェント(subagents/配下)の二重計上、retryは有限(100ms bootstrap完了待ち)、264回は1791行の2日間テスト集中だった。真因は Opus 4.8 + 1M context(per-turn最大995k)常用 × 長大セッション × subagent多用で gwt が Opus の81%。
 Learning: 使用量/コスト調査でサブエージェントの定量報告は誇張・二重計上・誤前提を含みやすく鵜呑み厳禁。(1)課金体系は ~/.claude/.credentials.json の subscriptionType/rateLimitTier と ANTHROPIC_API_KEY 有無で先に確定する(サブスク枠かAPI従量かで結論が真逆)。(2)transcript集計はメインセッションとサブエージェント(subagents/*.jsonl)を分離し各assistant messageを1回だけ model別 group_by する。(3)per-turnの input+cache_read が context window(200k/1M)を超えたら集計バグのサイン。
 Future Action: 使用量調査では結論前に自分で credentials 種別確認と jq による model別/二重計上排除の集計を実行し、エージェントの数値と断定を一次データで裏取りする。
+
+## 2026-06-06 — Codex managed hook は tool-use event の session_id 欠落で fail-closed にしない
+
+Type: lesson
+Context: Codex の PreToolUse/PostToolUse hook が毎回 exit code 1。runtime_state::validated_hook_agent_session_id が Codex セッションで CODEX_THREAD_ID 未設定かつ payload に session_id 無しのとき HookError::InvalidEvent を返していた。Codex は SessionStart では id を渡すが tool-use event では渡さないため毎回失敗。agent_session_id は session .toml に永続化済みなのに hook 全体を落としていた。live-event 経路 (daemon_runtime) は同条件で既に fail-open だった (commit c2c83469b で混入, SPEC-2077 ドメイン)。
+Learning: Provider 由来 (Codex) の hook payload フィールドは event ごとに有無が変わる。必須化して fail-closed にすると、ツール呼び出しごとに exit 1 がユーザーに露出する。永続済みメタデータ (exact_resume_session_id) があるなら fail-open + 既存値再利用が正しい。診断ログも persisted id がある通常ケースでは出さず、shipped behavior と分離する (2026-05-07 lesson と一致)。
+Future Action: hook handler に必須フィールド検査を追加するときは、(1) gwt 自身の不変条件 (GWT_SESSION_ID) だけ fail-closed、(2) provider 供給値の欠落は fail-open し persisted session metadata を破壊しない、(3) regression test で persisted id 保持と exit 0 を固定、(4) 診断ログは fallback 不能時のみ。runtime_state と daemon_runtime の両経路を必ず揃える。
