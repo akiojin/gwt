@@ -283,6 +283,115 @@ test("Workspace renderWindows refreshes legacy workspace preset windows", () => 
   );
 });
 
+test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W-12 FR-351)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "lifecycle-projection",
+    title: "Lifecycle projection",
+    status_category: "active",
+    active_work_count: 2,
+    active_works: [
+      {
+        id: "work-active",
+        title: "Active Work",
+        status_category: "active",
+        lifecycle_state: "active",
+        agents: [],
+      },
+      {
+        id: "work-paused",
+        title: "Paused Work",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        agents: [],
+      },
+    ],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const activeRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-active"]',
+  );
+  const pausedRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-paused"]',
+  );
+  const activeBadge = activeRow.querySelector(".workspace-overview-lifecycle");
+  const pausedBadge = pausedRow.querySelector(".workspace-overview-lifecycle");
+  assert.ok(activeBadge, "expected each Work row to render a lifecycle_state badge");
+  assert.equal(activeBadge.textContent, "Active");
+  assert.equal(activeBadge.dataset.lifecycle, "active");
+  assert.equal(pausedBadge.textContent, "Paused");
+  assert.equal(pausedBadge.dataset.lifecycle, "paused");
+});
+
+test("Work surface Done action sends close_work with close_kind done (SPEC-2359 W-12 FR-351)", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, {
+    id: "lifecycle-projection",
+    title: "Lifecycle projection",
+    status_category: "active",
+    active_work_count: 1,
+    active_works: [
+      {
+        id: "work-active",
+        title: "Active Work",
+        status_category: "active",
+        lifecycle_state: "active",
+        agents: [],
+      },
+    ],
+  }, { send: (message) => sent.push(message) });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const doneButton = fixture.body.querySelector("[data-action='close-work-done']");
+  assert.ok(doneButton, "expected a Done action on the selected Work detail");
+  doneButton.click();
+  assert.deepEqual(sent, [
+    { kind: "close_work", work_id: "work-active", close_kind: "done" },
+  ]);
+});
+
+test("Work surface Discard action sends close_work with close_kind discarded (SPEC-2359 W-12 FR-351)", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, {
+    id: "lifecycle-projection",
+    title: "Lifecycle projection",
+    status_category: "active",
+    active_work_count: 1,
+    active_works: [
+      {
+        id: "work-active",
+        title: "Active Work",
+        status_category: "active",
+        lifecycle_state: "active",
+        agents: [],
+      },
+    ],
+  }, { send: (message) => sent.push(message) });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const discardButton = fixture.body.querySelector("[data-action='close-work-discard']");
+  assert.ok(discardButton, "expected a Discard action on the selected Work detail");
+  discardButton.click();
+  assert.deepEqual(sent, [
+    { kind: "close_work", work_id: "work-active", close_kind: "discarded" },
+  ]);
+});
+
 function sampleProjection() {
   return {
     id: "workspace-current",

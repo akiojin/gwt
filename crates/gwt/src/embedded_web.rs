@@ -2658,52 +2658,45 @@ mod tests {
         );
     }
 
+    /// SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works overview
+    /// is removed and the Work surface (Workspace Overview / Kanban) is now the
+    /// single home for Work lifecycle. The legacy sidebar render entrypoints and
+    /// the `op-active-work` DOM section must no longer ship in the bundle.
     #[test]
-    fn embedded_web_active_work_hides_internal_git_identity_from_user_summary() {
+    fn embedded_web_active_work_sidebar_overview_is_removed() {
         let html = frontend_bundle_source();
-        let active_work_block = html
-            .split("function renderActiveWorkOverview()")
-            .nth(1)
-            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
-            .expect("active work render block");
 
         assert!(
-            !active_work_block.contains("appendMeta(meta, activeWorkProjection.branch)")
-                && !active_work_block.contains("compactPathLabel(agent.worktree_path)")
-                && !active_work_block.contains("appendMeta(agentMeta, agent.branch)"),
-            "Active Work must not expose branch names or worktree paths in the normal user summary",
+            !html.contains("function renderActiveWorkOverview")
+                && !html.contains("function renderActiveWorkAgentCard")
+                && !html.contains("id=\"op-active-work\""),
+            "sidebar Active Works overview must be removed in favor of the Work surface",
         );
     }
 
+    /// SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar-only `op-active-work`
+    /// CSS is removed when the section is retired so no orphaned styles linger.
     #[test]
-    fn embedded_web_active_work_hidden_attr_overrides_flex_layout() {
+    fn embedded_web_active_work_sidebar_css_is_removed() {
         let css = styles_components_css();
 
         assert!(
-            css.contains(".op-active-work[hidden]")
-                && regex::Regex::new(r"\.op-active-work\[hidden\]\s*\{\s*display:\s*none;")
-                    .unwrap()
-                    .is_match(css),
-            "Active Work must not render when the hidden attribute is present",
+            !css.contains(".op-active-work"),
+            "retired Active Works sidebar must not leave orphaned op-active-work CSS",
         );
     }
 
+    /// SPEC-2359 Phase W-12 Slice 3 (FR-351): the Work surface renders each Work
+    /// card with its agent-session lifecycle state badge (Active / Paused / Done
+    /// / Discarded).
     #[test]
-    fn embedded_web_active_work_uses_short_title_summary_before_long_focus_detail() {
+    fn embedded_web_work_surface_renders_lifecycle_state_badge() {
         let html = frontend_bundle_source();
-        let active_work_block = html
-            .split("function renderActiveWorkAgentCard(agent)")
-            .nth(1)
-            .and_then(|tail| tail.split("function formatActiveWorkLifecycleLabel").next())
-            .expect("active work render block");
 
         assert!(
-            active_work_block.contains("agent.title_summary || agent.current_focus"),
-            "Active Work Agent cards must prefer the short title summary over long focus text",
-        );
-        assert!(
-            active_work_block.contains("agentFocus.title = agent.current_focus"),
-            "Active Work Agent cards must keep long focus detail available without making it the main visible text",
+            html.contains("workspace-overview-lifecycle")
+                && html.contains("formatLifecycleStateLabel"),
+            "Work surface must render a lifecycle_state badge on each Work card",
         );
     }
 

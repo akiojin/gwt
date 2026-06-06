@@ -188,41 +188,52 @@ test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   );
 });
 
-test("Workspace sidebar exposes active work and per-agent overview", () => {
-  assert.ok(
+test("Sidebar retires the Active Works overview in favor of the Work surface (SPEC-2359 W-12 FR-351)", () => {
+  // Slice 3 aggregates Work lifecycle into the Work surface (Workspace
+  // Overview / Kanban). The sidebar no longer renders an Active Works region
+  // or its per-agent cards.
+  assert.equal(
     document.querySelector("#op-active-work"),
-    "expected Workspace shell to expose an Active Works overview region",
+    null,
+    "sidebar Active Works overview must be removed",
   );
-  assert.ok(
+  assert.equal(
     document.querySelector("#op-active-work-agents"),
-    "expected Workspace shell to expose a per-Work list region",
+    null,
+    "sidebar per-Work agent list must be removed",
   );
+  assert.doesNotMatch(
+    appSource,
+    /function\s+renderActiveWorkOverview\b/,
+    "sidebar renderActiveWorkOverview must be removed",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /function\s+renderActiveWorkAgentCard\b/,
+    "sidebar renderActiveWorkAgentCard must be removed",
+  );
+  // The Work projection still feeds Operator telemetry through the plural
+  // active_works data even though the sidebar overview is gone.
   assert.match(
     appSource,
     /function\s+activeWorkItemsFromProjection\(\)[\s\S]+active_works/,
-    "expected frontend to render plural active_works data, not only a single aggregate projection",
-  );
-  assert.match(
-    appSource,
-    /op-work-card[\s\S]+renderActiveWorkAgentCard\(agent\)/,
-    "expected Active Works rows to render their live Agent cards",
-  );
-  assert.match(
-    appSource,
-    /function\s+renderActiveWorkAgentCard\(agent\)[\s\S]+op-agent-card[\s\S]+last_board_entry_id/,
-    "expected Active Works rows to preserve agent board linkage for handoff/debugging",
+    "telemetry must still derive from plural active_works data",
   );
 });
 
-test("Workspace sidebar keeps Quick before the expanding active work list", () => {
+test("Workspace sidebar exposes only Layers and Quick sections (SPEC-2359 W-12 FR-351)", () => {
   const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
   const headings = sections.map((section) =>
     section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
   );
   assert.deepEqual(
-    headings.slice(0, 3),
-    ["Layers", "Quick", "Active Works"],
-    "Quick must stay above Active Works so Work cards do not push it off-screen",
+    headings.slice(0, 2),
+    ["Layers", "Quick"],
+    "Sidebar keeps Layers and Quick after the Active Works overview is retired",
+  );
+  assert.ok(
+    !headings.includes("Active Works"),
+    "Active Works heading must be removed from the sidebar",
   );
 });
 
@@ -391,22 +402,10 @@ test("canvas world grid is synchronized from viewport state", () => {
   );
 });
 
-test("Workspace active work overview behaves like a command center", () => {
-  assert.match(
-    appSource,
-    /Add Agent to This Work/,
-    "expected Workspace-origin launch copy to make same-work agent addition explicit",
-  );
-  assert.match(
-    appSource,
-    /last_board_entry_kind/,
-    "expected agent cards to expose the latest coordination milestone kind",
-  );
-  assert.match(
-    appSource,
-    /coordination_scope/,
-    "expected agent cards to expose owner/topic scope for each agent",
-  );
+test("Board deep-linking survives the Active Works sidebar retirement (SPEC-2359 W-12 FR-351)", () => {
+  // The sidebar Active Works command-center is removed; Board deep-linking and
+  // the addressable Board timeline entries it relied on remain so the Work
+  // surface and Board can still cross-reference coordination entries.
   assert.match(
     appSource,
     /function\s+focusBoardEntry\(/,
@@ -417,76 +416,45 @@ test("Workspace active work overview behaves like a command center", () => {
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
   );
-});
-
-test("Active Work title prefers concrete work context over Start Work workflow label", () => {
-  assert.match(
+  // The retired sidebar copy and per-agent card helpers must be gone.
+  assert.doesNotMatch(
     appSource,
-    /function\s+activeWorkDisplayTitle\(projection,\s*agents\)[\s\S]+agent\.title_summary[\s\S]+projection\?\.summary[\s\S]+projection\?\.owner[\s\S]+projection\?\.title[\s\S]+Start Work[\s\S]+Active Work/,
-    "expected Active Work title resolution to prefer Agent/Workspace work context and treat Start Work as a fallback-only workflow label",
-  );
-  assert.match(
-    appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(work,\s*work\.agents\)\)/,
-    "expected Active Work summary title to use the display-title helper",
+    /Add Agent to This Work/,
+    "sidebar Active Works launch copy must be removed",
   );
   assert.doesNotMatch(
     appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkProjection\.title\s*\|\|\s*"Active Work"\)/,
-    "Active Work must not render the saved Start Work workflow title directly",
+    /function\s+renderActiveWorkAgentCard\b/,
+    "sidebar per-agent card renderer must be removed",
   );
 });
 
-test("Active Work sidebar only renders while live Agent windows are focusable", () => {
+test("Active Work sidebar title + visibility helpers are retired (SPEC-2359 W-12 FR-351)", () => {
+  // Slice 3 removes the sidebar-only Active Works render path. The display
+  // title, section-visibility, and focus helpers it owned must be gone; the
+  // Work surface (Kanban) is now the single home for Work cards.
+  for (const removed of [
+    /function\s+activeWorkDisplayTitle\b/,
+    /function\s+setActiveWorkSectionVisible\b/,
+    /function\s+focusActiveWorkAgentWindow\b/,
+    /function\s+agentRuntimeStatusLabel\b/,
+    /function\s+renderActiveWorkOverview\b/,
+    /getElementById\("op-active-work"\)/,
+  ]) {
+    assert.doesNotMatch(appSource, removed, `sidebar Active Works code must be removed: ${removed}`);
+  }
+  // The focusable-agent filter survives because telemetry still derives from
+  // live agent windows.
   assert.match(
     appSource,
     /function\s+activeWorkFocusableAgents\(work\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
-    "expected Active Work cards to be filtered against live workspace windows",
+    "telemetry must still filter Works against live workspace windows",
   );
-  assert.match(
-    appSource,
-    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
-    "expected Active Work visibility to be controlled at the section level",
-  );
-  assert.match(
-    appSource,
-    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
-    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
-  );
-  assert.match(
-    appSource,
-    /if\s*\(workCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
-    "expected no focusable Agent windows to remove the Active Work sidebar section",
-  );
-  assert.match(
-    appSource,
-    /function\s+focusActiveWorkAgentWindow\(agent\)[\s\S]+restore_window[\s\S]+focusWindowRemotely\(agent\.window_id,\s*\{\s*center:\s*true\s*\}\)/,
-    "expected Focus to restore minimized Agent windows before focusing them",
-  );
+  // agentStatusLabel is exported to the Work surface, so it must remain.
   assert.match(
     appSource,
     /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
-    "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
-  );
-  assert.match(
-    appSource,
-    /function\s+agentRuntimeStatusLabel\(agent\)[\s\S]+runtimeStateForWindow\(windowData\)[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+agentStatusLabel\(agent\.status_category\)/,
-    "expected Active Work agent cards to derive their visible runtime label from the live window state before falling back to workspace category",
-  );
-  assert.match(
-    appSource,
-    /createNode\("div",\s*"op-agent-state",\s*agentRuntimeStatusLabel\(agent\)\)/,
-    "Active Work must render Waiting from WindowState even when workspace status_category remains active",
-  );
-  assert.doesNotMatch(
-    appSource,
-    /createNode\("div",\s*"op-agent-state",\s*state\)/,
-    "Active Work must not render raw status wire values such as ACTIVE",
-  );
-  assert.match(
-    appSource,
-    /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
-    "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
+    "shared agentStatusLabel must remain for the Work surface",
   );
 });
 
@@ -616,7 +584,7 @@ test("no surface presets auto-maximize — uniform 720×420 floating windows", (
   );
 });
 
-test("Active Work and Workspace Overview render PR metadata as links", () => {
+test("Work surface renders PR metadata as links via the shared renderer (SPEC-2359 W-12 FR-351)", () => {
   assert.match(
     appSource,
     /function\s+createWorkspacePrMeta\(/,
@@ -625,12 +593,7 @@ test("Active Work and Workspace Overview render PR metadata as links", () => {
   assert.match(
     workspaceOverviewSource,
     /createWorkspacePrMeta\?\.\(item\)/,
-    "expected Workspace Overview to render the saved PR link/state from the projection",
-  );
-  assert.match(
-    appSource,
-    /createWorkspacePrMeta\(activeWorkProjection\)/,
-    "expected Active Work sidebar to render the live PR link/state from the projection",
+    "expected the Work surface to render the saved PR link/state from the projection",
   );
   assert.match(
     appSource,
@@ -2486,17 +2449,33 @@ test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
 });
 
-test("agent cards style all four Living Telemetry states (active / blocked / idle / done)", () => {
+test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // Each of the four states must have a distinct visual treatment so operators
-  // can scan card boundaries at a glance — not just the high-priority pair.
-  assert.match(css, /\.op-agent-card\[data-state="active"\]\s*\{[^}]*--color-state-active/);
-  assert.match(css, /\.op-agent-card\[data-state="blocked"\]\s*\{[^}]*--color-state-blocked/);
-  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\{[^}]*--color-state-idle/);
-  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\{[^}]*--color-state-done/);
-  // The chip labels also need the matching foreground tint per state.
-  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
-  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
+  // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now
+  // carries the agent-session lifecycle badge with a distinct treatment per
+  // state so operators can scan Work lifecycle at a glance.
+  assert.doesNotMatch(
+    css,
+    /\.op-agent-card/,
+    "retired sidebar agent-card CSS must be removed",
+  );
+  assert.match(css, /\.workspace-overview-lifecycle\s*\{/);
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="active"\]\s*\{[^}]*--color-state-active/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="paused"\]\s*\{[^}]*--color-state-idle/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="done"\]\s*\{[^}]*--color-state-done/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="discarded"\]\s*\{/,
+  );
 });
 
 test("terminal surface body stays on the dark Operator canvas across themes (FR-013)", () => {
