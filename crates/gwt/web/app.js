@@ -2093,11 +2093,11 @@
       function renderWindowList() {
         windowListPanel.hidden = !windowListOpen;
         windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
-        const nextWindowListKey = windowListRenderKey();
         if (!windowListOpen) {
-          renderedWindowListKey = nextWindowListKey;
+          renderedWindowListKey = "__closed__";
           return;
         }
+        const nextWindowListKey = windowListRenderKey();
         if (renderedWindowListKey === nextWindowListKey) {
           return;
         }

@@ -527,6 +527,10 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
   const keyIndex = renderWindowListBody.indexOf(
     "const nextWindowListKey = windowListRenderKey();",
   );
+  const closedGuardIndex = renderWindowListBody.indexOf("if (!windowListOpen)");
+  const closedSentinelIndex = renderWindowListBody.indexOf(
+    'renderedWindowListKey = "__closed__";',
+  );
   const guardIndex = renderWindowListBody.indexOf(
     "if (renderedWindowListKey === nextWindowListKey)",
   );
@@ -534,9 +538,32 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
 
   assert.notEqual(hiddenIndex, -1, "renderWindowList must update panel hidden state");
   assert.notEqual(ariaIndex, -1, "renderWindowList must update trigger aria-expanded");
+  assert.notEqual(closedGuardIndex, -1, "renderWindowList must have a closed fast path");
+  assert.notEqual(
+    closedSentinelIndex,
+    -1,
+    "closed Window List fast path must store a stable sentinel key",
+  );
+  assert.ok(
+    closedGuardIndex > hiddenIndex && closedGuardIndex > ariaIndex,
+    "closed Window List fast path must run after chrome hidden/expanded updates",
+  );
+  assert.ok(
+    closedGuardIndex < keyIndex,
+    "closed Window List fast path must return before key generation",
+  );
+  assert.ok(
+    closedSentinelIndex > closedGuardIndex && closedSentinelIndex < keyIndex,
+    "closed Window List fast path must store the sentinel before any key generation",
+  );
+  assert.match(
+    renderWindowListBody.slice(closedGuardIndex, keyIndex),
+    /return\s*;/,
+    "closed Window List fast path must return before windowListRenderKey()",
+  );
   assert.ok(
     keyIndex > hiddenIndex && keyIndex > ariaIndex,
-    "Window List key must run after open state updates",
+    "open Window List key must run after open state updates",
   );
   assert.ok(guardIndex > keyIndex, "renderWindowList must guard on the Window List key");
   assert.ok(
