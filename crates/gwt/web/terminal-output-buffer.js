@@ -49,6 +49,7 @@ export function createTerminalOutputBatcher({
   maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
   maxTotalCharsPerFlush = DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
   mergeChunks = defaultMergeChunks,
+  canWrite,
 } = {}) {
   if (typeof write !== "function") {
     throw new TypeError("createTerminalOutputBatcher requires a write callback");
@@ -60,6 +61,7 @@ export function createTerminalOutputBatcher({
   const totalCharsPerFlush = normalizeMaxTotalCharsPerFlush(maxTotalCharsPerFlush);
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
+  const canWriteImpl = typeof canWrite === "function" ? canWrite : () => true;
   const pendingByWindow = new Map();
   let scheduled = false;
 
@@ -145,16 +147,28 @@ export function createTerminalOutputBatcher({
       if (!pendingByWindow.has(windowId)) {
         continue;
       }
+      if (!canWriteImpl(windowId)) {
+        continue;
+      }
       const remainingChars = Math.max(1, totalCharsPerFlush - charsFlushed);
       const result = flushWindow(windowId, remainingChars);
       flushed = result.flushed || flushed;
       charsFlushed += result.chars;
       windowsFlushed += 1;
     }
-    if (pendingByWindow.size > 0) {
+    if (hasEligiblePendingWindow()) {
       scheduleFlush();
     }
     return flushed;
+  }
+
+  function hasEligiblePendingWindow() {
+    for (const windowId of pendingByWindow.keys()) {
+      if (canWriteImpl(windowId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function flushWindow(windowId, maxChars = charsPerFlush) {
@@ -204,6 +218,14 @@ export function createTerminalOutputBatcher({
     return pendingByWindow.delete(windowId);
   }
 
+  function schedulePending(windowId) {
+    if (!pendingByWindow.has(windowId)) {
+      return false;
+    }
+    scheduleFlush();
+    return true;
+  }
+
   function pendingCount(windowId) {
     if (windowId !== undefined) {
       return pendingByWindow.get(windowId)?.chunks.length || 0;
@@ -223,6 +245,7 @@ export function createTerminalOutputBatcher({
     enqueue,
     flushNow,
     clear,
+    schedulePending,
     pendingCount,
     pendingWindowCount,
   };

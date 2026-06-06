@@ -961,6 +961,30 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
+test("Terminal output writes are gated while windows are hidden", () => {
+  const batcherConfig = appSource.match(
+    /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
+  );
+  assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
+  assert.match(
+    batcherConfig[1],
+    /canWrite:\s*canRefreshTerminalViewport/,
+    "terminal output batcher must reuse the terminal visibility predicate before decode/write",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowId\)[\s\S]*?scheduleTerminalFocusActivation\(windowId\)/,
+    "hidden project-tab reveal must re-arm pending output before viewport/focus activation",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowData\.id\)[\s\S]*?scheduleTerminalFocusActivation\(windowData\.id\)/,
+    "hidden window-tab reveal must re-arm pending output before viewport/focus activation",
+  );
+});
+
 test("Operator telemetry skips unchanged counts before DOM writes", () => {
   assert.match(
     appSource,

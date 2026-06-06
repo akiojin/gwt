@@ -236,6 +236,94 @@ test("aggregate frame budget does not split a single oversized chunk", () => {
   ]);
 });
 
+test("hidden terminal output remains queued without decode write or scheduler spin", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const mergeCalls = [];
+  const eligibility = new Map([
+    ["agent-hidden", false],
+    ["agent-visible", true],
+  ]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    mergeChunks: (chunks, windowId) => {
+      mergeCalls.push({ windowId, chunks: [...chunks] });
+      return chunks.join("");
+    },
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden", "hidden-a");
+  batcher.enqueue("agent-hidden", "hidden-b");
+  batcher.enqueue("agent-visible", "visible");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(mergeCalls, [
+    { windowId: "agent-visible", chunks: ["visible"] },
+  ]);
+  assert.deepEqual(writes, [{ windowId: "agent-visible", text: "visible" }]);
+  assert.equal(batcher.pendingCount("agent-hidden"), 2);
+  assert.equal(batcher.pendingWindowCount(), 1);
+  assert.equal(
+    scheduler.pendingCount(),
+    0,
+    "ineligible-only pending output must not schedule a follow-up spin",
+  );
+});
+
+test("schedulePending resumes hidden queued output through the budgeted flush path", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const eligibility = new Map([["agent-hidden", false]]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    maxCharsPerFlush: 6,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden", "aa");
+  batcher.enqueue("agent-hidden", "bb");
+  batcher.enqueue("agent-hidden", "cc");
+  batcher.enqueue("agent-hidden", "dd");
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, []);
+  assert.equal(batcher.pendingCount("agent-hidden"), 4);
+  assert.equal(scheduler.pendingCount(), 0);
+
+  eligibility.set("agent-hidden", true);
+  assert.equal(batcher.schedulePending("agent-hidden"), true);
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [{ windowId: "agent-hidden", text: "aabbcc" }]);
+  assert.equal(
+    batcher.pendingCount("agent-hidden"),
+    1,
+    "existing per-window budget must still hold after reveal",
+  );
+  assert.equal(scheduler.pendingCount(), 1, "remaining chunks use one follow-up frame");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-hidden", text: "aabbcc" },
+    { windowId: "agent-hidden", text: "dd" },
+  ]);
+  assert.equal(batcher.pendingCount("agent-hidden"), 0);
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
 test("flushNow drains a window before its scheduled frame", () => {
   const scheduler = manualScheduler();
   const writes = [];

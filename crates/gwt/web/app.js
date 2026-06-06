@@ -205,6 +205,7 @@
           }
           runtime.terminal.write(text, onWritten);
         },
+        canWrite: canRefreshTerminalViewport,
         onFlush: (windowId) => {
           scheduleTerminalViewportRefresh(windowId);
         },
@@ -13357,6 +13358,7 @@
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
                 onReveal: () => {
+                  terminalOutputBatcher.schedulePending(windowId);
                   rearmPendingTerminalViewportRefresh(windowId);
                   scheduleTerminalFocusActivation(windowId);
                 },
@@ -13419,6 +13421,7 @@
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
                 onReveal: () => {
+                  terminalOutputBatcher.schedulePending(windowData.id);
                   rearmPendingTerminalViewportRefresh(windowData.id);
                   scheduleTerminalFocusActivation(windowData.id);
                 },
