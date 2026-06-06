@@ -59,6 +59,112 @@ test.describe("Project tabs", () => {
     );
   });
 
+  test("tab switching under streamed output stays within CPU and heap budgets", async ({
+    page,
+  }) => {
+    const burstSize = 500;
+    const streamedStateBoundary = 32;
+    const latencyBudgetMs = 1_000;
+    const longTaskBudgetMs = 100;
+    const rafGapBudgetMs = 250;
+    const heapDriftBudgetBytes = 32 * 1024 * 1024;
+    await installEmbeddedRoutes(page);
+    await installProjectTabsBackend(page, projectTabsFixture(12, {
+      hotAgentWindowId: "agent-burst",
+    }));
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".project-tab")).toHaveCount(12, {
+      timeout: 10_000,
+    });
+    const first = page.locator(".project-tab").nth(0);
+    const second = page.locator(".project-tab").nth(1);
+    await expect(first).toHaveAttribute("aria-current", "page");
+
+    const heapBefore = await sampleBrowserHeap(page);
+    await runPaletteCommand(page, "Start UI Trace");
+    expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
+    await page.evaluate(
+      ({ count, windowId }) => {
+        const socket = window.__gwtProjectTabsFixtureSocket;
+        if (
+          !socket ||
+          typeof socket.emitTerminalOutputBurstSync !== "function"
+        ) {
+          throw new Error("project tabs fixture socket burst helper is missing");
+        }
+        socket.emitTerminalOutputBurstSync({ count, windowId });
+      },
+      { count: burstSize, windowId: "agent-burst" },
+    );
+
+    const start = await page.evaluate(() => performance.now());
+    await second.click();
+    await expect(second).toHaveAttribute("aria-current", "page", {
+      timeout: latencyBudgetMs,
+    });
+    const latencyMs = await page.evaluate((startedAt) => {
+      return performance.now() - startedAt;
+    }, start);
+    await page.waitForTimeout(100);
+    const tracePayload = await stopUiTraceViaPalette(page);
+    const heapAfter = await sampleBrowserHeap(page);
+    const trace = tracePayload?.trace;
+    expect(
+      trace,
+      "fixture socket should capture the UI trace save payload",
+    ).toBeTruthy();
+
+    const entries = trace.entries ?? [];
+    const terminalMessages = entries.filter(
+      (entry) =>
+        entry.kind === "ws_message" &&
+        entry.event_kind === "terminal_output",
+    );
+    const overBudgetLongTasks = entries.filter(
+      (entry) =>
+        entry.kind === "long_task" &&
+        Number(entry.duration_ms ?? 0) > longTaskBudgetMs,
+    );
+    const overBudgetRafGaps = entries.filter(
+      (entry) =>
+        entry.kind === "raf_gap" &&
+        Number(entry.gap_ms ?? 0) > rafGapBudgetMs,
+    );
+    const heapDriftBytes =
+      heapBefore.supported && heapAfter.supported
+        ? heapAfter.usedJSHeapSize - heapBefore.usedJSHeapSize
+        : null;
+
+    expect(latencyMs).toBeLessThan(latencyBudgetMs);
+    expect(terminalMessages.length).toBeGreaterThanOrEqual(burstSize);
+    expect(overBudgetLongTasks).toEqual([]);
+    expect(overBudgetRafGaps).toEqual([]);
+    if (heapDriftBytes !== null) {
+      expect(heapDriftBytes).toBeLessThan(heapDriftBudgetBytes);
+    }
+
+    const memorySummary =
+      heapDriftBytes === null
+        ? "memory=unsupported"
+        : `heap_drift=${heapDriftBytes}`;
+    test.info().annotations.push({
+      type: "measurement",
+      description:
+        `tab switch latency=${latencyMs.toFixed(1)}ms ` +
+        `long_tasks=${overBudgetLongTasks.length} ` +
+        `raf_gaps=${overBudgetRafGaps.length} ${memorySummary}`,
+    });
+    console.log(
+      `[project-tabs] budget latency=${latencyMs.toFixed(1)}ms ` +
+        `ws_terminal_messages=${terminalMessages.length} ` +
+        `long_tasks_over_${longTaskBudgetMs}ms=${overBudgetLongTasks.length} ` +
+        `raf_gaps_over_${rafGapBudgetMs}ms=${overBudgetRafGaps.length} ` +
+        `${memorySummary} burst=${burstSize} ` +
+        `streamed_state_boundary=${streamedStateBoundary}`,
+    );
+  });
+
   test("many project tabs keep project actions visible and remain switchable", async ({
     page,
   }) => {
@@ -157,6 +263,39 @@ test.describe("Project tabs", () => {
   });
 });
 
+async function runPaletteCommand(page, query: string) {
+  await page.locator("#op-palette-button").click();
+  const input = page.locator("#op-palette-input");
+  await expect(input).toBeVisible();
+  await input.fill(query);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute(
+    "data-open",
+    "true",
+  );
+}
+
+async function stopUiTraceViaPalette(page) {
+  await runPaletteCommand(page, "Stop UI Trace");
+  return await page.evaluate(() => {
+    const socket = window.__gwtProjectTabsFixtureSocket;
+    return socket?.savedUiTracePayload ?? null;
+  });
+}
+
+async function sampleBrowserHeap(page) {
+  return await page.evaluate(() => {
+    const memory = performance.memory;
+    if (!memory || typeof memory.usedJSHeapSize !== "number") {
+      return { supported: false };
+    }
+    return {
+      supported: true,
+      usedJSHeapSize: memory.usedJSHeapSize,
+    };
+  });
+}
+
 function projectTabsFixture(
   count: number,
   { hotAgentWindowId }: { hotAgentWindowId?: string } = {},
@@ -241,6 +380,10 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
         }
         if (message.kind === "frontend_ready") {
           this.emit(workspaceState);
+          return;
+        }
+        if (message.kind === "save_ui_trace") {
+          this.savedUiTracePayload = message;
           return;
         }
         if (
