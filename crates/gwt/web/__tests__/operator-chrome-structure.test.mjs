@@ -889,6 +889,86 @@ test("Runtime status key covers state detail preset visibility and cleanup", () 
   );
 });
 
+test("Operator telemetry skips unchanged counts before DOM writes", () => {
+  assert.match(
+    appSource,
+    /let\s+renderedOperatorTelemetryKey\s*=\s*""/,
+    "app.js must track the last rendered telemetry counts key",
+  );
+  assert.match(
+    appSource,
+    /function\s+operatorTelemetryRenderKey\s*\(/,
+    "app.js must define a telemetry counts key helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyOperatorTelemetryCounts\s*\(/,
+    "app.js must route telemetry DOM writes through a guarded helper",
+  );
+
+  const helperBody = extractFunctionBody(appSource, "applyOperatorTelemetryCounts");
+  const keyIndex = helperBody.indexOf("const nextOperatorTelemetryKey = operatorTelemetryRenderKey(counts);");
+  const guardIndex = helperBody.indexOf(
+    "renderedOperatorTelemetryKey === nextOperatorTelemetryKey",
+  );
+  const applyIndex = helperBody.indexOf("window.__operatorShell.applyTelemetryCounts(counts)");
+  const storeIndex = helperBody.indexOf("renderedOperatorTelemetryKey = nextOperatorTelemetryKey");
+
+  assert.notEqual(keyIndex, -1, "telemetry helper must compute a stable key");
+  assert.ok(guardIndex > keyIndex, "telemetry helper must guard after key computation");
+  assert.ok(
+    guardIndex < applyIndex,
+    "unchanged telemetry counts must return before applyTelemetryCounts DOM writes",
+  );
+  assert.ok(
+    applyIndex < storeIndex,
+    "telemetry key should be stored after applyTelemetryCounts succeeds",
+  );
+  assert.match(
+    helperBody.slice(guardIndex, applyIndex),
+    /return\s*;/,
+    "unchanged telemetry guard must return before DOM writes",
+  );
+});
+
+test("Operator telemetry key covers status strip fields and branch telemetry uses guard", () => {
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  for (const field of [
+    "active",
+    "idle",
+    "blocked",
+    "done",
+    "agents",
+    "branches",
+    "git",
+    "hooks",
+    "layers",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `telemetry key must include ${field}`,
+    );
+  }
+
+  const telemetryBody = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
+  assert.match(
+    telemetryBody,
+    /applyOperatorTelemetryCounts\s*\(\s*counts\s*\)/,
+    "runtime telemetry must use the guarded telemetry helper",
+  );
+  assert.doesNotMatch(
+    telemetryBody,
+    /applyTelemetryCounts\s*\(\s*counts\s*\)/,
+    "runtime telemetry must not call applyTelemetryCounts directly",
+  );
+  assert.match(
+    appSource,
+    /case\s+"branch_entries"[\s\S]+applyOperatorTelemetryCounts\s*\(\s*\{\s*branches:\s*branchesCount,\s*git:\s*branchesCount,\s*\}\s*\)/,
+    "branch telemetry must use the guarded telemetry helper",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state

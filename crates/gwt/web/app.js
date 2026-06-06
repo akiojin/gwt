@@ -495,6 +495,7 @@
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
+      let renderedOperatorTelemetryKey = "";
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -3410,6 +3411,34 @@
       // Aggregates `data-agent-state` across all open windows and pushes the
       // counts into the bottom strip. We also expose agent count to the
       // sidebar layer for the "Quick" section's hint.
+      function operatorTelemetryRenderKey(counts) {
+        return JSON.stringify({
+          active: counts?.active ?? null,
+          idle: counts?.idle ?? null,
+          blocked: counts?.blocked ?? null,
+          done: counts?.done ?? null,
+          agents: counts?.agents ?? null,
+          branches: counts?.branches ?? null,
+          git: counts?.git ?? null,
+          hooks: counts?.hooks ?? null,
+          layers: counts?.layers ?? null,
+        });
+      }
+
+      function applyOperatorTelemetryCounts(counts) {
+        if (!window.__operatorShell?.applyTelemetryCounts) return;
+        const nextOperatorTelemetryKey = operatorTelemetryRenderKey(counts);
+        if (renderedOperatorTelemetryKey === nextOperatorTelemetryKey) {
+          return;
+        }
+        try {
+          window.__operatorShell.applyTelemetryCounts(counts);
+          renderedOperatorTelemetryKey = nextOperatorTelemetryKey;
+        } catch (e) {
+          console.warn("operator telemetry update failed", e);
+        }
+      }
+
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
@@ -3456,11 +3485,7 @@
             counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
           }
         }
-        try {
-          window.__operatorShell.applyTelemetryCounts(counts);
-        } catch (e) {
-          console.warn("operator telemetry update failed", e);
-        }
+        applyOperatorTelemetryCounts(counts);
       }
 
       // ---- Provider usage & rate limits (SPEC-2970) ----
@@ -13822,15 +13847,11 @@
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             // SPEC-2356 — feed git layer count into the Operator Status Strip.
-            try {
-              const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
-              window.__operatorShell?.applyTelemetryCounts?.({
-                branches: branchesCount,
-                git: branchesCount,
-              });
-            } catch (e) {
-              console.warn("operator branch telemetry failed", e);
-            }
+            const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
+            applyOperatorTelemetryCounts({
+              branches: branchesCount,
+              git: branchesCount,
+            });
             break;
           }
           case "profile_snapshot": {
