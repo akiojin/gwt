@@ -510,6 +510,7 @@
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
       let renderedOperatorTelemetryKey = "";
+      let maximizedViewportSyncFrame = null;
 
       function projectTabsRenderKey(state) {
         return JSON.stringify({
@@ -2219,6 +2220,16 @@
             scheduleTerminalFit(windowData.id, false);
           }
         }
+      }
+
+      function scheduleMaximizedWindowsToViewportSync() {
+        if (maximizedViewportSyncFrame !== null) {
+          return;
+        }
+        maximizedViewportSyncFrame = requestAnimationFrame(() => {
+          maximizedViewportSyncFrame = null;
+          syncMaximizedWindowsToViewport();
+        });
       }
 
       function workspaceHasVisibleMaximizedWindow(workspace) {
@@ -13338,7 +13349,7 @@
             const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
             if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
               if (workspaceHasVisibleMaximizedWindow(workspace)) {
-                requestAnimationFrame(syncMaximizedWindowsToViewport);
+                scheduleMaximizedWindowsToViewportSync();
               }
               return;
             }
@@ -13428,7 +13439,7 @@
               });
             }
 
-            requestAnimationFrame(syncMaximizedWindowsToViewport);
+            scheduleMaximizedWindowsToViewportSync();
 
             const topmostId = topmostWindowId(workspace);
             if (topmostId && ids.has(topmostId)) {

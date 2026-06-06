@@ -3878,7 +3878,7 @@ mod tests {
     fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
         let js = app_js();
         let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*requestAnimationFrame\(syncMaximizedWindowsToViewport\);",
+            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*scheduleMaximizedWindowsToViewportSync\(\);",
         )
         .expect("valid regex");
         let captures = visibility_block
@@ -3903,6 +3903,16 @@ mod tests {
             "expected hidden->visible transition to schedule terminal focus activation \
              (fit + viewport refresh + focus) so scrollback responds without a manual \
              resize (SPEC-2008 FR-051); body: {body}",
+        );
+        assert!(
+            js.contains("function scheduleMaximizedWindowsToViewportSync()")
+                && js.contains("let maximizedViewportSyncFrame = null;"),
+            "expected maximized viewport sync to be routed through the coalesced \
+             frame scheduler (SPEC-1939 Phase 52)",
+        );
+        assert!(
+            !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
+            "expected renderWorkspace to avoid raw maximized viewport sync rAF fan-out",
         );
     }
 }

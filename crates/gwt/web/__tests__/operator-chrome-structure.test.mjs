@@ -351,6 +351,45 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
 });
 
+test("maximized viewport sync is coalesced across unchanged workspace_state events", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const schedulerBody = extractFunctionBody(
+    appSource,
+    "scheduleMaximizedWindowsToViewportSync",
+  );
+
+  assert.match(
+    appSource,
+    /let\s+maximizedViewportSyncFrame\s*=\s*null\s*;/,
+    "app.js must track a pending maximized viewport sync frame",
+  );
+  assert.match(
+    schedulerBody,
+    /if\s*\(\s*maximizedViewportSyncFrame\s*!==\s*null\s*\)[\s\S]*?return\s*;/,
+    "maximized viewport sync scheduler must coalesce duplicate pending requests",
+  );
+  assert.match(
+    schedulerBody,
+    /maximizedViewportSyncFrame\s*=\s*requestAnimationFrame\s*\(\s*\(\s*\)\s*=>\s*\{/,
+    "maximized viewport sync scheduler must own the animation-frame reservation",
+  );
+  assert.match(
+    schedulerBody,
+    /maximizedViewportSyncFrame\s*=\s*null\s*;[\s\S]*?syncMaximizedWindowsToViewport\s*\(\s*\)/,
+    "maximized viewport sync scheduler must clear the pending handle before running the existing sync body",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /scheduleMaximizedWindowsToViewportSync\s*\(\s*\)/,
+    "renderWorkspace must route maximized sync through the coalesced scheduler",
+  );
+  assert.doesNotMatch(
+    renderWorkspaceBody,
+    /requestAnimationFrame\s*\(\s*syncMaximizedWindowsToViewport\s*\)/,
+    "renderWorkspace must not schedule raw maximized sync frames per workspace_state",
+  );
+});
+
 test("clamped no-op zoom returns before local viewport apply and persist work", () => {
   const zoomBody = extractFunctionBody(appSource, "zoomCanvasAt");
   assert.match(
