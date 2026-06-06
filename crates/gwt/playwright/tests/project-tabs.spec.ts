@@ -4,6 +4,61 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 test.describe("Project tabs", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("tab switching stays responsive while streamed WebSocket output is backlogged", async ({
+    page,
+  }) => {
+    const burstSize = 500;
+    const streamedStateBoundary = 32;
+    await installEmbeddedRoutes(page);
+    await installProjectTabsBackend(page, projectTabsFixture(12, {
+      hotAgentWindowId: "agent-burst",
+    }));
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".project-tab")).toHaveCount(12, {
+      timeout: 10_000,
+    });
+    const first = page.locator(".project-tab").nth(0);
+    const second = page.locator(".project-tab").nth(1);
+    await expect(first).toHaveAttribute("aria-current", "page");
+
+    expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
+    await page.evaluate(
+      ({ count, windowId }) => {
+        const socket = window.__gwtProjectTabsFixtureSocket;
+        if (
+          !socket ||
+          typeof socket.emitTerminalOutputBurstSync !== "function"
+        ) {
+          throw new Error("project tabs fixture socket burst helper is missing");
+        }
+        socket.emitTerminalOutputBurstSync({ count, windowId });
+      },
+      { count: burstSize, windowId: "agent-burst" },
+    );
+
+    const start = await page.evaluate(() => performance.now());
+    await second.click();
+    await expect(second).toHaveAttribute("aria-current", "page", {
+      timeout: 1_000,
+    });
+    const latencyMs = await page.evaluate((startedAt) => {
+      return performance.now() - startedAt;
+    }, start);
+
+    expect(latencyMs).toBeLessThan(1_000);
+    test.info().annotations.push({
+      type: "measurement",
+      description:
+        `tab switch latency under ${burstSize} streamed events: ` +
+        `${latencyMs.toFixed(1)}ms`,
+    });
+    console.log(
+      `[project-tabs] high-load tab switch latency=${latencyMs.toFixed(1)}ms ` +
+        `burst=${burstSize} streamed_state_boundary=${streamedStateBoundary}`,
+    );
+  });
+
   test("many project tabs keep project actions visible and remain switchable", async ({
     page,
   }) => {
@@ -102,6 +157,37 @@ test.describe("Project tabs", () => {
   });
 });
 
+function projectTabsFixture(
+  count: number,
+  { hotAgentWindowId }: { hotAgentWindowId?: string } = {},
+) {
+  return Array.from({ length: count }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    return {
+      id: `tab-${number}`,
+      title: `known-project-${number}`,
+      project_root: `/fixture/known-project-${number}`,
+      kind: "git",
+      workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 },
+        windows:
+          index === 0 && hotAgentWindowId
+            ? [
+                {
+                  id: hotAgentWindowId,
+                  title: "Burst Agent",
+                  preset: "codex",
+                  status: "running",
+                  geometry: { x: 96, y: 96, width: 720, height: 420 },
+                  z_index: 1,
+                },
+              ]
+            : [],
+      },
+    };
+  });
+}
+
 async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
   await page.addInitScript((fixture) => {
     const tabs = Array.isArray(fixture)
@@ -139,6 +225,7 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
         super();
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
+        window.__gwtProjectTabsFixtureSocket = this;
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
@@ -161,7 +248,7 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
           tabs.some((tab) => tab.id === message.tab_id)
         ) {
           workspaceState.workspace.active_tab_id = message.tab_id;
-          this.emit(workspaceState);
+          this.emitSync(workspaceState);
         }
       }
 
@@ -172,10 +259,25 @@ async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
 
       emit(payload) {
         setTimeout(() => {
-          this.dispatchEvent(
-            new MessageEvent("message", { data: JSON.stringify(payload) }),
-          );
+          this.emitSync(payload);
         }, 0);
+      }
+
+      emitSync(payload) {
+        this.dispatchEvent(
+          new MessageEvent("message", { data: JSON.stringify(payload) }),
+        );
+      }
+
+      emitTerminalOutputBurstSync({ count, windowId }) {
+        const data_base64 = btoa("gwt responsiveness burst\\r\\n");
+        for (let i = 0; i < count; i += 1) {
+          this.emitSync({
+            kind: "terminal_output",
+            id: windowId,
+            data_base64,
+          });
+        }
       }
     }
 
