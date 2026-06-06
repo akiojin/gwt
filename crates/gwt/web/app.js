@@ -8873,12 +8873,59 @@
         }
       }
 
+      // SPEC-2014 FR-128: progress rail step key → wizard phase. Clicking a
+      // reachable step dispatches goto_step with the mapped phase so the
+      // backend can jump the ManualSetup (Setup 3-step) wizard between
+      // Path / Settings / Runtime / Confirm without re-walking each step.
+      const WIZARD_RAIL_STEP_PHASE = Object.freeze({
+        path: "path",
+        setup: "settings",
+        runtime: "runtime",
+        start: "confirm",
+      });
+
+      function gotoWizardStep(phase) {
+        if (
+          !releaseWizardInteractionGuardForChromeAction()
+          || launchWizardOpenError
+          || launchWizardPendingAction
+        ) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        sendWizardAction({ kind: "goto_step", phase });
+      }
+
       function renderWizardProgressRail() {
         const rail = createNode("aside", "wizard-progress-rail");
         rail.setAttribute("aria-label", "Launch progress");
         for (const step of launchWizard.progress_steps || []) {
           const item = createNode("div", "wizard-progress-step");
-          item.dataset.state = step.state || "pending";
+          const state = step.state || "pending";
+          item.dataset.state = state;
+          // SPEC-2014 FR-128 — only reached steps (active/done) are
+          // navigable; pending steps stay inert. A null phase mapping
+          // (unknown key) also stays inert.
+          const targetPhase = WIZARD_RAIL_STEP_PHASE[step.key];
+          const isClickable =
+            Boolean(targetPhase) && (state === "active" || state === "done");
+          if (isClickable) {
+            item.dataset.clickable = "true";
+            item.setAttribute("role", "button");
+            item.setAttribute("tabindex", "0");
+            item.setAttribute(
+              "aria-label",
+              `Go to ${step.label} step`,
+            );
+            const jump = () => gotoWizardStep(targetPhase);
+            item.addEventListener("click", jump);
+            item.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                event.preventDefault();
+                jump();
+              }
+            });
+          }
           item.appendChild(createNode("span", "wizard-progress-marker"));
           const copy = createNode("span", "wizard-progress-copy");
           copy.appendChild(createNode("span", "wizard-progress-label", step.label));
@@ -9087,14 +9134,29 @@
         }
 
         renderWizardSummary();
-        const showManualSetup = launchWizard.show_manual_setup !== false;
+        // SPEC-2014 FR-126/FR-127 — the backend now drives four mutually
+        // exclusive wizard phases through dedicated flags:
+        //   show_manual_setup       → Settings form
+        //   show_runtime_confirmation→ Runtime step
+        //   show_confirm             → Confirm (read-only summary + Launch)
+        //   show_start_methods       → entry (start method picker)
+        // The backend already strictly clears show_manual_setup during
+        // Runtime / Confirm, but we re-derive exclusive locals here so the
+        // renderer never paints two phases at once.
+        const showConfirm = Boolean(launchWizard.show_confirm);
         const isRuntimeConfirmation = Boolean(
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
+          && !showConfirm
         );
+        const showManualSetup =
+          launchWizard.show_manual_setup !== false
+          && !isRuntimeConfirmation
+          && !showConfirm;
         const showStartMethods = Boolean(
           launchWizard.show_start_methods
             && !isRuntimeConfirmation
+            && !showConfirm
             && !launchWizard.runtime_resolution_pending
             && (launchWizard.start_methods || []).length > 0,
         );
@@ -9135,6 +9197,26 @@
               "Creating agent window...",
             ),
           );
+        }
+
+        // SPEC-2014 FR-127 — Confirm step: a read-only review of the
+        // resolved launch configuration plus the footer Launch button.
+        // No editable controls are rendered here; the user revisits an
+        // earlier phase (via the progress rail or Back) to change anything.
+        if (showConfirm) {
+          const section = createLaunchSection(
+            "Confirm",
+            "Review the launch configuration. Use the steps above or Back to change anything.",
+          );
+          const summaryList = createNode("div", "wizard-confirm-summary");
+          for (const item of launchWizard.launch_summary || []) {
+            const card = createNode("div", "wizard-summary-item");
+            card.appendChild(createNode("div", "wizard-summary-label", item.label));
+            card.appendChild(createNode("div", "wizard-summary-value", item.value));
+            summaryList.appendChild(card);
+          }
+          section.appendChild(summaryList);
+          panel.appendChild(section);
         }
 
         if (showStartMethods) {
@@ -9483,6 +9565,7 @@
             (launchWizard.docker_lifecycle_options || []).length > 0);
         if (
           launchWizard.show_runtime_confirmation &&
+          !showConfirm &&
           (hasRuntimeControls || isRuntimeConfirmation || !showManualSetup)
         ) {
           const section = createLaunchSection(
