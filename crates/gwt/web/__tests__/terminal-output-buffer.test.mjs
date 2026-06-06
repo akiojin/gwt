@@ -156,6 +156,35 @@ test("flush budget rolls excess chunks into later scheduled flushes without spli
   ]);
 });
 
+test("mergeChunks runs during the scheduled flush with original chunk order", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const mergeCalls = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    mergeChunks: (chunks, windowId) => {
+      mergeCalls.push({ windowId, chunks: [...chunks] });
+      return chunks.map((chunk) => chunk.toUpperCase()).join("|");
+    },
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-1", "ab");
+  batcher.enqueue("agent-1", "cd");
+
+  assert.deepEqual(mergeCalls, [], "merge must not run on enqueue");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(mergeCalls, [
+    { windowId: "agent-1", chunks: ["ab", "cd"] },
+  ]);
+  assert.deepEqual(writes, [{ windowId: "agent-1", text: "AB|CD" }]);
+});
+
 test("defaults expose a bounded per-frame character budget", () => {
   assert.equal(DEFAULT_MAX_CHARS_PER_FLUSH, 65536);
 });

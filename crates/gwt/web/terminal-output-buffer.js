@@ -21,11 +21,16 @@ function normalizeMaxCharsPerFlush(value) {
   return Math.floor(value);
 }
 
+function defaultMergeChunks(chunks) {
+  return chunks.join("");
+}
+
 export function createTerminalOutputBatcher({
   schedule = defaultSchedule,
   write,
   onFlush,
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
+  mergeChunks = defaultMergeChunks,
 } = {}) {
   if (typeof write !== "function") {
     throw new TypeError("createTerminalOutputBatcher requires a write callback");
@@ -33,6 +38,8 @@ export function createTerminalOutputBatcher({
   const scheduleImpl = typeof schedule === "function" ? schedule : defaultSchedule;
   const onFlushImpl = typeof onFlush === "function" ? onFlush : null;
   const charsPerFlush = normalizeMaxCharsPerFlush(maxCharsPerFlush);
+  const mergeChunksImpl =
+    typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const pendingByWindow = new Map();
 
   function entryFor(windowId) {
@@ -111,7 +118,13 @@ export function createTerminalOutputBatcher({
     } else {
       scheduleWindow(windowId, entry);
     }
-    const text = chunks.join("");
+    let text = "";
+    try {
+      text = mergeChunksImpl(chunks, windowId);
+    } catch (error) {
+      console.warn("[terminal-output-buffer] merge failed for %s", windowId, error);
+      return false;
+    }
     if (!text) {
       return false;
     }

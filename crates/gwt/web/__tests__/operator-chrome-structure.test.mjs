@@ -889,6 +889,44 @@ test("Runtime status key covers state detail preset visibility and cleanup", () 
   );
 });
 
+test("Terminal output decode is deferred out of the receive path", () => {
+  const batcherConfig = appSource.match(
+    /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
+  );
+  assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
+  assert.match(
+    batcherConfig[1],
+    /mergeChunks:\s*\(\s*chunks\s*,\s*windowId\s*\)/,
+    "terminal output batcher must merge encoded chunks during scheduled flush",
+  );
+  assert.match(
+    batcherConfig[1],
+    /decoderMap\.get\s*\(\s*windowId\s*\)/,
+    "flush merge must use the per-window TextDecoder",
+  );
+  assert.match(
+    batcherConfig[1],
+    /chunks\s*\.\s*map[\s\S]*decodeBase64\s*\(\s*chunk\s*\)/,
+    "flush merge must decode each encoded chunk in order",
+  );
+
+  const writeOutputBody = extractFunctionBody(appSource, "writeOutput");
+  assert.match(
+    writeOutputBody,
+    /terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\)/,
+    "ready terminal output must enqueue encoded chunks without eager decode",
+  );
+  const readyEnqueueIndex = writeOutputBody.indexOf(
+    "terminalOutputBatcher.enqueue(",
+  );
+  const readyPath = writeOutputBody.slice(readyEnqueueIndex);
+  assert.doesNotMatch(
+    readyPath,
+    /decoder\.decode\s*\(|decodeBase64\s*\(/,
+    "writeOutput ready path must not decode before the scheduled flush",
+  );
+});
+
 test("Operator telemetry skips unchanged counts before DOM writes", () => {
   assert.match(
     appSource,

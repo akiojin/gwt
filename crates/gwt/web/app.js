@@ -185,6 +185,15 @@
       const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
       const terminalOutputBatcher = createTerminalOutputBatcher({
+        mergeChunks: (chunks, windowId) => {
+          const decoder = decoderMap.get(windowId);
+          if (!decoder) {
+            return "";
+          }
+          return chunks
+            .map((chunk) => decoder.decode(decodeBase64(chunk), { stream: true }))
+            .join("");
+        },
         write: (windowId, text, onWritten) => {
           const runtime = terminalMap.get(windowId);
           if (!runtime) {
@@ -5665,11 +5674,7 @@
               runtime.deferredWrites.push(base64);
               return;
             }
-            const decoder = decoderMap.get(windowId);
-            terminalOutputBatcher.enqueue(
-              windowId,
-              decoder.decode(decodeBase64(base64), { stream: true }),
-            );
+            terminalOutputBatcher.enqueue(windowId, base64);
           },
         );
       }

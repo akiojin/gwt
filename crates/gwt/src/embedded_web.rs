@@ -885,8 +885,12 @@ mod tests {
     #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
+        let streaming_merge = regex::Regex::new(
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?mergeChunks:\s*\(chunks,\s*windowId\)\s*=>\s*\{[\s\S]*?decoderMap\.get\(windowId\)[\s\S]*?chunks\s*\.\s*map\(\(chunk\) => decoder\.decode\(decodeBase64\(chunk\),\s*\{\s*stream:\s*true\s*\}\)\)",
+        )
+        .expect("valid regex");
         let streaming_enqueue = regex::Regex::new(
-            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\);",
+            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);",
         )
         .expect("valid regex");
         let streaming_write = regex::Regex::new(
@@ -926,8 +930,12 @@ mod tests {
             "expected app.js to import the terminal output batcher root module",
         );
         assert!(
+            streaming_merge.is_match(html),
+            "expected terminal output batcher to decode encoded chunks during scheduled flush",
+        );
+        assert!(
             streaming_enqueue.is_match(html),
-            "expected streaming terminal output to enter the per-window batcher after TextDecoder streaming decode",
+            "expected streaming terminal output to enqueue encoded chunks without receive-path decode",
         );
         assert!(
             streaming_write.is_match(html),
