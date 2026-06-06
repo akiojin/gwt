@@ -13,7 +13,7 @@ plus SPEC-2805 Memory):
 | SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwtd issue spec pull` or gwt GUI startup sync |
 | Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + runner auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + runner auto-build on first search |
-| Memory | Post-mortem entries in `tasks/memory.md` | Pinpoint allowlist watcher on `tasks/memory.md` + runner auto-build on first search |
+| Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + runner auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, and Memory are repo-scoped and shared across worktrees; Files (code
@@ -157,7 +157,7 @@ $PYTHON $RUNNER \
 ```
 
 `search-memory` reads from the repo-scoped memory index built from
-`<project_root>/tasks/memory.md`. `--worktree-hash` is accepted but ignored
+`<project_root>/.gwt/work/memory.md`. `--worktree-hash` is accepted but ignored
 for this scope.
 
 ### Search all scopes (default)
@@ -312,7 +312,7 @@ Run at least 2-3 semantic queries derived from the request before creating any n
 
 - **Spec integration**: find the canonical spec before creating or updating
 - **Issue lookup**: find existing GitHub Issues before creating new ones
-- **Memory lookup**: before fixing a bug, check whether a prior `tasks/memory.md` entry already records the prevention strategy
+- **Memory lookup**: before fixing a bug, check whether a prior `.gwt/work/memory.md` entry already records the prevention strategy
 - **Task start**: search for specs, issues, files, and memory related to the assigned feature
 - **Bug investigation**: find issues, files, and memory that might relate to the bug
 - **Duplicate check**: verify no existing spec, issue, or memory covers the same scope

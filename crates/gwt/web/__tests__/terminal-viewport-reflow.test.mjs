@@ -1,7 +1,7 @@
 // SPEC-2008 Phase 24 / T-184..T-186 — terminal viewport reflow on host
 // resize and tab visibility transitions. Behaviour tests drive the
 // extracted controller (terminal-viewport-reflow.js) so the operation
-// shape is exercised end-to-end (`tasks/memory.md` 2026-05-07 memory —
+// shape is exercised end-to-end (`.gwt/work/memory.md` 2026-05-07 memory —
 // window interaction features need behavior tests, not only source-string
 // contract). app.js still imports the same primitives, and a thin
 // source-string assertion at the bottom makes sure the wiring stays in

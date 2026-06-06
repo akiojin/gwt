@@ -296,7 +296,8 @@ fn append_title_summary_stale_context(
 }
 
 fn memory_source_present(worktree_path: &Path) -> bool {
-    worktree_path.join("tasks/memory.md").is_file()
+    worktree_path.join(".gwt/work/memory.md").is_file()
+        || worktree_path.join("tasks/memory.md").is_file()
         || worktree_path.join("tasks/lessons.md").is_file()
 }
 
@@ -606,8 +607,8 @@ mod tests {
     fn user_prompt_submit_includes_memory_reminder_when_memory_file_exists() {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
-        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("work dir");
+        std::fs::write(repo.join(".gwt/work/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
         let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
@@ -619,7 +620,7 @@ mod tests {
         };
         assert!(text.contains("Memory Reminder"));
         assert!(text.contains("gwtd memory add"));
-        assert!(text.contains("tasks/memory.md"));
+        assert!(text.contains(".gwt/work/memory.md"));
         assert!(text.contains("Future Action"));
     }
 
@@ -627,8 +628,8 @@ mod tests {
     fn stop_includes_memory_reminder_without_stop_block() {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
-        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("work dir");
+        std::fs::write(repo.join(".gwt/work/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
         let plan = compute_plan("Stop", &session, Utc::now())
@@ -640,7 +641,7 @@ mod tests {
         };
         assert!(text.contains("Memory Reminder"));
         assert!(text.contains("gwtd memory add"));
-        assert!(text.contains("tasks/memory.md"));
+        assert!(text.contains(".gwt/work/memory.md"));
     }
 
     #[test]

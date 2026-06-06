@@ -279,10 +279,10 @@ fn format_index_help() -> String {
 
 fn format_memory_help() -> String {
     [
-        "gwtd memory — Append reusable project memory to tasks/memory.md.",
+        "gwtd memory — Append reusable project memory to .gwt/work/memory.md.",
         "",
         "Usage: gwtd memory add [fields]",
-        "       gwtd lessons add [fields]   Legacy alias; writes tasks/memory.md",
+        "       gwtd lessons add [fields]   Legacy alias; writes .gwt/work/memory.md",
         "",
         "Fields:",
         "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",

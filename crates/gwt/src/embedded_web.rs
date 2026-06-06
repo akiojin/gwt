@@ -1046,7 +1046,7 @@ mod tests {
         // default 80×24 grid; flushing deferredWrites then renders the
         // post-launch Claude Code output corrupted, with the
         // resize-recovers-on-move signature documented in
-        // tasks/memory.md 2026-05-13.
+        // .gwt/work/memory.md 2026-05-13.
         let layout_box_gate = regex::Regex::new(
             r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )

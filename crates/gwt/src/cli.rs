@@ -10,7 +10,7 @@ mod board;
 mod build;
 pub mod daemon;
 mod discuss;
-mod discussion;
+pub(crate) mod discussion;
 mod env;
 pub mod gwtd_resolver;
 pub mod hook;

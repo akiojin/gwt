@@ -272,6 +272,29 @@ pub fn gwt_repo_local_work_events_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("events.jsonl")
 }
 
+/// Return the repo-local project memory path
+/// (`<repo_root>/.gwt/work/memory.md`).
+///
+/// SPEC-2359 Phase W-12: project memory (post-mortem entries written by
+/// `gwtd memory add`) is a git-tracked, repo-local file living under the
+/// shared `.gwt/work/` directory alongside the Work event log. The main
+/// worktree root is resolved first so every linked worktree of the same
+/// repository shares one canonical file.
+pub fn gwt_repo_local_memory_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("memory.md")
+}
+
+/// Return the repo-local discussion log path
+/// (`<repo_root>/.gwt/work/discussions.md`).
+///
+/// SPEC-2359 Phase W-12: the discussion log written by `gwtd discussion
+/// update` is a git-tracked, repo-local file under the shared `.gwt/work/`
+/// directory. The main worktree root is resolved first so linked worktrees
+/// share one canonical file.
+pub fn gwt_repo_local_discussions_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("discussions.md")
+}
+
 /// Return the repo-scoped notes root (`~/.gwt/notes/`).
 pub fn gwt_notes_dir() -> PathBuf {
     gwt_home().join("notes")
@@ -733,6 +756,36 @@ mod tests {
         assert_eq!(
             comparable_path(&events),
             comparable_path(&root.join(".gwt").join("work").join("events.jsonl"))
+        );
+    }
+
+    #[test]
+    fn gwt_repo_local_memory_path_joins_repo_local_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let memory = gwt_repo_local_memory_path(&repo);
+        assert!(memory.ends_with(PathBuf::from(".gwt").join("work").join("memory.md")));
+        let root = resolve_main_worktree_root(&repo);
+        assert_eq!(
+            comparable_path(&memory),
+            comparable_path(&root.join(".gwt").join("work").join("memory.md"))
+        );
+    }
+
+    #[test]
+    fn gwt_repo_local_discussions_path_joins_repo_local_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let discussions = gwt_repo_local_discussions_path(&repo);
+        assert!(discussions.ends_with(PathBuf::from(".gwt").join("work").join("discussions.md")));
+        let root = resolve_main_worktree_root(&repo);
+        assert_eq!(
+            comparable_path(&discussions),
+            comparable_path(&root.join(".gwt").join("work").join("discussions.md"))
         );
     }
 
