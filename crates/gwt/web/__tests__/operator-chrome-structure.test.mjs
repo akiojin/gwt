@@ -45,7 +45,23 @@ function terminalOptionNumber(name) {
 function extractFunctionBody(source, name) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `expected function ${name} in source`);
-  const open = source.indexOf("{", start);
+  const paramsOpen = source.indexOf("(", start);
+  assert.notEqual(paramsOpen, -1, `expected function ${name} parameters`);
+  let parenDepth = 0;
+  let paramsClose = -1;
+  for (let i = paramsOpen; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "(") parenDepth += 1;
+    if (char === ")") {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        paramsClose = i;
+        break;
+      }
+    }
+  }
+  assert.notEqual(paramsClose, -1, `expected function ${name} parameter close`);
+  const open = source.indexOf("{", paramsClose);
   assert.notEqual(open, -1, `expected function ${name} body`);
   let depth = 0;
   for (let i = open; i < source.length; i += 1) {
@@ -369,6 +385,40 @@ test("Project Tabs shell key avoids JSON stringify allocation", () => {
     keyBody,
     /for\s*\(\s*const\s+tab\s+of\s+tabs\s*\)/,
     "Project Tabs shell key must iterate tabs directly",
+  );
+});
+
+test("Project Tabs renderer avoids mapped selector snapshots on tab switches", () => {
+  const renderBody = extractFunctionBody(projectTabsRendererSource, "renderProjectTabs");
+  assert.doesNotMatch(
+    renderBody,
+    /nextTabs\.map\s*\(/,
+    "Project Tabs renderer must not allocate a mapped tab id source",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /querySelectorAll\s*\(/,
+    "Project Tabs renderer hot path must walk existing child buttons directly",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /Array\.from\s*\(/,
+    "Project Tabs renderer must not snapshot child buttons into an array",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /nextTabs\.forEach\s*\(/,
+    "Project Tabs renderer must not allocate a per-render callback for tab ordering",
+  );
+  assert.match(
+    renderBody,
+    /for\s*\(\s*let\s+index\s*=\s*0;\s*index\s*<\s*nextTabs\.length;\s*index\s*\+=\s*1\s*\)/,
+    "Project Tabs renderer must update tabs with an indexed direct loop",
+  );
+  assert.match(
+    renderBody,
+    /projectTabs\.children/,
+    "Project Tabs renderer must reuse the live child collection for stale cleanup and ordering",
   );
 });
 
