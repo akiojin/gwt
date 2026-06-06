@@ -323,7 +323,19 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
     /function\s+workspaceWindowsRenderKey\s*\(/,
     "app.js must define a Workspace Windows render key helper",
   );
+  assert.match(
+    appSource,
+    /let\s+viewportDomApplied\s*=\s*false\s*;/,
+    "app.js must track whether the viewport DOM has been initialized",
+  );
 
+  const nextViewportIndex = renderWorkspaceBody.indexOf(
+    "const nextViewport = viewportSyncState.applyServerViewport",
+  );
+  const viewportChangedIndex = renderWorkspaceBody.indexOf(
+    "const viewportChanged = !sameViewportValues(viewport, nextViewport);",
+  );
+  const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
   const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
   const keyIndex = renderWorkspaceBody.indexOf(
     "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
@@ -336,8 +348,35 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
   const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
   const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
+  const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
 
-  assert.notEqual(applyViewportIndex, -1, "renderWorkspace must apply viewport");
+  assert.notEqual(
+    nextViewportIndex,
+    -1,
+    "renderWorkspace must store the applied server viewport before DOM writes",
+  );
+  assert.ok(
+    viewportChangedIndex > nextViewportIndex,
+    "renderWorkspace must compare the current viewport with the applied server viewport",
+  );
+  assert.ok(
+    assignViewportIndex > viewportChangedIndex,
+    "renderWorkspace must compare before replacing the current viewport reference",
+  );
+  assert.equal(
+    applyCalls.length,
+    1,
+    "renderWorkspace must keep server viewport DOM writes behind one guarded apply call",
+  );
+  assert.ok(
+    applyViewportIndex > assignViewportIndex,
+    "changed server viewport must assign the new viewport before applying DOM writes",
+  );
+  assert.match(
+    renderWorkspaceBody.slice(assignViewportIndex, keyIndex),
+    /if\s*\(\s*!viewportDomApplied\s*\|\|\s*viewportChanged\s*\)\s*\{\s*applyViewport\(\);\s*\}/,
+    "unchanged server viewport must skip applyViewport only after the first DOM apply",
+  );
   assert.ok(keyIndex > applyViewportIndex, "window key guard must run after viewport");
   assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
   assert.ok(

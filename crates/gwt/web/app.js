@@ -378,6 +378,7 @@
         idleMs: 300,
       });
       let viewportRasterTimer = null;
+      let viewportDomApplied = false;
       let launchWizard = null;
       let launchWizardOpenError = null;
       let activeWorkProjection = null;
@@ -2843,6 +2844,7 @@
           y: viewport.y,
           zoom: viewport.zoom,
         });
+        viewportDomApplied = true;
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -13341,10 +13343,14 @@
           UI_TRACE_EVENT.renderWorkspace,
           { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
           () => {
-            viewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+            const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
               scopeKey: activeViewportScopeKey(),
             });
-            applyViewport();
+            const viewportChanged = !sameViewportValues(viewport, nextViewport);
+            viewport = nextViewport;
+            if (!viewportDomApplied || viewportChanged) {
+              applyViewport();
+            }
 
             const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
             if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
