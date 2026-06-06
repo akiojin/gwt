@@ -6,6 +6,7 @@
 // per frame for normal chunk sizes while preserving per-window ordering.
 
 export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
+export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 
 function defaultSchedule(callback) {
   if (typeof requestAnimationFrame === "function") {
@@ -21,6 +22,13 @@ function normalizeMaxCharsPerFlush(value) {
   return Math.floor(value);
 }
 
+function normalizeMaxWindowsPerFlush(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_WINDOWS_PER_FLUSH;
+  }
+  return Math.floor(value);
+}
+
 function defaultMergeChunks(chunks) {
   return chunks.join("");
 }
@@ -30,6 +38,7 @@ export function createTerminalOutputBatcher({
   write,
   onFlush,
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
+  maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
   mergeChunks = defaultMergeChunks,
 } = {}) {
   if (typeof write !== "function") {
@@ -38,6 +47,7 @@ export function createTerminalOutputBatcher({
   const scheduleImpl = typeof schedule === "function" ? schedule : defaultSchedule;
   const onFlushImpl = typeof onFlush === "function" ? onFlush : null;
   const charsPerFlush = normalizeMaxCharsPerFlush(maxCharsPerFlush);
+  const windowsPerFlush = normalizeMaxWindowsPerFlush(maxWindowsPerFlush);
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const pendingByWindow = new Map();
@@ -109,8 +119,16 @@ export function createTerminalOutputBatcher({
       return false;
     }
     let flushed = false;
+    let windowsFlushed = 0;
     for (const windowId of Array.from(pendingByWindow.keys())) {
+      if (windowsFlushed >= windowsPerFlush) {
+        break;
+      }
+      if (!pendingByWindow.has(windowId)) {
+        continue;
+      }
       flushed = flushWindow(windowId) || flushed;
+      windowsFlushed += 1;
     }
     if (pendingByWindow.size > 0) {
       scheduleFlush();
