@@ -13,9 +13,10 @@ use crate::{
     coordination::{BoardEntry, BoardEntryKind},
     error::{GwtError, Result},
     paths::{
-        gwt_project_dir_for_repo_path, gwt_workspace_journal_path_for_repo_path,
-        gwt_workspace_projection_path_for_repo_path, gwt_workspace_work_events_path_for_repo_path,
-        gwt_workspace_work_items_path_for_repo_path, project_scope_hash,
+        gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
+        gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
+        gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
+        project_scope_hash, resolve_main_worktree_root,
     },
 };
 
@@ -1199,6 +1200,77 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
     Ok(())
 }
 
+/// SPEC-2359 Phase W-12 Slice 5b (FR-355): the gitattributes line that joins
+/// the append-only Work event log across branch divergence via git's union
+/// merge driver. The glob matches the repo-local event log regardless of the
+/// directory it is checked out under.
+const WORK_EVENTS_GITATTRIBUTES_LINE: &str = "**/.gwt/work/events.jsonl merge=union";
+
+/// SPEC-2359 Phase W-12 Slice 5b (FR-353/FR-358): resolve the repo-local Work
+/// event log path (`<repo_root>/.gwt/work/events.jsonl`), running the one-time
+/// migration from the home (untracked) sources and ensuring the union-merge
+/// gitattribute exists. Returns the repo-local path so every record/read entry
+/// point shares one resolution + migration.
+///
+/// Migration (FR-358) is guarded by existence: when the repo-local event log
+/// is absent, the home Project State event log (and its older Workspace path)
+/// are copied into it exactly once. Once the repo-local file exists, the home
+/// sources are never read again. The copy is idempotent across restarts and
+/// across linked worktrees because they all resolve to the same main worktree
+/// root.
+fn repo_local_work_events_path_with_migration(repo_path: &Path) -> Result<PathBuf> {
+    let events_path = gwt_repo_local_work_events_path(repo_path);
+    if !events_path.exists() {
+        // Primary migration source: the home Project State event log.
+        copy_legacy_workspace_file_if_needed(
+            &gwt_workspace_work_events_path_for_repo_path(repo_path),
+            &events_path,
+        )?;
+        // Fallback migration source: the older home Workspace event log. Only
+        // consulted when neither the repo-local nor the Project State file
+        // exists, so the most recent home log always wins.
+        copy_legacy_workspace_file_if_needed(
+            &legacy_workspace_work_events_path_for_repo_path(repo_path),
+            &events_path,
+        )?;
+    }
+    ensure_work_events_gitattributes(repo_path)?;
+    Ok(events_path)
+}
+
+/// SPEC-2359 Phase W-12 Slice 5b (FR-355): ensure the repo's `.gitattributes`
+/// carries the union-merge line for the repo-local Work event log. The entry
+/// is appended at most once (idempotent): an existing line — regardless of
+/// surrounding whitespace — is left untouched. The file is created when
+/// absent. Failures to write are swallowed for non-repository / read-only
+/// roots so recording a Work event never fails on the gitattributes side.
+fn ensure_work_events_gitattributes(repo_path: &Path) -> Result<()> {
+    let root = resolve_main_worktree_root(repo_path);
+    // Skip bare repositories (resolved for the workspace-home layout): a
+    // `.gitattributes` there would never be checked out, so it cannot drive
+    // the merge driver.
+    if root.join("HEAD").is_file() && root.join("objects").is_dir() && !root.join(".git").exists() {
+        return Ok(());
+    }
+    let attributes_path = root.join(".gitattributes");
+    let existing = fs::read_to_string(&attributes_path).unwrap_or_default();
+    if existing
+        .lines()
+        .any(|line| line.trim() == WORK_EVENTS_GITATTRIBUTES_LINE)
+    {
+        return Ok(());
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(WORK_EVENTS_GITATTRIBUTES_LINE);
+    next.push('\n');
+    // Best-effort: a read-only or non-repo root must not fail event recording.
+    let _ = fs::write(&attributes_path, next);
+    Ok(())
+}
+
 fn migrate_legacy_workspace_projection(
     repo_path: &Path,
     canonical_path: &Path,
@@ -1434,12 +1506,8 @@ pub fn save_workspace_work_items_projection_to_path(
 
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkspaceWorkEvent) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     record_workspace_work_event_paths(&work_items_path, &events_path, event)
 }
 
@@ -1514,12 +1582,8 @@ pub fn record_workspace_work_paused_event(
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     record_workspace_work_paused_event_paths(
         &work_items_path,
         &events_path,
@@ -1565,7 +1629,7 @@ pub fn emit_workspace_done_event_if_absent(
 ) -> Result<bool> {
     emit_workspace_done_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
         work_item_id,
         updated_at,
     )
@@ -1619,7 +1683,7 @@ pub fn emit_workspace_discard_event_if_absent(
 ) -> Result<bool> {
     emit_workspace_discard_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
         work_item_id,
         updated_at,
     )
@@ -1777,12 +1841,8 @@ pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
 ) -> Result<WorkspaceWorkItemsRebuildOutcome> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     let marker_path = work_items_path
         .parent()
         .map(|dir| dir.join("work_items.migration.json"))
@@ -1910,13 +1970,9 @@ pub fn reset_legacy_agent_identity_for_repo(repo_path: &Path) -> Result<bool> {
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
 
@@ -1988,7 +2044,7 @@ pub fn emit_workspace_done_event_for_branch(
     emit_workspace_done_event_for_branch_paths(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
         branch,
         now,
     )
@@ -5224,5 +5280,237 @@ mod tests {
             .expect("work item");
         assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
         assert!(item.completed_at.is_some());
+    }
+
+    // ---------------------------------------------------------------------
+    // SPEC-2359 Phase W-12 Slice 5b (FR-353 / FR-355 / FR-358): the Work
+    // event log persistent core is repo-local and git-tracked.
+    // ---------------------------------------------------------------------
+
+    /// Override `HOME` for the duration of a test so the home-side projection
+    /// writes (works.json, project-state) and the legacy migration sources
+    /// resolve under an isolated temp directory. Restores the previous value
+    /// on drop.
+    struct ScopedHome {
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedHome {
+        fn set(path: &Path) -> Self {
+            let previous_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous_home }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            match self.previous_home.as_ref() {
+                Some(previous) => std::env::set_var("HOME", previous),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn init_test_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("create repo dir");
+        let output = crate::process::hidden_command("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+        for args in [
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "Test User"],
+        ] {
+            let mut cmd = crate::process::hidden_command("git");
+            cmd.args(args).current_dir(path);
+            crate::process::scrub_git_env(&mut cmd);
+            assert!(cmd.output().expect("git config").status.success());
+        }
+    }
+
+    fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkspaceWorkEvent {
+        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, at);
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        event.title = Some("Repo-local work".to_string());
+        event
+    }
+
+    #[test]
+    fn record_workspace_work_event_writes_to_repo_local_events_log() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-repo-local", t1)).expect("record event");
+
+        // The event must land in the repo-local, git-tracked event log.
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(
+            repo_local.is_file(),
+            "event must be written to repo-local .gwt/work/events.jsonl"
+        );
+        let body = std::fs::read_to_string(&repo_local).expect("read events");
+        assert!(body.contains("wi-repo-local"), "event payload present");
+
+        // The home Project State event log must NOT be written for new events.
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        assert!(
+            !home_events.exists(),
+            "home project-state event log must not receive new events"
+        );
+    }
+
+    #[test]
+    fn record_workspace_work_event_adds_union_merge_gitattribute_idempotently() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+        // Seed a pre-existing .gitattributes to confirm we append, not clobber.
+        std::fs::write(repo.join(".gitattributes"), "*.sh text eol=lf\n")
+            .expect("seed gitattributes");
+
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-attr", t1)).expect("record 1");
+        record_workspace_work_event(
+            &repo,
+            start_event("wi-attr-2", t1 + chrono::Duration::seconds(1)),
+        )
+        .expect("record 2");
+
+        let attributes =
+            std::fs::read_to_string(repo.join(".gitattributes")).expect("read gitattributes");
+        let union_lines = attributes
+            .lines()
+            .filter(|line| line.trim() == "**/.gwt/work/events.jsonl merge=union")
+            .count();
+        assert_eq!(
+            union_lines, 1,
+            "union-merge entry must be added exactly once"
+        );
+        assert!(
+            attributes.contains("*.sh text eol=lf"),
+            "pre-existing gitattributes content must be preserved"
+        );
+    }
+
+    #[test]
+    fn migrates_home_events_into_repo_local_once_then_skips() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        // Seed the home Project State event log with a historical event so the
+        // one-time migration has something to copy.
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+        append_workspace_work_event_to_path(&home_events, &start_event("wi-historical", t0))
+            .expect("seed home events");
+
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(!repo_local.exists(), "precondition: repo-local absent");
+
+        // First record triggers migration: the historical event is copied in,
+        // then the new event is appended.
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-new", t1)).expect("record new");
+
+        let body = std::fs::read_to_string(&repo_local).expect("read repo-local");
+        assert!(
+            body.contains("wi-historical"),
+            "migration must copy the home historical event into the repo-local log"
+        );
+        assert!(
+            body.contains("wi-new"),
+            "the new event is appended after migration"
+        );
+
+        // Mutate the home log AFTER migration. Because the repo-local file now
+        // exists, the home source must never be read again (idempotent skip).
+        append_workspace_work_event_to_path(
+            &home_events,
+            &start_event("wi-home-after-migration", t1 + chrono::Duration::seconds(5)),
+        )
+        .expect("append post-migration home event");
+
+        record_workspace_work_event(
+            &repo,
+            start_event("wi-second", t1 + chrono::Duration::seconds(10)),
+        )
+        .expect("record second");
+
+        let body2 = std::fs::read_to_string(&repo_local).expect("read repo-local again");
+        assert!(
+            !body2.contains("wi-home-after-migration"),
+            "once repo-local exists the home source must not be migrated again"
+        );
+        assert!(body2.contains("wi-second"), "second new event appended");
+    }
+
+    #[test]
+    fn rebuild_work_items_uses_repo_local_events_after_migration() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        // A Done then later Update in the home log; rebuild must replay through
+        // the repo-local log and recover the terminal Done state (regression
+        // coverage that the repo-local path drives the existing rebuild).
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 1, 11, 0, 0).unwrap();
+        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "wi-rebuild", t1);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        append_workspace_work_event_to_path(&home_events, &done).expect("seed done");
+        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "wi-rebuild", t2);
+        append_workspace_work_event_to_path(&home_events, &update).expect("seed update");
+
+        let outcome = rebuild_work_items_from_events_for_repo(&repo).expect("rebuild");
+        assert_eq!(outcome, WorkspaceWorkItemsRebuildOutcome::Applied);
+
+        // The rebuild must have migrated and replayed the repo-local log.
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(
+            repo_local.is_file(),
+            "rebuild migrates events into repo-local log"
+        );
+
+        let projection = load_workspace_work_items_from_path(
+            &gwt_workspace_work_items_path_for_repo_path(&repo),
+        )
+        .expect("load")
+        .expect("present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == "wi-rebuild")
+            .expect("rebuilt item");
+        assert_eq!(
+            item.status_category,
+            WorkspaceStatusCategory::Done,
+            "Done terminal state recovered via repo-local replay"
+        );
     }
 }
