@@ -678,55 +678,98 @@
           windowData.maximized && !windowData.minimized
             ? maximizedGeometry(visibleBounds(), viewport.zoom)
             : null;
-        return JSON.stringify({
-          id: windowData.id,
-          preset: windowData.preset || "",
-          title: windowData.title || "",
-          dynamic_title: windowData.dynamic_title || "",
-          dynamic_title_detail: windowData.dynamic_title_detail || "",
-          purpose_title: windowData.purpose_title || "",
-          agent_id: windowData.agent_id || "",
-          agent_color: windowData.agent_color || "",
-          status: windowData.status || "",
-          runtime_state: runtimeStateForWindow(windowData),
-          detail: detailMap.get(windowData.id) || "",
-          display_title: windowDisplayTitle(windowData),
-          title_tooltip: windowTitleTooltip(windowData),
-          role_badge: windowRoleBadgeLabel(windowData),
-          geometry_revision: workspaceGeometryRevision(windowData),
-          geometry: {
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-          },
-          minimized: Boolean(windowData.minimized),
-          maximized: Boolean(windowData.maximized),
-          z_index: windowData.z_index,
-          tab_group_id: windowData.tab_group_id || "",
-          tab_group_active: Boolean(windowData.tab_group_active),
-          maximized_fill: maximizedFill
-            ? {
-                x: maximizedFill.x,
-                y: maximizedFill.y,
-                width: maximizedFill.width,
-                height: maximizedFill.height,
-              }
-            : null,
-          tabs: windowTabsFor(windowData).map((tab) => ({
-            id: tab.id,
-            preset: tab.preset || "",
-            title: tab.title || "",
-            dynamic_title: tab.dynamic_title || "",
-            dynamic_title_detail: tab.dynamic_title_detail || "",
-            purpose_title: tab.purpose_title || "",
-            agent_id: tab.agent_id || "",
-            agent_color: tab.agent_color || "",
-            status: tab.status || "",
-            tab_group_id: tab.tab_group_id || "",
-            tab_group_active: Boolean(tab.tab_group_active),
-          })),
-        });
+        const tabGroupId = windowGroupId(windowData);
+        const parts = [];
+        appendRenderKeyPart(parts, "id");
+        appendRenderKeyPart(parts, windowData.id || "");
+        appendRenderKeyPart(parts, "preset");
+        appendRenderKeyPart(parts, windowData.preset || "");
+        appendRenderKeyPart(parts, "title");
+        appendRenderKeyPart(parts, windowData.title || "");
+        appendRenderKeyPart(parts, "dynamic_title");
+        appendRenderKeyPart(parts, windowData.dynamic_title || "");
+        appendRenderKeyPart(parts, "dynamic_title_detail");
+        appendRenderKeyPart(parts, windowData.dynamic_title_detail || "");
+        appendRenderKeyPart(parts, "purpose_title");
+        appendRenderKeyPart(parts, windowData.purpose_title || "");
+        appendRenderKeyPart(parts, "agent_id");
+        appendRenderKeyPart(parts, windowData.agent_id || "");
+        appendRenderKeyPart(parts, "agent_color");
+        appendRenderKeyPart(parts, windowData.agent_color || "");
+        appendRenderKeyPart(parts, "status");
+        appendRenderKeyPart(parts, windowData.status || "");
+        appendRenderKeyPart(parts, "runtime_state");
+        appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+        appendRenderKeyPart(parts, "detail");
+        appendRenderKeyPart(parts, detailMap.get(windowData.id) || "");
+        appendRenderKeyPart(parts, "display_title");
+        appendRenderKeyPart(parts, windowDisplayTitle(windowData));
+        appendRenderKeyPart(parts, "title_tooltip");
+        appendRenderKeyPart(parts, windowTitleTooltip(windowData));
+        appendRenderKeyPart(parts, "role_badge");
+        appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
+        appendRenderKeyPart(parts, "geometry_revision");
+        appendRenderKeyPart(parts, workspaceGeometryRevision(windowData));
+        appendRenderKeyPart(parts, "geometry");
+        appendRenderKeyPart(parts, "x");
+        appendRenderKeyPart(parts, geometry.x ?? "");
+        appendRenderKeyPart(parts, "y");
+        appendRenderKeyPart(parts, geometry.y ?? "");
+        appendRenderKeyPart(parts, "width");
+        appendRenderKeyPart(parts, geometry.width ?? "");
+        appendRenderKeyPart(parts, "height");
+        appendRenderKeyPart(parts, geometry.height ?? "");
+        appendRenderKeyPart(parts, "minimized");
+        appendRenderKeyPart(parts, Boolean(windowData.minimized));
+        appendRenderKeyPart(parts, "maximized");
+        appendRenderKeyPart(parts, Boolean(windowData.maximized));
+        appendRenderKeyPart(parts, "z_index");
+        appendRenderKeyPart(parts, windowData.z_index ?? "");
+        appendRenderKeyPart(parts, "tab_group_id");
+        appendRenderKeyPart(parts, windowData.tab_group_id || "");
+        appendRenderKeyPart(parts, "tab_group_active");
+        appendRenderKeyPart(parts, Boolean(windowData.tab_group_active));
+        appendRenderKeyPart(parts, "maximized_fill");
+        appendRenderKeyPart(parts, Boolean(maximizedFill));
+        if (maximizedFill) {
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, maximizedFill.x);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, maximizedFill.y);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, maximizedFill.width);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, maximizedFill.height);
+        }
+        appendRenderKeyPart(parts, "tabs");
+        for (const tab of activeWorkspace().windows || []) {
+          if (windowGroupId(tab) !== tabGroupId) {
+            continue;
+          }
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, tab.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, tab.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, tab.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, tab.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, tab.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, tab.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, tab.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, tab.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, tab.status || "");
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, tab.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
+        }
+        return parts.join("");
       }
 
       function projectPickerRenderKey(activeTab = activeProjectTab()) {

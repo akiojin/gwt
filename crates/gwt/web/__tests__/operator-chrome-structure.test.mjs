@@ -1052,8 +1052,13 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
   );
   assert.match(
     keyBody,
-    /windowTabsFor\s*\(/,
-    "per-window key must include tab strip inputs",
+    /windowGroupId\s*\(\s*windowData\s*\)/,
+    "per-window key must derive the tab group for tab strip inputs",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "per-window key must append primitive key fields directly",
   );
   assert.match(
     keyBody,
@@ -1085,6 +1090,8 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     "z_index",
     "tab_group_id",
     "tab_group_active",
+    "maximized_fill",
+    "tabs",
   ]) {
     assert.match(
       keyBody,
@@ -1101,6 +1108,53 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     cleanupIndex < removeIndex,
     "per-window render key cleanup must happen before element removal",
   );
+});
+
+test("Per-window render key avoids JSON stringify and mapped tab allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "windowElementRenderKey");
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "per-window key must not serialize an object graph for each changed window",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /windowTabsFor\s*\(\s*windowData\s*\)\.map\s*\(/,
+    "per-window key must not allocate a mapped tab shell array",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /windowTabsFor\s*\(\s*windowData\s*\)/,
+    "per-window key must avoid allocating a filtered tab array",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+tab\s+of\s+activeWorkspace\s*\(\s*\)\.windows\s*\|\|\s*\[\]\s*\)/,
+    "per-window key must iterate workspace tab candidates directly",
+  );
+  assert.match(
+    keyBody,
+    /windowGroupId\s*\(\s*tab\s*\)\s*!==\s*tabGroupId[\s\S]+continue\s*;/,
+    "per-window key must keep only tabs in the same group",
+  );
+  for (const field of [
+    "runtime_state",
+    "detail",
+    "display_title",
+    "title_tooltip",
+    "role_badge",
+    "geometry_revision",
+    "maximized_fill",
+    "tabs",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `per-window primitive key must keep ${field}`,
+    );
+  }
 });
 
 test("Focus class updates skip unchanged focus and avoid all-window scans", () => {
