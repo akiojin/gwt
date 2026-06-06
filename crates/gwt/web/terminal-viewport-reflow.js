@@ -5,6 +5,7 @@
 // source-string contracts).
 
 export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+export const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
   if (typeof requestAnimationFrame === "function") {
@@ -16,6 +17,13 @@ function defaultScheduleFrame(callback) {
 function normalizeMaxTerminalFitsPerFrame(value) {
   if (!Number.isFinite(value) || value <= 0) {
     return DEFAULT_MAX_TERMINAL_FITS_PER_FRAME;
+  }
+  return Math.floor(value);
+}
+
+function normalizeMaxTerminalRefreshesPerFrame(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME;
   }
   return Math.floor(value);
 }
@@ -86,6 +94,91 @@ export function createTerminalFitScheduler({
 
   return {
     enqueue,
+    flushPending,
+    pendingCount,
+  };
+}
+
+/**
+ * Coalesce terminal viewport refresh requests through one bounded frame queue.
+ *
+ * xterm refresh is render work. Terminal output, scroll, and visibility paths
+ * can request refreshes for many terminals before paint; this scheduler keeps
+ * each window refreshed at most once per burst while limiting how many refresh
+ * calls run in one frame.
+ */
+export function createTerminalViewportRefreshScheduler({
+  schedule = defaultScheduleFrame,
+  canRefresh,
+  refresh,
+  markPending,
+  maxRefreshesPerFrame = DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME,
+} = {}) {
+  if (typeof refresh !== "function") {
+    throw new TypeError("createTerminalViewportRefreshScheduler requires a refresh callback");
+  }
+  const scheduleImpl = typeof schedule === "function" ? schedule : defaultScheduleFrame;
+  const canRefreshImpl = typeof canRefresh === "function" ? canRefresh : () => true;
+  const markPendingImpl = typeof markPending === "function" ? markPending : () => {};
+  const refreshesPerFrame = normalizeMaxTerminalRefreshesPerFrame(maxRefreshesPerFrame);
+  const pending = new Set();
+  let scheduled = false;
+
+  function scheduleFlush() {
+    if (scheduled) {
+      return;
+    }
+    scheduled = true;
+    scheduleImpl(flushPending);
+  }
+
+  function enqueue(windowId) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    pending.add(String(windowId));
+    scheduleFlush();
+    return true;
+  }
+
+  function clear(windowId) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    return pending.delete(String(windowId));
+  }
+
+  function flushPending() {
+    scheduled = false;
+    let refreshed = 0;
+    for (const windowId of Array.from(pending.values())) {
+      if (refreshed >= refreshesPerFrame) {
+        break;
+      }
+      if (!pending.has(windowId)) {
+        continue;
+      }
+      pending.delete(windowId);
+      if (!canRefreshImpl(windowId)) {
+        markPendingImpl(windowId);
+        continue;
+      }
+      refresh(windowId);
+      refreshed += 1;
+    }
+    if (pending.size > 0) {
+      scheduleFlush();
+    }
+    return refreshed;
+  }
+
+  function pendingCount() {
+    return pending.size;
+  }
+
+  return {
+    enqueue,
+    clear,
     flushPending,
     pendingCount,
   };

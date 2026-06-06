@@ -52,6 +52,7 @@
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
         createTerminalFitScheduler,
+        createTerminalViewportRefreshScheduler,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
         rearmRefreshOnVisible,
@@ -186,6 +187,7 @@
       const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
       let terminalFitScheduler = null;
+      let terminalViewportRefreshScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
@@ -3245,24 +3247,28 @@
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
-          return;
+          return false;
         }
         if (!canRefreshTerminalViewport(windowId)) {
-          runtime.viewportRefreshPending = true;
-          return;
+          markTerminalViewportRefreshPending(windowId);
+          return false;
         }
-        if (runtime.viewportRefreshFrame !== null) {
-          return;
+        if (!terminalViewportRefreshScheduler) {
+          requestAnimationFrame(() => {
+            if (!canRefreshTerminalViewport(windowId)) {
+              markTerminalViewportRefreshPending(windowId);
+              return;
+            }
+            const activeRuntime = terminalMap.get(windowId);
+            if (!activeRuntime) {
+              return;
+            }
+            activeRuntime.viewportRefreshPending = false;
+            refreshTerminalViewport(windowId);
+          });
+          return false;
         }
-        runtime.viewportRefreshFrame = requestAnimationFrame(() => {
-          runtime.viewportRefreshFrame = null;
-          if (!canRefreshTerminalViewport(windowId)) {
-            runtime.viewportRefreshPending = true;
-            return;
-          }
-          runtime.viewportRefreshPending = false;
-          refreshTerminalViewport(windowId);
-        });
+        return terminalViewportRefreshScheduler.enqueue(windowId);
       }
 
       function refreshTerminalViewport(windowId) {
@@ -3272,6 +3278,26 @@
         }
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
+
+      function markTerminalViewportRefreshPending(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (runtime) {
+          runtime.viewportRefreshPending = true;
+        }
+      }
+
+      terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({
+        canRefresh: canRefreshTerminalViewport,
+        refresh: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          if (!runtime) {
+            return;
+          }
+          runtime.viewportRefreshPending = false;
+          refreshTerminalViewport(windowId);
+        },
+        markPending: markTerminalViewportRefreshPending,
+      });
 
       function forceTerminalViewportRefresh(windowId, { shouldPersistGeometry = true } = {}) {
         const runtime = terminalMap.get(windowId);
@@ -3403,8 +3429,8 @@
           // Schedule one more viewport refresh on the next frame so the
           // post-fit cols/rows are reflected in the rendered buffer even
           // when xterm coalesces internal redraws. This keeps the prior
-          // `viewportRefreshFrame` re-arm path active for repeated
-          // activations.
+          // refresh re-arm behavior active for repeated activations while
+          // routing routine refresh work through the shared scheduler.
           scheduleTerminalViewportRefresh(windowId);
         });
       }
@@ -5562,7 +5588,6 @@
           terminal,
           fitAddon,
           cleanup,
-          viewportRefreshFrame: null,
           viewportRefreshPending: false,
           activationFrame: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
@@ -13341,12 +13366,10 @@
               const element = windowMap.get(windowId);
               if (!element) continue;
               const runtime = terminalMap.get(windowId);
-              if (runtime && runtime.viewportRefreshFrame !== null) {
-                cancelAnimationFrame(runtime.viewportRefreshFrame);
-              }
               if (runtime && runtime.activationFrame !== null) {
                 cancelAnimationFrame(runtime.activationFrame);
               }
+              terminalViewportRefreshScheduler?.clear(windowId);
               runtime?.cleanup?.();
               runtime?.terminal.dispose();
               terminalMap.delete(windowId);

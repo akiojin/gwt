@@ -920,8 +920,9 @@ mod tests {
             "expected terminal viewport refresh scheduling helper",
         );
         assert!(
-            html.contains("viewportRefreshFrame"),
-            "expected terminal runtime to debounce viewport refreshes",
+            html.contains("createTerminalViewportRefreshScheduler({")
+                && html.contains("terminalViewportRefreshScheduler.enqueue(windowId)"),
+            "expected terminal runtime to route viewport refreshes through the shared scheduler",
         );
         assert!(
             html.contains(
@@ -962,16 +963,12 @@ mod tests {
             "expected document visibility restore to re-arm visible terminal refreshes",
         );
         assert!(
-            html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
-            "expected pending terminal viewport refresh frames to be cancelled during cleanup",
-        );
-        assert!(
             html.contains("terminalOutputBatcher.clear(windowId);"),
             "expected pending terminal output batches to be cleared on snapshot and removed-window cleanup",
         );
         assert!(
-            html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),
-            "expected terminal cleanup to guard non-terminal windows before cancelling refresh frames",
+            html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
+            "expected terminal cleanup to clear pending shared viewport refreshes",
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
