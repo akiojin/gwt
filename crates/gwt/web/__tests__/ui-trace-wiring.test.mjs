@@ -15,8 +15,13 @@ const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 
 function fakeProfiler() {
   const calls = [];
+  let active = false;
   return {
     calls,
+    isActive() {
+      calls.push({ kind: "isActive" });
+      return active;
+    },
     measure(kind, fields, callback) {
       calls.push({ kind: "measure", event: kind, fields });
       return callback();
@@ -28,10 +33,16 @@ function fakeProfiler() {
       calls.push({ kind: "recordPointer", event: kind, pointerId: event.pointerId, fields });
     },
     start() {
+      active = true;
       calls.push({ kind: "start" });
       return { session_id: "trace-1", started_at: 1 };
     },
     stop() {
+      if (!active) {
+        calls.push({ kind: "stop" });
+        return null;
+      }
+      active = false;
       calls.push({ kind: "stop" });
       return { session_id: "trace-1", entries: [] };
     },
@@ -141,6 +152,22 @@ test("UI trace save payload keeps the wire kind in one place", () => {
   });
 });
 
+test("UI trace wiring exposes profiler active state", () => {
+  const profiler = fakeProfiler();
+  const wiring = createUiTraceWiring({
+    profiler,
+    send: () => {},
+    alert: () => {},
+    log: () => {},
+  });
+
+  assert.equal(wiring.isTracing(), false);
+  wiring.start();
+  assert.equal(wiring.isTracing(), true);
+  wiring.stop();
+  assert.equal(wiring.isTracing(), false);
+});
+
 test("app.js imports and instantiates the UI trace wiring module", () => {
   assert.match(
     appSource,
@@ -152,6 +179,10 @@ test("app.js imports and instantiates the UI trace wiring module", () => {
 test("WebSocket dispatcher forwards timing trace events through the wiring facade", () => {
   assert.match(appSource, /onTrace:\s*\(kind,\s*fields\)\s*=>/);
   assert.match(appSource, /traceUi\(kind,\s*fields\)/);
+});
+
+test("WebSocket dispatcher gates trace work through active UI trace state", () => {
+  assert.match(appSource, /shouldTrace:\s*uiTraceWiring\.isTracing/);
 });
 
 test("pointer diagnostics use centralized event constants", () => {

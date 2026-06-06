@@ -47,6 +47,7 @@ export function createSocketReceiveDispatcher({
   coalesceKinds = DEFAULT_COALESCE_KINDS,
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
+  shouldTrace,
 } = {}) {
   if (typeof receive !== "function") {
     throw new TypeError(
@@ -67,15 +68,31 @@ export function createSocketReceiveDispatcher({
     return Date.now();
   });
   const traceImpl = typeof onTrace === "function" ? onTrace : null;
+  const shouldTraceImpl = typeof shouldTrace === "function" ? shouldTrace : null;
 
   const queue = [];
   let scheduled = false;
 
-  function trace(kind, fields = {}) {
+  function traceActive() {
     if (!traceImpl) {
+      return false;
+    }
+    if (!shouldTraceImpl) {
+      return true;
+    }
+    try {
+      return Boolean(shouldTraceImpl());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function trace(kind, fieldsFactory = () => ({})) {
+    if (!traceActive()) {
       return;
     }
     try {
+      const fields = fieldsFactory();
       traceImpl(kind, fields);
     } catch (_) {
       // Diagnostics must never affect the interactive event path.
@@ -92,9 +109,9 @@ export function createSocketReceiveDispatcher({
     });
     queue.length = 0;
     const start = nowImpl();
-    trace("ws_flush_start", {
+    trace("ws_flush_start", () => ({
       ready_count: ready.length,
-    });
+    }));
     let cursor = 0;
     while (cursor < ready.length) {
       const entry = ready[cursor];
@@ -103,18 +120,18 @@ export function createSocketReceiveDispatcher({
       try {
         const event = queuedEntryPayload(entry);
         receive(event);
-        trace("ws_receive", {
+        trace("ws_receive", () => ({
           event_kind: event && event.kind,
           duration_ms: nowImpl() - receiveStart,
           deferred_parse: entry && entry.type === "raw",
-        });
+        }));
       } catch (error) {
-        trace("ws_receive", {
+        trace("ws_receive", () => ({
           event_kind: eventKind,
           duration_ms: nowImpl() - receiveStart,
           threw: true,
           error_name: error && error.name,
-        });
+        }));
         console.warn(
           "[ws-dispatcher] receive threw for %s — continuing with remaining events",
           eventKind,
@@ -126,20 +143,20 @@ export function createSocketReceiveDispatcher({
         for (let i = ready.length - 1; i >= cursor; i -= 1) {
           queue.unshift(ready[i]);
         }
-        trace("ws_flush_defer", {
+        trace("ws_flush_defer", () => ({
           processed_count: cursor,
           remaining_count: ready.length - cursor,
           duration_ms: nowImpl() - start,
-        });
+        }));
         scheduled = true;
         scheduleImpl(flush);
         return;
       }
     }
-    trace("ws_flush_end", {
+    trace("ws_flush_end", () => ({
       processed_count: cursor,
       duration_ms: nowImpl() - start,
-    });
+    }));
   }
 
   function enqueue(event) {
@@ -154,11 +171,11 @@ export function createSocketReceiveDispatcher({
     const parseStart = nowImpl();
     if (messageEvent && typeof messageEvent.data === "string") {
       const entry = rawQueueEntry(messageEvent.data);
-      trace("ws_message", {
+      trace("ws_message", () => ({
         event_kind: entry.kind,
         parse_ms: nowImpl() - parseStart,
         deferred_parse: true,
-      });
+      }));
       queue.push(entry);
     } else if (
       messageEvent
@@ -166,10 +183,10 @@ export function createSocketReceiveDispatcher({
       && Object.hasOwn(messageEvent, "kind")
     ) {
       const entry = parsedQueueEntry(messageEvent);
-      trace("ws_message", {
+      trace("ws_message", () => ({
         event_kind: entry.kind,
         parse_ms: nowImpl() - parseStart,
-      });
+      }));
       queue.push(entry);
     } else {
       throw new TypeError(

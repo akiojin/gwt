@@ -1551,6 +1551,7 @@
           onTrace: (kind, fields) => {
             traceUi(kind, fields);
           },
+          shouldTrace: uiTraceWiring.isTracing,
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_COALESCE_KINDS,
@@ -7,6 +10,9 @@ import {
   coalesceEvents,
   createSocketReceiveDispatcher,
 } from "../socket-receive-dispatcher.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const dispatcherSource = readFileSync(resolve(here, "../socket-receive-dispatcher.js"), "utf8");
 
 function manualScheduler() {
   const pending = [];
@@ -441,4 +447,49 @@ test("dispatcher emits sanitized trace metadata for parse and receive timing", (
   assert.equal(traces[2].event_kind, "terminal_output");
   assert.equal(traces[2].duration_ms, 4);
   assert.equal(JSON.stringify(traces).includes("must-not-leak"), false);
+});
+
+test("dispatcher builds trace metadata lazily", () => {
+  assert.match(dispatcherSource, /function\s+trace\(\s*kind,\s*fieldsFactory/);
+  assert.doesNotMatch(
+    dispatcherSource,
+    /trace\(\s*["']ws_[^"']+["']\s*,\s*\{/,
+    "trace call sites must pass factories so inactive tracing skips field allocation",
+  );
+});
+
+test("dispatcher skips trace callbacks while shouldTrace is false", () => {
+  const traces = [];
+  const received = [];
+  const scheduler = manualScheduler();
+  let shouldTrace = false;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, ...fields }),
+    shouldTrace: () => shouldTrace,
+  });
+
+  for (let i = 0; i < 25; i += 1) {
+    dispatcher.handle({
+      data: JSON.stringify({ kind: "terminal_output", id: "shell", data: String(i) }),
+    });
+  }
+  scheduler.runOnce();
+
+  assert.equal(received.length, 25);
+  assert.deepEqual(traces, [], "inactive tracing must not call onTrace");
+
+  shouldTrace = true;
+  dispatcher.handle({
+    data: JSON.stringify({ kind: "terminal_output", id: "shell", data: "active" }),
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    traces.map((trace) => trace.kind),
+    ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
+    "trace events must resume once shouldTrace returns true",
+  );
 });
