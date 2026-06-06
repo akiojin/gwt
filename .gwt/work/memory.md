@@ -6690,3 +6690,10 @@ Type: lesson
 Context: gwt-discussion で Work UI/UX 全面再設計に合意。Work=agent session 単位(1 agent:1 Work)、lifecycle Active/Paused/Done/Discarded、手動 close まで一覧に残す、Canvas 専用 surface 集約(サイドバー Active Works 撤去)、cleanup は worktree のみ削除、repo-local 追跡で永続コア/揮発ランタイムの 2 層。
 Learning: Work current state と Board は責務分離(event log vs snapshot、shared vs project-scoped、author vs owner)。統合せず board_refs/board_entry_id でリンクする。FR-008 と 2026-05-07 lesson(Board を current state に流用するな、live 照合せよ)を維持。
 Future Action: Work state を Board に統合しようとしない。Active 判定は必ず live session/window 照合を挟む。設計の正本は SPEC-2359 Phase W-12。
+
+## 2026-06-06 — repo-local tracked ファイルは --show-toplevel(現 worktree)に解決する。--git-common-dir は bare repo を返す
+
+Type: lesson
+Context: SPEC-2359 W-12 Slice 5b で gwt_repo_local_work_dir が resolve_main_worktree_root(git rev-parse --git-common-dir)を使い、gwt の workspace-home layout(親が bare repo gwt.git を持つ)では bare repo dir(gwt.git)に解決。bare repo は working tree を持たないため .gwt/work/events.jsonl/memory.md が tracked されず gwt.git/.gwt/work/ に書かれ、committed の <worktree>/.gwt/work/ と不一致になった。
+Learning: git-tracked な repo-local ファイルの配置先は必ず git rev-parse --show-toplevel(現在の worktree の working tree root)で解決する。--git-common-dir / main_worktree_root は linked worktree で共有 git dir(しばしば bare)を返し working tree が無いので tracked file には使えない。worktree 横断の共有は filesystem 共有でなく git commit + merge=union で行う(各 worktree が自分の .gwt/work/ を持つ)。
+Future Action: repo-local tracked ファイルの path helper は --show-toplevel ベースにする。CLI 書込み先と committed 場所が一致するか git ls-files/git show で確認する。

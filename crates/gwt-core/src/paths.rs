@@ -180,13 +180,14 @@ pub fn gwt_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf
     gwt_workspace_work_events_path(&repo_hash)
 }
 
-/// Resolve the main worktree root for a repository or linked worktree path.
+/// Resolve the main worktree root (git common dir) for a repository or linked
+/// worktree path.
 ///
-/// SPEC-2359 Phase W-12 Slice 5b (FR-353): the Work event log is now a
-/// repo-local, git-tracked file at `<repo_root>/.gwt/work/events.jsonl`.
-/// To keep every linked worktree of the same repository writing into one
-/// shared `.gwt/work/` directory, callers must resolve the canonical main
-/// worktree root before joining the repo-local path.
+/// NOTE: repo-local, git-tracked files (`.gwt/work/…`) must NOT use this. For a
+/// linked worktree the common dir is the shared (often bare) git directory,
+/// which has no checked-out working tree to track files in. Those callers use
+/// [`resolve_current_worktree_root`] (`git rev-parse --show-toplevel`). This
+/// function remains a utility for resolving the canonical main repository root.
 ///
 /// `gwt-core` cannot depend on `gwt-git`, so this mirrors
 /// `gwt_git::worktree::main_worktree_root`: it asks git for the absolute
@@ -249,12 +250,41 @@ fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
         .min()
 }
 
-/// Return the repo-local Work storage directory (`<repo_root>/.gwt/work/`).
+/// Resolve the current worktree's working-tree root via `git rev-parse
+/// --show-toplevel`.
 ///
-/// SPEC-2359 Phase W-12 Slice 5b (FR-353): the main worktree root is resolved
-/// first so linked worktrees of the same repository share one directory.
+/// Unlike [`resolve_main_worktree_root`] — which returns the shared git common
+/// dir (a bare repo such as `gwt.git` in the workspace-home layout) for a
+/// linked worktree — this returns the checked-out working tree of the *current*
+/// worktree, the only place a git-tracked file can actually live. Falls back to
+/// `repo_path` when git cannot resolve a toplevel (non-repository directory).
+pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
+    let Ok(output) = crate::process::run_git_logged(
+        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        Some(repo_path),
+    ) else {
+        return repo_path.to_path_buf();
+    };
+    if !output.status.success() {
+        return repo_path.to_path_buf();
+    }
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if toplevel.as_os_str().is_empty() {
+        return repo_path.to_path_buf();
+    }
+    normalize_windows_child_process_path(&toplevel)
+}
+
+/// Return the repo-local Work storage directory (`<worktree_root>/.gwt/work/`).
+///
+/// SPEC-2359 Phase W-12 Slice 5b (FR-353): the persistent Work core lives as a
+/// git-tracked file in the *current* worktree's working tree. Each worktree
+/// commits its own `.gwt/work/`; branch divergence is reconciled via the
+/// `merge=union` gitattribute (FR-355), not via a shared filesystem path. The
+/// shared git common dir (bare repo) is never used because it has no working
+/// tree to track files in.
 pub fn gwt_repo_local_work_dir(repo_root: &Path) -> PathBuf {
-    resolve_main_worktree_root(repo_root)
+    resolve_current_worktree_root(repo_root)
         .join(".gwt")
         .join("work")
 }
@@ -790,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_main_worktree_root_returns_primary_for_linked_worktree() {
+    fn repo_local_work_events_path_is_per_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("gwt");
         init_git_repo(&repo);
@@ -808,15 +838,26 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // A Work event recorded from the linked worktree must resolve to the
-        // same repo-local path as one recorded from the primary worktree.
-        assert_eq!(
-            comparable_path(&gwt_repo_local_work_events_path(&linked)),
-            comparable_path(&gwt_repo_local_work_events_path(&repo))
+        // A git-tracked Work event log lives in each worktree's OWN working
+        // tree — the shared git common dir (a bare repo in the workspace-home
+        // layout) has no working tree to track files in. So the linked worktree
+        // resolves to its own `.gwt/work/`, distinct from the primary's; branch
+        // divergence is reconciled via the `merge=union` gitattribute on merge,
+        // not via a shared filesystem path.
+        let linked_events = gwt_repo_local_work_events_path(&linked);
+        let repo_events = gwt_repo_local_work_events_path(&repo);
+        let tail = PathBuf::from(".gwt").join("work").join("events.jsonl");
+        assert_ne!(
+            comparable_path(&linked_events),
+            comparable_path(&repo_events)
         );
         assert_eq!(
-            comparable_path(&resolve_main_worktree_root(&linked)),
-            comparable_path(&std::fs::canonicalize(&repo).unwrap())
+            comparable_path(&linked_events),
+            comparable_path(&std::fs::canonicalize(&linked).unwrap().join(&tail))
+        );
+        assert_eq!(
+            comparable_path(&repo_events),
+            comparable_path(&std::fs::canonicalize(&repo).unwrap().join(&tail))
         );
     }
 

@@ -16,7 +16,7 @@ use crate::{
         gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
         gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
         gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
-        project_scope_hash, resolve_main_worktree_root,
+        project_scope_hash, resolve_current_worktree_root,
     },
 };
 
@@ -1245,10 +1245,10 @@ fn repo_local_work_events_path_with_migration(repo_path: &Path) -> Result<PathBu
 /// absent. Failures to write are swallowed for non-repository / read-only
 /// roots so recording a Work event never fails on the gitattributes side.
 fn ensure_work_events_gitattributes(repo_path: &Path) -> Result<()> {
-    let root = resolve_main_worktree_root(repo_path);
-    // Skip bare repositories (resolved for the workspace-home layout): a
-    // `.gitattributes` there would never be checked out, so it cannot drive
-    // the merge driver.
+    let root = resolve_current_worktree_root(repo_path);
+    // Defensive: a bare repository has no checked-out `.gitattributes`, so it
+    // cannot drive the merge driver. `resolve_current_worktree_root` returns
+    // the working tree, so this guard is normally inert, but stays as a guard.
     if root.join("HEAD").is_file() && root.join("objects").is_dir() && !root.join(".git").exists() {
         return Ok(());
     }
