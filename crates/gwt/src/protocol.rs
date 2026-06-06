@@ -749,6 +749,17 @@ pub enum FrontendEvent {
     ApplyUpdateToVersion {
         version: String,
     },
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the user closed a Work from the
+    /// Work surface. `work_id` is the Work item id (`work-session-<session_id>`
+    /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
+    /// Done records a terminal completion, Discarded a terminal discard; both
+    /// remove the Work from the active surface. The backend blocks the close
+    /// when the owning agent session is still live (the worktree is only
+    /// removed for Paused Works that have no running agent).
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI

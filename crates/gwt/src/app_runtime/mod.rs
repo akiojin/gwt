@@ -878,6 +878,11 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
         FrontendEvent::ApplyUpdateToVersion { version } => {
             FrontendUserActionLog::new("apply_update_to_version", "update").target(version)
         }
+        FrontendEvent::CloseWork {
+            work_id,
+            close_kind,
+        } => FrontendUserActionLog::new("close_work", "workspace")
+            .target(format!("{work_id} ({close_kind})")),
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
@@ -2194,7 +2199,10 @@ fn append_paused_work_items(
     works: &[gwt::WorkspaceHistoryView],
 ) {
     for work in works {
-        if work.status_category == "done" {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal closes (Done and
+        // Discarded) leave the active Work surface. Both are excluded so a
+        // closed Work never re-appears as a Paused row.
+        if work.status_category == "done" || work.status_category == "discarded" {
             continue;
         }
         if active_work_already_present(active_works, work) {
@@ -2334,7 +2342,14 @@ pub(crate) fn workspace_work_item_view_from_item(
         title: item.title.clone(),
         intent: item.intent.clone(),
         summary: item.summary.clone(),
-        status_category: workspace_status_category_wire(item.status_category).to_string(),
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a discarded Work surfaces as the
+        // dedicated `"discarded"` status so the Work surface and the Paused
+        // exclusion treat it as a terminal close distinct from Done.
+        status_category: if item.discarded {
+            "discarded".to_string()
+        } else {
+            workspace_status_category_wire(item.status_category).to_string()
+        },
         owner: item.owner.clone(),
         created_at: item
             .created_at
@@ -2435,6 +2450,7 @@ fn workspace_work_event_kind_wire(
         WorkspaceWorkEventKind::Pr => "pr",
         WorkspaceWorkEventKind::Pause => "pause",
         WorkspaceWorkEventKind::Done => "done",
+        WorkspaceWorkEventKind::Discard => "discard",
     }
 }
 
@@ -4383,6 +4399,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateToVersion { version } => {
                 self.apply_update_to_version_events(&client_id, version)
             }
+            FrontendEvent::CloseWork {
+                work_id,
+                close_kind,
+            } => self.close_work(&work_id, &close_kind),
             FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
@@ -8521,6 +8541,161 @@ impl AppRuntime {
                     result: Err(error),
                 });
             }
+        }
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): handle a user-initiated Work close
+    /// from the Work surface. `close_kind` is `"done"` or `"discarded"`.
+    ///
+    /// Behavior:
+    /// - If the owning agent session (derived from `work_id`) is still live, the
+    ///   close is blocked and the worktree is left untouched (FR-352). The
+    ///   owning agent must be stopped first.
+    /// - Otherwise (a Paused Work with no running agent), the worktree is removed
+    ///   (worktree only — branch / PR are retained) and the terminal close is
+    ///   recorded in the work history. A `done` close records a Done event; a
+    ///   `discarded` close records a Discard event. Both remove the Work from the
+    ///   active Work surface. Re-closing an already-closed Work is a noop.
+    pub(crate) fn close_work(&mut self, work_id: &str, close_kind: &str) -> Vec<OutboundEvent> {
+        let work_id = work_id.trim();
+        if work_id.is_empty() {
+            return Vec::new();
+        }
+        let close_kind = match close_kind.trim().to_ascii_lowercase().as_str() {
+            "done" => gwt_core::workspace_projection::WorkCloseKind::Done,
+            "discarded" => gwt_core::workspace_projection::WorkCloseKind::Discarded,
+            other => {
+                tracing::warn!(
+                    work_id = %work_id,
+                    close_kind = %other,
+                    "ignoring Work close with unknown close_kind"
+                );
+                return Vec::new();
+            }
+        };
+
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            tracing::warn!(work_id = %work_id, "Work close has no active project tab");
+            return Vec::new();
+        };
+
+        // The session id of an agent-session Work is encoded in the Work id
+        // (`work-session-<session_id>`). A live agent owns the Work when any
+        // active session matches that id.
+        let session_id = work_id
+            .strip_prefix("work-session-")
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let has_live_agent = session_id.is_some_and(|session_id| {
+            self.active_agent_sessions
+                .values()
+                .any(|session| session.session_id == session_id)
+        });
+
+        // Resolve the worktree path from the retained work history so a Paused
+        // Work can have its worktree removed without a live session.
+        let worktree_path = self.resolve_work_worktree_path(&project_root, work_id);
+
+        let decision =
+            gwt_core::workspace_projection::decide_work_close(has_live_agent, worktree_path);
+
+        match decision {
+            gwt_core::workspace_projection::WorkCloseDecision::BlockedLiveAgent => {
+                // FR-352: never clean up a Work while its agent session is live.
+                tracing::warn!(
+                    work_id = %work_id,
+                    session_id = session_id.unwrap_or_default(),
+                    "Work close blocked: owning agent session is still live; stop the agent before closing"
+                );
+                return Vec::new();
+            }
+            gwt_core::workspace_projection::WorkCloseDecision::CleanupWorktree {
+                worktree_path,
+            } => {
+                self.remove_work_worktree_only(&project_root, &worktree_path);
+            }
+            gwt_core::workspace_projection::WorkCloseDecision::RecordOnly => {
+                // No resolvable worktree path: record the close without any
+                // filesystem side effect.
+            }
+        }
+
+        // Record the terminal close in the work history. Idempotent against an
+        // already-closed Work, so a duplicate close emits no new event.
+        let now = chrono::Utc::now();
+        let recorded = match close_kind {
+            gwt_core::workspace_projection::WorkCloseKind::Done => {
+                gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+                    &project_root,
+                    work_id,
+                    now,
+                )
+            }
+            gwt_core::workspace_projection::WorkCloseKind::Discarded => {
+                gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+                    &project_root,
+                    work_id,
+                    now,
+                )
+            }
+        };
+        if let Err(error) = recorded {
+            tracing::warn!(
+                work_id = %work_id,
+                error = %error,
+                "failed to record Work terminal close event"
+            );
+        }
+
+        // Broadcast the refreshed projection so the Work leaves the active
+        // surface for every connected client.
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): resolve the worktree path for
+    /// `work_id` from the retained work history's execution containers. Returns
+    /// `None` when the Work has no recorded worktree, in which case the close is
+    /// recorded without filesystem cleanup.
+    fn resolve_work_worktree_path(&self, project_root: &Path, work_id: &str) -> Option<PathBuf> {
+        let projection =
+            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
+                .ok()?;
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)?;
+        item.execution_containers
+            .iter()
+            .find_map(|container| container.worktree_path.clone())
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): remove the worktree at
+    /// `worktree_path` (worktree only — the branch and any PR are retained). A
+    /// missing or already-removed worktree is treated as success so the close
+    /// stays robust; other failures are logged but do not abort recording the
+    /// close.
+    fn remove_work_worktree_only(&self, project_root: &Path, worktree_path: &Path) {
+        let main_repo_path = match gwt_git::worktree::main_worktree_root(project_root) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    worktree_path = %worktree_path.display(),
+                    error = %error,
+                    "Work close could not resolve main worktree root; skipping worktree removal"
+                );
+                return;
+            }
+        };
+        let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+        if let Err(error) = manager.remove_force(worktree_path) {
+            tracing::warn!(
+                worktree_path = %worktree_path.display(),
+                error = %error,
+                "Work close worktree removal failed; recording the close anyway"
+            );
         }
     }
 
@@ -14853,6 +15028,314 @@ exit 1
         assert_eq!(paused.closed_at, None);
         assert_eq!(paused.active_agents, 0);
         assert_eq!(paused.branch.as_deref(), Some("work/paused"));
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): closing a Paused Work with
+    /// `close_kind = "done"` records a terminal Done close and removes the Work
+    /// from the active Work surface. No live agent owns the Work, so the close
+    /// is not blocked.
+    #[test]
+    fn app_runtime_close_work_done_removes_paused_work_from_active_surface() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push({
+            let mut agent = workspace_agent_summary_for_test("session-done", Some("work-done"));
+            agent.window_id = Some("tab-1::agent-done".to_string());
+            agent.branch = Some("work/done".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut session = sample_active_agent_session("tab-1", "tab-1::agent-done");
+        session.session_id = "session-done".to_string();
+        session.branch_name = "work/done".to_string();
+        session.worktree_path = repo.join("work/done");
+        session.window_id = "tab-1::agent-done".to_string();
+        runtime
+            .active_agent_sessions
+            .insert("tab-1::agent-done".to_string(), session);
+
+        // Stop → Paused row retained on the active surface.
+        runtime.mark_agent_session_stopped("tab-1::agent-done");
+        let paused_view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("paused projection view");
+        assert_eq!(paused_view.active_works.len(), 1);
+        assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
+
+        // Close (Done): the Work leaves the active surface.
+        let events = runtime.close_work("work-session-session-done", "done");
+        assert!(
+            !events.is_empty(),
+            "close_work should broadcast a refreshed projection"
+        );
+
+        let closed_view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("closed projection view");
+        assert!(
+            closed_view
+                .active_works
+                .iter()
+                .all(|work| work.id != "work-session-session-done"),
+            "Done-closed Work must not appear in active_works"
+        );
+
+        // The retained work history records the Done terminal close.
+        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+            .expect("load work items");
+        let item = works
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-session-done")
+            .expect("work item exists");
+        assert_eq!(
+            item.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+        );
+        assert!(!item.discarded);
+        assert!(item.is_terminal());
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): closing a Paused Work with
+    /// `close_kind = "discarded"` records a terminal Discard close (distinct from
+    /// Done) and removes the Work from the active surface.
+    #[test]
+    fn app_runtime_close_work_discarded_marks_terminal_and_removes_from_surface() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push({
+            let mut agent =
+                workspace_agent_summary_for_test("session-discard", Some("work-discard"));
+            agent.window_id = Some("tab-1::agent-discard".to_string());
+            agent.branch = Some("work/discard".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut session = sample_active_agent_session("tab-1", "tab-1::agent-discard");
+        session.session_id = "session-discard".to_string();
+        session.branch_name = "work/discard".to_string();
+        session.worktree_path = repo.join("work/discard");
+        session.window_id = "tab-1::agent-discard".to_string();
+        runtime
+            .active_agent_sessions
+            .insert("tab-1::agent-discard".to_string(), session);
+
+        runtime.mark_agent_session_stopped("tab-1::agent-discard");
+
+        let events = runtime.close_work("work-session-session-discard", "discarded");
+        assert!(!events.is_empty());
+
+        let closed_view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("closed projection view");
+        assert!(
+            closed_view
+                .active_works
+                .iter()
+                .all(|work| work.id != "work-session-session-discard"),
+            "Discarded Work must not appear in active_works"
+        );
+
+        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+            .expect("load work items");
+        let item = works
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-session-discard")
+            .expect("work item exists");
+        assert!(item.discarded, "Discard close must mark the Work discarded");
+        assert_ne!(
+            item.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            "Discard is distinct from Done"
+        );
+        assert!(item.is_terminal());
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): a close request for a Work whose
+    /// owning agent session is still live must be blocked. The worktree is not
+    /// removed and the Work stays Active on the surface — the agent must be
+    /// stopped first.
+    #[test]
+    fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        // A real worktree directory so we can assert it is NOT removed.
+        let worktree_path = repo.join("work/live");
+        fs::create_dir_all(&worktree_path).expect("create worktree dir");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push({
+            let mut agent = workspace_agent_summary_for_test("session-live", Some("work-live"));
+            agent.window_id = Some("tab-1::agent-live".to_string());
+            agent.branch = Some("work/live".to_string());
+            agent
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut session = sample_active_agent_session("tab-1", "tab-1::agent-live");
+        session.session_id = "session-live".to_string();
+        session.branch_name = "work/live".to_string();
+        session.worktree_path = worktree_path.clone();
+        session.window_id = "tab-1::agent-live".to_string();
+        runtime
+            .active_agent_sessions
+            .insert("tab-1::agent-live".to_string(), session);
+
+        // Agent is live: close must be blocked.
+        let events = runtime.close_work("work-session-session-live", "done");
+        assert!(
+            events.is_empty(),
+            "a blocked close must not broadcast a projection change"
+        );
+        assert!(
+            worktree_path.exists(),
+            "blocked close must never remove the live worktree"
+        );
+
+        // No terminal close was recorded; the Work remains live/active.
+        let live_view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("live projection view");
+        let work = live_view
+            .active_works
+            .iter()
+            .find(|work| work.id == "work-session-session-live")
+            .expect("live Work still present");
+        assert_eq!(work.lifecycle_state, "active");
+        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+            .expect("load work items");
+        assert!(
+            works
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-session-session-live")
+                .is_none_or(|item| !item.is_terminal()),
+            "a blocked close must not record a terminal event"
+        );
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the worktree-only cleanup removes
+    /// the actual worktree directory but retains the branch (branch / PR are
+    /// preserved). Uses a real temp git repo + worktree to verify the
+    /// `remove_force` side effect.
+    #[test]
+    fn app_runtime_close_work_removes_worktree_only_and_retains_branch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        // Initialize a real git repo with an initial commit.
+        let run_git = |args: &[&str], cwd: &Path| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init"], &repo);
+        run_git(&["config", "user.email", "test@example.com"], &repo);
+        run_git(&["config", "user.name", "Test User"], &repo);
+        run_git(&["commit", "--allow-empty", "-m", "init"], &repo);
+
+        // Create a real worktree on a dedicated branch.
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        let base = if crate::runtime_support::local_branch_exists(&repo, "main").unwrap_or(false) {
+            "main"
+        } else {
+            "master"
+        };
+        let worktree_path = temp.path().join("work-cleanup");
+        manager
+            .create_from_base(base, "work/cleanup", &worktree_path)
+            .expect("create worktree");
+        assert!(worktree_path.exists());
+
+        // A saved (empty) Workspace projection so the close broadcast can build
+        // the active-work projection view for the tab.
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        // Persist a Paused Work whose execution container points at the worktree.
+        let now = chrono::Utc::now();
+        gwt_core::workspace_projection::record_workspace_work_paused_event(
+            &repo,
+            "work-session-session-cleanup",
+            Some("Cleanup work"),
+            None,
+            None,
+            &[],
+            Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some("work/cleanup".to_string()),
+                    worktree_path: Some(worktree_path.clone()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            ),
+            Some("session-cleanup"),
+            now,
+        )
+        .expect("record paused work");
+
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        // No live agent session → cleanup path. Close (Done).
+        let events = runtime.close_work("work-session-session-cleanup", "done");
+        assert!(!events.is_empty());
+
+        assert!(
+            !worktree_path.exists(),
+            "worktree-only cleanup must remove the worktree directory"
+        );
+        assert!(
+            crate::runtime_support::local_branch_exists(&repo, "work/cleanup").unwrap_or(false),
+            "worktree-only cleanup must retain the branch (branch / PR are preserved)"
+        );
     }
 
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): resuming a paused Work (a live
@@ -22716,6 +23199,7 @@ exit 1
             board_refs: Vec::new(),
             related_work_item_ids: Vec::new(),
             events: Vec::new(),
+            discarded: false,
         };
         let projection = gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
             updated_at: completed_at,

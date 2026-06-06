@@ -269,6 +269,45 @@ pub fn recompute_work_active_lifecycle(
     }
 }
 
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): the outcome of deciding how to handle
+/// a user-initiated Work close. Kept as a pure value so the block / cleanup /
+/// record-only decision can be unit-tested without touching git or the
+/// filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkCloseDecision {
+    /// A live agent session still owns this Work — block the close and do not
+    /// touch the worktree (FR-352). The owning session must be stopped first.
+    BlockedLiveAgent,
+    /// No live agent and a worktree path is known — remove the worktree only
+    /// (branch / PR are retained) and record the terminal close.
+    CleanupWorktree { worktree_path: PathBuf },
+    /// No live agent and no resolvable worktree path — record the terminal
+    /// close in the work history but perform no filesystem cleanup.
+    RecordOnly,
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): decide how to handle a Work close.
+///
+/// Decision order:
+/// 1. If a live agent session owns this Work (`live_agent` is `true`), block the
+///    close — the worktree must never be removed while an agent is running.
+/// 2. Otherwise, if a worktree path is known, request worktree-only cleanup.
+/// 3. Otherwise, record the close without any filesystem side effect.
+///
+/// Pure: takes only resolved inputs and returns a value, so it is exercised
+/// directly by unit tests while the git removal itself is verified separately.
+pub fn decide_work_close(live_agent: bool, worktree_path: Option<PathBuf>) -> WorkCloseDecision {
+    if live_agent {
+        return WorkCloseDecision::BlockedLiveAgent;
+    }
+    match worktree_path {
+        Some(path) if !path.as_os_str().is_empty() => WorkCloseDecision::CleanupWorktree {
+            worktree_path: path,
+        },
+        _ => WorkCloseDecision::RecordOnly,
+    }
+}
+
 /// SPEC-2359 Phase U-6 (FR-131): sentinel default for `created_at` when a
 /// legacy `workspace.json` is read without the field present. The retroactive
 /// migration in `workspace_projection_migration` detects this value and
@@ -869,6 +908,11 @@ pub enum WorkspaceWorkEventKind {
     /// so it stays on the Work surface until the user closes it.
     Pause,
     Done,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the user explicitly discarded the
+    /// Work from the Work surface. This is a terminal close distinct from Done:
+    /// the Work leaves the active surface but its provenance is retained as
+    /// discarded (not completed). Agent stop alone never yields Discard.
+    Discard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -955,11 +999,26 @@ pub struct WorkspaceWorkItem {
     pub related_work_item_ids: Vec<String>,
     #[serde(default)]
     pub events: Vec<WorkspaceWorkEvent>,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal discarded close. A
+    /// discarded Work is removed from the active Work surface but kept in the
+    /// history with its provenance. Distinct from `status_category == Done`
+    /// (which marks completion); `discarded` marks an explicit user discard.
+    /// Back-compat default is `false` for projections written before W-12.
+    #[serde(default)]
+    pub discarded: bool,
 }
 
 impl WorkspaceWorkItem {
+    /// A Work is incomplete while it is neither completed (Done) nor discarded.
+    /// Both Done and Discarded are terminal closes (FR-352).
     pub fn is_incomplete(&self) -> bool {
-        self.status_category != WorkspaceStatusCategory::Done
+        self.status_category != WorkspaceStatusCategory::Done && !self.discarded
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when the Work has reached a
+    /// terminal close — either completed (Done) or explicitly discarded.
+    pub fn is_terminal(&self) -> bool {
+        self.status_category == WorkspaceStatusCategory::Done || self.discarded
     }
 }
 
@@ -1003,6 +1062,7 @@ impl WorkspaceWorkItemsProjection {
                     board_refs: Vec::new(),
                     related_work_item_ids: Vec::new(),
                     events: Vec::new(),
+                    discarded: false,
                 });
                 self.work_items.len() - 1
             });
@@ -1024,11 +1084,20 @@ impl WorkspaceWorkItemsProjection {
         // (kind=Update with status_category=None) emitted after a Done event
         // must not regress the WorkItem to Active/Idle. Only events that
         // carry an explicit `status_category` may transition out of Done.
+        //
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is likewise terminal.
+        // Once a Work is discarded, subsequent events (heartbeat updates without
+        // an explicit status_category) must not regress its runtime status; the
+        // `discarded` flag is monotonic and never reset.
         let new_status = workspace_work_event_status(&event);
-        let preserve_done = item.status_category == WorkspaceStatusCategory::Done
+        let preserve_terminal = (item.status_category == WorkspaceStatusCategory::Done
+            || item.discarded)
             && event.status_category.is_none();
-        if !preserve_done {
+        if !preserve_terminal {
             item.status_category = new_status;
+        }
+        if event.kind == WorkspaceWorkEventKind::Discard {
+            item.discarded = true;
         }
         if item.status_category == WorkspaceStatusCategory::Done {
             // Preserve the first Done timestamp so idempotent Done re-applies
@@ -1518,6 +1587,56 @@ fn work_item_has_done_event_in_projection(
                 .iter()
                 .any(|event| event.kind == WorkspaceWorkEventKind::Done)
         }))
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): Emit a single Discard
+/// `WorkspaceWorkEvent` for `work_item_id` iff the Work is not already
+/// terminal (Done or already Discarded). This is the canonical write path for a
+/// user-initiated Discard close from the Work surface. Returns `Ok(true)` when
+/// a new Discard event was appended, `Ok(false)` when the Work was already
+/// terminal (idempotent noop so a re-close does nothing).
+pub fn emit_workspace_discard_event_if_absent_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    if work_item_is_terminal_in_projection(work_items_path, work_item_id)? {
+        return Ok(false);
+    }
+    let event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, updated_at);
+    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    Ok(true)
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): Convenience wrapper resolving the
+/// project-scoped work_items and work_events paths from `repo_path` and
+/// invoking [`emit_workspace_discard_event_if_absent_paths`].
+pub fn emit_workspace_discard_event_if_absent(
+    repo_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    emit_workspace_discard_event_if_absent_paths(
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        work_item_id,
+        updated_at,
+    )
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when `work_item_id` is already
+/// in a terminal close state (Done or discarded) in the saved projection. Used
+/// to make Done / Discard close emission idempotent.
+fn work_item_is_terminal_in_projection(work_items_path: &Path, work_item_id: &str) -> Result<bool> {
+    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(false);
+    };
+    Ok(projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_item_id)
+        .any(|item| item.is_terminal()))
 }
 
 /// SPEC-2359 US-37 / FR-119: Scan WorkItems and the current Workspace
@@ -2101,6 +2220,7 @@ fn synthesize_workspace_work_item_from_legacy(
             .unwrap_or_default(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        discarded: false,
     };
     if let Some(projection) = projection {
         item.agents.extend(
@@ -2263,6 +2383,10 @@ fn workspace_work_event_status(event: &WorkspaceWorkEvent) -> WorkspaceStatusCat
         // Pause keeps the Work incomplete (non-Done) while the agent is stopped;
         // the Idle status preserves the retained-but-not-running semantics.
         WorkspaceWorkEventKind::Pause => WorkspaceStatusCategory::Idle,
+        // Discard does not complete the Work (status stays non-Done); the
+        // terminal close is carried by the `discarded` flag (FR-352). Idle
+        // mirrors the retained-but-not-running runtime status.
+        WorkspaceWorkEventKind::Discard => WorkspaceStatusCategory::Idle,
         WorkspaceWorkEventKind::Start
         | WorkspaceWorkEventKind::Claim
         | WorkspaceWorkEventKind::Update
@@ -4739,6 +4863,159 @@ mod tests {
         assert_eq!(
             outcome_again,
             WorkspaceWorkItemsRebuildOutcome::AlreadyMigrated
+        );
+    }
+
+    #[test]
+    fn apply_event_discard_marks_work_terminal_discarded() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
+        // terminal-discarded (not Done) and removes it from the incomplete set.
+        let work_item_id = "test-item-discard";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        start.title = Some("Discardable work".to_string());
+        projection.apply_event(start);
+
+        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t2);
+        projection.apply_event(discard);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(item.discarded, "Discard event must mark the Work discarded");
+        assert!(item.is_terminal(), "discarded Work is terminal");
+        assert!(!item.is_incomplete(), "discarded Work is not incomplete");
+        assert_ne!(
+            item.status_category,
+            WorkspaceStatusCategory::Done,
+            "Discard is distinct from Done"
+        );
+        assert_eq!(
+            item.completed_at, None,
+            "discarded Work is not completed, so completed_at stays None"
+        );
+    }
+
+    #[test]
+    fn apply_event_preserves_discarded_against_subsequent_heartbeat() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is terminal — a later
+        // heartbeat update (no explicit status_category) must not un-discard.
+        let work_item_id = "test-item-discard-preserve";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t1);
+        projection.apply_event(discard);
+        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        projection.apply_event(update);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(
+            item.discarded,
+            "heartbeat update must not clear the discarded terminal flag"
+        );
+        assert!(!item.is_incomplete());
+    }
+
+    #[test]
+    fn emit_workspace_discard_event_if_absent_is_idempotent_for_terminal_work() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a re-close of an already
+        // discarded (or already Done) Work is a noop.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("work_items.json");
+        let events_path = temp.path().join("work_events.jsonl");
+        let work_item_id = "wi-discard-idem";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("record start");
+
+        assert!(
+            emit_workspace_discard_event_if_absent_paths(
+                &work_items_path,
+                &events_path,
+                work_item_id,
+                t2
+            )
+            .expect("first discard"),
+            "first discard appends a new event"
+        );
+        assert!(
+            !emit_workspace_discard_event_if_absent_paths(
+                &work_items_path,
+                &events_path,
+                work_item_id,
+                t2
+            )
+            .expect("second discard"),
+            "re-discarding a terminal Work is a noop"
+        );
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load")
+            .expect("present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(item.discarded);
+        let discard_events = item
+            .events
+            .iter()
+            .filter(|e| e.kind == WorkspaceWorkEventKind::Discard)
+            .count();
+        assert_eq!(discard_events, 1, "only one Discard event is recorded");
+    }
+
+    #[test]
+    fn decide_work_close_blocks_when_live_agent_present() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a live agent blocks the close
+        // and never requests worktree cleanup.
+        assert_eq!(
+            decide_work_close(true, Some(PathBuf::from("/repo/work/live"))),
+            WorkCloseDecision::BlockedLiveAgent
+        );
+        assert_eq!(
+            decide_work_close(true, None),
+            WorkCloseDecision::BlockedLiveAgent
+        );
+    }
+
+    #[test]
+    fn decide_work_close_cleans_worktree_when_paused_with_path() {
+        assert_eq!(
+            decide_work_close(false, Some(PathBuf::from("/repo/work/paused"))),
+            WorkCloseDecision::CleanupWorktree {
+                worktree_path: PathBuf::from("/repo/work/paused")
+            }
+        );
+    }
+
+    #[test]
+    fn decide_work_close_records_only_without_worktree_path() {
+        assert_eq!(
+            decide_work_close(false, None),
+            WorkCloseDecision::RecordOnly
+        );
+        assert_eq!(
+            decide_work_close(false, Some(PathBuf::new())),
+            WorkCloseDecision::RecordOnly,
+            "an empty worktree path is treated as unresolved"
         );
     }
 
