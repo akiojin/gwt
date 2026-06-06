@@ -825,7 +825,7 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
 
   const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
   const pickerKeyIndex = renderProjectPickerBody.indexOf(
-    "const nextProjectPickerKey = projectPickerRenderKey();",
+    "const nextProjectPickerKey = projectPickerRenderKey(activeTab);",
   );
   const pickerGuardIndex = renderProjectPickerBody.indexOf(
     "if (renderedProjectPickerKey === nextProjectPickerKey)",
@@ -859,7 +859,7 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
 
   const updateActionAvailabilityBody = extractFunctionBody(appSource, "updateActionAvailability");
   const actionKeyIndex = updateActionAvailabilityBody.indexOf(
-    "const nextActionAvailabilityKey = actionAvailabilityRenderKey();",
+    "const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);",
   );
   const actionGuardIndex = updateActionAvailabilityBody.indexOf(
     "if (renderedActionAvailabilityKey === nextActionAvailabilityKey)",
@@ -877,7 +877,7 @@ test("Static project chrome keys ignore workspace geometry and include visible t
   const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
   assert.match(
     pickerKeyBody,
-    /activeProjectTab\s*\(\s*\)/,
+    /activeTab/,
     "Project Picker key must include visible active-tab state",
   );
   assert.match(
@@ -903,7 +903,7 @@ test("Static project chrome keys ignore workspace geometry and include visible t
   const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
   assert.match(
     actionKeyBody,
-    /activeProjectTab\s*\(\s*\)/,
+    /activeTab/,
     "Action Availability key must include active-tab availability",
   );
 
@@ -915,6 +915,51 @@ test("Static project chrome keys ignore workspace geometry and include visible t
         `Static project chrome keys must ignore ${workspaceField}`,
       );
     }
+  }
+});
+
+test("Static project chrome keys avoid JSON stringify allocation", () => {
+  for (const name of ["projectPickerRenderKey", "projectOnboardingRenderKey"]) {
+    const keyBody = extractFunctionBody(appSource, name);
+    assert.match(
+      keyBody,
+      /appendRenderKeyPart\s*\(/,
+      `${name} must append primitive fields directly`,
+    );
+    assert.doesNotMatch(
+      keyBody,
+      /JSON\.stringify\s*\(/,
+      `${name} must not serialize an object graph on every workspace_state`,
+    );
+  }
+});
+
+test("Static project chrome reuses the renderAppState active tab lookup", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  const tabLookupIndex = renderAppStateBody.indexOf("const tab = activeProjectTab();");
+  const pickerCallIndex = renderAppStateBody.indexOf("renderProjectPicker(tab);");
+  const actionCallIndex = renderAppStateBody.indexOf("updateActionAvailability(tab);");
+  const onboardingCallIndex = renderAppStateBody.indexOf("renderProjectOnboarding(tab);");
+  const workspaceCallIndex = renderAppStateBody.indexOf(
+    "renderWorkspace(tab?.workspace || emptyWorkspace());",
+  );
+  assert.ok(
+    tabLookupIndex >= 0 &&
+      pickerCallIndex > tabLookupIndex &&
+      actionCallIndex > tabLookupIndex &&
+      onboardingCallIndex > tabLookupIndex &&
+      workspaceCallIndex > tabLookupIndex,
+    "renderAppState must resolve the active tab once and pass it through static chrome and workspace renderers",
+  );
+
+  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
+  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  for (const keyBody of [pickerKeyBody, actionKeyBody]) {
+    assert.doesNotMatch(
+      keyBody,
+      /activeProjectTab\s*\(\s*\)/,
+      "static chrome key helpers must not rescan activeProjectTab on the workspace_state hot path",
+    );
   }
 });
 

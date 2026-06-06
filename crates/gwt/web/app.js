@@ -729,26 +729,35 @@
         });
       }
 
-      function projectPickerRenderKey() {
-        const shouldShow = !activeProjectTab();
-        return JSON.stringify({
-          visible: shouldShow,
-          error: projectError || "",
-          recent_projects: shouldShow ? recentProjectsRenderKey(appState) : "",
-        });
+      function projectPickerRenderKey(activeTab = activeProjectTab()) {
+        const shouldShow = !activeTab;
+        const parts = [];
+        appendRenderKeyPart(parts, "visible");
+        appendRenderKeyPart(parts, shouldShow);
+        appendRenderKeyPart(parts, "error");
+        appendRenderKeyPart(parts, projectError || "");
+        appendRenderKeyPart(parts, "recent_projects");
+        appendRenderKeyPart(
+          parts,
+          shouldShow ? recentProjectsRenderKey(appState) : "",
+        );
+        return parts.join("");
       }
 
       function projectOnboardingRenderKey(tab) {
         const visible = Boolean(tab && tab.kind !== "git");
-        return JSON.stringify({
-          visible,
-          kind: visible ? tab.kind || "" : "",
-          project_root: visible ? tab.project_root || "" : "",
-        });
+        const parts = [];
+        appendRenderKeyPart(parts, "visible");
+        appendRenderKeyPart(parts, visible);
+        appendRenderKeyPart(parts, "kind");
+        appendRenderKeyPart(parts, visible ? tab.kind || "" : "");
+        appendRenderKeyPart(parts, "project_root");
+        appendRenderKeyPart(parts, visible ? tab.project_root || "" : "");
+        return parts.join("");
       }
 
-      function actionAvailabilityRenderKey() {
-        return activeProjectTab() ? "active" : "empty";
+      function actionAvailabilityRenderKey(activeTab = activeProjectTab()) {
+        return activeTab ? "active" : "empty";
       }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
@@ -1936,8 +1945,8 @@
         });
       }
 
-      function updateActionAvailability() {
-        const nextActionAvailabilityKey = actionAvailabilityRenderKey();
+      function updateActionAvailability(activeTab = activeProjectTab()) {
+        const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);
         if (renderedActionAvailabilityKey === nextActionAvailabilityKey) {
           return;
         }
@@ -2581,13 +2590,13 @@
         focusOpenProjectMenuItemAt(nextIndex);
       }
 
-      function renderProjectPicker() {
-        const nextProjectPickerKey = projectPickerRenderKey();
+      function renderProjectPicker(activeTab = activeProjectTab()) {
+        const nextProjectPickerKey = projectPickerRenderKey(activeTab);
         if (renderedProjectPickerKey === nextProjectPickerKey) {
           return;
         }
         renderedProjectPickerKey = nextProjectPickerKey;
-        const shouldShow = !activeProjectTab();
+        const shouldShow = !activeTab;
         projectPicker.classList.toggle("visible", shouldShow);
         projectPickerError.hidden = !projectError;
         projectPickerError.textContent = projectError;
@@ -2633,9 +2642,9 @@
               renderedProjectTabsKey = nextProjectTabsKey;
               renderProjectTabs();
             }
-            renderProjectPicker();
-            updateActionAvailability();
             const tab = activeProjectTab();
+            renderProjectPicker(tab);
+            updateActionAvailability(tab);
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
             syncCurrentProjectWorkspaceIds(
