@@ -41,6 +41,25 @@ function defaultMergeChunks(chunks) {
   return chunks.join("");
 }
 
+function pendingChunkCount(entry) {
+  return Math.max(0, entry.chunks.length - entry.head);
+}
+
+function compactConsumedChunks(entry) {
+  if (entry.head <= 0) {
+    return;
+  }
+  if (entry.head >= entry.chunks.length) {
+    entry.chunks.length = 0;
+    entry.head = 0;
+    return;
+  }
+  if (entry.head >= 1024 && entry.head * 2 >= entry.chunks.length) {
+    entry.chunks.splice(0, entry.head);
+    entry.head = 0;
+  }
+}
+
 export function createTerminalOutputBatcher({
   schedule = defaultSchedule,
   write,
@@ -69,7 +88,7 @@ export function createTerminalOutputBatcher({
   function entryFor(windowId) {
     let entry = pendingByWindow.get(windowId);
     if (!entry) {
-      entry = { chunks: [] };
+      entry = { chunks: [], head: 0 };
       pendingByWindow.set(windowId, entry);
     }
     return entry;
@@ -106,17 +125,19 @@ export function createTerminalOutputBatcher({
       Number.isFinite(maxChars) && maxChars > 0
         ? Math.min(charsPerFlush, Math.floor(maxChars))
         : charsPerFlush;
-    while (entry.chunks.length > 0) {
-      const next = entry.chunks[0];
+    while (entry.head < entry.chunks.length) {
+      const next = entry.chunks[entry.head];
       if (chunks.length > 0 && chars + next.length > charLimit) {
         break;
       }
-      chunks.push(entry.chunks.shift());
+      chunks.push(next);
+      entry.head += 1;
       chars += next.length;
       if (chars >= charLimit) {
         break;
       }
     }
+    compactConsumedChunks(entry);
     return chunks;
   }
 
@@ -186,14 +207,15 @@ export function createTerminalOutputBatcher({
     if (!entry) {
       return { flushed: false, chars: 0 };
     }
-    if (entry.chunks.length === 0) {
+    if (pendingChunkCount(entry) === 0) {
       pendingByWindow.delete(windowId);
       quiescedWindows.delete(windowId);
       return { flushed: false, chars: 0 };
     }
     const chunks = takeFlushChunks(entry, maxChars);
-    if (entry.chunks.length === 0) {
+    if (pendingChunkCount(entry) === 0) {
       pendingByWindow.delete(windowId);
+      quiescedWindows.delete(windowId);
     }
     let text = "";
     try {
@@ -242,11 +264,12 @@ export function createTerminalOutputBatcher({
 
   function pendingCount(windowId) {
     if (windowId !== undefined) {
-      return pendingByWindow.get(windowId)?.chunks.length || 0;
+      const entry = pendingByWindow.get(windowId);
+      return entry ? pendingChunkCount(entry) : 0;
     }
     let count = 0;
     for (const entry of pendingByWindow.values()) {
-      count += entry.chunks.length;
+      count += pendingChunkCount(entry);
     }
     return count;
   }

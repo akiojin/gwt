@@ -31,6 +31,42 @@ function manualScheduler() {
   };
 }
 
+function cursorScheduler() {
+  const pending = [];
+  let head = 0;
+  function compact() {
+    if (head > 32 && head * 2 >= pending.length) {
+      pending.splice(0, head);
+      head = 0;
+    }
+  }
+  return {
+    schedule: (cb) => {
+      pending.push(cb);
+      return pending.length - head;
+    },
+    runOnce() {
+      const cb = pending[head];
+      if (cb) {
+        head += 1;
+        compact();
+        cb();
+      }
+    },
+    runAll() {
+      while (head < pending.length) {
+        const cb = pending[head];
+        head += 1;
+        compact();
+        cb();
+      }
+    },
+    pendingCount() {
+      return pending.length - head;
+    },
+  };
+}
+
 test("same-window terminal chunks batch into one ordered xterm write", () => {
   const scheduler = manualScheduler();
   const writes = [];
@@ -162,6 +198,85 @@ test("multi-window terminal bursts respect the per-frame window budget", () => {
     { windowId: "agent-49", text: "chunk-49" },
   ]);
   assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(batcher.pendingWindowCount(), 0);
+});
+
+test("large terminal output queues drain without per-chunk Array.shift", () => {
+  const scheduler = cursorScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 10000,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  const chunks = Array.from({ length: 2000 }, (_, index) => `${index},`);
+  for (const chunk of chunks) {
+    batcher.enqueue("agent-large", chunk);
+  }
+
+  assert.equal(scheduler.pendingCount(), 1);
+
+  const originalShift = Array.prototype.shift;
+  let shiftCalls = 0;
+  Array.prototype.shift = function patchedShift(...args) {
+    shiftCalls += 1;
+    return originalShift.apply(this, args);
+  };
+  try {
+    scheduler.runOnce();
+  } finally {
+    Array.prototype.shift = originalShift;
+  }
+
+  assert.equal(
+    shiftCalls,
+    0,
+    "large output backlog drain must not move the array once per chunk",
+  );
+  assert.deepEqual(writes, [
+    { windowId: "agent-large", text: chunks.join("") },
+  ]);
+  assert.equal(batcher.pendingCount("agent-large"), 0);
+  assert.equal(batcher.pendingWindowCount(), 0);
+});
+
+test("partial queue drains report only the unconsumed tail", () => {
+  const scheduler = cursorScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 4,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-tail", "aa");
+  batcher.enqueue("agent-tail", "bb");
+  batcher.enqueue("agent-tail", "cc");
+  batcher.enqueue("agent-tail", "dd");
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [{ windowId: "agent-tail", text: "aabb" }]);
+  assert.equal(batcher.pendingCount("agent-tail"), 2);
+  assert.equal(batcher.pendingCount(), 2);
+  assert.equal(batcher.pendingWindowCount(), 1);
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, [
+    { windowId: "agent-tail", text: "aabb" },
+    { windowId: "agent-tail", text: "ccdd" },
+  ]);
+  assert.equal(batcher.pendingCount("agent-tail"), 0);
+  assert.equal(batcher.pendingCount(), 0);
   assert.equal(batcher.pendingWindowCount(), 0);
 });
 
