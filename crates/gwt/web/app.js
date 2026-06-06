@@ -2263,15 +2263,20 @@
         }
         renderedWindowListKey = nextWindowListKey;
         const workspaceWindows = activeWorkspace().windows || [];
-        const workspaceWindowMap = new Map(
-          workspaceWindows.map((windowData) => [windowData.id, windowData]),
-        );
-        const entries =
-          windowListEntries.length > 0
-            ? windowListEntries
-                .map((entry) => workspaceWindowMap.get(entry.id) || entry)
-                .filter((entry) => workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id))
-            : workspaceWindows;
+        let entries = workspaceWindows;
+        if (windowListEntries.length > 0) {
+          const workspaceWindowMap = new Map();
+          for (const windowData of workspaceWindows) {
+            workspaceWindowMap.set(windowData.id, windowData);
+          }
+          entries = [];
+          for (const entry of windowListEntries) {
+            const workspaceEntry = workspaceWindowMap.get(entry.id);
+            if (workspaceWindowMap.size === 0 || workspaceEntry) {
+              entries.push(workspaceEntry || entry);
+            }
+          }
+        }
         windowListPanel.innerHTML = "";
         if (entries.length === 0) {
           const empty = document.createElement("div");

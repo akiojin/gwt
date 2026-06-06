@@ -735,6 +735,35 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
   );
 });
 
+test("Window List row source rebuild avoids mapped intermediate arrays", () => {
+  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /workspaceWindows\.map\s*\(/,
+    "Window List row rebuild must not allocate a mapped workspace-window lookup source",
+  );
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /windowListEntries[\s\S]*?\.map\s*\(/,
+    "Window List row rebuild must not map backend entries before filtering",
+  );
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /\.filter\s*\(/,
+    "Window List row rebuild must avoid chained filter allocation",
+  );
+  assert.match(
+    renderWindowListBody,
+    /for\s*\(\s*const\s+windowData\s+of\s+workspaceWindows\s*\)/,
+    "Window List row rebuild must build workspace lookups with a direct loop",
+  );
+  assert.match(
+    renderWindowListBody,
+    /for\s*\(\s*const\s+entry\s+of\s+windowListEntries\s*\)/,
+    "Window List row rebuild must derive server-backed entries with a direct loop",
+  );
+});
+
 test("Window List render key ignores viewport and includes row shell fields", () => {
   const keyBody = extractFunctionBody(appSource, "windowListRenderKey");
   assert.match(
