@@ -148,10 +148,20 @@ fn validated_hook_agent_session_id(
     match resolve_hook_agent_session_id(session, hook_event) {
         HookAgentSessionId::Provided(session_id) => Ok(Some(session_id)),
         HookAgentSessionId::MissingRequiredForCodex => {
-            log_missing_codex_hook_session_id(event, gwt_session_id, session, hook_event);
-            Err(HookError::InvalidEvent(format!(
-                "missing session_id for Codex hook event {event}"
-            )))
+            // Fail open, mirroring daemon_runtime::live_event_agent_session_id.
+            // Codex omits a usable session_id on tool-use events (PreToolUse /
+            // PostToolUse), but the id was already captured at SessionStart and
+            // persisted in the session .toml. Returning Ok(None) skips
+            // sync_agent_session_id (so the persisted id is preserved and the
+            // "agent-session" placeholder is never written) while the caller
+            // still writes runtime state and records the hook event. Failing
+            // closed here surfaces "hook exited with code 1" to the user on
+            // every tool call for no functional gain. Only warn when there is
+            // genuinely no persisted id to fall back to.
+            if session.and_then(Session::exact_resume_session_id).is_none() {
+                log_missing_codex_hook_session_id(event, gwt_session_id, session, hook_event);
+            }
+            Ok(None)
         }
         HookAgentSessionId::MissingOptional => Ok(None),
     }
@@ -535,7 +545,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_runtime_state_rejects_missing_hook_session_id() {
+    fn codex_runtime_state_fails_open_when_hook_session_id_missing() {
+        // A Codex tool-use payload without a session_id (the shape Codex
+        // actually sends on PreToolUse/PostToolUse) must NOT break the tool
+        // call. The agent_session_id was already captured at SessionStart, so
+        // the hook fails open: it preserves the persisted id (never writing the
+        // "agent-session" placeholder) and still records runtime state.
         let _lock = env_lock();
         let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
@@ -555,25 +570,25 @@ mod tests {
         );
         env.unset("CODEX_THREAD_ID");
 
-        let err = handle_with_input("PreToolUse", r#"{"tool_name":"Bash"}"#)
-            .expect_err("managed Codex hooks must include session_id");
+        handle_with_input("PreToolUse", r#"{"tool_name":"Bash"}"#)
+            .expect("missing Codex hook session_id must fail open, not break the tool call");
 
-        match err {
-            HookError::InvalidEvent(message) => {
-                assert!(message.contains("missing session_id"), "{message}");
-            }
-            other => panic!("expected InvalidEvent, got {other:?}"),
-        }
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-existing"));
-        assert!(
-            !runtime_path.exists(),
-            "invalid payload must not write state"
-        );
+        assert_eq!(loaded.last_hook_event.as_deref(), Some("PreToolUse"));
+
+        let raw = std::fs::read_to_string(&runtime_path).expect("runtime state written");
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Running");
+        assert_eq!(state.source_event, "PreToolUse");
     }
 
     #[test]
-    fn codex_runtime_state_rejects_blank_hook_session_id() {
+    fn codex_runtime_state_fails_open_when_hook_session_id_blank() {
+        // A blank session_id resolves to MissingRequiredForCodex with no
+        // persisted id to fall back to. The hook must still fail open: write
+        // runtime state and leave agent_session_id unset (never the placeholder
+        // or the blank value).
         let _lock = env_lock();
         let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
@@ -585,22 +600,23 @@ mod tests {
         let session_id = session.id.clone();
         session.save(&sessions_dir).unwrap();
         let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
-        env.set(GWT_SESSION_ID_ENV, session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
         env.set(
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
             runtime_path.as_os_str().to_os_string(),
         );
         env.unset("CODEX_THREAD_ID");
 
-        let err = handle_with_input("PreToolUse", r#"{"session_id":"   "}"#)
-            .expect_err("blank Codex session_id must fail");
+        handle_with_input("PostToolUse", r#"{"session_id":"   "}"#)
+            .expect("blank Codex session_id must fail open");
 
-        match err {
-            HookError::InvalidEvent(message) => {
-                assert!(message.contains("missing session_id"), "{message}");
-            }
-            other => panic!("expected InvalidEvent, got {other:?}"),
-        }
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.agent_session_id, None);
+
+        let raw = std::fs::read_to_string(&runtime_path).expect("runtime state written");
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Running");
+        assert_eq!(state.source_event, "PostToolUse");
     }
 
     #[test]
