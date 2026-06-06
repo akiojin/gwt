@@ -76,13 +76,47 @@ test("terminal output batching stays isolated per window", () => {
   batcher.enqueue("agent-a", "a2");
   batcher.enqueue("agent-b", "b2");
 
-  assert.equal(scheduler.pendingCount(), 2, "each window gets its own scheduled flush");
+  assert.equal(scheduler.pendingCount(), 1, "one shared frame drains all windows");
   scheduler.runAll();
 
   assert.deepEqual(writes, [
     { windowId: "agent-a", text: "a1a2" },
     { windowId: "agent-b", text: "b1b2" },
   ]);
+});
+
+test("multi-window terminal bursts schedule one shared frame", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  for (let i = 0; i < 50; i += 1) {
+    const windowId = `agent-${i}`;
+    batcher.enqueue(windowId, `${windowId}:a`);
+    batcher.enqueue(windowId, `${windowId}:b`);
+  }
+
+  assert.equal(
+    scheduler.pendingCount(),
+    1,
+    "one shared frame should drain all pending terminal windows",
+  );
+
+  scheduler.runOnce();
+
+  assert.equal(writes.length, 50);
+  assert.deepEqual(writes.slice(0, 3), [
+    { windowId: "agent-0", text: "agent-0:aagent-0:b" },
+    { windowId: "agent-1", text: "agent-1:aagent-1:b" },
+    { windowId: "agent-2", text: "agent-2:aagent-2:b" },
+  ]);
+  assert.equal(scheduler.pendingCount(), 0);
 });
 
 test("flushNow drains a window before its scheduled frame", () => {

@@ -41,22 +41,23 @@ export function createTerminalOutputBatcher({
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const pendingByWindow = new Map();
+  let scheduled = false;
 
   function entryFor(windowId) {
     let entry = pendingByWindow.get(windowId);
     if (!entry) {
-      entry = { chunks: [], scheduled: false };
+      entry = { chunks: [] };
       pendingByWindow.set(windowId, entry);
     }
     return entry;
   }
 
-  function scheduleWindow(windowId, entry) {
-    if (entry.scheduled) {
+  function scheduleFlush() {
+    if (scheduled) {
       return;
     }
-    entry.scheduled = true;
-    scheduleImpl(() => flushWindow(windowId));
+    scheduled = true;
+    scheduleImpl(flushPending);
   }
 
   function enqueue(windowId, text) {
@@ -69,7 +70,7 @@ export function createTerminalOutputBatcher({
     }
     const entry = entryFor(windowId);
     entry.chunks.push(normalized);
-    scheduleWindow(windowId, entry);
+    scheduleFlush();
     return true;
   }
 
@@ -102,12 +103,26 @@ export function createTerminalOutputBatcher({
     }
   }
 
+  function flushPending() {
+    scheduled = false;
+    if (pendingByWindow.size === 0) {
+      return false;
+    }
+    let flushed = false;
+    for (const windowId of Array.from(pendingByWindow.keys())) {
+      flushed = flushWindow(windowId) || flushed;
+    }
+    if (pendingByWindow.size > 0) {
+      scheduleFlush();
+    }
+    return flushed;
+  }
+
   function flushWindow(windowId) {
     const entry = pendingByWindow.get(windowId);
     if (!entry) {
       return false;
     }
-    entry.scheduled = false;
     if (entry.chunks.length === 0) {
       pendingByWindow.delete(windowId);
       return false;
@@ -115,8 +130,6 @@ export function createTerminalOutputBatcher({
     const chunks = takeFlushChunks(entry);
     if (entry.chunks.length === 0) {
       pendingByWindow.delete(windowId);
-    } else {
-      scheduleWindow(windowId, entry);
     }
     let text = "";
     try {
