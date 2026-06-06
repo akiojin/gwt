@@ -533,6 +533,37 @@ test("classifyProjectWindowVisibility keeps inactive project terminals hidden, n
   assert.deepEqual(result.removed, ["orphan::agent-1"]);
 });
 
+test("classifyProjectWindowVisibility accepts prebuilt id sets", () => {
+  const legacy = classifyProjectWindowVisibility({
+    activeWindowIds: ["tab-a::agent-1", "tab-a::board-1"],
+    allProjectWindowIds: [
+      "tab-a::agent-1",
+      "tab-a::board-1",
+      "tab-b::agent-1",
+    ],
+    mountedWindowIds: [
+      "tab-a::agent-1",
+      "tab-b::agent-1",
+      "orphan::agent-1",
+    ],
+  });
+  const fromSets = classifyProjectWindowVisibility({
+    activeWindowIdSet: new Set(["tab-a::agent-1", "tab-a::board-1"]),
+    allProjectWindowIdSet: new Set([
+      "tab-a::agent-1",
+      "tab-a::board-1",
+      "tab-b::agent-1",
+    ]),
+    mountedWindowIds: [
+      "tab-a::agent-1",
+      "tab-b::agent-1",
+      "orphan::agent-1",
+    ],
+  });
+
+  assert.deepEqual(fromSets, legacy);
+});
+
 test("attachHostResizeReflow throws when given a non-DOM window", () => {
   assert.throws(
     () =>

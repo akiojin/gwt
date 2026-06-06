@@ -339,6 +339,13 @@ function idSet(values) {
   return set;
 }
 
+function providedIdSet(value) {
+  if (!value || typeof value.has !== "function" || typeof value[Symbol.iterator] !== "function") {
+    return null;
+  }
+  return value;
+}
+
 /**
  * Classify mounted workspace windows during a project-tab render.
  *
@@ -350,11 +357,13 @@ function idSet(values) {
  */
 export function classifyProjectWindowVisibility({
   activeWindowIds,
+  activeWindowIdSet,
   allProjectWindowIds,
+  allProjectWindowIdSet,
   mountedWindowIds,
 }) {
-  const active = idSet(activeWindowIds);
-  const all = idSet(allProjectWindowIds);
+  const active = providedIdSet(activeWindowIdSet) || idSet(activeWindowIds);
+  const all = providedIdSet(allProjectWindowIdSet) || idSet(allProjectWindowIds);
   const visible = Array.from(active);
   const hidden = [];
   const removed = [];

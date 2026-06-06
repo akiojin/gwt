@@ -1079,6 +1079,40 @@ test("Focus class updates touch previous/current elements and keep no-topmost re
   );
 });
 
+test("Workspace visibility classification reuses direct id sets", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    appSource,
+    /function\s+workspaceWindowIdSet\s*\(/,
+    "app.js must provide a direct-loop active window id set helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+allProjectWindowIdSet\s*\(/,
+    "app.js must provide a direct-loop all-project window id set helper",
+  );
+  assert.doesNotMatch(
+    renderWorkspaceBody,
+    /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
+    "renderWorkspace must not allocate an active window id array before classification",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    "renderWorkspace must derive active window ids as a Set once",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /activeWindowIdSet\s*,[\s\S]*allProjectWindowIdSet:\s*allProjectWindowIdSet\s*\(\s*\)/,
+    "renderWorkspace must pass id sets to classifyProjectWindowVisibility",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    "renderWorkspace must reuse the active id set for topmost focus membership",
+  );
+});
+
 test("Runtime status updates skip unchanged DOM and dependent surface writes", () => {
   assert.match(
     appSource,

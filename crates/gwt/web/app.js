@@ -1705,6 +1705,24 @@
         return ids;
       }
 
+      function allProjectWindowIdSet() {
+        const ids = new Set();
+        for (const tab of appState?.tabs || []) {
+          for (const windowData of tab.workspace?.windows || []) {
+            ids.add(windowData.id);
+          }
+        }
+        return ids;
+      }
+
+      function workspaceWindowIdSet(workspace) {
+        const ids = new Set();
+        for (const windowData of workspace?.windows || []) {
+          ids.add(windowData.id);
+        }
+        return ids;
+      }
+
       function workspaceWindowById(windowId) {
         return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
       }
@@ -13413,11 +13431,10 @@
             }
             renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
 
-            const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
-            const ids = new Set(activeWindowIds);
+            const activeWindowIdSet = workspaceWindowIdSet(workspace);
             const visibility = classifyProjectWindowVisibility({
-              activeWindowIds,
-              allProjectWindowIds: allProjectWindowIds(),
+              activeWindowIdSet,
+              allProjectWindowIdSet: allProjectWindowIdSet(),
               mountedWindowIds: windowMap.keys(),
             });
             for (const windowId of visibility.hidden) {
@@ -13500,7 +13517,7 @@
             scheduleMaximizedWindowsToViewportSync();
 
             const topmostId = topmostWindowId(workspace);
-            if (topmostId && ids.has(topmostId)) {
+            if (topmostId && activeWindowIdSet.has(topmostId)) {
               focusWindowLocally(topmostId);
               scheduleTerminalFocusActivation(topmostId, {
                 shouldPersistGeometry: false,
