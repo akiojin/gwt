@@ -198,6 +198,7 @@
       });
       const windowMap = new Map();
       const renderedWindowElementKeys = new Map();
+      const renderedRuntimeStatusKeys = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const profileStateMap = new Map();
@@ -599,6 +600,18 @@
           window_list_entries: windowListEntries.map(entryKey),
           active_window_ids: workspaceWindows.map((windowData) => windowData?.id || ""),
           rows: entries.map(entryKey),
+        });
+      }
+
+      function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
+        return JSON.stringify({
+          id: windowId || "",
+          mounted: windowMap.has(windowId),
+          runtime_state: runtimeState || "",
+          detail: effectiveDetail || "",
+          preset: windowData?.preset || "",
+          runtime_visible: shouldShowRuntimeStatus(windowData),
+          agent_state: mapAgentTelemetryState(runtimeState),
         });
       }
 
@@ -4367,6 +4380,17 @@
             ) {
               detailMap.delete(windowId);
             }
+            const effectiveDetail = detailMap.get(windowId) || "";
+            const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
+              windowId,
+              runtimeState,
+              effectiveDetail,
+              windowData,
+            );
+            if (renderedRuntimeStatusKeys.get(windowId) === nextRuntimeStatusKey) {
+              return;
+            }
+            renderedRuntimeStatusKeys.set(windowId, nextRuntimeStatusKey);
             const element = windowMap.get(windowId);
             if (!element) {
               renderWindowList();
@@ -4395,7 +4419,6 @@
             element.dataset.agentState = mapAgentTelemetryState(runtimeState);
             recomputeOperatorTelemetry();
             label.textContent = windowRuntimeLabel(runtimeState);
-            const effectiveDetail = detailMap.get(windowId);
             const statusTitle = effectiveDetail
               ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
               : windowRuntimeLabel(runtimeState);
@@ -13276,6 +13299,7 @@
               detailMap.delete(windowId);
               windowRuntimeStateMap.delete(windowId);
               renderedWindowElementKeys.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
               pendingOutputMap.delete(windowId);
               pendingSnapshotMap.delete(windowId);
               terminalOutputBatcher.clear(windowId);

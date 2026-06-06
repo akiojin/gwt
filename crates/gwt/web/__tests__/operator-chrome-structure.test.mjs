@@ -808,6 +808,87 @@ test("Focus class updates touch previous/current elements and keep no-topmost re
   );
 });
 
+test("Runtime status updates skip unchanged DOM and dependent surface writes", () => {
+  assert.match(
+    appSource,
+    /const\s+renderedRuntimeStatusKeys\s*=\s*new\s+Map\s*\(/,
+    "app.js must track per-window runtime status render keys",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowRuntimeStatusRenderKey\s*\(/,
+    "app.js must define a runtime status render key helper",
+  );
+
+  const statusBody = extractFunctionBody(appSource, "applyStatus");
+  const keyIndex = statusBody.indexOf(
+    "const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(",
+  );
+  const guardIndex = statusBody.indexOf(
+    "renderedRuntimeStatusKeys.get(windowId) === nextRuntimeStatusKey",
+  );
+  const chipIndex = statusBody.indexOf("chip.classList.remove(");
+  const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
+  const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
+  const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
+  const dotsIndex = statusBody.indexOf("refreshProjectTabDots()");
+
+  assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
+  assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
+  for (const [label, index] of [
+    ["status chip class writes", chipIndex],
+    ["overlay lookup/writes", overlayIndex],
+    ["telemetry recompute", telemetryIndex],
+    ["Window List refresh", windowListIndex],
+    ["project tab dot refresh", dotsIndex],
+  ]) {
+    assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
+    assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
+  }
+  assert.match(
+    statusBody.slice(guardIndex, chipIndex),
+    /return\s*;/,
+    "unchanged runtime status guard must return before DOM/dependent-surface writes",
+  );
+});
+
+test("Runtime status key covers state detail preset visibility and cleanup", () => {
+  const keyBody = extractFunctionBody(appSource, "windowRuntimeStatusRenderKey");
+  for (const pattern of [
+    /runtimeState/,
+    /effectiveDetail/,
+    /windowData\?\.preset/,
+    /shouldShowRuntimeStatus\s*\(/,
+    /mapAgentTelemetryState\s*\(/,
+  ]) {
+    assert.match(keyBody, pattern, `runtime status key must include ${pattern}`);
+  }
+
+  const statusBody = extractFunctionBody(appSource, "applyStatus");
+  const stateMapIndex = statusBody.indexOf("windowRuntimeStateMap.set(windowId, runtimeState);");
+  const effectiveDetailIndex = statusBody.indexOf("const effectiveDetail = detailMap.get(windowId)");
+  const keyIndex = statusBody.indexOf(
+    "const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(",
+  );
+  assert.ok(
+    stateMapIndex !== -1 && stateMapIndex < keyIndex,
+    "applyStatus must update runtime state before computing the status key",
+  );
+  assert.ok(
+    effectiveDetailIndex !== -1 && effectiveDetailIndex < keyIndex,
+    "applyStatus must compute effective detail before the status key",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const cleanupIndex = renderWorkspaceBody.indexOf("renderedRuntimeStatusKeys.delete(windowId);");
+  const removeIndex = renderWorkspaceBody.indexOf("element.remove();");
+  assert.notEqual(cleanupIndex, -1, "window removal must clear runtime status render key");
+  assert.ok(
+    cleanupIndex < removeIndex,
+    "runtime status render key cleanup must happen before element removal",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
