@@ -4,6 +4,93 @@
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 
+export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+
+function defaultScheduleFrame(callback) {
+  if (typeof requestAnimationFrame === "function") {
+    return requestAnimationFrame(callback);
+  }
+  return setTimeout(callback, 0);
+}
+
+function normalizeMaxTerminalFitsPerFrame(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_TERMINAL_FITS_PER_FRAME;
+  }
+  return Math.floor(value);
+}
+
+/**
+ * Coalesce terminal viewport fit requests through one bounded frame queue.
+ *
+ * Fitting an xterm terminal can force render/measure work and optionally
+ * persist PTY geometry. Render and resize paths can request many fits before
+ * the next paint; this scheduler keeps those fits ordered while preventing one
+ * frame from draining every terminal in a large workspace.
+ */
+export function createTerminalFitScheduler({
+  schedule = defaultScheduleFrame,
+  fitTerminal,
+  maxFitsPerFrame = DEFAULT_MAX_TERMINAL_FITS_PER_FRAME,
+} = {}) {
+  if (typeof fitTerminal !== "function") {
+    throw new TypeError("createTerminalFitScheduler requires a fitTerminal callback");
+  }
+  const scheduleImpl = typeof schedule === "function" ? schedule : defaultScheduleFrame;
+  const fitsPerFrame = normalizeMaxTerminalFitsPerFrame(maxFitsPerFrame);
+  const pending = new Map();
+  let scheduled = false;
+
+  function scheduleFlush() {
+    if (scheduled) {
+      return;
+    }
+    scheduled = true;
+    scheduleImpl(flushPending);
+  }
+
+  function enqueue(windowId, { persist = false } = {}) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    const id = String(windowId);
+    const existing = pending.get(id);
+    pending.set(id, { persist: Boolean(existing?.persist || persist) });
+    scheduleFlush();
+    return true;
+  }
+
+  function flushPending() {
+    scheduled = false;
+    let flushed = 0;
+    for (const [windowId, state] of Array.from(pending.entries())) {
+      if (flushed >= fitsPerFrame) {
+        break;
+      }
+      if (!pending.has(windowId)) {
+        continue;
+      }
+      pending.delete(windowId);
+      fitTerminal(windowId, state.persist);
+      flushed += 1;
+    }
+    if (pending.size > 0) {
+      scheduleFlush();
+    }
+    return flushed;
+  }
+
+  function pendingCount() {
+    return pending.size;
+  }
+
+  return {
+    enqueue,
+    flushPending,
+    pendingCount,
+  };
+}
+
 /**
  * Attach a host `window.resize` listener that refreshes every visible
  * terminal viewport. The caller supplies the terminal id iterator,

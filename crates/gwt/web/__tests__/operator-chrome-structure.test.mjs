@@ -695,7 +695,7 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
   const classIndex = ensureWindowBody.indexOf('classList.toggle("minimized"');
   const styleIndex = ensureWindowBody.indexOf("element.style.zIndex");
   const statusIndex = ensureWindowBody.indexOf("applyStatus");
-  const fitIndex = ensureWindowBody.indexOf("fitTerminal");
+  const fitIndex = ensureWindowBody.indexOf("scheduleTerminalFit");
 
   assert.notEqual(mountIndex, -1, "ensureWindow must keep preset/body mount logic");
   assert.ok(keyIndex > mountIndex, "per-window key must run after preset/body mounting");

@@ -993,7 +993,8 @@ mod tests {
                 && html.contains("const previousHeight = parseFloat(element.style.height")
                 && html.contains("const dimensionsChanged =")
                 && html.contains("(wasMinimized && !windowData.minimized) || dimensionsChanged",)
-                && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
+                && html
+                    .contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
             "expected terminals to persist fitted geometry to backend on \
              restore-from-minimized OR window resize (Tile/Stack/Align)",
         );
@@ -3825,9 +3826,10 @@ mod tests {
              can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
         );
         assert!(
-            body.contains("fitTerminal,"),
-            "expected attachHostResizeReflow to receive fitTerminal so cols/rows refit and \
-             UpdateWindowGeometry persists to the backend; body: {body}",
+            js.contains("createTerminalFitScheduler({ fitTerminal })")
+                && body.contains("fitTerminal: scheduleTerminalFit"),
+            "expected attachHostResizeReflow to route fit requests through the shared \
+             terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
         );
         assert!(
             body.contains("syncMaximizedWindowsToViewport()"),

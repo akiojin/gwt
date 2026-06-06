@@ -51,6 +51,7 @@
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        createTerminalFitScheduler,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
         rearmRefreshOnVisible,
@@ -184,6 +185,7 @@
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
+      let terminalFitScheduler = null;
       const terminalOutputBatcher = createTerminalOutputBatcher({
         mergeChunks: (chunks, windowId) => {
           const decoder = decoderMap.get(windowId);
@@ -2211,7 +2213,7 @@
           if (presetSurface(windowData.preset) === "terminal") {
             // Visual re-fit only (persist=false): never round-trip geometry from
             // the sync path, so this client cannot churn the shared state.
-            requestAnimationFrame(() => fitTerminal(windowData.id, false));
+            scheduleTerminalFit(windowData.id, false);
           }
         }
       }
@@ -3058,6 +3060,16 @@
           }
         );
       }
+
+      function scheduleTerminalFit(windowId, persist = false) {
+        if (!terminalFitScheduler) {
+          requestAnimationFrame(() => fitTerminal(windowId, persist));
+          return false;
+        }
+        return terminalFitScheduler.enqueue(windowId, { persist });
+      }
+
+      terminalFitScheduler = createTerminalFitScheduler({ fitTerminal });
 
       function scheduleTerminalResizeFit(windowId) {
         if (!terminalMap.has(windowId)) {
@@ -13283,9 +13295,7 @@
           presetSurface(windowData.preset) === "terminal" &&
           !windowData.minimized
         ) {
-          requestAnimationFrame(() =>
-            fitTerminal(windowData.id, shouldPersistTerminalGeometry),
-          );
+          scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry);
         }
       }
 
@@ -15475,7 +15485,7 @@
         window,
         terminalIds: () => terminalMap.keys(),
         canRefreshViewport: canRefreshTerminalViewport,
-        fitTerminal,
+        fitTerminal: scheduleTerminalFit,
         beforeFan: () => {
           frontendUnits.projectWorkspaceShell.renderWindowList();
           syncMaximizedWindowsToViewport();
