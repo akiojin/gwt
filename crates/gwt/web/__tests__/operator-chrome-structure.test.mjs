@@ -343,6 +343,35 @@ test("Project Tabs shell key ignores workspace geometry but includes tab identit
   }
 });
 
+test("Project Tabs shell key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Project Tabs shell key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Project Tabs shell key must not serialize an object graph on every workspace_state",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\.map\s*\(/,
+    "Project Tabs shell key must not allocate a mapped tab array",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+tab\s+of\s+tabs\s*\)/,
+    "Project Tabs shell key must iterate tabs directly",
+  );
+});
+
 test("hidden project picker does not rebuild Recent Projects on workspace_state", () => {
   const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
   assert.match(

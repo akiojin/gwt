@@ -514,14 +514,21 @@
       let maximizedViewportSyncFrame = null;
 
       function projectTabsRenderKey(state) {
-        return JSON.stringify({
-          active_tab_id: state?.active_tab_id || null,
-          tabs: (state?.tabs || []).map((tab) => ({
-            id: tab?.id || "",
-            title: tab?.title || "",
-            project_root: tab?.project_root || "",
-          })),
-        });
+        const tabs = state?.tabs || [];
+        const parts = [];
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, state?.active_tab_id || null);
+        appendRenderKeyPart(parts, "tabs");
+        appendRenderKeyPart(parts, tabs.length);
+        for (const tab of tabs) {
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, tab?.id || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, tab?.title || "");
+          appendRenderKeyPart(parts, "project_root");
+          appendRenderKeyPart(parts, tab?.project_root || "");
+        }
+        return parts.join("");
       }
 
       function recentProjectsRenderKey(state) {
