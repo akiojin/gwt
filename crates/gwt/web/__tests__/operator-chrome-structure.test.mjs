@@ -758,6 +758,56 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
   );
 });
 
+test("Focus class updates skip unchanged focus and avoid all-window scans", () => {
+  const focusBody = extractFunctionBody(appSource, "focusWindowLocally");
+  assert.match(
+    focusBody,
+    /const\s+targetElement\s*=\s*windowMap\.get\s*\(\s*windowId\s*\)/,
+    "focusWindowLocally must resolve the requested window directly",
+  );
+  assert.match(
+    focusBody,
+    /focusedId\s*===\s*windowId[\s\S]+targetElement\?\.classList\.contains\s*\(\s*"focused"\s*\)[\s\S]+return\s*;/,
+    "focusWindowLocally must return when focus is unchanged and the class is already applied",
+  );
+  assert.doesNotMatch(
+    focusBody,
+    /windowMap\.entries\s*\(/,
+    "focusWindowLocally must not scan every mounted window",
+  );
+});
+
+test("Focus class updates touch previous/current elements and keep no-topmost reset", () => {
+  const focusBody = extractFunctionBody(appSource, "focusWindowLocally");
+  assert.match(
+    focusBody,
+    /const\s+previousFocusedId\s*=\s*focusedId/,
+    "focusWindowLocally must remember the previous focused window",
+  );
+  assert.match(
+    focusBody,
+    /focusedId\s*=\s*windowId/,
+    "focusWindowLocally must update focusedId to the requested window",
+  );
+  assert.match(
+    focusBody,
+    /previousFocusedId\s*!==\s*windowId[\s\S]+previousElement\?\.classList\.remove\s*\(\s*"focused"\s*\)/,
+    "focusWindowLocally must remove focus from the previous element only",
+  );
+  assert.match(
+    focusBody,
+    /targetElement\.classList\.add\s*\(\s*"focused"\s*\)/,
+    "focusWindowLocally must add focus to the requested element",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    renderWorkspaceBody,
+    /focusedId\s*=\s*null\s*;/,
+    "renderWorkspace must still clear focusedId when no topmost active window exists",
+  );
+});
+
 test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state

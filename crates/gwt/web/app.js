@@ -4460,9 +4460,18 @@
       }
 
       function focusWindowLocally(windowId) {
+        const targetElement = windowMap.get(windowId);
+        if (focusedId === windowId && targetElement?.classList.contains("focused")) {
+          return;
+        }
+        const previousFocusedId = focusedId;
         focusedId = windowId;
-        for (const [id, element] of windowMap.entries()) {
-          element.classList.toggle("focused", id === windowId);
+        if (previousFocusedId && previousFocusedId !== windowId) {
+          const previousElement = windowMap.get(previousFocusedId);
+          previousElement?.classList.remove("focused");
+        }
+        if (targetElement) {
+          targetElement.classList.add("focused");
         }
       }
 
