@@ -40,6 +40,11 @@ use gwt_core::workspace_projection::WorkspaceProjection;
 /// stale reminder fires. Tuned conservatively to avoid reminder fatigue.
 const TITLE_SUMMARY_STALE_TURN_THRESHOLD: u32 = 8;
 
+/// Issue #2987: throttle window for the memory-update reminder. After the
+/// reminder fires it stays silent for this many hours, then fires again, so a
+/// long session does not pay the reminder on every UserPromptSubmit turn.
+const MEMORY_REMINDER_THROTTLE_WINDOW_HOURS: i64 = 6;
+
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
 use crate::board_audience::current_session_board_scope;
 
@@ -301,13 +306,48 @@ fn memory_source_present(worktree_path: &Path) -> bool {
         || worktree_path.join("tasks/lessons.md").is_file()
 }
 
+/// Issue #2987: throttle the memory-update reminder so it does not inject on
+/// every UserPromptSubmit turn. Fires on the first encounter (no prior
+/// timestamp) and again only after [`MEMORY_REMINDER_THROTTLE_WINDOW_HOURS`]
+/// has elapsed, stamping the fire time into the reminder sidecar. SessionStart
+/// never fires (initial onboarding guidance is owned by the SessionStart board
+/// path). Stop shares the same throttle so it does not immediately re-nag right
+/// after a UserPromptSubmit reminder. Throttling on our own persisted timestamp
+/// (not `memory.md` mtime) keeps first-encounter and post-window turns firing
+/// even across git operations that would reset file mtime.
+fn compute_memory_reminder_state(
+    event: IntentBoundaryEvent,
+    present: bool,
+    current_state: &RemindersState,
+    now: DateTime<Utc>,
+) -> (bool, RemindersState) {
+    let mut new_state = current_state.clone();
+    if event == IntentBoundaryEvent::SessionStart {
+        return (true, new_state);
+    }
+    if !present {
+        return (true, new_state);
+    }
+    let fire = match new_state.last_memory_reminded_at {
+        None => true,
+        Some(last) => now - last >= chrono::Duration::hours(MEMORY_REMINDER_THROTTLE_WINDOW_HOURS),
+    };
+    if fire {
+        new_state.last_memory_reminded_at = Some(now);
+        (false, new_state)
+    } else {
+        (true, new_state)
+    }
+}
+
 fn append_memory_update_context(
     output: HookOutput,
     event: IntentBoundaryEvent,
     present: bool,
+    suppress: bool,
     language: &str,
 ) -> HookOutput {
-    if !present || event == IntentBoundaryEvent::SessionStart {
+    if !present || event == IntentBoundaryEvent::SessionStart || suppress {
         return output;
     }
     let reminder = texts::memory_update_reminder(language, event == IntentBoundaryEvent::Stop);
@@ -401,10 +441,15 @@ pub fn compute_plan(
     );
     plan.next_reminders = updated_state;
     plan.output = append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+    let memory_present = memory_source_present(&session.worktree_path);
+    let (memory_suppress, memory_state) =
+        compute_memory_reminder_state(intent_event, memory_present, &plan.next_reminders, now);
+    plan.next_reminders = memory_state;
     plan.output = append_memory_update_context(
         plan.output,
         intent_event,
-        memory_source_present(&session.worktree_path),
+        memory_present,
+        memory_suppress,
         &language,
     );
 
@@ -642,6 +687,198 @@ mod tests {
         assert!(text.contains("Memory Reminder"));
         assert!(text.contains("gwtd memory add"));
         assert!(text.contains(".gwt/work/memory.md"));
+    }
+
+    #[test]
+    fn compute_plan_throttles_memory_reminder_after_first_fire() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let t0 = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t1 = "2026-06-04T13:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t2 = "2026-06-04T18:01:00Z".parse::<DateTime<Utc>>().unwrap();
+
+        let plan = compute_plan("UserPromptSubmit", &session, t0)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(additional_context(&plan.output).contains("Memory Reminder"));
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+        assert_eq!(
+            load_reminders_state(&session.worktree_path, &session.id)
+                .unwrap()
+                .last_memory_reminded_at,
+            Some(t0)
+        );
+
+        let plan = compute_plan("UserPromptSubmit", &session, t1)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(!additional_context(&plan.output).contains("Memory Reminder"));
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+        assert_eq!(
+            load_reminders_state(&session.worktree_path, &session.id)
+                .unwrap()
+                .last_memory_reminded_at,
+            Some(t0)
+        );
+
+        let plan = compute_plan("UserPromptSubmit", &session, t2)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(additional_context(&plan.output).contains("Memory Reminder"));
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+        assert_eq!(
+            load_reminders_state(&session.worktree_path, &session.id)
+                .unwrap()
+                .last_memory_reminded_at,
+            Some(t2)
+        );
+    }
+
+    #[test]
+    fn compute_plan_never_fires_memory_reminder_on_session_start() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let plan = compute_plan("SessionStart", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => {
+                assert!(!text.contains("Memory Reminder"));
+            }
+            HookOutput::Silent => {}
+            other => panic!("unexpected SessionStart output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_plan_throttles_stop_memory_reminder_after_user_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let t0 = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t_near = "2026-06-04T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t_far = "2026-06-04T18:01:00Z".parse::<DateTime<Utc>>().unwrap();
+
+        let plan = compute_plan("UserPromptSubmit", &session, t0)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(additional_context(&plan.output).contains("Memory Reminder"));
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+
+        let plan = compute_plan("Stop", &session, t_near)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(!system_message(&plan.output).contains("Memory Reminder"));
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+
+        let plan = compute_plan("Stop", &session, t_far)
+            .expect("compute plan")
+            .expect("plan");
+        assert!(system_message(&plan.output).contains("Memory Reminder"));
+    }
+
+    #[test]
+    fn compute_plan_fires_memory_reminder_on_first_mid_session_encounter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/memory", "Codex");
+
+        let plan = compute_plan("SessionStart", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        match &plan.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => {
+                assert!(!text.contains("Memory Reminder"));
+            }
+            HookOutput::Silent => {}
+            other => panic!("unexpected SessionStart output: {other:?}"),
+        }
+        write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders).unwrap();
+
+        std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
+        std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
+        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        assert!(additional_context(&plan.output).contains("Memory Reminder"));
+    }
+
+    #[test]
+    fn reminders_state_persists_memory_reminded_timestamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/memory", "Codex");
+        let now = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+
+        let state = RemindersState {
+            last_memory_reminded_at: Some(now),
+            ..RemindersState::default()
+        };
+        write_reminders_state(&session.worktree_path, &session.id, &state).unwrap();
+        let loaded = load_reminders_state(&session.worktree_path, &session.id).unwrap();
+        assert_eq!(loaded.last_memory_reminded_at, Some(now));
+    }
+
+    #[test]
+    fn compute_memory_reminder_state_returns_correct_suppress_flag() {
+        let now = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let base = RemindersState::default();
+
+        let (suppress, next) =
+            compute_memory_reminder_state(IntentBoundaryEvent::UserPromptSubmit, true, &base, now);
+        assert!(!suppress);
+        assert_eq!(next.last_memory_reminded_at, Some(now));
+
+        let recent = RemindersState {
+            last_memory_reminded_at: Some(now - chrono::Duration::hours(2)),
+            ..RemindersState::default()
+        };
+        let (suppress, next) = compute_memory_reminder_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            true,
+            &recent,
+            now,
+        );
+        assert!(suppress);
+        assert_eq!(next.last_memory_reminded_at, recent.last_memory_reminded_at);
+
+        let old = RemindersState {
+            last_memory_reminded_at: Some(now - chrono::Duration::hours(7)),
+            ..RemindersState::default()
+        };
+        let (suppress, next) =
+            compute_memory_reminder_state(IntentBoundaryEvent::UserPromptSubmit, true, &old, now);
+        assert!(!suppress);
+        assert_eq!(next.last_memory_reminded_at, Some(now));
+
+        let (suppress, next) =
+            compute_memory_reminder_state(IntentBoundaryEvent::SessionStart, true, &base, now);
+        assert!(suppress);
+        assert_eq!(next.last_memory_reminded_at, None);
+
+        let (suppress, _) =
+            compute_memory_reminder_state(IntentBoundaryEvent::UserPromptSubmit, false, &base, now);
+        assert!(suppress);
+
+        let (suppress, _) =
+            compute_memory_reminder_state(IntentBoundaryEvent::Stop, true, &recent, now);
+        assert!(suppress);
+        let (suppress, _) =
+            compute_memory_reminder_state(IntentBoundaryEvent::Stop, true, &old, now);
+        assert!(!suppress);
     }
 
     #[test]
@@ -1458,6 +1695,7 @@ mod tests {
             unchanged_turn_count: 12,
             last_current_focus_seen: Some("focus".to_string()),
             phase_changed_in_window: true,
+            last_memory_reminded_at: Some("2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: RemindersState = serde_json::from_str(&json).unwrap();

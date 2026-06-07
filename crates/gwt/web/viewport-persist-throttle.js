@@ -38,8 +38,37 @@ export function createViewportPersistThrottle({
 
   let timerId = null;
   let firstPendingAt = 0;
-  let latestPayload;
+  let latestX;
+  let latestY;
+  let latestZoom;
+  let lastDispatchedX;
+  let lastDispatchedY;
+  let lastDispatchedZoom;
+  let hasLastDispatched = false;
   let hasPending = false;
+
+  function sameViewportPayload(payload, x, y, zoom, hasValue) {
+    return hasValue
+      && payload
+      && typeof payload === "object"
+      && payload.x === x
+      && payload.y === y
+      && payload.zoom === zoom;
+  }
+
+  function storePendingPayload(payload) {
+    latestX = payload.x;
+    latestY = payload.y;
+    latestZoom = payload.zoom;
+  }
+
+  function latestPayloadSnapshot() {
+    return {
+      x: latestX,
+      y: latestY,
+      zoom: latestZoom,
+    };
+  }
 
   function clearTimer() {
     if (timerId !== null) {
@@ -53,15 +82,32 @@ export function createViewportPersistThrottle({
     if (!hasPending) {
       return;
     }
-    const payload = latestPayload;
+    const payload = latestPayloadSnapshot();
     hasPending = false;
-    latestPayload = undefined;
     firstPendingAt = 0;
     send(payload);
+    lastDispatchedX = payload.x;
+    lastDispatchedY = payload.y;
+    lastDispatchedZoom = payload.zoom;
+    hasLastDispatched = true;
   }
 
   function schedule(payload) {
-    latestPayload = payload;
+    if (sameViewportPayload(payload, latestX, latestY, latestZoom, hasPending)) {
+      return;
+    }
+    if (
+      sameViewportPayload(
+        payload,
+        lastDispatchedX,
+        lastDispatchedY,
+        lastDispatchedZoom,
+        hasLastDispatched,
+      )
+    ) {
+      return;
+    }
+    storePendingPayload(payload);
     if (!hasPending) {
       hasPending = true;
       firstPendingAt = nowFn();
@@ -78,11 +124,14 @@ export function createViewportPersistThrottle({
     if (!hasPending) {
       return;
     }
-    const payload = latestPayload;
+    const payload = latestPayloadSnapshot();
     hasPending = false;
-    latestPayload = undefined;
     firstPendingAt = 0;
     send(payload);
+    lastDispatchedX = payload.x;
+    lastDispatchedY = payload.y;
+    lastDispatchedZoom = payload.zoom;
+    hasLastDispatched = true;
   }
 
   function hasPendingValue() {

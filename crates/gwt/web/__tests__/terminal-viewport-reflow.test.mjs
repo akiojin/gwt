@@ -19,6 +19,8 @@ import {
   attachContainerResizeReflow,
   attachHostResizeReflow,
   classifyProjectWindowVisibility,
+  createTerminalFitScheduler,
+  createTerminalViewportRefreshScheduler,
   elementHasLayoutBox,
   gateTerminalInputForReadiness,
   rearmRefreshOnVisible,
@@ -531,6 +533,37 @@ test("classifyProjectWindowVisibility keeps inactive project terminals hidden, n
   assert.deepEqual(result.removed, ["orphan::agent-1"]);
 });
 
+test("classifyProjectWindowVisibility accepts prebuilt id sets", () => {
+  const legacy = classifyProjectWindowVisibility({
+    activeWindowIds: ["tab-a::agent-1", "tab-a::board-1"],
+    allProjectWindowIds: [
+      "tab-a::agent-1",
+      "tab-a::board-1",
+      "tab-b::agent-1",
+    ],
+    mountedWindowIds: [
+      "tab-a::agent-1",
+      "tab-b::agent-1",
+      "orphan::agent-1",
+    ],
+  });
+  const fromSets = classifyProjectWindowVisibility({
+    activeWindowIdSet: new Set(["tab-a::agent-1", "tab-a::board-1"]),
+    allProjectWindowIdSet: new Set([
+      "tab-a::agent-1",
+      "tab-a::board-1",
+      "tab-b::agent-1",
+    ]),
+    mountedWindowIds: [
+      "tab-a::agent-1",
+      "tab-b::agent-1",
+      "orphan::agent-1",
+    ],
+  });
+
+  assert.deepEqual(fromSets, legacy);
+});
+
 test("attachHostResizeReflow throws when given a non-DOM window", () => {
   assert.throws(
     () =>
@@ -653,6 +686,174 @@ test("attachHostResizeReflow dispose cancels pending rAF (Issue #2903)", () => {
   assert.equal(fitCalls.length, 0, "no fits after dispose");
 });
 
+test("createTerminalFitScheduler budgets multi-terminal fits across frames", () => {
+  const callbacks = [];
+  const fitCalls = [];
+  const scheduler = createTerminalFitScheduler({
+    schedule: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    fitTerminal: (id, persist) => fitCalls.push([id, persist]),
+    maxFitsPerFrame: 4,
+  });
+
+  for (let i = 0; i < 12; i += 1) {
+    scheduler.enqueue(`terminal-${i + 1}`, { persist: false });
+  }
+
+  assert.equal(callbacks.length, 1, "fit burst must schedule one shared frame");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    fitCalls.map(([id]) => id),
+    ["terminal-1", "terminal-2", "terminal-3", "terminal-4"],
+    "first frame must only run the configured fit budget",
+  );
+  assert.equal(callbacks.length, 1, "remaining fits must share one follow-up frame");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    fitCalls.map(([id]) => id),
+    [
+      "terminal-1",
+      "terminal-2",
+      "terminal-3",
+      "terminal-4",
+      "terminal-5",
+      "terminal-6",
+      "terminal-7",
+      "terminal-8",
+    ],
+    "second frame must continue in insertion order",
+  );
+  assert.equal(callbacks.length, 1, "third frame must be scheduled for the tail");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    fitCalls.map(([id]) => id),
+    Array.from({ length: 12 }, (_, index) => `terminal-${index + 1}`),
+    "all queued terminals must eventually fit exactly once",
+  );
+  assert.equal(callbacks.length, 0, "no extra frames after completion");
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test("createTerminalFitScheduler coalesces same-window fits and preserves persist=true", () => {
+  const callbacks = [];
+  const fitCalls = [];
+  const scheduler = createTerminalFitScheduler({
+    schedule: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    fitTerminal: (id, persist) => fitCalls.push([id, persist]),
+    maxFitsPerFrame: 4,
+  });
+
+  assert.equal(scheduler.enqueue("agent-1", { persist: false }), true);
+  assert.equal(scheduler.enqueue("agent-1", { persist: true }), true);
+  assert.equal(scheduler.enqueue("agent-2", { persist: false }), true);
+  assert.equal(callbacks.length, 1, "coalesced requests still share one frame");
+  assert.equal(scheduler.pendingCount(), 2);
+
+  callbacks.shift()();
+
+  assert.deepEqual(fitCalls, [
+    ["agent-1", true],
+    ["agent-2", false],
+  ]);
+  assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(callbacks.length, 0);
+});
+
+test("createTerminalViewportRefreshScheduler budgets multi-terminal refreshes across frames", () => {
+  const callbacks = [];
+  const refreshCalls = [];
+  const scheduler = createTerminalViewportRefreshScheduler({
+    schedule: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    canRefresh: () => true,
+    refresh: (id) => refreshCalls.push(id),
+    maxRefreshesPerFrame: 4,
+  });
+
+  for (let i = 0; i < 12; i += 1) {
+    scheduler.enqueue(`terminal-${i + 1}`);
+  }
+
+  assert.equal(callbacks.length, 1, "refresh burst must schedule one shared frame");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    refreshCalls,
+    ["terminal-1", "terminal-2", "terminal-3", "terminal-4"],
+    "first frame must only run the configured refresh budget",
+  );
+  assert.equal(callbacks.length, 1, "remaining refreshes must share one follow-up frame");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    refreshCalls,
+    [
+      "terminal-1",
+      "terminal-2",
+      "terminal-3",
+      "terminal-4",
+      "terminal-5",
+      "terminal-6",
+      "terminal-7",
+      "terminal-8",
+    ],
+    "second frame must continue in insertion order",
+  );
+  assert.equal(callbacks.length, 1, "third frame must be scheduled for the tail");
+
+  callbacks.shift()();
+  assert.deepEqual(
+    refreshCalls,
+    Array.from({ length: 12 }, (_, index) => `terminal-${index + 1}`),
+    "all queued terminals must eventually refresh exactly once",
+  );
+  assert.equal(callbacks.length, 0, "no extra frames after completion");
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test("createTerminalViewportRefreshScheduler coalesces and marks ineligible windows pending", () => {
+  const callbacks = [];
+  const refreshCalls = [];
+  const pendingMarks = [];
+  const eligibility = new Map([
+    ["agent-1", true],
+    ["agent-2", false],
+  ]);
+  const scheduler = createTerminalViewportRefreshScheduler({
+    schedule: (callback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    },
+    canRefresh: (id) => eligibility.get(id) !== false,
+    refresh: (id) => refreshCalls.push(id),
+    markPending: (id) => pendingMarks.push(id),
+    maxRefreshesPerFrame: 4,
+  });
+
+  assert.equal(scheduler.enqueue("agent-1"), true);
+  assert.equal(scheduler.enqueue("agent-1"), true);
+  assert.equal(scheduler.enqueue("agent-2"), true);
+  assert.equal(callbacks.length, 1, "coalesced refreshes still share one frame");
+  assert.equal(scheduler.pendingCount(), 2);
+
+  callbacks.shift()();
+
+  assert.deepEqual(refreshCalls, ["agent-1"]);
+  assert.deepEqual(pendingMarks, ["agent-2"]);
+  assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(callbacks.length, 0);
+});
+
 test("app.js wires the reflow controller for resize, transition, and predicate", () => {
   // Source-string contract retained per the memory — limited to wiring
   // detection so a future refactor that drops the import / call surfaces
@@ -664,8 +865,43 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /attachHostResizeReflow\(\{[\s\S]*?fitTerminal,\s*\n[\s\S]*?\}\)/,
-    "host resize fan-out must dispatch through the reflow controller",
+    /createTerminalFitScheduler\(\{\s*fitTerminal\s*\}\)/,
+    "app.js must construct the shared terminal fit scheduler from fitTerminal",
+  );
+  assert.match(
+    appSource,
+    /createTerminalViewportRefreshScheduler\(\{[\s\S]*?canRefresh:\s*canRefreshTerminalViewport[\s\S]*?refresh:\s*\(windowId\)\s*=>[\s\S]*?refreshTerminalViewport\(windowId\)[\s\S]*?markPending:\s*markTerminalViewportRefreshPending[\s\S]*?\}\)/,
+    "app.js must construct the shared terminal viewport refresh scheduler",
+  );
+  assert.match(
+    appSource,
+    /function scheduleTerminalFit\(windowId,\s*persist = false\)[\s\S]*?terminalFitScheduler\.enqueue\(windowId,\s*\{\s*persist\s*\}\)/,
+    "app.js must expose a scheduleTerminalFit wrapper over the shared fit scheduler",
+  );
+  assert.match(
+    appSource,
+    /function scheduleTerminalViewportRefresh\(windowId\)[\s\S]*?terminalViewportRefreshScheduler\.enqueue\(windowId\)/,
+    "app.js must route routine terminal viewport refreshes through the shared scheduler",
+  );
+  assert.match(
+    appSource,
+    /terminalViewportRefreshScheduler\?\.clear\(windowId\)/,
+    "removed terminal windows must be cleared from the shared viewport refresh scheduler",
+  );
+  assert.match(
+    appSource,
+    /attachHostResizeReflow\(\{[\s\S]*?fitTerminal:\s*scheduleTerminalFit[\s\S]*?\}\)/,
+    "host resize fan-out must route fit requests through the shared scheduler",
+  );
+  assert.match(
+    appSource,
+    /syncMaximizedWindowsToViewport[\s\S]*?scheduleTerminalFit\(windowData\.id,\s*false\)/,
+    "maximized viewport sync must route visual terminal fits through the shared scheduler",
+  );
+  assert.match(
+    appSource,
+    /scheduleTerminalFit\(windowData\.id,\s*shouldPersistTerminalGeometry\)/,
+    "workspace render geometry changes must route terminal fits through the shared scheduler",
   );
   assert.match(
     appSource,

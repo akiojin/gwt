@@ -16,6 +16,7 @@ node --check crates/gwt/web/window-docking.js
 node --check crates/gwt/web/update-cta.js
 node --check crates/gwt/web/terminal-context-menu.js
 node --check crates/gwt/web/terminal-wheel-scroll.js
+node --check crates/gwt/web/terminal-output-buffer.js
 node --check crates/gwt/web/canvas-wheel-gesture.js
 node --check crates/gwt/web/window-geometry-sync.js
 node --check crates/gwt/web/custom-agent-env-editor.js

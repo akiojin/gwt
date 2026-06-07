@@ -172,15 +172,21 @@ impl AppRuntime {
                 publish_runtime_hook_change(&project_root, &event);
             }
         }
-        let mut events = vec![OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
-            event: event.clone(),
-        })];
+        let mut events = Vec::new();
+        if Self::should_broadcast_runtime_hook_event_to_frontend(&event) {
+            events.push(OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
+                event: event.clone(),
+            }));
+        }
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
+        if self.window_hook_states.get(&window_id).copied() == Some(hook_state) {
+            return events;
+        }
         self.window_hook_states
             .insert(window_id.clone(), hook_state);
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
@@ -218,6 +224,10 @@ impl AppRuntime {
         }
         events.extend(Self::status_events(window_id, composed_state, detail));
         events
+    }
+
+    fn should_broadcast_runtime_hook_event_to_frontend(event: &gwt::RuntimeHookEvent) -> bool {
+        event.kind != gwt::RuntimeHookEventKind::RuntimeState
     }
 }
 

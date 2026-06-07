@@ -208,7 +208,7 @@ mod tests {
     use gwt_core::workspace_projection::{
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceStatusCategory,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn agent(
@@ -248,6 +248,36 @@ mod tests {
             target: target.to_string(),
             label: None,
         }
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn isolate_gwt_home() -> (tempfile::TempDir, ScopedEnvVar, ScopedEnvVar) {
+        let home = tempdir().unwrap();
+        let home_guard = ScopedEnvVar::set("HOME", home.path());
+        let userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        (home, home_guard, userprofile_guard)
     }
 
     #[test]
@@ -315,6 +345,10 @@ mod tests {
 
     #[test]
     fn session_scope_reads_projection_from_disk() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
         let dir = tempdir().unwrap();
         let repo = dir.path();
 
@@ -365,6 +399,10 @@ mod tests {
 
     #[test]
     fn gui_default_scope_reads_projection_from_disk() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
         let dir = tempdir().unwrap();
         let repo = dir.path();
 
@@ -413,6 +451,10 @@ mod tests {
 
     #[test]
     fn post_audience_for_session_attaches_workspace_and_respects_broadcast() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
         let dir = tempdir().unwrap();
         let repo = dir.path();
         // Broadcast short-circuits before any projection load.

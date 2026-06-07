@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -55,6 +55,7 @@ pub enum IndexInFlightKey {
 #[derive(Clone, Default)]
 pub struct ProjectIndexBootstrapService {
     in_flight: Arc<Mutex<HashSet<IndexInFlightKey>>>,
+    last_full_status: Arc<Mutex<HashMap<PathBuf, gwt::ProjectIndexStatusView>>>,
 }
 
 impl ProjectIndexBootstrapService {
@@ -198,10 +199,12 @@ impl ProjectIndexBootstrapService {
                         );
                         let kick_orchestrator =
                             status.state == gwt::ProjectIndexStatusState::RepairRequired;
-                        proxy.send(UserEvent::ProjectIndexStatus {
-                            project_root: project_root_label.clone(),
-                            status: status.clone(),
-                        });
+                        service_for_thread.emit_full_status_if_changed(
+                            &proxy,
+                            &project_key,
+                            &project_root_label,
+                            status.clone(),
+                        );
                         if kick_orchestrator {
                             trigger_auto_repair_for_project(
                                 service_for_thread,
@@ -220,15 +223,18 @@ impl ProjectIndexBootstrapService {
                             error = %error,
                             "project index full status refresh bootstrap failed"
                         );
-                        proxy.send(UserEvent::ProjectIndexStatus {
-                            project_root: project_root_label,
-                            status: gwt::ProjectIndexStatusView::new(
-                                gwt::ProjectIndexStatusState::Error,
-                                format!(
-                                    "Project index full status refresh failed after {elapsed_ms} ms: {error}"
-                                ),
+                        let status = gwt::ProjectIndexStatusView::new(
+                            gwt::ProjectIndexStatusState::Error,
+                            format!(
+                                "Project index full status refresh failed after {elapsed_ms} ms: {error}"
                             ),
-                        });
+                        );
+                        service_for_thread.emit_full_status_if_changed(
+                            &proxy,
+                            &project_key,
+                            &project_root_label,
+                            status,
+                        );
                     }
                 }
             });
@@ -315,6 +321,45 @@ impl ProjectIndexBootstrapService {
                 ProjectIndexBootstrapRequest::SpawnFailed
             }
         }
+    }
+
+    fn emit_full_status_if_changed(
+        &self,
+        proxy: &AppEventProxy,
+        project_key: &Path,
+        project_root_label: &str,
+        status: gwt::ProjectIndexStatusView,
+    ) -> bool {
+        let key = normalize_project_root(project_key);
+        if let Ok(mut last) = self.last_full_status.lock() {
+            if last.get(&key) == Some(&status) {
+                tracing::debug!(
+                    target: "gwt::index",
+                    worktree = %project_root_label,
+                    state = %status.state,
+                    "skipping unchanged project index full status broadcast"
+                );
+                return false;
+            }
+            last.insert(key, status.clone());
+        }
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label.to_string(),
+            status,
+        });
+        true
+    }
+
+    #[cfg(test)]
+    fn full_status_is_idle_for_test(&self, project_root: &Path) -> bool {
+        let project_key = normalize_project_root(project_root);
+        let full_status_key = IndexInFlightKey::FullStatus {
+            project_root: project_key.clone(),
+        };
+        let retry_key = IndexInFlightKey::FullStatusRetry {
+            project_root: project_key,
+        };
+        !self.is_reserved(&full_status_key) && !self.is_reserved(&retry_key)
     }
 
     pub(crate) fn spawn_with<B, S>(
@@ -646,6 +691,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
                 }),
                 scopes: gwt::ProjectIndexScopes::default(),
                 worktrees: std::collections::BTreeMap::new(),
+                coverage: None,
             },
         });
 
@@ -1007,6 +1053,61 @@ mod tests {
             full_probe_calls.load(Ordering::SeqCst),
             1,
             "duplicate Settings.Index refresh requests must collapse into the in-flight full refresh"
+        );
+    }
+
+    #[test]
+    fn repeated_full_status_refresh_suppresses_unchanged_status_broadcast() {
+        let service = super::ProjectIndexBootstrapService::new_for_test();
+        let temp = tempdir().expect("tempdir");
+        let expected_project_root = dunce::canonicalize(temp.path())
+            .unwrap_or_else(|_| temp.path().to_path_buf())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+        let status_probe_calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let status_probe_calls_for_closure = status_probe_calls.clone();
+            let request = service.spawn_full_status_refresh_with_retry(
+                proxy.clone(),
+                temp.path().to_path_buf(),
+                Arc::new(|_project_root: &Path| Ok(())),
+                Arc::new(move |_project_root: &Path| {
+                    status_probe_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                    gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "unchanged full table",
+                    )
+                }),
+                Duration::from_millis(5),
+            );
+            assert_eq!(request, super::ProjectIndexBootstrapRequest::Spawned);
+            wait_for_project_status_detail(&events, &expected_project_root, "unchanged full table");
+            for _ in 0..100 {
+                if service.full_status_is_idle_for_test(temp.path()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        assert_eq!(status_probe_calls.load(Ordering::SeqCst), 2);
+        let recorded = events.lock().expect("events");
+        let full_status_events = recorded
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::ProjectIndexStatus { project_root, status }
+                        if project_root == &expected_project_root
+                            && status.detail == "unchanged full table"
+                )
+            })
+            .count();
+        assert_eq!(
+            full_status_events, 1,
+            "unchanged full status payload should not be re-broadcast"
         );
     }
 

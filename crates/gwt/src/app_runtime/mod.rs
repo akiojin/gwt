@@ -1,5 +1,6 @@
 use super::*;
 use gwt::LaunchWizardAction;
+use std::io::Write as _;
 
 #[derive(Clone)]
 pub enum AppEventProxy {
@@ -1112,29 +1113,76 @@ fn sanitize_image_paste_stem(filename: Option<&str>) -> String {
 }
 
 fn sanitize_file_attachment_name(filename: &str) -> String {
-    let raw_name = Path::new(filename)
-        .file_name()
-        .and_then(|name| name.to_str())
+    let trimmed = filename.trim();
+    let raw_name = trimmed
+        .rsplit(['/', '\\'])
+        .find(|part| !part.trim().is_empty())
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or("file");
     let mut sanitized = String::new();
     let mut previous_dash = false;
-    for character in raw_name.chars().flat_map(char::to_lowercase) {
-        if character.is_ascii_alphanumeric() || character == '.' || character == '_' {
+    for character in raw_name.chars() {
+        let unsafe_character = character.is_control()
+            || matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            );
+        if unsafe_character || character.is_whitespace() || character == '-' {
+            if !previous_dash {
+                sanitized.push('-');
+                previous_dash = true;
+            }
+        } else if character.is_ascii() {
+            sanitized.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else {
             sanitized.push(character);
             previous_dash = false;
-        } else if !previous_dash {
-            sanitized.push('-');
-            previous_dash = true;
         }
     }
     let sanitized = sanitized.trim_matches(['-', '.', '_']);
     if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
         "file".to_string()
+    } else if is_reserved_attachment_basename(sanitized) {
+        format!("file-{sanitized}")
     } else {
         sanitized.to_string()
     }
+}
+
+fn is_reserved_attachment_basename(filename: &str) -> bool {
+    let stem = filename
+        .split('.')
+        .next()
+        .unwrap_or(filename)
+        .trim_matches([' ', '.', '_', '-'])
+        .to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn attachment_storage_paths(
@@ -1261,16 +1309,28 @@ pub(crate) fn prepare_file_attachment(
 }
 
 fn save_file_attachment(file: &PreparedFileAttachment) -> Result<(), FileAttachmentError> {
+    save_file_attachment_with_progress(file, |_bytes_done, _bytes_total| {})
+}
+
+fn save_file_attachment_with_progress(
+    file: &PreparedFileAttachment,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), FileAttachmentError> {
     let Some(storage_path) = file.storage_path.as_ref() else {
         return Ok(());
     };
     if let Some(bytes) = file.bytes.as_ref() {
-        return write_attachment_bytes(storage_path, bytes)
+        return write_attachment_bytes_with_progress(storage_path, bytes, &mut on_progress)
             .map_err(FileAttachmentError::WriteFailed);
     }
     if let Some(source_path) = file.source_path.as_ref() {
-        copy_attachment_file(source_path, storage_path, file.remove_source_after_save)
-            .map_err(FileAttachmentError::WriteFailed)?;
+        copy_attachment_file_with_progress(
+            source_path,
+            storage_path,
+            file.remove_source_after_save,
+            &mut on_progress,
+        )
+        .map_err(FileAttachmentError::WriteFailed)?;
     }
     Ok(())
 }
@@ -1297,6 +1357,116 @@ pub(crate) fn format_file_attachment_prompt(paths: &[String]) -> String {
                 .join(", ")
         ),
     }
+}
+
+fn normalize_attachment_operation_id(operation_id: Option<String>) -> String {
+    operation_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("attachment-{}", image_paste_unique_token()))
+}
+
+fn display_attachment_basename(filename: &str) -> String {
+    filename
+        .trim()
+        .rsplit(['/', '\\'])
+        .find(|part| !part.trim().is_empty())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .unwrap_or("file")
+        .to_string()
+}
+
+fn display_name_for_file_attachment(file: &gwt::FileAttachment) -> String {
+    match file {
+        gwt::FileAttachment::NativePath { path } => display_attachment_basename(path),
+        gwt::FileAttachment::Inline { filename, .. }
+        | gwt::FileAttachment::Uploaded { filename, .. } => display_attachment_basename(filename),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AttachmentProgressUpdate {
+    id: String,
+    operation_id: String,
+    phase: AttachmentProgressPhase,
+    file_index: Option<usize>,
+    file_count: usize,
+    filename: Option<String>,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
+    message: Option<String>,
+}
+
+impl AttachmentProgressUpdate {
+    fn new(
+        id: impl Into<String>,
+        operation_id: impl Into<String>,
+        phase: AttachmentProgressPhase,
+        file_count: usize,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            operation_id: operation_id.into(),
+            phase,
+            file_index: None,
+            file_count,
+            filename: None,
+            bytes_done: None,
+            bytes_total: None,
+            message: None,
+        }
+    }
+
+    fn filename(mut self, filename: Option<String>) -> Self {
+        self.filename = filename;
+        self
+    }
+
+    fn file(mut self, index: usize, filename: String) -> Self {
+        self.file_index = Some(index);
+        self.filename = Some(filename);
+        self
+    }
+
+    fn bytes(mut self, bytes_done: u64, bytes_total: Option<u64>) -> Self {
+        self.bytes_done = Some(bytes_done);
+        self.bytes_total = bytes_total;
+        self
+    }
+
+    fn message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+
+    fn outbound(self, client_id: ClientId) -> OutboundEvent {
+        OutboundEvent::reply(
+            client_id,
+            BackendEvent::AttachmentProgress {
+                id: self.id,
+                operation_id: self.operation_id,
+                phase: self.phase,
+                file_index: self.file_index,
+                file_count: self.file_count,
+                filename: self.filename,
+                bytes_done: self.bytes_done,
+                bytes_total: self.bytes_total,
+                message: self.message,
+            },
+        )
+    }
+
+    fn dispatch(self, proxy: &AppEventProxy, client_id: &ClientId) {
+        proxy.send(UserEvent::Dispatch(vec![self.outbound(client_id.clone())]));
+    }
+}
+
+struct UploadedImagePasteOperation {
+    upload_id: String,
+    mime_type: String,
+    filename: Option<String>,
+    size: u64,
 }
 
 pub(crate) fn prepare_image_paste_file(
@@ -1391,24 +1561,54 @@ fn image_paste_unique_token() -> String {
     format!("{millis}-{sequence}")
 }
 
-fn write_attachment_bytes(storage_path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let Some(parent) = storage_path.parent() else {
-        return Err("attachment path has no parent directory".to_string());
-    };
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    std::fs::write(storage_path, bytes).map_err(|error| error.to_string())
-}
-
-fn copy_attachment_file(
-    source_path: &Path,
+fn write_attachment_bytes_with_progress(
     storage_path: &Path,
-    remove_source_after_save: bool,
+    bytes: &[u8],
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
     let Some(parent) = storage_path.parent() else {
         return Err("attachment path has no parent directory".to_string());
     };
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    std::fs::copy(source_path, storage_path).map_err(|error| error.to_string())?;
+    let total = bytes.len() as u64;
+    on_progress(0, Some(total));
+    std::fs::write(storage_path, bytes).map_err(|error| error.to_string())?;
+    on_progress(total, Some(total));
+    Ok(())
+}
+
+fn copy_attachment_file_with_progress(
+    source_path: &Path,
+    storage_path: &Path,
+    remove_source_after_save: bool,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), String> {
+    let Some(parent) = storage_path.parent() else {
+        return Err("attachment path has no parent directory".to_string());
+    };
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let total = std::fs::metadata(source_path)
+        .ok()
+        .map(|metadata| metadata.len());
+    on_progress(0, total);
+    let mut source = std::fs::File::open(source_path).map_err(|error| error.to_string())?;
+    let mut destination = std::fs::File::create(storage_path).map_err(|error| error.to_string())?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        let read =
+            std::io::Read::read(&mut source, &mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if let Err(error) = destination.write_all(&buffer[..read]) {
+            let _ = std::fs::remove_file(storage_path);
+            return Err(error.to_string());
+        }
+        copied += read as u64;
+        on_progress(copied, total);
+    }
+    destination.flush().map_err(|error| error.to_string())?;
     if remove_source_after_save {
         let _ = std::fs::remove_file(source_path);
     }
@@ -1416,15 +1616,23 @@ fn copy_attachment_file(
 }
 
 fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
+    save_image_paste_file_with_progress(image, |_bytes_done, _bytes_total| {})
+}
+
+fn save_image_paste_file_with_progress(
+    image: &ImagePasteFile,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), ImagePasteError> {
     if let Some(bytes) = image.bytes.as_ref() {
-        return write_attachment_bytes(&image.storage_path, bytes)
+        return write_attachment_bytes_with_progress(&image.storage_path, bytes, &mut on_progress)
             .map_err(ImagePasteError::WriteFailed);
     }
     if let Some(source_path) = image.source_path.as_ref() {
-        return copy_attachment_file(
+        return copy_attachment_file_with_progress(
             source_path,
             &image.storage_path,
             image.remove_source_after_save,
+            &mut on_progress,
         )
         .map_err(ImagePasteError::WriteFailed);
     }
@@ -4111,18 +4319,45 @@ impl AppRuntime {
             } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
             FrontendEvent::PasteImageUploaded {
                 id,
+                operation_id,
                 upload_id,
                 mime_type,
                 filename,
                 size,
-            } => self.paste_image_uploaded_events(
-                &id,
-                &upload_id,
-                &mime_type,
-                filename.as_deref(),
-                size,
-            ),
-            FrontendEvent::AttachFiles { id, files } => self.attach_files_events(&id, files),
+            } => {
+                if operation_id.is_some() {
+                    self.paste_image_uploaded_operation_events(
+                        client_id,
+                        id,
+                        operation_id,
+                        UploadedImagePasteOperation {
+                            upload_id,
+                            mime_type,
+                            filename,
+                            size,
+                        },
+                    )
+                } else {
+                    self.paste_image_uploaded_events(
+                        &id,
+                        &upload_id,
+                        &mime_type,
+                        filename.as_deref(),
+                        size,
+                    )
+                }
+            }
+            FrontendEvent::AttachFiles {
+                id,
+                operation_id,
+                files,
+            } => {
+                if operation_id.is_some() {
+                    self.attach_files_operation_events(client_id, id, operation_id, files)
+                } else {
+                    self.attach_files_events(&id, files)
+                }
+            }
             FrontendEvent::LoadFileTree { id, path } => {
                 let path = path.unwrap_or_default();
                 vec![OutboundEvent::reply(
@@ -5777,6 +6012,52 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn inject_attachment_prompt_events(
+        &mut self,
+        client_id: ClientId,
+        window_id: String,
+        operation_id: String,
+        prompt: String,
+        file_count: usize,
+        filename: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let mut events = vec![AttachmentProgressUpdate::new(
+            window_id.clone(),
+            operation_id.clone(),
+            AttachmentProgressPhase::Injecting,
+            file_count,
+        )
+        .filename(filename.clone())
+        .outbound(client_id.clone())];
+        let terminal_events = self.terminal_input_events(&window_id, &prompt);
+        if terminal_events.is_empty() {
+            events.push(
+                AttachmentProgressUpdate::new(
+                    window_id,
+                    operation_id,
+                    AttachmentProgressPhase::Attached,
+                    file_count,
+                )
+                .filename(filename)
+                .outbound(client_id),
+            );
+        } else {
+            events.extend(terminal_events);
+            events.push(
+                AttachmentProgressUpdate::new(
+                    window_id,
+                    operation_id,
+                    AttachmentProgressPhase::Failed,
+                    file_count,
+                )
+                .filename(filename)
+                .message("failed to inject attachment prompt")
+                .outbound(client_id),
+            );
+        }
+        events
+    }
+
     pub(crate) fn paste_image_events(
         &mut self,
         id: &str,
@@ -5836,6 +6117,119 @@ impl AppRuntime {
             "saved pasted image"
         );
         self.terminal_input_events(id, &image.prompt_text)
+    }
+
+    fn paste_image_uploaded_operation_events(
+        &mut self,
+        client_id: ClientId,
+        id: String,
+        operation_id: Option<String>,
+        upload: UploadedImagePasteOperation,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
+            tracing::debug!(window_id = %id, "uploaded image paste dropped: window not found");
+            return Vec::new();
+        };
+        if self.tab(&address.tab_id).is_none() {
+            tracing::debug!(window_id = %id, "uploaded image paste dropped: project tab not found");
+            return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(&id) else {
+            tracing::debug!(
+                window_id = %id,
+                "uploaded image paste dropped: active agent session not found"
+            );
+            return Vec::new();
+        };
+        let operation_id = normalize_attachment_operation_id(operation_id);
+        let display_filename = upload
+            .filename
+            .as_deref()
+            .map(display_attachment_basename)
+            .or_else(|| Some(display_attachment_basename("image")));
+        let worktree_path = session.worktree_path.clone();
+        let upload_store = self.attachment_uploads.clone();
+        let proxy = self.proxy.clone();
+        let spawner = self.blocking_tasks.clone();
+        let worker_client_id = client_id.clone();
+        let worker_window_id = id.clone();
+        let worker_operation_id = operation_id.clone();
+        let worker_filename = display_filename.clone();
+
+        spawner.spawn(move || {
+            let image = match prepare_uploaded_image_paste_file(
+                &worktree_path,
+                &upload_store,
+                &upload.upload_id,
+                &upload.mime_type,
+                upload.filename.as_deref(),
+                upload.size,
+                &image_paste_unique_token(),
+            ) {
+                Ok(image) => image,
+                Err(error) => {
+                    AttachmentProgressUpdate::new(
+                        worker_window_id.clone(),
+                        worker_operation_id.clone(),
+                        AttachmentProgressPhase::Failed,
+                        1,
+                    )
+                    .file(
+                        0,
+                        worker_filename
+                            .clone()
+                            .unwrap_or_else(|| "image".to_string()),
+                    )
+                    .message(error.to_string())
+                    .dispatch(&proxy, &worker_client_id);
+                    return;
+                }
+            };
+            let progress_filename = worker_filename
+                .clone()
+                .or_else(|| Some(display_attachment_basename(&image.agent_path)));
+            if let Err(error) = save_image_paste_file_with_progress(&image, |bytes_done, total| {
+                AttachmentProgressUpdate::new(
+                    worker_window_id.clone(),
+                    worker_operation_id.clone(),
+                    AttachmentProgressPhase::Staging,
+                    1,
+                )
+                .file(
+                    0,
+                    progress_filename
+                        .clone()
+                        .unwrap_or_else(|| "image".to_string()),
+                )
+                .bytes(bytes_done, total)
+                .dispatch(&proxy, &worker_client_id);
+            }) {
+                AttachmentProgressUpdate::new(
+                    worker_window_id.clone(),
+                    worker_operation_id.clone(),
+                    AttachmentProgressPhase::Failed,
+                    1,
+                )
+                .filename(progress_filename)
+                .message(error.to_string())
+                .dispatch(&proxy, &worker_client_id);
+                return;
+            }
+            proxy.send(UserEvent::AttachmentPromptReady {
+                client_id: worker_client_id,
+                window_id: worker_window_id,
+                operation_id: worker_operation_id,
+                prompt: image.prompt_text,
+                file_count: 1,
+                filename: progress_filename,
+            });
+        });
+
+        vec![
+            AttachmentProgressUpdate::new(id, operation_id, AttachmentProgressPhase::Queued, 1)
+                .filename(display_filename)
+                .outbound(client_id),
+        ]
     }
 
     pub(crate) fn paste_image_uploaded_events(
@@ -5901,6 +6295,137 @@ impl AppRuntime {
             "saved uploaded pasted image"
         );
         self.terminal_input_events(id, &image.prompt_text)
+    }
+
+    fn attach_files_operation_events(
+        &mut self,
+        client_id: ClientId,
+        id: String,
+        operation_id: Option<String>,
+        files: Vec<gwt::FileAttachment>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
+            tracing::debug!(window_id = %id, "file attachment dropped: window not found");
+            return Vec::new();
+        };
+        if self.tab(&address.tab_id).is_none() {
+            tracing::debug!(window_id = %id, "file attachment dropped: project tab not found");
+            return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(&id) else {
+            tracing::debug!(
+                window_id = %id,
+                "file attachment dropped: active agent session not found"
+            );
+            return Vec::new();
+        };
+        if files.is_empty() {
+            tracing::debug!(window_id = %id, "file attachment dropped: empty selection");
+            return Vec::new();
+        }
+
+        let operation_id = normalize_attachment_operation_id(operation_id);
+        let file_count = files.len();
+        let display_filename =
+            (file_count == 1).then(|| display_name_for_file_attachment(&files[0]));
+        let worktree_path = session.worktree_path.clone();
+        let agent_project_root = session.agent_project_root.clone();
+        let runtime_target = session.runtime_target;
+        let upload_store = self.attachment_uploads.clone();
+        let limits = ContentLimits::default();
+        let proxy = self.proxy.clone();
+        let spawner = self.blocking_tasks.clone();
+        let worker_client_id = client_id.clone();
+        let worker_window_id = id.clone();
+        let worker_operation_id = operation_id.clone();
+        let worker_display_filename = display_filename.clone();
+
+        spawner.spawn(move || {
+            let mut agent_paths = Vec::with_capacity(files.len());
+            for (index, file) in files.iter().enumerate() {
+                let filename = display_name_for_file_attachment(file);
+                let token = format!("{}-{index}", image_paste_unique_token());
+                let prepared = match prepare_file_attachment(
+                    &worktree_path,
+                    &agent_project_root,
+                    runtime_target,
+                    file,
+                    &token,
+                    limits,
+                    &upload_store,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        AttachmentProgressUpdate::new(
+                            worker_window_id.clone(),
+                            worker_operation_id.clone(),
+                            AttachmentProgressPhase::Failed,
+                            file_count,
+                        )
+                        .file(index, filename)
+                        .message(error.to_string())
+                        .dispatch(&proxy, &worker_client_id);
+                        return;
+                    }
+                };
+                if let Err(error) =
+                    save_file_attachment_with_progress(&prepared, |bytes_done, total| {
+                        AttachmentProgressUpdate::new(
+                            worker_window_id.clone(),
+                            worker_operation_id.clone(),
+                            AttachmentProgressPhase::Staging,
+                            file_count,
+                        )
+                        .file(index, filename.clone())
+                        .bytes(bytes_done, total)
+                        .dispatch(&proxy, &worker_client_id);
+                    })
+                {
+                    AttachmentProgressUpdate::new(
+                        worker_window_id.clone(),
+                        worker_operation_id.clone(),
+                        AttachmentProgressPhase::Failed,
+                        file_count,
+                    )
+                    .file(index, filename)
+                    .message(error.to_string())
+                    .dispatch(&proxy, &worker_client_id);
+                    return;
+                }
+                agent_paths.push(prepared.agent_path);
+            }
+
+            let prompt = format_file_attachment_prompt(&agent_paths);
+            if prompt.is_empty() {
+                AttachmentProgressUpdate::new(
+                    worker_window_id.clone(),
+                    worker_operation_id.clone(),
+                    AttachmentProgressPhase::Failed,
+                    file_count,
+                )
+                .filename(worker_display_filename.clone())
+                .message("no attachment prompt generated")
+                .dispatch(&proxy, &worker_client_id);
+                return;
+            }
+            proxy.send(UserEvent::AttachmentPromptReady {
+                client_id: worker_client_id,
+                window_id: worker_window_id,
+                operation_id: worker_operation_id,
+                prompt,
+                file_count,
+                filename: worker_display_filename,
+            });
+        });
+
+        vec![AttachmentProgressUpdate::new(
+            id,
+            operation_id,
+            AttachmentProgressPhase::Queued,
+            file_count,
+        )
+        .filename(display_filename)
+        .outbound(client_id)]
     }
 
     pub(crate) fn attach_files_events(
@@ -9462,6 +9987,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
             gwt::LaunchWizardAction::Submit => "submit",
+            gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }
     }
 
@@ -10173,10 +10699,10 @@ mod tests {
     use super::{
         active_work_projection_from_saved, dispatch_agent_launch_success,
         save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
-        AgentLaunchCompletion, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
-        ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
+        AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase,
+        BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask,
+        KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
     };
     use crate::{
         combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
@@ -11069,6 +11595,49 @@ exit 1
     }
 
     #[test]
+    fn file_attachment_prepare_preserves_japanese_unicode_basename() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"unicode-notes");
+
+        let prepared = super::prepare_file_attachment(
+            &worktree,
+            &worktree.display().to_string(),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &gwt::FileAttachment::Inline {
+                filename: "../資料 日本語.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                size: 13,
+                data_base64: payload,
+            },
+            "20260604-inline",
+            ContentLimits::default(),
+            &AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("prepare unicode filename attachment");
+
+        assert_eq!(
+            prepared.storage_path.as_deref(),
+            Some(
+                worktree
+                    .join(".gwt")
+                    .join("drop-files")
+                    .join("20260604-inline-資料-日本語.txt")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            prepared.agent_path,
+            ".gwt/drop-files/20260604-inline-資料-日本語.txt"
+        );
+        assert_eq!(
+            super::format_file_attachment_prompt(&[prepared.agent_path]),
+            "File: \".gwt/drop-files/20260604-inline-資料-日本語.txt\""
+        );
+    }
+
+    #[test]
     fn file_attachment_prepare_copies_native_file_for_docker_agent_path() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo");
@@ -11386,6 +11955,139 @@ exit 1
     }
 
     #[test]
+    fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/file-drop".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "operation_id": "attachment-op-fail",
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": temp.path().display().to_string()
+                }
+            ]
+        }))
+        .expect("deserialize operation attach files event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::AttachmentProgress {
+                    id,
+                    operation_id,
+                    phase: AttachmentProgressPhase::Queued,
+                    ..
+                } if id == &window_id && operation_id == "attachment-op-fail"
+            )),
+            "operation-aware attachment handling should acknowledge queued progress immediately: {events:?}"
+        );
+        wait_for_recorded_event("failed attachment progress", &recorded_events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            &outbound.event,
+                            BackendEvent::AttachmentProgress {
+                                id,
+                                operation_id,
+                                phase: AttachmentProgressPhase::Failed,
+                                message: Some(message),
+                                ..
+                            } if id == &window_id
+                                && operation_id == "attachment-op-fail"
+                                && message.contains("not a file")
+                        ))
+                )
+            })
+        });
+        {
+            let events = recorded_events.lock().expect("event log");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::AttachmentPromptReady { .. })),
+                "failed staging must not enqueue terminal prompt injection"
+            );
+        }
+    }
+
+    #[test]
+    fn file_attachment_copy_reports_byte_progress() {
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("日本語-source.bin");
+        let storage = temp
+            .path()
+            .join("repo")
+            .join(".gwt")
+            .join("drop-files")
+            .join("20260604-日本語-source.bin");
+        let payload = vec![b'x'; 192 * 1024 + 7];
+        fs::write(&source, &payload).expect("write source file");
+        let prepared = super::PreparedFileAttachment {
+            bytes: None,
+            source_path: Some(source.clone()),
+            remove_source_after_save: false,
+            storage_path: Some(storage.clone()),
+            agent_path: ".gwt/drop-files/20260604-日本語-source.bin".to_string(),
+        };
+        let mut progress = Vec::new();
+
+        super::save_file_attachment_with_progress(&prepared, |bytes_done, bytes_total| {
+            progress.push((bytes_done, bytes_total));
+        })
+        .expect("copy attachment with progress");
+
+        assert_eq!(fs::read(&storage).expect("read copied file"), payload);
+        assert!(
+            progress.len() >= 3,
+            "copy should report an initial sample, at least one chunk, and final completion: {progress:?}"
+        );
+        assert_eq!(progress.first(), Some(&(0, Some(192 * 1024 + 7))));
+        assert_eq!(
+            progress.last(),
+            Some(&(192 * 1024 + 7, Some(192 * 1024 + 7)))
+        );
+        assert!(
+            progress
+                .windows(2)
+                .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 == pair[1].1),
+            "copy progress must be monotonic with stable total: {progress:?}"
+        );
+    }
+
+    #[test]
     fn file_attachment_event_saves_prepared_files_incrementally() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo");
@@ -11522,6 +12224,21 @@ exit 1
             status: Some(status.to_string()),
             tool_name: None,
             message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        }
+    }
+
+    fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
+        gwt::RuntimeHookEvent {
+            kind: gwt::RuntimeHookEventKind::CoordinationEvent,
+            source_event: Some("PostToolUse".to_string()),
+            gwt_session_id: Some(session_id.to_string()),
+            agent_session_id: Some("agent-session-1".to_string()),
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: None,
+            tool_name: Some("TodoWrite".to_string()),
+            message: Some("coordination:PostToolUse".to_string()),
             occurred_at: "2026-04-25T00:00:00Z".to_string(),
         }
     }
@@ -13606,7 +14323,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_open_start_work_ensures_remote_develop_without_creating_work_branch() {
+    fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -13619,6 +14336,21 @@ exit 1
         run_git(&repo, &["checkout", "develop"]);
         run_git(&repo, &["remote", "set-head", "origin", "-a"]);
         run_git(&origin, &["branch", "-D", "develop"]);
+        run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        let develop_before_open = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check origin/develop before open");
+        assert!(
+            !develop_before_open.success(),
+            "fixture must start without origin/develop"
+        );
 
         let tab = sample_project_tab(
             "tab-1",
@@ -13659,8 +14391,8 @@ exit 1
             .status()
             .expect("check origin/develop");
         assert!(
-            develop.success(),
-            "opening Start Work should restore origin/develop from the remote default branch"
+            !develop.success(),
+            "opening Start Work must not fetch or restore origin/develop before the user launches"
         );
 
         let refs = gwt_core::process::hidden_command("git")
@@ -18055,13 +18787,9 @@ exit 1
 
         let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert!(matches!(
             events[0].event,
-            BackendEvent::RuntimeHookEvent { .. }
-        ));
-        assert!(matches!(
-            events[1].event,
             BackendEvent::WorkspaceState { .. }
         ));
         assert!(!runtime.active_agent_sessions.contains_key(&window_id));
@@ -18113,13 +18841,207 @@ exit 1
 
         let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
 
+        assert!(events.is_empty());
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_some());
+    }
+
+    #[test]
+    fn app_runtime_runtime_state_hooks_use_status_events_without_browser_hook_event() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. })),
+            "runtime_state hooks are browser-internal noise; status events carry the visible chrome state"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowState { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+    }
+
+    #[test]
+    fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "board-1",
+            WindowPreset::Board,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_runtime_hook_event(runtime_hook_coordination_event("session-1"));
+
         assert_eq!(events.len(), 1);
         assert!(matches!(
             events[0].event,
             BackendEvent::RuntimeHookEvent { .. }
         ));
-        assert!(runtime.window_lookup.contains_key(&window_id));
-        assert!(runtime.tabs[0].workspace.window("codex-1").is_some());
+    }
+
+    #[test]
+    fn app_runtime_runtime_state_bursts_emit_no_browser_hook_events() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let browser_hook_events = (0..1_000)
+            .flat_map(|_| {
+                runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"))
+            })
+            .filter(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. }))
+            .count();
+
+        assert_eq!(browser_hook_events, 0);
+    }
+
+    #[test]
+    fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = (0..1_000)
+            .flat_map(|_| {
+                runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. }))
+                .count(),
+            0
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::WindowState { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, BackendEvent::TerminalStatus { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let first_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let duplicate_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let changed_events =
+            runtime.handle_runtime_hook_event(runtime_hook_state("Running", "session-1"));
+
+        assert!(first_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+        assert!(
+            duplicate_events.is_empty(),
+            "unchanged RuntimeState hooks should not fan out status events"
+        );
+        assert!(changed_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::WindowState {
+                state: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+        assert!(changed_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+        let _ = runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::WorkspaceState { .. })
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
     }
 
     #[test]
@@ -18309,6 +19231,61 @@ exit 1
         assert_eq!(window.geometry.y, 78.0);
         assert_eq!(window.geometry.width, 720.0);
         assert_eq!(window.geometry.height, 480.0);
+    }
+
+    #[test]
+    fn app_runtime_duplicate_viewport_update_skips_workspace_broadcast_and_persist() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo,
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let viewport = gwt::CanvasViewport {
+            x: 12.0,
+            y: 34.0,
+            zoom: 1.25,
+        };
+
+        assert_eq!(runtime.update_viewport_events(viewport.clone()).len(), 1);
+        assert_eq!(runtime.persist_dispatcher.enqueued_count(), 1);
+
+        assert!(
+            runtime.update_viewport_events(viewport).is_empty(),
+            "duplicate viewport payload should not broadcast a workspace_state",
+        );
+        assert_eq!(
+            runtime.persist_dispatcher.enqueued_count(),
+            1,
+            "duplicate viewport payload should not enqueue another persist snapshot",
+        );
+
+        assert_eq!(
+            runtime
+                .update_viewport_events(gwt::CanvasViewport {
+                    x: 12.0,
+                    y: 34.0,
+                    zoom: 1.5,
+                })
+                .len(),
+            1,
+            "changed zoom must still broadcast workspace_state",
+        );
+        assert_eq!(
+            runtime.persist_dispatcher.enqueued_count(),
+            2,
+            "changed viewport must still enqueue persistence",
+        );
     }
 
     #[test]
@@ -22000,13 +22977,16 @@ exit 1
 
         assert!(events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. })));
+            .all(|event| !matches!(event.event, BackendEvent::RuntimeHookEvent { .. })));
         assert!(
             !events
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
             "non-structural runtime hook state changes must not force a full workspace_state"
         );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowState { .. })));
         assert!(events
             .iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));

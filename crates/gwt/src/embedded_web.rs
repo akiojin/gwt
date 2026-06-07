@@ -145,6 +145,11 @@ pub fn socket_receive_dispatcher_js() -> &'static str {
     include_str!("../web/socket-receive-dispatcher.js")
 }
 
+// SPEC-1939 Phase 24 — per-window terminal output batching before xterm write.
+pub fn terminal_output_buffer_js() -> &'static str {
+    include_str!("../web/terminal-output-buffer.js")
+}
+
 // Issue #2698 PR 1 (B7) — interaction-guard primitive that defers
 // destructive wizard re-renders while the user has a native <select>
 // dropdown open.
@@ -329,6 +334,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/socket-receive-dispatcher.js",
         source: socket_receive_dispatcher_js,
         marker: "createSocketReceiveDispatcher",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-output-buffer.js",
+        source: terminal_output_buffer_js,
+        marker: "createTerminalOutputBatcher",
     },
     RootJsModuleAsset {
         path: "/interaction-guard.js",
@@ -787,8 +797,16 @@ mod tests {
         assert!(
             html.contains("kind: \"attach_files\"")
                 && html.contains("source: \"uploaded\"")
-                && html.contains("upload_id"),
-            "expected browser file drops to send uploaded attach_files payloads",
+                && html.contains("upload_id")
+                && html.contains("operation_id"),
+            "expected browser file drops to send uploaded attach_files payloads with operation ids",
+        );
+        assert!(
+            html.contains("attachmentProgressControllers")
+                && html.contains("handleAttachmentProgress")
+                && html.contains("workspaceWindowElement")
+                && !html.contains("attachment-progress__cancel"),
+            "expected attachment progress to be scoped to the Agent window without a Cancel action",
         );
         let drop_start = html
             .find("function installTerminalFileDropHandlers")
@@ -832,8 +850,10 @@ mod tests {
             "expected native drops to map the WebView pointer to the terminal under it",
         );
         assert!(
-            html.contains("source: \"native_path\"") && html.contains("kind: \"attach_files\""),
-            "expected native drops to send native_path attach_files payloads",
+            html.contains("source: \"native_path\"")
+                && html.contains("kind: \"attach_files\"")
+                && html.contains("operation_id"),
+            "expected native drops to send native_path attach_files payloads with operation ids",
         );
     }
 
@@ -875,8 +895,16 @@ mod tests {
     #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
+        let streaming_merge = regex::Regex::new(
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?mergeChunks:\s*\(chunks,\s*windowId\)\s*=>\s*\{[\s\S]*?decoderMap\.get\(windowId\)[\s\S]*?chunks\s*\.\s*map\(\(chunk\) => decoder\.decode\(decodeBase64\(chunk\),\s*\{\s*stream:\s*true\s*\}\)\)",
+        )
+        .expect("valid regex");
+        let streaming_enqueue = regex::Regex::new(
+            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);",
+        )
+        .expect("valid regex");
         let streaming_write = regex::Regex::new(
-            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+            r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
         .expect("valid regex");
         // SPEC-2008 Phase 26.B / FR-056: snapshot replays must force the
@@ -902,12 +930,27 @@ mod tests {
             "expected terminal viewport refresh scheduling helper",
         );
         assert!(
-            html.contains("viewportRefreshFrame"),
-            "expected terminal runtime to debounce viewport refreshes",
+            html.contains("createTerminalViewportRefreshScheduler({")
+                && html.contains("terminalViewportRefreshScheduler.enqueue(windowId)"),
+            "expected terminal runtime to route viewport refreshes through the shared scheduler",
+        );
+        assert!(
+            html.contains(
+                r#"import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";"#
+            ),
+            "expected app.js to import the terminal output batcher root module",
+        );
+        assert!(
+            streaming_merge.is_match(html),
+            "expected terminal output batcher to decode encoded chunks during scheduled flush",
+        );
+        assert!(
+            streaming_enqueue.is_match(html),
+            "expected streaming terminal output to enqueue encoded chunks without receive-path decode",
         );
         assert!(
             streaming_write.is_match(html),
-            "expected streaming terminal output to refresh viewport after xterm parses it",
+            "expected terminal output batch flushes to refresh viewport after xterm parses them",
         );
         assert!(
             snapshot_write.is_match(html),
@@ -930,12 +973,12 @@ mod tests {
             "expected document visibility restore to re-arm visible terminal refreshes",
         );
         assert!(
-            html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
-            "expected pending terminal viewport refresh frames to be cancelled during cleanup",
+            html.contains("terminalOutputBatcher.clear(windowId);"),
+            "expected pending terminal output batches to be cleared on snapshot and removed-window cleanup",
         );
         assert!(
-            html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),
-            "expected terminal cleanup to guard non-terminal windows before cancelling refresh frames",
+            html.contains("terminalViewportRefreshScheduler?.clear(windowId);"),
+            "expected terminal cleanup to clear pending shared viewport refreshes",
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
@@ -957,7 +1000,8 @@ mod tests {
                 && html.contains("const previousHeight = parseFloat(element.style.height")
                 && html.contains("const dimensionsChanged =")
                 && html.contains("(wasMinimized && !windowData.minimized) || dimensionsChanged",)
-                && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
+                && html
+                    .contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
             "expected terminals to persist fitted geometry to backend on \
              restore-from-minimized OR window resize (Tile/Stack/Align)",
         );
@@ -3010,7 +3054,7 @@ mod tests {
         // guard preamble between the case label and the assignment. A
         // null tombstone must not clear an open-error modal during reconnect.
         let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
         )
         .expect("valid regex");
         assert!(
@@ -3208,7 +3252,7 @@ mod tests {
         // guard preamble between the case label and the mutation. A
         // null tombstone must not clear an open-error modal during reconnect.
         let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
         let wizard_open_error_event = regex::Regex::new(
@@ -3782,9 +3826,10 @@ mod tests {
              can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
         );
         assert!(
-            body.contains("fitTerminal,"),
-            "expected attachHostResizeReflow to receive fitTerminal so cols/rows refit and \
-             UpdateWindowGeometry persists to the backend; body: {body}",
+            js.contains("createTerminalFitScheduler({ fitTerminal })")
+                && body.contains("fitTerminal: scheduleTerminalFit"),
+            "expected attachHostResizeReflow to route fit requests through the shared \
+             terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
         );
         assert!(
             body.contains("syncMaximizedWindowsToViewport()"),
@@ -3836,7 +3881,7 @@ mod tests {
     fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
         let js = app_js();
         let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*requestAnimationFrame\(syncMaximizedWindowsToViewport\);",
+            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*scheduleMaximizedWindowsToViewportSync\(\);",
         )
         .expect("valid regex");
         let captures = visibility_block
@@ -3861,6 +3906,16 @@ mod tests {
             "expected hidden->visible transition to schedule terminal focus activation \
              (fit + viewport refresh + focus) so scrollback responds without a manual \
              resize (SPEC-2008 FR-051); body: {body}",
+        );
+        assert!(
+            js.contains("function scheduleMaximizedWindowsToViewportSync()")
+                && js.contains("let maximizedViewportSyncFrame = null;"),
+            "expected maximized viewport sync to be routed through the coalesced \
+             frame scheduler (SPEC-1939 Phase 52)",
+        );
+        assert!(
+            !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
+            "expected renderWorkspace to avoid raw maximized viewport sync rAF fan-out",
         );
     }
 }
