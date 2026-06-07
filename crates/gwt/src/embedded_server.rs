@@ -675,6 +675,8 @@ fn display_host(ip: IpAddr) -> String {
 ///
 /// `/healthz` is demoted to `tracing::debug!` so periodic health probes do not
 /// dominate the stderr stream when the operator wants to spot real LAN access.
+/// Successful `/internal/hook-live` posts are internal hook-forwarding traffic
+/// and are omitted entirely; failures remain visible for diagnosis.
 async fn access_log_middleware(
     State(sink): State<AccessLogSink>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -703,6 +705,10 @@ async fn access_log_middleware(
         elapsed_ms,
     };
 
+    if should_drop_access_log_record(&record) {
+        return response;
+    }
+
     if record.path == "/healthz" {
         tracing::debug!(
             target: "gwt_access",
@@ -729,6 +735,10 @@ async fn access_log_middleware(
     sink.record(record);
 
     response
+}
+
+fn should_drop_access_log_record(record: &AccessLogRecord) -> bool {
+    record.method == "POST" && record.path == "/internal/hook-live" && record.status == 204
 }
 
 async fn websocket_handler(
@@ -981,6 +991,21 @@ mod tests {
             },
             events,
         )
+    }
+
+    fn sample_runtime_hook_event() -> RuntimeHookEvent {
+        RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: Some("agent-1".to_string()),
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/runtime".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: Some("Bash".to_string()),
+            message: None,
+            occurred_at: "2026-04-21T00:00:00Z".to_string(),
+        }
     }
 
     #[test]
@@ -1310,18 +1335,7 @@ mod tests {
             "expected embedded server to serve the segmented theme toggle module",
         );
 
-        let event = RuntimeHookEvent {
-            kind: RuntimeHookEventKind::RuntimeState,
-            source_event: Some("PreToolUse".to_string()),
-            gwt_session_id: Some("session-1".to_string()),
-            agent_session_id: Some("agent-1".to_string()),
-            project_root: Some("E:/gwt/test-repo".to_string()),
-            branch: Some("feature/runtime".to_string()),
-            status: Some("Running".to_string()),
-            tool_name: Some("Bash".to_string()),
-            message: None,
-            occurred_at: "2026-04-21T00:00:00Z".to_string(),
-        };
+        let event = sample_runtime_hook_event();
 
         let unauthorized = client
             .post(&hook.url)
@@ -1358,6 +1372,77 @@ mod tests {
                         && recorded_event.agent_session_id.as_deref() == Some("agent-1")
             )
         }));
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn successful_hook_live_requests_do_not_fill_access_log_ring() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("server");
+
+        let hook = server.hook_forward_target();
+        let client = reqwest::blocking::Client::new();
+        let accepted = client
+            .post(&hook.url)
+            .bearer_auth(&hook.token)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("authorized hook request");
+        assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
+
+        let records = server.access_log().snapshot();
+        assert!(
+            records
+                .iter()
+                .all(|record| record.path != "/internal/hook-live"),
+            "successful internal hook-live traffic must not evict operator-relevant access records"
+        );
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn unsuccessful_hook_live_requests_remain_in_access_log_ring() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients,
+            pty_writers,
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("server");
+
+        let hook = server.hook_forward_target();
+        let client = reqwest::blocking::Client::new();
+        let unauthorized = client
+            .post(&hook.url)
+            .json(&sample_runtime_hook_event())
+            .send()
+            .expect("unauthorized hook request");
+        assert_eq!(unauthorized.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let records = server.access_log().snapshot();
+        let hook_record = records
+            .iter()
+            .find(|record| record.path == "/internal/hook-live")
+            .expect("failed hook-live access should remain visible");
+        assert_eq!(hook_record.method, "POST");
+        assert_eq!(hook_record.status, 401);
 
         server.shutdown();
     }

@@ -139,7 +139,9 @@ impl AppRuntime {
         let Some(tab) = self.active_tab_mut() else {
             return Vec::new();
         };
-        tab.workspace.update_viewport(viewport);
+        if !tab.workspace.update_viewport(viewport) {
+            return Vec::new();
+        }
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }

@@ -234,6 +234,22 @@ pub struct WorktreeMeta {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectIndexStatusCoverageScope {
+    CurrentWorktree,
+    AllWorktrees,
+    PartialAllWorktrees,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ProjectIndexStatusCoverage {
+    pub scope: ProjectIndexStatusCoverageScope,
+    pub probed_worktrees: usize,
+    pub total_worktrees: usize,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ProjectIndexStatusView {
     pub state: ProjectIndexStatusState,
@@ -246,6 +262,8 @@ pub struct ProjectIndexStatusView {
     pub scopes: ProjectIndexScopes,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub worktrees: BTreeMap<String, WorktreeMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ProjectIndexStatusCoverage>,
 }
 
 impl ProjectIndexStatusView {
@@ -257,7 +275,13 @@ impl ProjectIndexStatusView {
             progress: None,
             scopes: ProjectIndexScopes::default(),
             worktrees: BTreeMap::new(),
+            coverage: None,
         }
+    }
+
+    fn with_coverage(mut self, coverage: ProjectIndexStatusCoverage) -> Self {
+        self.coverage = Some(coverage);
+        self
     }
 }
 
@@ -435,6 +459,7 @@ pub fn build_aggregated_status_view(
         progress: None,
         scopes,
         worktrees,
+        coverage: None,
     }
 }
 
@@ -550,6 +575,65 @@ enum StatusProbeScope {
     CurrentWorktree,
 }
 
+#[derive(Debug, Clone)]
+struct ProbeInputSelection {
+    inputs: Vec<WorktreeProbeInput>,
+    coverage: ProjectIndexStatusCoverage,
+}
+
+const DEFAULT_ALL_WORKTREE_STATUS_BATCH_LIMIT: usize = 32;
+
+fn all_worktree_status_batch_limit() -> usize {
+    std::env::var("GWT_INDEX_STATUS_WORKTREE_BATCH_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_ALL_WORKTREE_STATUS_BATCH_LIMIT)
+}
+
+fn select_probe_inputs_for_scope(
+    inputs: Vec<WorktreeProbeInput>,
+    probe_scope: StatusProbeScope,
+    current_worktree_root: Option<&Path>,
+    all_worktree_limit: usize,
+) -> ProbeInputSelection {
+    let total_worktrees = inputs.len();
+    match probe_scope {
+        StatusProbeScope::CurrentWorktree => {
+            let selected = current_worktree_root
+                .map(|root| collect_current_worktree_probe_inputs(inputs, root))
+                .unwrap_or_default();
+            ProbeInputSelection {
+                coverage: ProjectIndexStatusCoverage {
+                    scope: ProjectIndexStatusCoverageScope::CurrentWorktree,
+                    probed_worktrees: selected.len(),
+                    total_worktrees,
+                    truncated: false,
+                },
+                inputs: selected,
+            }
+        }
+        StatusProbeScope::AllWorktrees => {
+            let limit = all_worktree_limit.max(1);
+            let truncated = total_worktrees > limit;
+            let selected: Vec<WorktreeProbeInput> = inputs.into_iter().take(limit).collect();
+            ProbeInputSelection {
+                coverage: ProjectIndexStatusCoverage {
+                    scope: if truncated {
+                        ProjectIndexStatusCoverageScope::PartialAllWorktrees
+                    } else {
+                        ProjectIndexStatusCoverageScope::AllWorktrees
+                    },
+                    probed_worktrees: selected.len(),
+                    total_worktrees,
+                    truncated,
+                },
+                inputs: selected,
+            }
+        }
+    }
+}
+
 fn aggregate_project_index_status_for_path_inner(
     project_root: &Path,
     probe_scope: StatusProbeScope,
@@ -567,6 +651,25 @@ fn aggregate_project_index_status_for_path_inner(
             "No origin remote configured",
         ));
     };
+    let selection = select_probe_inputs_for_scope(
+        list_worktree_probe_inputs(&repo_root)?,
+        probe_scope,
+        context.current_worktree_root.as_deref(),
+        all_worktree_status_batch_limit(),
+    );
+    if selection.inputs.is_empty() {
+        let detail = match probe_scope {
+            StatusProbeScope::CurrentWorktree => {
+                "No matching current worktree for project index status"
+            }
+            StatusProbeScope::AllWorktrees => "No active worktrees for project index status",
+        };
+        return Ok(
+            ProjectIndexStatusView::new(ProjectIndexStatusState::Skipped, detail)
+                .with_coverage(selection.coverage),
+        );
+    }
+
     let runtime_started = Instant::now();
     let report =
         gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
@@ -577,19 +680,9 @@ fn aggregate_project_index_status_for_path_inner(
         "project index runtime ensured for aggregated status"
     );
 
-    let inputs = match probe_scope {
-        StatusProbeScope::AllWorktrees => list_worktree_probe_inputs(&repo_root)?,
-        StatusProbeScope::CurrentWorktree => {
-            let inputs = list_worktree_probe_inputs(&repo_root)?;
-            if let Some(current_worktree_root) = context.current_worktree_root.as_deref() {
-                collect_current_worktree_probe_inputs(inputs, current_worktree_root)
-            } else {
-                inputs
-            }
-        }
-    };
-    let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(inputs.len());
-    for input in inputs {
+    let coverage = selection.coverage;
+    let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
+    for input in selection.inputs {
         let payload = probe_worktree_status(&repo_root, &repo_hash, &input.worktree_hash);
         probes.push(WorktreeProbeOutcome {
             input,
@@ -597,10 +690,15 @@ fn aggregate_project_index_status_for_path_inner(
         });
     }
 
-    Ok(build_aggregated_status_view(
-        report.runner_hash.as_str(),
-        &probes,
-    ))
+    let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
+    if coverage.truncated {
+        view.detail = format!(
+            "Partial status: probed {}/{} worktrees; {}",
+            coverage.probed_worktrees, coverage.total_worktrees, view.detail
+        );
+    }
+    view.coverage = Some(coverage);
+    Ok(view)
 }
 
 fn collect_current_worktree_probe_inputs(
@@ -740,7 +838,21 @@ fn probe_worktree_status(
         .current_dir(repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
-    tracing::info!(
+    if !output.status.success() {
+        tracing::warn!(
+            target: "gwt::index",
+            project_root = %repo_root.display(),
+            worktree_hash,
+            elapsed_ms = runner_started.elapsed().as_millis() as u64,
+            exit_status = %output.status,
+            "project index status runner failed for worktree"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("runner exit {}: {detail}", output.status));
+    }
+    tracing::debug!(
         target: "gwt::index",
         project_root = %repo_root.display(),
         worktree_hash,
@@ -748,12 +860,6 @@ fn probe_worktree_status(
         exit_status = %output.status,
         "project index status runner completed for worktree"
     );
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("runner exit {}: {detail}", output.status));
-    }
     serde_json::from_slice(&output.stdout)
         .map_err(|err| format!("parse project index status: {err}"))
 }
@@ -1065,6 +1171,7 @@ where
         }),
         scopes: initial_scopes.clone(),
         worktrees: initial_worktrees.clone(),
+        coverage: None,
     });
 
     let project_root_for_thread = project_root.clone();
@@ -1087,6 +1194,7 @@ where
                             }),
                             scopes: initial_scopes.clone(),
                             worktrees: initial_worktrees.clone(),
+                            coverage: None,
                         });
                     }
                     Err(error) => {
@@ -1512,6 +1620,7 @@ detached
                 ..Default::default()
             },
             worktrees: BTreeMap::new(),
+            coverage: None,
         };
         std::fs::write(
             &fixture_path,
@@ -1677,6 +1786,7 @@ detached
             progress: None,
             scopes: ProjectIndexScopes::default(),
             worktrees: BTreeMap::new(),
+            coverage: None,
         };
 
         let payload = serde_json::to_value(&view).expect("serialize ready view");
@@ -1709,6 +1819,7 @@ detached
             }),
             scopes: ProjectIndexScopes::default(),
             worktrees: BTreeMap::new(),
+            coverage: None,
         };
 
         let payload = serde_json::to_value(&view).expect("serialize repairing view");
@@ -1919,6 +2030,64 @@ detached
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].worktree_hash, "current-hash");
         assert_eq!(filtered[0].branch, "develop");
+    }
+
+    #[test]
+    fn current_worktree_probe_selection_without_match_does_not_fall_back_to_all_worktrees() {
+        let current = tempfile::tempdir().expect("current worktree");
+        let inactive_a = tempfile::tempdir().expect("inactive worktree a");
+        let inactive_b = tempfile::tempdir().expect("inactive worktree b");
+        let inputs = vec![
+            WorktreeProbeInput {
+                worktree_hash: "inactive-a".to_string(),
+                branch: "feature/a".to_string(),
+                path: inactive_a.path().to_path_buf(),
+            },
+            WorktreeProbeInput {
+                worktree_hash: "inactive-b".to_string(),
+                branch: "feature/b".to_string(),
+                path: inactive_b.path().to_path_buf(),
+            },
+        ];
+
+        let selection = select_probe_inputs_for_scope(
+            inputs,
+            StatusProbeScope::CurrentWorktree,
+            Some(current.path()),
+            32,
+        );
+
+        assert!(selection.inputs.is_empty());
+        assert_eq!(
+            selection.coverage.scope,
+            ProjectIndexStatusCoverageScope::CurrentWorktree
+        );
+        assert_eq!(selection.coverage.probed_worktrees, 0);
+        assert_eq!(selection.coverage.total_worktrees, 2);
+        assert!(!selection.coverage.truncated);
+    }
+
+    #[test]
+    fn all_worktree_probe_selection_is_batch_limited_and_reports_partial_coverage() {
+        let inputs: Vec<WorktreeProbeInput> = (0..5)
+            .map(|index| WorktreeProbeInput {
+                worktree_hash: format!("wt-{index}"),
+                branch: format!("branch-{index}"),
+                path: PathBuf::from(format!("/tmp/worktree-{index}")),
+            })
+            .collect();
+
+        let selection =
+            select_probe_inputs_for_scope(inputs, StatusProbeScope::AllWorktrees, None, 3);
+
+        assert_eq!(selection.inputs.len(), 3);
+        assert_eq!(
+            selection.coverage.scope,
+            ProjectIndexStatusCoverageScope::PartialAllWorktrees
+        );
+        assert_eq!(selection.coverage.probed_worktrees, 3);
+        assert_eq!(selection.coverage.total_worktrees, 5);
+        assert!(selection.coverage.truncated);
     }
 
     #[test]
@@ -2157,6 +2326,7 @@ detached
             progress: None,
             scopes,
             worktrees: BTreeMap::new(),
+            coverage: None,
         }
     }
 
@@ -2384,6 +2554,7 @@ detached
             }),
             scopes,
             worktrees,
+            coverage: None,
         };
 
         let payload = serde_json::to_value(&view).expect("serialize aggregated view");

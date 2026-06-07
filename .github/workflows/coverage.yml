@@ -36,7 +36,7 @@ jobs:
         run: cargo llvm-cov report -p gwt-core -p gwt --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           flags: rust

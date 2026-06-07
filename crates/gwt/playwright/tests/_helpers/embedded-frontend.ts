@@ -44,6 +44,7 @@ const ROOT_MODULES = new Set([
   "socket-receive-dispatcher.js",
   "terminal-copy-shortcut.js",
   "terminal-context-menu.js",
+  "terminal-output-buffer.js",
   "terminal-wheel-scroll.js",
   "terminal-viewport-reflow.js",
   "theme-manager.js",
