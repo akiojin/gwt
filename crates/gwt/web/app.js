@@ -2289,6 +2289,59 @@
 
       let presetModalFocusReturn = null;
       let presetModalFocusTrapRelease = null;
+      // SPEC-2356 "Surface Deck" — arrow-key roving across the 2-column
+      // preset grid. Buttons are walked in document order; ←→ step within a
+      // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
+      // currently-focused tile so the keyboard glow tracks the cursor.
+      const PRESET_GRID_COLUMNS = 2;
+      function presetRovingButtons() {
+        return [...modal.querySelectorAll(".preset-button")];
+      }
+      function setActivePresetButton(buttons, index) {
+        if (!buttons.length) return;
+        const clamped = Math.max(0, Math.min(index, buttons.length - 1));
+        buttons.forEach((button, i) => {
+          button.classList.toggle("is-active", i === clamped);
+        });
+        const target = buttons[clamped];
+        if (target && typeof target.focus === "function") {
+          try { target.focus({ preventScroll: true }); }
+          catch { target.focus(); }
+        }
+      }
+      function handlePresetRovingKeydown(event) {
+        const key = event.key;
+        if (
+          key !== "ArrowRight" &&
+          key !== "ArrowLeft" &&
+          key !== "ArrowUp" &&
+          key !== "ArrowDown" &&
+          key !== "Enter"
+        ) {
+          return;
+        }
+        const buttons = presetRovingButtons();
+        if (!buttons.length) return;
+        let current = buttons.indexOf(document.activeElement);
+        if (current < 0) {
+          current = buttons.findIndex((button) =>
+            button.classList.contains("is-active"),
+          );
+          if (current < 0) current = 0;
+        }
+        if (key === "Enter") {
+          event.preventDefault();
+          buttons[current].click();
+          return;
+        }
+        event.preventDefault();
+        let next = current;
+        if (key === "ArrowRight") next = Math.min(current + 1, buttons.length - 1);
+        else if (key === "ArrowLeft") next = Math.max(current - 1, 0);
+        else if (key === "ArrowDown") next = Math.min(current + PRESET_GRID_COLUMNS, buttons.length - 1);
+        else if (key === "ArrowUp") next = Math.max(current - PRESET_GRID_COLUMNS, 0);
+        setActivePresetButton(buttons, next);
+      }
       function openModal() {
         // SPEC-2356 — capture trigger BEFORE adding .open so we can
         // restore focus on close. The preset modal is invoked via the
@@ -2306,6 +2359,12 @@
         if (presetShell) {
           presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
         }
+        // SPEC-2356 "Surface Deck" — drop focus onto the first preset tile so
+        // arrow-key roving works immediately without a stray Tab.
+        const buttons = presetRovingButtons();
+        if (buttons.length) {
+          setActivePresetButton(buttons, 0);
+        }
       }
 
       function closeModal() {
@@ -2322,6 +2381,10 @@
             catch { presetModalFocusReturn.focus(); }
           }
           presetModalFocusReturn = null;
+          // SPEC-2356 — clear the roving highlight so a re-open starts clean.
+          for (const button of presetRovingButtons()) {
+            button.classList.remove("is-active");
+          }
         }
       }
 
@@ -13191,12 +13254,13 @@
             state.notice = "";
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            // SPEC-2356 — feed git layer count into the Operator Status Strip.
+            // SPEC-2356 — feed branch count into the Operator Status Strip WK
+            // cell. (The dead Sidebar Layers `git` counter was removed in the
+            // operator chrome cleanup, so only `branches` is forwarded now.)
             try {
               const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
               window.__operatorShell?.applyTelemetryCounts?.({
                 branches: branchesCount,
-                git: branchesCount,
               });
             } catch (e) {
               console.warn("operator branch telemetry failed", e);
@@ -14840,6 +14904,11 @@
           closeModal();
         });
       }
+
+      // SPEC-2356 "Surface Deck" — arrow-key roving + Enter-to-deploy. Esc is
+      // already handled by the global modal close handler, so the roving
+      // listener only needs the directional keys and Enter.
+      modal.addEventListener("keydown", handlePresetRovingKeydown);
 
       // SPEC-2356 — bridge Command Palette + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or

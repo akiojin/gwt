@@ -121,11 +121,28 @@ test("index.html declares Operator chrome scaffold", () => {
   }
 });
 
-test("project bar exposes a Layers column with three layers", () => {
-  const layers = document.querySelectorAll(".op-sidebar__section .op-layer[data-layer]");
-  assert.equal(layers.length, 3, "expected three sidebar layers");
-  const labels = Array.from(layers).map((el) => el.dataset.layer);
-  assert.deepEqual(labels.sort(), ["agents", "git", "hooks"]);
+test("SPEC-2356 operator chrome cleanup retires the dead Layers section", () => {
+  // The Layers toggles (Agents / Git / Hooks) only set dataset.opLayer* on the
+  // document element; no CSS ever reads those, so toggling was a no-op. The
+  // section + its counters are removed so the sidebar only carries actionable
+  // controls. Telemetry counts now live solely in the Status Strip.
+  assert.equal(
+    document.querySelectorAll(".op-sidebar .op-layer[data-layer]").length,
+    0,
+    "Layers toggle buttons must be removed from the sidebar",
+  );
+  for (const id of [
+    "op-layer-count-agents",
+    "op-layer-count-git",
+    "op-layer-count-hooks",
+    "op-sidebar-count",
+  ]) {
+    assert.equal(document.getElementById(id), null, `${id} counter must be removed`);
+  }
+  const headings = Array.from(document.querySelectorAll(".op-sidebar__heading span")).map((el) =>
+    el.textContent?.trim(),
+  );
+  assert.ok(!headings.includes("Layers"), "Layers heading must be removed");
 });
 
 test("project bar and command palette expose Start Work outside the Branches surface", () => {
@@ -162,12 +179,12 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
+test("Status Strip ACTIVE counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
   // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
-  // the Sidebar Layers "Agents" row showed e.g. 4 when only 2 agent panes
-  // were live. The DOM walk must scope to presets that represent agent panes.
+  // the Status Strip ACTIVE cell showed e.g. 4 when only 2 agent panes were
+  // live. The DOM walk must scope to presets that represent agent panes.
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -184,7 +201,7 @@ test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   assert.match(
     body,
     /presetSupportsWaitingStatus/,
-    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Sidebar Agents counter",
+    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Status Strip ACTIVE counter",
   );
 });
 
@@ -221,19 +238,138 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Workspace sidebar exposes only Layers and Quick sections (SPEC-2359 W-12 FR-351)", () => {
+test("Sidebar groups actionable controls into Quick / Windows / Palette / Update (SPEC-2356)", () => {
+  // SPEC-2356 operator chrome cleanup: the right-bottom floating controls and
+  // the dead Layers section are gone. The sidebar is the single home for the
+  // Command Palette, window operations (Tile / Stack / Align / Windows / Add),
+  // and the Update CTA — in that order, after the Quick navigation block.
   const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
   const headings = sections.map((section) =>
     section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
   );
   assert.deepEqual(
-    headings.slice(0, 2),
-    ["Layers", "Quick"],
-    "Sidebar keeps Layers and Quick after the Active Works overview is retired",
+    headings,
+    ["Quick", "Windows", "Palette", "Update"],
+    "Sidebar order must be Quick → Windows → Palette → Update with no Layers section",
   );
   assert.ok(
     !headings.includes("Active Works"),
     "Active Works heading must be removed from the sidebar",
+  );
+  assert.ok(
+    !headings.includes("Layers"),
+    "dead Layers heading must be removed from the sidebar",
+  );
+});
+
+test("Sidebar Windows section carries the flat window-operation controls (SPEC-2356)", () => {
+  // Window operations move out of the right-bottom floating toolbar into a flat
+  // Windows section in the sidebar. The hover-reveal peek 帯 nesting is gone;
+  // the controls sit directly inside the section so the whole sidebar reveal
+  // exposes them.
+  const windowsSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Windows",
+  );
+  assert.ok(windowsSection, "expected a Windows section in the sidebar");
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(
+      windowsSection.contains(control),
+      `${id} must live inside the sidebar Windows section`,
+    );
+  }
+  // The window-list dropdown panel rides along with its trigger.
+  assert.ok(
+    windowsSection.querySelector("#window-list-panel"),
+    "window-list-panel must move into the Windows section with its trigger",
+  );
+});
+
+test("Sidebar Palette section hosts the Command Palette trigger (SPEC-2356)", () => {
+  const paletteSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Palette",
+  );
+  assert.ok(paletteSection, "expected a Palette section in the sidebar");
+  const trigger = document.getElementById("op-palette-button");
+  assert.ok(trigger, "expected op-palette-button");
+  assert.ok(paletteSection.contains(trigger), "Command Palette trigger must live in the sidebar");
+});
+
+test("Right-bottom floating controls are removed; the canvas corner is empty (SPEC-2356)", () => {
+  // The whole `.floating-actions` / `#floating-window-controls` toolbar and the
+  // window-controls peek 帯 are gone. Nothing floats over the bottom-right of
+  // the canvas anymore.
+  assert.equal(
+    document.querySelector(".floating-actions"),
+    null,
+    ".floating-actions toolbar must be removed",
+  );
+  assert.equal(
+    document.getElementById("floating-window-controls"),
+    null,
+    "#floating-window-controls root must be removed",
+  );
+  assert.equal(
+    document.getElementById("floating-window-controls-actions"),
+    null,
+    "floating-window-controls-actions group must be removed",
+  );
+  assert.equal(
+    document.querySelector(".op-window-controls-peek"),
+    null,
+    "window controls peek 帯 must be removed — the sidebar peek reveals the controls now",
+  );
+});
+
+test("Status Strip hosts the zoom controls so canvas zoom is always reachable (SPEC-2356)", () => {
+  const strip = document.getElementById("op-status-strip");
+  assert.ok(strip, "expected op-status-strip");
+  for (const id of ["zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(strip.contains(control), `${id} must live in the Status Strip`);
+  }
+  // Labels are preserved so the existing app.js zoom handlers stay wired by id.
+  assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
+});
+
+test("Sidebar Update section provides the mount anchor for the Update CTA (SPEC-2356)", () => {
+  // SPEC-2356 chrome cleanup: the Update CTA moves out of the fixed bottom-right
+  // corner into a dedicated sidebar Update section. update-cta.js mounts the
+  // shell into this anchor instead of document.body.
+  const updateSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Update",
+  );
+  assert.ok(updateSection, "expected an Update section in the sidebar");
+  const anchor = updateSection.querySelector("#update-cta-anchor");
+  assert.ok(anchor, "expected #update-cta-anchor inside the Update section");
+});
+
+test("update-cta.js mounts into the sidebar anchor and peeks the sidebar when an update arrives (SPEC-2356)", () => {
+  const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
+  // The shell must prefer the sidebar anchor over document.body so the CTA
+  // lives inside the sidebar Update section.
+  assert.match(
+    updateCtaSource,
+    /update-cta-anchor/,
+    "update-cta.js must mount into the sidebar #update-cta-anchor",
+  );
+  // When an update becomes available, the sidebar must peek/badge so the user
+  // notices even though the sidebar is auto-hidden (hover not required).
+  assert.match(
+    updateCtaSource,
+    /op:update-available/,
+    "update-cta.js must signal update availability so the sidebar can peek/badge",
   );
 });
 
@@ -888,10 +1024,12 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () => {
+test("chrome visibility uses the sidebar peek 帯 hover-reveal instead of click chips", () => {
   // SPEC-2356 Phase 9 (FR-021/FR-022): the chip-style toggles and Project Bar
-  // text toggles are removed; auto-hide chrome is summoned via the peek 帯
-  // (`.op-sidebar-peek` / `.op-window-controls-peek`).
+  // text toggles are removed; the auto-hide sidebar is summoned via the peek 帯
+  // (`.op-sidebar-peek`). SPEC-2356 chrome cleanup additionally folds the
+  // window controls into that sidebar, so the separate window-controls peek is
+  // retired entirely.
   assert.equal(
     document.getElementById("op-sidebar-toggle"),
     null,
@@ -914,87 +1052,16 @@ test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () =
   );
 
   const sidebarPeek = document.querySelector(".op-sidebar-peek");
-  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
   assert.ok(sidebarPeek, "expected .op-sidebar-peek hover trigger");
-  assert.ok(windowControlsPeek, "expected .op-window-controls-peek hover trigger");
+  assert.equal(
+    document.querySelector(".op-window-controls-peek"),
+    null,
+    "window controls peek 帯 is retired — window operations live in the sidebar",
+  );
   assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
-  assert.equal(
-    windowControlsPeek.getAttribute("aria-controls"),
-    "floating-window-controls-actions",
-  );
   assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
-  assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
   assert.equal(sidebarPeek.getAttribute("tabindex"), "0", "sidebar peek 帯 must be keyboard-focusable");
-  assert.equal(
-    windowControlsPeek.getAttribute("tabindex"),
-    "0",
-    "window controls peek 帯 must be keyboard-focusable",
-  );
   assert.equal(sidebarPeek.getAttribute("role"), "button");
-  assert.equal(windowControlsPeek.getAttribute("role"), "button");
-});
-
-test("window controls peek 帯 targets only collapsible control groups", () => {
-  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
-  assert.ok(windowControlsPeek, "expected window controls peek 帯");
-
-  const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
-    .split(/\s+/)
-    .filter(Boolean);
-  assert.deepEqual(controlledIds, ["floating-window-controls-actions"]);
-  assert.ok(!controlledIds.includes("floating-window-controls"));
-
-  const actionsGroup = document.getElementById("floating-window-controls-actions");
-  const primaryGroup = document.getElementById("floating-window-controls-primary");
-  const addGroup = document.getElementById("floating-window-controls-add");
-  assert.ok(actionsGroup, "expected continuous window controls actions group");
-  assert.ok(primaryGroup, "expected primary window controls group");
-  assert.ok(addGroup, "expected add-window control group");
-
-  const floatingControls = document.getElementById("floating-window-controls");
-  assert.ok(floatingControls, "expected floating window controls root");
-  const toolbarChildren = Array.from(floatingControls.children);
-  assert.ok(
-    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
-    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
-  );
-
-  assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
-  assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
-
-  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.ok(actionsGroup.contains(control), `${id} must be inside the continuous actions group`);
-  }
-
-  const addButton = document.getElementById("add-button");
-  assert.ok(addButton, "expected add-button");
-  assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
-  assert.ok(actionsGroup.contains(addButton), "add-button must be reachable through the continuous actions group");
-
-  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.equal(
-      actionsGroup.contains(control),
-      false,
-      `${id} must remain outside collapsible window controls groups`,
-    );
-  }
-});
-
-test("floating window controls mark only window operations as hideable", () => {
-  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
-    const button = document.getElementById(id);
-    assert.ok(button, `expected ${id}`);
-    assert.equal(button.dataset.windowControl, "true", `${id} should be hidden by the window controls toggle`);
-  }
-  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
-    const button = document.getElementById(id);
-    assert.ok(button, `expected ${id}`);
-    assert.notEqual(button.dataset.windowControl, "true", `${id} should remain visible when window controls are hidden`);
-  }
 });
 
 test("workspace windows expose draggable tab docking affordances", () => {
@@ -1192,26 +1259,20 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
   );
 });
 
-test("components.css hover-reveals only the marked floating window control groups", () => {
-  // SPEC-2356 Phase 9 (FR-022): the continuous actions group auto-hides by default and
-  // are revealed only when [data-op-window-controls="revealed"] is set.
-  // Palette and Zoom controls remain in the toolbar regardless.
+test("components.css retires the floating window controls toolbar CSS (SPEC-2356)", () => {
+  // SPEC-2356 chrome cleanup: window operations live in the sidebar, so the
+  // separate floating-window-controls toolbar, its hover-reveal state, and the
+  // window-controls peek 帯 styling are all removed. The sidebar peek 帯 is the
+  // only auto-hide affordance left.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
-  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
-  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
-  assert.match(
-    css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
-  );
-  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\]/);
-  assert.match(css, /\.op-window-controls-peek\s*\{/);
+  assert.doesNotMatch(css, /#floating-window-controls-actions/);
+  assert.doesNotMatch(css, /\.op-window-controls-peek/);
+  assert.doesNotMatch(css, /\[data-op-window-controls/);
+  assert.doesNotMatch(css, /\.floating-actions/);
   assert.match(css, /\.op-sidebar-peek\s*\{/);
 });
 
-test("floating actions expose Align without resizing windows", () => {
+test("Windows section exposes Align without resizing windows", () => {
   const button = document.getElementById("align-button");
   assert.ok(button, "expected Align button");
   assert.equal(button.textContent.trim(), "Align");
@@ -1222,10 +1283,12 @@ test("floating actions expose Align without resizing windows", () => {
   );
 });
 
-test("operator-shell migrates legacy chrome keys and wires hover-reveal independently", () => {
+test("operator-shell migrates legacy chrome keys and wires the sidebar hover-reveal", () => {
   // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
   // and the chip-style toggles (and their Project Bar text counterparts) must
-  // not be referenced anywhere in operator-shell.
+  // not be referenced anywhere in operator-shell. SPEC-2356 chrome cleanup
+  // folds window controls into the sidebar, so the separate window-controls
+  // hover-reveal controller / peek 帯 are gone.
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
   assert.doesNotMatch(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
   assert.doesNotMatch(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
@@ -1233,19 +1296,20 @@ test("operator-shell migrates legacy chrome keys and wires hover-reveal independ
   assert.doesNotMatch(operatorShell, /op-window-controls-edge-toggle/);
   assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
   assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-peek/);
+  assert.doesNotMatch(operatorShell, /op:window-controls-changed/);
   assert.match(operatorShell, /removeItem\("gwt:ui:sidebar-collapsed"\)/);
   assert.match(operatorShell, /removeItem\("gwt:ui:window-controls"\)/);
   assert.match(operatorShell, /op:chrome-visibility-changed/);
-  assert.match(operatorShell, /op:window-controls-changed/);
   assert.match(operatorShell, /\.op-sidebar-peek/);
-  assert.match(operatorShell, /\.op-window-controls-peek/);
 });
 
-test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
+test("components.css declares Status Strip BLOCKED pulse", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // PR #2414 introduced the pulse animation; PR #2404 the layer live dot.
+  // PR #2414 introduced the pulse animation. SPEC-2356 chrome cleanup retires
+  // the Layers `data-live` row indicator together with the Layers section.
   assert.match(css, /op-status-strip-blocked-pulse/);
-  assert.match(css, /\.op-layer\[data-live="true"\] \.op-layer__label::before/);
+  assert.doesNotMatch(css, /\.op-layer\[data-live="true"\]/);
 });
 
 test("components.css declares Operator scrollbar + tinted text selection", () => {
@@ -2692,11 +2756,12 @@ test("every readable non-terminal surface participates in the opaque window chro
   }
 });
 
-test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+test("Sidebar row buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
   // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
-  // default は border + grey background を出す。`.op-layer` は indicator
-  // dot + label color + token-driven focus ring のみで状態を表現するため、
-  // base rule で UA chrome を解除する必要がある。
+  // default は border + grey background を出す。`.op-layer` (sidebar row 共通
+  // クラス、Quick / Windows / Palette / Update が利用) は indicator dot +
+  // label color + token-driven focus ring のみで状態を表現するため、base rule
+  // で UA chrome を解除する必要がある。
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
   assert.ok(layerRule, "expected base .op-layer rule in components.css");

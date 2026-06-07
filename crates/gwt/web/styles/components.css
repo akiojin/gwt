@@ -233,15 +233,19 @@ body::after {
 }
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
-   earlier split toast + persistent button flow. */
+   earlier split toast + persistent button flow.
+   SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
+   bottom-right corner; it mounts into the sidebar Update section anchor
+   (#update-cta-anchor) and flows with the sidebar surface. */
 .update-cta-shell {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  z-index: 9999;
+  display: flex;
+  width: 100%;
+  align-items: stretch;
+  gap: var(--space-1);
+}
+
+.update-cta-shell .update-cta {
+  flex: 1;
 }
 
 .update-cta {
@@ -653,6 +657,32 @@ body::after {
   }
 }
 
+/* SPEC-2356 operator chrome cleanup: when an update is available the sidebar
+   Update section lives behind the auto-hide. The operator shell sets
+   data-op-sidebar-update="available" on <html>; widen + pulse the peek 帯 so
+   the user is drawn to reveal the sidebar (and the Update CTA) without relying
+   on a fixed bottom-right toast. */
+:root[data-op-sidebar-update="available"] .op-sidebar-peek {
+  width: 10px;
+  background: linear-gradient(
+    to right,
+    var(--color-state-active) 0%,
+    color-mix(in oklab, var(--color-state-active) 60%, transparent) 100%
+  );
+  animation: op-sidebar-update-peek var(--motion-pulse) ease-in-out infinite;
+}
+
+@keyframes op-sidebar-update-peek {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-op-sidebar-update="available"] .op-sidebar-peek {
+    animation: none;
+  }
+}
+
 .op-sidebar__section {
   border-bottom: 1px solid var(--color-border);
   padding: var(--space-3) var(--space-4);
@@ -673,12 +703,39 @@ body::after {
   gap: var(--space-2);
 }
 
-.op-sidebar__count {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  font-weight: 500;
-  color: var(--color-text);
+/* SPEC-2356 operator chrome cleanup: the Windows / Palette / Update sidebar
+   sections lay their controls out as a vertical stack of full-width rows. */
+.op-sidebar__section--windows,
+.op-sidebar__section--palette,
+.op-sidebar__section--update {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.op-sidebar__section--windows .op-sidebar__heading,
+.op-sidebar__section--palette .op-sidebar__heading,
+.op-sidebar__section--update .op-sidebar__heading {
+  margin-bottom: var(--space-1);
+}
+
+/* Window operation + palette buttons fill the section width so they read as
+   sidebar rows rather than floating chips. */
+.op-sidebar__section--windows .arrange-button,
+.op-sidebar__section--windows .add-button,
+.op-sidebar__section--palette .arrange-button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+/* The window-list dropdown anchors to its trigger; keep it full width too. */
+.op-sidebar__section--windows .window-list-shell {
+  width: 100%;
+}
+
+.op-sidebar__update-anchor {
+  display: flex;
 }
 
 .op-layer {
@@ -710,20 +767,13 @@ body::after {
   transition: background var(--motion-fast) var(--motion-curve);
 }
 
-.op-layer[aria-pressed="true"] .op-layer__indicator {
-  background: var(--color-state-active);
-  border-color: var(--color-state-active);
-}
+/* SPEC-2356 operator chrome cleanup: the Layers toggle `aria-pressed` active
+   state and the `.op-layer__count` Layers count badge are removed together with
+   the dead Layers section. The indicator dot stays as a quiet leading marker
+   for the remaining actionable sidebar rows. */
 
 .op-layer__label {
   flex: 1;
-}
-
-.op-layer__count {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
 }
 
 .workspace-pr-meta {
@@ -821,6 +871,44 @@ body::after {
   color: var(--color-state-blocked);
 }
 
+/* SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +) moved from the
+   right-bottom floating toolbar into the Status Strip. The buttons read as a
+   compact mono cluster matching the strip's typographic vocabulary. */
+.op-status-strip__cell--zoom {
+  gap: var(--space-1);
+}
+
+.op-status-strip__zoom-button {
+  appearance: none;
+  border: 1px solid var(--color-status-strip-divider);
+  background: transparent;
+  color: var(--color-status-strip-fg);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-curve),
+    border-color var(--motion-fast) var(--motion-curve);
+}
+
+.op-status-strip__zoom-button:hover {
+  background: color-mix(in oklab, var(--color-status-strip-fg) 14%, transparent);
+}
+
+.op-status-strip__zoom-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-status-strip__zoom-button {
+    transition: none;
+  }
+}
+
 /* ============================================================
    Canvas area — Operator overrides on existing layout
    ============================================================ */
@@ -835,51 +923,14 @@ body::after {
   background: var(--color-canvas);
 }
 
-/* SPEC-2356 Phase 9 (FR-022): peek 帯 for the bottom Window controls. The
-   palette + zoom controls always render in the toolbar; primary (Tile / Stack
-   / Windows) and add (+) groups are auto-hidden until pointer hover /
-   keyboard focus / pointer tap on the peek 帯. */
-.op-window-controls-peek {
-  order: 2;
-  width: 32px;
-  height: 24px;
-  border-radius: var(--radius-md);
-  border: 1px solid color-mix(in oklab, var(--color-border-strong) 55%, transparent);
-  background: linear-gradient(
-    to top,
-    color-mix(in oklab, var(--color-state-active) 60%, transparent) 0%,
-    color-mix(in oklab, var(--color-state-active) 18%, transparent) 100%
-  );
-  cursor: pointer;
-  z-index: 31;
-  transition: background var(--motion-fast) var(--motion-curve), border-color var(--motion-fast) var(--motion-curve);
-}
-
-.op-window-controls-peek:hover,
-.op-window-controls-peek:focus-visible {
-  background: var(--color-state-active);
-  border-color: var(--color-focus-ring);
-  outline: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .op-window-controls-peek {
-    transition: none;
-  }
-}
-
-@media (forced-colors: active) {
-  .op-window-controls-peek {
-    background: Highlight;
-    border-color: Highlight;
-  }
-}
+/* SPEC-2356 operator chrome cleanup: the bottom Window-controls peek 帯 is
+   removed — window operations now live in the sidebar Windows section, revealed
+   together with the rest of the sidebar via `.op-sidebar-peek`. */
 
 /* SPEC-2356 Phase 9 (T-136): while a floating window resize is in flight,
    peek 帯 hits are suppressed so the pointer cannot steal focus from the
    resize handle if the user crosses the screen edge mid-drag. */
-:root[data-op-resize-active] .op-sidebar-peek,
-:root[data-op-resize-active] .op-window-controls-peek {
+:root[data-op-resize-active] .op-sidebar-peek {
   pointer-events: none;
 }
 
@@ -897,9 +948,12 @@ body::after {
   opacity: 0.9;
 }
 
-/* Existing floating actions become Operator-styled */
-.floating-actions .arrange-button,
-.floating-actions .add-button {
+/* SPEC-2356 operator chrome cleanup: window-operation + add buttons now live in
+   the sidebar Windows section. They reuse the Operator button vocabulary while
+   reading as full-width sidebar rows (see .op-sidebar__section--windows). */
+.op-sidebar__section--windows .arrange-button,
+.op-sidebar__section--windows .add-button,
+.op-sidebar__section--palette .arrange-button {
   background: var(--color-button-bg);
   color: var(--color-button-fg);
   border: 1px solid var(--color-button-border);
@@ -911,8 +965,9 @@ body::after {
   transition: background var(--motion-fast) var(--motion-curve);
 }
 
-.floating-actions .arrange-button:hover,
-.floating-actions .add-button:hover {
+.op-sidebar__section--windows .arrange-button:hover,
+.op-sidebar__section--windows .add-button:hover,
+.op-sidebar__section--palette .arrange-button:hover {
   background: var(--color-button-bg-hover);
 }
 
@@ -2166,7 +2221,10 @@ kbd.op-kbd {
   color: var(--color-display-fg);
 }
 
-/* Preset modal (Add window) */
+/* Preset modal (Add window) — SPEC-2356 "Surface Deck".
+   Three categorized bands, each binding --cat-accent so the section tick,
+   icon chip, hover/keyboard glow and focus all read from one accent token.
+   surface=cyan, knowledge=amber, config=muted. */
 :root[data-theme] .preset-section-label {
   color: var(--color-text-muted);
   font-family: var(--font-display);
@@ -2174,17 +2232,85 @@ kbd.op-kbd {
   text-transform: uppercase;
   letter-spacing: var(--tracking-display);
 }
+:root[data-theme] .preset-button[data-category="surface"],
+:root[data-theme] .preset-section[data-category="surface"] {
+  --cat-accent: var(--color-state-active);
+}
+:root[data-theme] .preset-button[data-category="knowledge"],
+:root[data-theme] .preset-section[data-category="knowledge"] {
+  --cat-accent: var(--agent-claude);
+}
+:root[data-theme] .preset-button[data-category="config"],
+:root[data-theme] .preset-section[data-category="config"] {
+  --cat-accent: var(--color-text-muted);
+}
 :root[data-theme] .preset-button {
   background: var(--color-surface);
   color: var(--color-text);
   border-color: var(--color-border);
 }
-:root[data-theme] .preset-button:hover {
+:root[data-theme] .preset-button:hover,
+:root[data-theme] .preset-button.is-active {
   background: var(--color-surface-elevated);
-  border-color: var(--color-state-active);
+  border-color: var(--cat-accent);
+  box-shadow: 0 0 0 1px var(--cat-accent),
+              0 0 18px 0 color-mix(in oklab, var(--cat-accent) 35%, transparent);
+  transform: translateY(-1px);
+}
+:root[data-theme] .preset-button:hover .preset-button__icon,
+:root[data-theme] .preset-button.is-active .preset-button__icon {
+  background: color-mix(in oklab, var(--cat-accent) 22%, transparent);
+  box-shadow: 0 0 10px 0 color-mix(in oklab, var(--cat-accent) 45%, transparent);
 }
 :root[data-theme] .preset-button strong {
   color: var(--color-text-strong);
+}
+
+/* Operator atmosphere — depth glow + faint scan grid behind the deck.
+   Keyed off the `.is-surface-deck` modifier (never a bare modal-shell
+   rule) so the shared modal-frame primitive contract keeps owning the
+   first plain modal-shell match in the bundled stylesheet. */
+:root[data-theme] .modal-shell.is-surface-deck {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+:root[data-theme] .modal-shell.is-surface-deck::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    var(--bg-depth-glow),
+    repeating-linear-gradient(
+      0deg,
+      var(--bg-scan-grid) 0,
+      var(--bg-scan-grid) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+  opacity: 0.6;
+}
+
+/* Stagger reveal on open. Each button rises with an index-based delay so
+   the deck "deploys" rather than snapping in. reduced-motion keeps it still. */
+@keyframes presetRise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+:root[data-theme] #preset-modal.open .preset-button {
+  animation: presetRise var(--motion-medium) var(--motion-curve) both;
+}
+:root[data-theme] #preset-modal.open .preset-button:nth-child(1) { animation-delay: 30ms; }
+:root[data-theme] #preset-modal.open .preset-button:nth-child(2) { animation-delay: 60ms; }
+:root[data-theme] #preset-modal.open .preset-button:nth-child(3) { animation-delay: 90ms; }
+:root[data-theme] #preset-modal.open .preset-button:nth-child(4) { animation-delay: 120ms; }
+:root[data-theme] #preset-modal.open .preset-button:nth-child(5) { animation-delay: 150ms; }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] #preset-modal.open .preset-button {
+    animation: none;
+  }
 }
 
 /* Window list panel (in floating actions) */
@@ -2528,23 +2654,9 @@ kbd.op-kbd {
   .op-briefing__progress { display: none; }
 }
 
-/* SPEC-2356 — Sidebar Layer "live" hint:
-   when applyTelemetryCounts marks a layer with `data-live="true"` (e.g.
-   agents > 0 active windows, git > 0 branches), the layer label receives
-   a small leading dot tinted with `--color-state-active`. */
-:root[data-theme] .op-layer[data-live="true"] .op-layer__label::before {
-  content: "● ";
-  color: var(--color-state-active);
-  margin-right: 0;
-  font-size: 0.7em;
-  vertical-align: middle;
-}
-
-@media (forced-colors: active) {
-  :root[data-theme] .op-layer[data-live="true"] .op-layer__label::before {
-    color: Highlight;
-  }
-}
+/* SPEC-2356 operator chrome cleanup: the Sidebar Layers "live" hint
+   (`.op-layer[data-live]` leading dot) is removed with the dead Layers section.
+   Live status is conveyed by the Status Strip cells. */
 
 /* Command Palette trigger button — emphasises the ⌘K hotkey */
 :root[data-theme] .op-palette-trigger {
@@ -2663,17 +2775,9 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
-/* SPEC-2356 Phase 9 (FR-022): Window controls action group auto-hides
-   until [data-op-window-controls="revealed"] is set by the hover-reveal state
-   machine. Palette and Zoom controls remain in the toolbar regardless. */
-:root[data-theme] #floating-window-controls-actions {
-  order: 1;
-  display: none;
-}
-
-:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-actions {
-  display: flex;
-}
+/* SPEC-2356 operator chrome cleanup: the floating Window-controls action group
+   and its old hover-reveal data-attribute state are removed. Window operations
+   live in the always-revealed (with the sidebar) Windows section. */
 
 /* SPEC-2356 — micro motion on hover for the few row-style buttons that
    take a click action. Smooth enough not to be distracting but clearly

@@ -204,18 +204,41 @@ test("legacy split update toast and button surfaces are removed", () => {
   assert.doesNotMatch(indexHtml, /\.update-button\b/);
 });
 
-test("index.html declares a fixed bottom-right unified update CTA style", () => {
+test("SPEC-2356: unified update CTA renders inside the sidebar Update section", () => {
+  // SPEC-2356 chrome cleanup: the CTA is no longer pinned to the bottom-right
+  // corner. It mounts into the sidebar Update section anchor and flows with the
+  // sidebar surface, so the shell must NOT use fixed bottom-right positioning.
   const shellMatch = componentsCss.match(/\.update-cta-shell\s*\{[^}]+\}/);
   assert.ok(shellMatch, "expected .update-cta-shell rule inside components.css");
-  assert.match(shellMatch[0], /position:\s*fixed/);
-  assert.match(shellMatch[0], /bottom:\s*\d+px/);
-  assert.match(shellMatch[0], /right:\s*\d+px/);
+  assert.doesNotMatch(shellMatch[0], /position:\s*fixed/);
+  // The sidebar Update section anchor exists in index.html.
+  assert.match(indexHtml, /id="update-cta-anchor"/);
   const styleMatch = componentsCss.match(/\.update-cta\s*\{[^}]+\}/);
   assert.ok(styleMatch, "expected .update-cta rule inside components.css");
   assert.match(componentsCss, /\.update-cta\.is-applying\s*\{/);
   assert.match(componentsCss, /\.update-cta\.is-error\s*\{/);
   assert.match(componentsCss, /\.update-cta__dismiss\s*\{/);
   assert.doesNotMatch(indexHtml, /\.update-cta\s*\{/);
+});
+
+test("SPEC-2356: update CTA shell mounts into the sidebar anchor when present", () => {
+  // When the sidebar Update section anchor exists, the controller must mount
+  // the shell there instead of document.body so the CTA lives in the sidebar.
+  const { document } = parseHTML(
+    '<!doctype html><html><body><aside class="op-sidebar"><div class="op-sidebar__section"><div id="update-cta-anchor"></div></div></aside></body></html>',
+  );
+  const sent = [];
+  const controller = createUpdateCtaController({
+    document,
+    send: (m) => sent.push(m),
+    confirmUpdate: () => true,
+    setVersionState: () => {},
+  });
+  controller.showAvailable("9.50.0");
+  const shell = document.getElementById("update-cta-shell");
+  assert.ok(shell, "expected the update CTA shell to be created");
+  const anchor = document.getElementById("update-cta-anchor");
+  assert.ok(anchor.contains(shell), "shell must mount inside the sidebar anchor");
 });
 
 function createFixture({ confirmResult = true } = {}) {

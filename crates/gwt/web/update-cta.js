@@ -31,15 +31,45 @@ export function createUpdateCtaController({
     });
   }
 
+  // SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
+  // bottom-right corner. It mounts into the sidebar Update section anchor
+  // (#update-cta-anchor) when present, falling back to <body> only if the
+  // sidebar is unavailable (e.g. degraded shell) so the update path never
+  // silently disappears.
+  function ctaMountParent() {
+    return document.getElementById("update-cta-anchor") || document.body;
+  }
+
   function ensureShell() {
     let shell = document.getElementById(shellId);
     if (!shell) {
       shell = document.createElement("div");
       shell.id = shellId;
       shell.className = "update-cta-shell";
-      document.body.appendChild(shell);
+    }
+    const parent = ctaMountParent();
+    if (shell.parentElement !== parent) {
+      parent.appendChild(shell);
     }
     return shell;
+  }
+
+  // SPEC-2356 — announce update availability so the operator shell can peek /
+  // badge the auto-hidden sidebar; the user notices without hovering.
+  function announceUpdateAvailable() {
+    try {
+      document.dispatchEvent(new CustomEvent("op:update-available"));
+    } catch {
+      /* no-op */
+    }
+  }
+
+  function announceUpdateDismissed() {
+    try {
+      document.dispatchEvent(new CustomEvent("op:update-dismissed"));
+    } catch {
+      /* no-op */
+    }
   }
 
   function ensureCta(shell) {
@@ -112,14 +142,18 @@ export function createUpdateCtaController({
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     latestVersion = version;
-    return renderCta("available", `Update available: v${version} - Click to update`);
+    const cta = renderCta("available", `Update available: v${version} - Click to update`);
+    announceUpdateAvailable();
+    return cta;
   }
 
   function showReadyPending(version) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     pendingVersion = version;
-    return renderCta("ready", `Update v${version} ready — Restart now`);
+    const cta = renderCta("ready", `Update v${version} ready — Restart now`);
+    announceUpdateAvailable();
+    return cta;
   }
 
   function showError(message) {
@@ -186,6 +220,7 @@ export function createUpdateCtaController({
       shell.remove();
     }
     status = "dismissed";
+    announceUpdateDismissed();
   }
 
   function handleClick() {
