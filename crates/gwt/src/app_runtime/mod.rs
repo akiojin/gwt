@@ -1699,6 +1699,29 @@ impl LaunchWizardMemoryCache {
         )
     }
 
+    fn latest_resumable_branch_session(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Option<gwt_agent::Session> {
+        let entry = self
+            .quick_start_entries(repo_path, branch_name)
+            .into_iter()
+            .find(|entry| entry.resume_session_id.is_some())?;
+        self.sessions
+            .iter()
+            .find(|session| session.id == entry.session_id)
+            .cloned()
+    }
+
+    /// Replace all cached sessions with a freshly disk-loaded set. Called from
+    /// the off-thread branch load (#2995) so resume availability and resolution
+    /// observe session TOMLs the hook CLI wrote out-of-process after launch,
+    /// without ever blocking the main UI thread on disk I/O.
+    fn replace_sessions(&mut self, sessions: Vec<gwt_agent::Session>) {
+        self.sessions = sessions;
+    }
+
     fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
         self.sessions
             .iter()
@@ -7930,24 +7953,25 @@ impl AppRuntime {
         project_root: &Path,
         branch_name: &str,
     ) -> Option<gwt_agent::Session> {
-        // Resolve the resume target from sessions read fresh off disk rather
-        // than the in-memory cache: the managed hook CLI persists a session's
-        // real `agent_session_id` out-of-process after launch, and the cache
-        // (loaded once at startup, refreshed only per-window at spawn) never
-        // observes it, so cache-based resolution permanently failed to find
-        // resumable sessions for stopped agents (#2995).
+        // Resolve from the in-memory cache so the Resume click never blocks the
+        // main UI thread on disk I/O. Freshness is guaranteed by
+        // [`apply_refreshed_launch_wizard_sessions`], which the off-thread
+        // branch load dispatches before any Resume button is enabled (#2995).
         let normalized_branch_name = normalize_branch_name(branch_name);
-        let sessions = gwt::launch_wizard::load_sessions(&self.sessions_dir);
-        let entry = gwt::launch_wizard::quick_start_entries_from_sessions(
-            project_root,
-            &normalized_branch_name,
-            &sessions,
-        )
-        .into_iter()
-        .find(|entry| entry.resume_session_id.is_some())?;
-        sessions
-            .into_iter()
-            .find(|session| session.id == entry.session_id)
+        self.launch_wizard_cache
+            .latest_resumable_branch_session(project_root, &normalized_branch_name)
+    }
+
+    /// Apply a freshly disk-loaded session set to the Launch Wizard cache.
+    /// Dispatched from the off-thread branch load (#2995) so branch Resume
+    /// availability and the subsequent cache-based resume resolution reflect
+    /// session TOMLs the hook CLI wrote out-of-process after launch — without
+    /// the main thread ever performing the session-directory scan.
+    pub(crate) fn apply_refreshed_launch_wizard_sessions(
+        &mut self,
+        sessions: Vec<gwt_agent::Session>,
+    ) {
+        self.launch_wizard_cache.replace_sessions(sessions);
     }
 
     pub(crate) fn live_sessions_for_branch(
@@ -15882,12 +15906,13 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_latest_branch_resume_reads_sessions_written_after_cache_load() {
+    fn app_runtime_latest_branch_resume_reflects_sessions_refreshed_after_cache_load() {
         // #2995 regression: the managed hook CLI persists a session's real
         // agent_session_id out-of-process *after* the GUI loaded its in-memory
-        // session cache. Branch Resume resolution must read sessions fresh from
-        // disk so such a session is still resumable without a full process
-        // restart (the gwt daemon/tray process keeps the stale cache alive).
+        // session cache. The branch load's disk-fresh refresh
+        // (apply_refreshed_launch_wizard_sessions, dispatched off-thread) must
+        // make such a session resumable without a full process restart — the
+        // gwt daemon/tray process otherwise keeps the stale cache alive.
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -15895,7 +15920,7 @@ exit 1
         fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
         // Runtime constructed first, so its in-memory cache starts empty.
-        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
         assert!(
             runtime
                 .latest_resumable_branch_session(&repo, "work/late-write")
@@ -15904,16 +15929,27 @@ exit 1
         );
 
         // Session TOML appears on disk afterwards (hook CLI writing the native
-        // agent_session_id post-launch).
+        // agent_session_id post-launch). The stale cache still cannot see it.
         let mut session =
             gwt_agent::Session::new(&repo, "work/late-write", gwt_agent::AgentId::Codex);
         session.id = "session-late".to_string();
         session.agent_session_id = Some("native-late".to_string());
         session.save(&sessions_dir).expect("save late session");
+        assert!(
+            runtime
+                .latest_resumable_branch_session(&repo, "work/late-write")
+                .is_none(),
+            "stale cache must not yet see the late on-disk session"
+        );
 
+        // The off-thread branch load refreshes the cache from disk (no main
+        // thread session-dir scan); resolution now finds the session.
+        runtime.apply_refreshed_launch_wizard_sessions(gwt::launch_wizard::load_sessions(
+            &sessions_dir,
+        ));
         let selected = runtime
             .latest_resumable_branch_session(&repo, "work/late-write")
-            .expect("disk-fresh resume after cache load");
+            .expect("disk-fresh refresh makes the late session resumable");
         assert_eq!(selected.id, "session-late");
         assert_eq!(selected.agent_session_id.as_deref(), Some("native-late"));
     }
