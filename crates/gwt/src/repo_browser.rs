@@ -15,9 +15,14 @@ pub fn spawn_branch_load_async(
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
-    resume_sessions: Vec<gwt_agent::Session>,
+    sessions_dir: PathBuf,
 ) {
     thread::spawn(move || {
+        // Load resume candidates fresh from disk (off the main thread) rather
+        // than from the GUI's in-memory session cache, so branch Resume
+        // availability reflects session TOMLs updated out-of-process by the
+        // hook CLI after launch (#2995).
+        let resume_sessions = gwt::launch_wizard::load_sessions(&sessions_dir);
         dispatch_branch_load_progressive(
             &proxy,
             &window_id,

@@ -1699,21 +1699,6 @@ impl LaunchWizardMemoryCache {
         )
     }
 
-    fn latest_resumable_branch_session(
-        &self,
-        repo_path: &Path,
-        branch_name: &str,
-    ) -> Option<gwt_agent::Session> {
-        let entry = self
-            .quick_start_entries(repo_path, branch_name)
-            .into_iter()
-            .find(|entry| entry.resume_session_id.is_some())?;
-        self.sessions
-            .iter()
-            .find(|session| session.id == entry.session_id)
-            .cloned()
-    }
-
     fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
         self.sessions
             .iter()
@@ -6684,7 +6669,10 @@ impl AppRuntime {
             id.to_string(),
             tab.project_root.clone(),
             self.active_session_branches_for_tab(&address.tab_id),
-            self.launch_wizard_cache.sessions.clone(),
+            // Pass the sessions dir so the async branch load reads resume
+            // candidates fresh from disk instead of the stale in-memory cache
+            // snapshot (#2995).
+            self.sessions_dir.clone(),
         );
         Vec::new()
     }
@@ -7942,9 +7930,24 @@ impl AppRuntime {
         project_root: &Path,
         branch_name: &str,
     ) -> Option<gwt_agent::Session> {
+        // Resolve the resume target from sessions read fresh off disk rather
+        // than the in-memory cache: the managed hook CLI persists a session's
+        // real `agent_session_id` out-of-process after launch, and the cache
+        // (loaded once at startup, refreshed only per-window at spawn) never
+        // observes it, so cache-based resolution permanently failed to find
+        // resumable sessions for stopped agents (#2995).
         let normalized_branch_name = normalize_branch_name(branch_name);
-        self.launch_wizard_cache
-            .latest_resumable_branch_session(project_root, &normalized_branch_name)
+        let sessions = gwt::launch_wizard::load_sessions(&self.sessions_dir);
+        let entry = gwt::launch_wizard::quick_start_entries_from_sessions(
+            project_root,
+            &normalized_branch_name,
+            &sessions,
+        )
+        .into_iter()
+        .find(|entry| entry.resume_session_id.is_some())?;
+        sessions
+            .into_iter()
+            .find(|session| session.id == entry.session_id)
     }
 
     pub(crate) fn live_sessions_for_branch(
@@ -15876,6 +15879,43 @@ exit 1
 
         assert_eq!(selected.id, "session-newer");
         assert_eq!(selected.agent_session_id.as_deref(), Some("native-newer"));
+    }
+
+    #[test]
+    fn app_runtime_latest_branch_resume_reads_sessions_written_after_cache_load() {
+        // #2995 regression: the managed hook CLI persists a session's real
+        // agent_session_id out-of-process *after* the GUI loaded its in-memory
+        // session cache. Branch Resume resolution must read sessions fresh from
+        // disk so such a session is still resumable without a full process
+        // restart (the gwt daemon/tray process keeps the stale cache alive).
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+        // Runtime constructed first, so its in-memory cache starts empty.
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+        assert!(
+            runtime
+                .latest_resumable_branch_session(&repo, "work/late-write")
+                .is_none(),
+            "no session exists yet"
+        );
+
+        // Session TOML appears on disk afterwards (hook CLI writing the native
+        // agent_session_id post-launch).
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/late-write", gwt_agent::AgentId::Codex);
+        session.id = "session-late".to_string();
+        session.agent_session_id = Some("native-late".to_string());
+        session.save(&sessions_dir).expect("save late session");
+
+        let selected = runtime
+            .latest_resumable_branch_session(&repo, "work/late-write")
+            .expect("disk-fresh resume after cache load");
+        assert_eq!(selected.id, "session-late");
+        assert_eq!(selected.agent_session_id.as_deref(), Some("native-late"));
     }
 
     #[test]
