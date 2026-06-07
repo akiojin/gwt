@@ -259,3 +259,72 @@ test("payload always reflects the most recent value at flush time", () => {
   scheduler.advance(100);
   assert.deepEqual(sent, [{ x: 999, y: 999, zoom: 1.5 }]);
 });
+
+test("duplicate pending viewport payloads keep the existing timer and dispatch once", () => {
+  const sent = [];
+  const clock = manualClock();
+  const scheduler = manualScheduler();
+  const throttle = createViewportPersistThrottle({
+    send: (payload) => sent.push(payload),
+    tailMs: 100,
+    maxWaitMs: 500,
+    now: clock.nowFn,
+    setTimeoutImpl: scheduler.setTimeout,
+    clearTimeoutImpl: scheduler.clearTimeout,
+  });
+
+  throttle.schedule({ x: 10, y: 20, zoom: 1 });
+  clock.advance(30);
+  scheduler.advance(30);
+  throttle.schedule({ x: 10, y: 20, zoom: 1 });
+
+  assert.equal(
+    scheduler.pendingCount(),
+    1,
+    "duplicate pending payload must not create another active timer",
+  );
+
+  clock.advance(70);
+  scheduler.advance(70);
+  assert.deepEqual(sent, [{ x: 10, y: 20, zoom: 1 }]);
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test("duplicate dispatched viewport payloads are no-ops until values change", () => {
+  const sent = [];
+  const clock = manualClock();
+  const scheduler = manualScheduler();
+  const throttle = createViewportPersistThrottle({
+    send: (payload) => sent.push(payload),
+    tailMs: 100,
+    maxWaitMs: 500,
+    now: clock.nowFn,
+    setTimeoutImpl: scheduler.setTimeout,
+    clearTimeoutImpl: scheduler.clearTimeout,
+  });
+
+  throttle.schedule({ x: 1, y: 2, zoom: 1 });
+  throttle.flushNow();
+  assert.deepEqual(sent, [{ x: 1, y: 2, zoom: 1 }]);
+
+  throttle.schedule({ x: 1, y: 2, zoom: 1 });
+  assert.deepEqual(
+    sent,
+    [{ x: 1, y: 2, zoom: 1 }],
+    "same values after dispatch must not send again",
+  );
+  assert.equal(
+    scheduler.pendingCount(),
+    0,
+    "same values after dispatch must not schedule a timer",
+  );
+
+  throttle.schedule({ x: 1, y: 2, zoom: 1.25 });
+  assert.equal(scheduler.pendingCount(), 1, "changed zoom must schedule");
+  clock.advance(100);
+  scheduler.advance(100);
+  assert.deepEqual(sent, [
+    { x: 1, y: 2, zoom: 1 },
+    { x: 1, y: 2, zoom: 1.25 },
+  ]);
+});
