@@ -953,6 +953,10 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
+    /// #2995: a disk-fresh session set loaded off-thread by the branch load.
+    /// Applied to the Launch Wizard cache on the main thread so branch Resume
+    /// availability/resolution stay fresh without main-thread disk I/O.
+    RefreshLaunchWizardSessions(Vec<gwt_agent::Session>),
     UpdateAvailable(gwt_core::update::UpdateState),
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
@@ -6702,6 +6706,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {
+                app.apply_refreshed_launch_wizard_sessions(sessions);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));

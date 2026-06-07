@@ -5,25 +5,32 @@ use std::{
 
 use super::QuickStartEntry;
 
-pub fn load_quick_start_entries(
-    repo_path: &Path,
-    sessions_dir: &Path,
-    branch_name: &str,
-) -> Vec<QuickStartEntry> {
+/// Load every persisted session from `sessions_dir` fresh from disk, applying
+/// legacy migrations. Resume paths use this instead of the GUI's in-memory
+/// session cache so they observe session TOMLs that the managed hook CLI
+/// updates out-of-process (e.g. the real `agent_session_id` persisted after an
+/// agent starts), which the cache — loaded once at startup and only refreshed
+/// per-window at spawn — never picks up (#2995).
+pub fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
     let Ok(entries) = std::fs::read_dir(sessions_dir) else {
         return Vec::new();
     };
-
-    let sessions = entries
+    entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
             (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
         })
         .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    collect_quick_start_entries_from_sessions(repo_path, branch_name, sessions)
+pub fn load_quick_start_entries(
+    repo_path: &Path,
+    sessions_dir: &Path,
+    branch_name: &str,
+) -> Vec<QuickStartEntry> {
+    collect_quick_start_entries_from_sessions(repo_path, branch_name, load_sessions(sessions_dir))
 }
 
 pub(super) fn collect_quick_start_entries_from_sessions(
