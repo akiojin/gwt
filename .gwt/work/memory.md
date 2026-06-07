@@ -6739,3 +6739,17 @@ Type: lesson
 Context: SPEC-2012 visual verification needed a Claude Code window in an isolated browser-check HOME. Launch Wizard normal mode appeared to close successfully but did not create Claude while a live Codex pane was already assigned to the same Work.
 Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
 Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
+
+## 2026-06-08 — 遅れたブランチの test-file マージは ours+append だけでは develop の base-test 修正を取りこぼす
+
+Type: lesson
+Context: SPEC-2359 W-12 / SPEC-2356 ブランチ (develop 76 commit 遅れ) のマージで operator-chrome-structure.test.mjs が 1400 行の単一巨大 conflict 化。ours(私の119テスト)を土台に develop の新規 perf テスト33個を append する戦略を取ったが、develop が base テスト 'Launch wizard runtime confirmation' を contract 変更 (showConfirm 追加) していたのに ours が旧版を保持し、merged app.js (develop の launch wizard) と不一致で1件 RED になった。
+Learning: ours+append-theirs'-new-tests 戦略は『theirs が base テストを変更し ours が触っていない』ケースを取りこぼす。新規テスト名 (comm -13 base theirs) は拾えても、同名 base テストの body 変更は拾えない。全テストランナーを oracle にすれば contract 不一致は RED として顕在化するので、append 後に必ず full suite を回し、RED の base テストは theirs 版へ swap する。obsolete 化したテスト (削除済み関数参照) のみ除外する。
+Future Action: 大きく遅れたブランチの test-file conflict は (1) theirs を土台に git apply --3way で ours の diff を当てるか、(2) ours+append 後に full suite を oracle にして RED を theirs 版へ swap する。どちらでも append/swap 後に full frontend+cargo suite で 0 fail を確認してから commit する。
+
+## 2026-06-08 — browser-check の session.json seed: recent_projects は RecentProjectEntry 構造体配列 (string 配列は起動 panic)
+
+Type: lesson
+Context: merged build で fresh 隔離インスタンスを起動した際、seed した session.json の recent_projects を文字列配列 ['<repo>'] にしたら 'app runtime: invalid type: string, expected struct RecentProjectEntry' で起動 panic (main.rs:6356)。RecentProjectEntry は persistence.rs:122 で { path, title, kind } 構造体。develop 側でスキーマが string→struct に変わっていた。
+Learning: browser-check で session.json を seed する時、recent_projects は { path, title, kind } の構造体配列。空 [] にすればプロジェクトタブ (tabs) だけでアプリに着地でき安全。古い string 配列形式は新ビルドで起動を落とす。これは seed バグであり製品バグではない。
+Future Action: browser-check の seed では recent_projects は [] にするか persistence.rs の RecentProjectEntry 現行 shape をその場で確認してから書く。起動 panic 時は seed スキーマ不一致をまず疑い、CHECK_HOME/.gwt/session.json を現行 struct 定義と突き合わせる。
