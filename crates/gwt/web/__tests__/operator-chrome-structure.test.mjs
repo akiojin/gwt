@@ -179,6 +179,51 @@ test("project bar and command palette expose Start Work outside the Branches sur
   );
 });
 
+test("Start Work command opens a pending wizard before backend state arrives", () => {
+  const commandCase = appSource.match(
+    /case\s+"start-work":[\s\S]*?case\s+"theme-cycle"/,
+  );
+  assert.ok(commandCase, "expected Start Work command case");
+  assert.match(
+    commandCase[0],
+    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_start_work"/,
+    "expected Start Work to render a local pending wizard before sending open_start_work",
+  );
+  assert.match(
+    appSource,
+    /let\s+launchWizardOpening\s*=\s*null/,
+    "expected local pending wizard state",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
+    "renderLaunchWizard must keep the modal open for local pending Start Work state",
+  );
+});
+
+test("Start Work pending wizard clears when backend state, error, or local close wins", () => {
+  assert.match(
+    appSource,
+    /function\s+clearLaunchWizardOpening\(\)\s*\{[\s\S]{0,120}?launchWizardOpening\s*=\s*null/,
+    "expected a helper that clears pending open state",
+  );
+  assert.match(
+    appSource,
+    /function\s+closeLaunchWizardLocal\(\)[\s\S]{0,260}?clearLaunchWizardOpening\(\)/,
+    "local wizard close must clear pending open state",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,240}?launchWizardOpenError\s*=/,
+    "backend open errors must replace pending open state",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,260}?launchWizard\s*=\s*event\.wizard/,
+    "backend wizard state must replace pending open state",
+  );
+});
+
 test("frontend handles active work projection as status-strip telemetry", () => {
   assert.match(
     appSource,

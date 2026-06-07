@@ -3051,7 +3051,7 @@ mod tests {
         // guard preamble between the case label and the assignment. A
         // null tombstone must not clear an open-error modal during reconnect.
         let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
         )
         .expect("valid regex");
         assert!(
@@ -3249,7 +3249,7 @@ mod tests {
         // guard preamble between the case label and the mutation. A
         // null tombstone must not clear an open-error modal during reconnect.
         let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
         .expect("valid regex");
         let wizard_open_error_event = regex::Regex::new(

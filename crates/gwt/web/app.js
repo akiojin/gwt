@@ -381,6 +381,7 @@
       let viewportDomApplied = false;
       let launchWizard = null;
       let launchWizardOpenError = null;
+      let launchWizardOpening = null;
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
@@ -402,12 +403,14 @@
           }
           if (deferred.kind === "launch_wizard_state") {
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             if (deferred.wizard) {
               launchWizardOpenError = null;
             }
             launchWizard = deferred.wizard;
           } else if (deferred.kind === "launch_wizard_open_error") {
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             launchWizard = null;
             launchWizardOpenError = {
               title: deferred.title || "Launch Agent",
@@ -9376,6 +9379,7 @@
 
       function closeLaunchWizardLocal() {
         clearLaunchWizardPendingAction();
+        clearLaunchWizardOpening();
         launchWizard = null;
         launchWizardOpenError = null;
         // Issue #2698 PR 1 (B7) — local close wins over any pending
@@ -9399,6 +9403,22 @@
 
       function clearLaunchWizardPendingAction() {
         launchWizardPendingAction = null;
+      }
+
+      function openStartWorkPendingWizard() {
+        clearLaunchWizardPendingAction();
+        launchWizard = null;
+        launchWizardOpenError = null;
+        launchWizardOpening = {
+          title: "Start Work",
+          meta: "Work launch",
+          message: "Preparing Start Work...",
+        };
+        renderLaunchWizard();
+      }
+
+      function clearLaunchWizardOpening() {
+        launchWizardOpening = null;
       }
 
       function syncLaunchWizardPendingChrome(isPending) {
@@ -9439,7 +9459,7 @@
       }
 
       function renderLaunchWizard() {
-        if (!launchWizard && !launchWizardOpenError) {
+        if (!launchWizard && !launchWizardOpenError && !launchWizardOpening) {
           clearLaunchWizardPendingAction();
           syncLaunchWizardPendingChrome(false);
           const wasOpenBeforeClose = wizardModal.classList.contains("open");
@@ -9479,8 +9499,9 @@
         syncWizardDraftState();
         closeModal();
         const isLaunchActionPending = Boolean(launchWizardPendingAction);
+        const isLaunchOpeningPending = Boolean(launchWizardOpening);
         const isLaunchSubmitPending = launchWizardPendingAction?.kind === "submit";
-        syncLaunchWizardPendingChrome(isLaunchActionPending);
+        syncLaunchWizardPendingChrome(isLaunchActionPending || isLaunchOpeningPending);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
           // Capture trigger BEFORE flipping .open so render-driven focus
@@ -9499,6 +9520,33 @@
           // SPEC-2356 — trap Tab inside the wizard while it's open so
           // keyboard users can't escape into background content.
           wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
+        }
+
+        if (launchWizardOpening) {
+          if (wizardTitle) {
+            wizardTitle.textContent = launchWizardOpening.title || "Start Work";
+          }
+          wizardMeta.textContent = launchWizardOpening.meta || "Work launch";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = true;
+          wizardSubmitButton.hidden = true;
+          wizardSubmitButton.disabled = true;
+          wizardCancelButton.textContent = "Cancel";
+          wizardCancelButton.disabled = true;
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          const openingPanel = createNode("div", "launch-panel wizard-disabled");
+          openingPanel.appendChild(
+            createNode(
+              "div",
+              "launch-note launch-pending-note",
+              launchWizardOpening.message || "Preparing Start Work...",
+            ),
+          );
+          wizardBody.appendChild(openingPanel);
+          return;
         }
 
         if (launchWizardOpenError) {
@@ -14641,6 +14689,7 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             launchWizard = null;
             launchWizardOpenError = {
               title: event.title || "Launch Agent",
@@ -14666,6 +14715,7 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             if (event.wizard) {
               launchWizardOpenError = null;
             }
@@ -15818,6 +15868,7 @@
             return;
           case "start-work":
           case "spawn-agent":
+            openStartWorkPendingWizard();
             frontendUnits.socketTransport.send({
               kind: "open_start_work",
             });

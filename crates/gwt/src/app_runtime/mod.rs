@@ -13146,7 +13146,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_open_start_work_ensures_remote_develop_without_creating_work_branch() {
+    fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -13159,6 +13159,21 @@ exit 1
         run_git(&repo, &["checkout", "develop"]);
         run_git(&repo, &["remote", "set-head", "origin", "-a"]);
         run_git(&origin, &["branch", "-D", "develop"]);
+        run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        let develop_before_open = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/develop",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check origin/develop before open");
+        assert!(
+            !develop_before_open.success(),
+            "fixture must start without origin/develop"
+        );
 
         let tab = sample_project_tab(
             "tab-1",
@@ -13199,8 +13214,8 @@ exit 1
             .status()
             .expect("check origin/develop");
         assert!(
-            develop.success(),
-            "opening Start Work should restore origin/develop from the remote default branch"
+            !develop.success(),
+            "opening Start Work must not fetch or restore origin/develop before the user launches"
         );
 
         let refs = gwt_core::process::hidden_command("git")

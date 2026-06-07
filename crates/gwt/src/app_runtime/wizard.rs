@@ -845,15 +845,7 @@ impl AppRuntime {
         project_root: &Path,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<(), String> {
-        // SPEC-2014 FR-PERF-003: reuse the tab's cached `main_worktree_root`
-        // so Start Work does not spawn another `git rev-parse
-        // --git-common-dir` per open.
-        let git_root = self.tab(tab_id).map(|tab| tab.main_worktree_root());
-        let base_branch = match git_root.as_deref() {
-            Some(root) => gwt::start_work::resolve_start_work_base_branch_in(root),
-            None => gwt::start_work::resolve_start_work_base_branch(project_root),
-        }
-        .map_err(|error| error.to_string())?;
+        let base_branch = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
         let work_branch =
             gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
                 .map_err(|error| error.to_string())?;
