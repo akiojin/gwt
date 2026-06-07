@@ -307,3 +307,47 @@ fn event_dispatcher_keeps_blocked_stop_runtime_state_running() {
         "\"Running\""
     );
 }
+
+/// Regression for the user-visible symptom: Codex's managed PreToolUse /
+/// PostToolUse hooks ran `gwtd hook event <event>` and exited with code 1 on
+/// every tool call because the runtime-state step failed closed when the
+/// payload carried no session_id (the shape Codex sends on tool-use events)
+/// and `CODEX_THREAD_ID` was unset. The dispatcher must now fail open and
+/// return `HookOutput::Silent` (exit code 0) while preserving the persisted
+/// agent_session_id.
+#[test]
+fn event_dispatcher_codex_tool_use_fails_open_without_hook_session_id() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    let mut session = Session::new(tmp.path(), "feature/demo", AgentId::Codex);
+    session.agent_session_id = Some("agent-existing".to_string());
+    let session_id = session.id.clone();
+    session.save(&sessions_dir).unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+    let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+    for event in ["PreToolUse", "PostToolUse"] {
+        let output = event_dispatcher::handle_with_input(
+            event,
+            r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+            tmp.path(),
+            Some(&session_id),
+        )
+        .unwrap_or_else(|err| panic!("{event} must fail open, got {err:?}"));
+        assert_eq!(output, HookOutput::Silent, "{event}");
+    }
+
+    // The id captured at SessionStart is preserved (placeholder never written).
+    let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+    assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-existing"));
+
+    // Runtime state is still written so the Branches tab keeps tracking status.
+    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
+    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
+    assert_eq!(runtime_state.status, "Running");
+}

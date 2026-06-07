@@ -178,6 +178,16 @@ pub enum FileAttachment {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentProgressPhase {
+    Queued,
+    Staging,
+    Injecting,
+    Attached,
+    Failed,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -273,6 +283,8 @@ pub enum FrontendEvent {
     },
     PasteImageUploaded {
         id: String,
+        #[serde(default)]
+        operation_id: Option<String>,
         upload_id: String,
         mime_type: String,
         filename: Option<String>,
@@ -280,6 +292,8 @@ pub enum FrontendEvent {
     },
     AttachFiles {
         id: String,
+        #[serde(default)]
+        operation_id: Option<String>,
         files: Vec<FileAttachment>,
     },
     LoadFileTree {
@@ -1084,6 +1098,17 @@ pub enum BackendEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    AttachmentProgress {
+        id: String,
+        operation_id: String,
+        phase: AttachmentProgressPhase,
+        file_index: Option<usize>,
+        file_count: usize,
+        filename: Option<String>,
+        bytes_done: Option<u64>,
+        bytes_total: Option<u64>,
+        message: Option<String>,
+    },
     WindowState {
         window_id: String,
         state: WindowProcessStatus,
@@ -1689,6 +1714,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "attachment_progress",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "window_state",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2077,6 +2107,7 @@ impl BackendEvent {
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
             BackendEvent::FileTreeError { .. } => "file_tree_error",
@@ -2219,10 +2250,11 @@ mod tests {
     };
 
     use super::{
-        backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
-        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, IndexSearchMatchMode,
-        IndexSearchResult, IndexSearchScope, IndexSearchTarget, ProfileEntryView,
-        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        backend_event_policy, AttachmentProgressPhase, BackendEvent,
+        BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
+        FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
+        IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+        UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -2993,6 +3025,7 @@ mod tests {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "paste_image_uploaded",
             "id": "tab-1::agent-1",
+            "operation_id": "attachment-op-1",
             "upload_id": "upload-1",
             "mime_type": "image/png",
             "filename": "screenshot.png",
@@ -3005,17 +3038,43 @@ mod tests {
                 event,
                 FrontendEvent::PasteImageUploaded {
                     id,
+                    operation_id: Some(operation_id),
                     upload_id,
                     mime_type,
                     filename: Some(filename),
                     size,
                 } if id == "tab-1::agent-1"
+                    && operation_id == "attachment-op-1"
                     && upload_id == "upload-1"
                     && mime_type == "image/png"
                     && filename == "screenshot.png"
                     && size == 12
             ),
-            "uploaded image paste must expose upload id and image metadata"
+            "uploaded image paste must expose operation id, upload id, and image metadata"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_uploaded_terminal_image_paste_without_operation_id() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": "tab-1::agent-1",
+            "upload_id": "upload-1",
+            "mime_type": "image/png",
+            "filename": "screenshot.png",
+            "size": 12
+        }))
+        .expect("deserialize legacy uploaded image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImageUploaded {
+                    operation_id: None,
+                    ..
+                }
+            ),
+            "legacy uploaded image paste events must remain accepted"
         );
     }
 
@@ -3036,7 +3095,7 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles { id, files, .. }
                     if id == "tab-1::agent-1"
                         && matches!(
                             files.as_slice(),
@@ -3068,7 +3127,7 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles { id, files, .. }
                     if id == "tab-1::agent-1"
                         && matches!(
                             files.as_slice(),
@@ -3092,6 +3151,7 @@ mod tests {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "attach_files",
             "id": "tab-1::agent-1",
+            "operation_id": "attachment-op-2",
             "files": [
                 {
                     "source": "uploaded",
@@ -3107,8 +3167,13 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles {
+                    id,
+                    operation_id: Some(operation_id),
+                    files,
+                }
                     if id == "tab-1::agent-1"
+                        && operation_id == "attachment-op-2"
                         && matches!(
                             files.as_slice(),
                             [super::FileAttachment::Uploaded {
@@ -3123,6 +3188,69 @@ mod tests {
                         )
             ),
             "browser streaming uploads must expose upload id and metadata"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_file_attachments_without_operation_id() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": "/Users/me/report.pdf"
+                }
+            ]
+        }))
+        .expect("deserialize legacy file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles {
+                    operation_id: None,
+                    ..
+                }
+            ),
+            "legacy file attachment events must remain accepted"
+        );
+    }
+
+    #[test]
+    fn backend_event_serializes_attachment_progress_contract() {
+        let event = BackendEvent::AttachmentProgress {
+            id: "tab-1::agent-1".to_string(),
+            operation_id: "attachment-op-3".to_string(),
+            phase: AttachmentProgressPhase::Staging,
+            file_index: Some(0),
+            file_count: 2,
+            filename: Some("資料 日本語.txt".to_string()),
+            bytes_done: Some(64),
+            bytes_total: Some(128),
+            message: None,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize attachment progress");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "attachment_progress",
+                "id": "tab-1::agent-1",
+                "operation_id": "attachment-op-3",
+                "phase": "staging",
+                "file_index": 0,
+                "file_count": 2,
+                "filename": "資料 日本語.txt",
+                "bytes_done": 64,
+                "bytes_total": 128,
+                "message": null
+            })
+        );
+        assert_eq!(
+            event.delivery_policy().kind,
+            "attachment_progress",
+            "attachment progress must be registered in the backend event policy catalog"
         );
     }
 
@@ -3496,6 +3624,31 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn frontend_event_launch_wizard_goto_step_round_trips() {
+        // SPEC-2014 FR-128 / SC-084: progress rail クリックの goto_step action。
+        use crate::launch_wizard::{LaunchWizardAction, WizardPhase};
+        let payload =
+            r#"{"kind":"launch_wizard_action","action":{"kind":"goto_step","phase":"runtime"}}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize launch_wizard goto_step");
+        match event {
+            FrontendEvent::LaunchWizardAction { action, .. } => match action {
+                LaunchWizardAction::GotoStep { phase } => {
+                    assert_eq!(phase, WizardPhase::Runtime);
+                }
+                other => panic!("unexpected action: {other:?}"),
+            },
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let action = LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Confirm,
+        };
+        let value = serde_json::to_value(&action).expect("serialize goto_step");
+        assert_eq!(value["kind"], "goto_step");
+        assert_eq!(value["phase"], "confirm");
     }
 
     #[test]

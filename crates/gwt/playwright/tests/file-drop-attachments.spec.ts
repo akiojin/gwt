@@ -139,6 +139,80 @@ test.describe("Browser file drop attachments", () => {
     await expect.poll(() => page.evaluate(() => window.__fileDropAlerts)).toEqual([]);
   });
 
+  test("drop progress is scoped to the target Agent window and keeps Japanese filenames", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+
+    await page.goto(APP_URL);
+    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-id='shell-1']")).toBeVisible();
+
+    await dropTextFileOn(page, ".workspace-window[data-id='agent-1'] .window-body", {
+      name: "資料 日本語.txt",
+      type: "text/plain",
+      content: "nihongo filename\n",
+    });
+
+    const attach = await waitForAttachFiles(page);
+    expect(attach).toMatchObject({
+      kind: "attach_files",
+      id: "agent-1",
+    });
+    expect(attach.operation_id).toEqual(expect.stringMatching(/^attachment-/));
+    expect(attach.files[0]).toMatchObject({
+      filename: "資料 日本語.txt",
+    });
+
+    const agentProgress = page.locator(
+      ".workspace-window[data-id='agent-1'] .attachment-progress",
+    );
+    await expect(agentProgress).toBeVisible();
+    await expect(agentProgress).toContainText("資料 日本語.txt");
+    await expect(agentProgress.locator(".attachment-progress__cancel")).toHaveCount(0);
+    await expect(
+      page.locator(".workspace-window[data-id='shell-1'] .attachment-progress"),
+    ).toHaveCount(0);
+
+    await page.evaluate((operationId) => {
+      window.__emitFileDropBackendEvent?.({
+        kind: "attachment_progress",
+        id: "agent-1",
+        operation_id: operationId,
+        phase: "staging",
+        file_index: 0,
+        file_count: 1,
+        filename: "資料 日本語.txt",
+        bytes_done: 8,
+        bytes_total: 16,
+        message: null,
+      });
+    }, attach.operation_id);
+    await expect(agentProgress).toContainText("Staging");
+    await expect(agentProgress.locator('[role="progressbar"]')).toHaveAttribute(
+      "aria-valuenow",
+      "50",
+    );
+
+    await page.evaluate((operationId) => {
+      window.__emitFileDropBackendEvent?.({
+        kind: "attachment_progress",
+        id: "agent-1",
+        operation_id: operationId,
+        phase: "attached",
+        file_index: 0,
+        file_count: 1,
+        filename: "資料 日本語.txt",
+        bytes_done: 16,
+        bytes_total: 16,
+        message: null,
+      });
+    }, attach.operation_id);
+    await expect(agentProgress).toContainText("Attached");
+    await expect.poll(() => page.evaluate(() => window.__fileDropAlerts)).toEqual([]);
+  });
+
   test("pasting an image on an Agent terminal uploads and shows progress", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
@@ -275,6 +349,7 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
     window.__fileDropAlerts = [];
     window.__attachmentUploads = [];
     window.__attachmentUploadSequence = 0;
+    window.__emitFileDropBackendEvent = null;
     window.alert = (message) => {
       window.__fileDropAlerts.push(String(message));
     };
@@ -378,6 +453,7 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
         super();
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
+        window.__emitFileDropBackendEvent = (payload) => this.emit(payload);
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));

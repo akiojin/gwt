@@ -6697,3 +6697,24 @@ Type: lesson
 Context: While completing SPEC-1939 Phase 34, a perl pipeline used backtick-delimited text and failed before producing content, but gwtd issue spec 1939 --edit tasks -f - still consumed empty stdin and wrote a 0-byte tasks section. The section was restored from the cached artifact comment before handoff.
 Learning: Piping generated content directly into gwtd issue spec --edit is unsafe when the generator can fail; pipefail does not prevent the receiving command from accepting empty stdin.
 Future Action: For SPEC section rewrites, generate to a temporary file first, assert expected byte/line count and required anchors, show tail/readback, and only then pass the verified file to gwtd issue spec --edit.
+
+## 2026-06-06 — Codex managed hook は tool-use event の session_id 欠落で fail-closed にしない
+
+Type: lesson
+Context: Codex の PreToolUse/PostToolUse hook が毎回 exit code 1。runtime_state::validated_hook_agent_session_id が Codex セッションで CODEX_THREAD_ID 未設定かつ payload に session_id 無しのとき HookError::InvalidEvent を返していた。Codex は SessionStart では id を渡すが tool-use event では渡さないため毎回失敗。agent_session_id は session .toml に永続化済みなのに hook 全体を落としていた。live-event 経路 (daemon_runtime) は同条件で既に fail-open だった (commit c2c83469b で混入, SPEC-2077 ドメイン)。
+Learning: Provider 由来 (Codex) の hook payload フィールドは event ごとに有無が変わる。必須化して fail-closed にすると、ツール呼び出しごとに exit 1 がユーザーに露出する。永続済みメタデータ (exact_resume_session_id) があるなら fail-open + 既存値再利用が正しい。診断ログも persisted id がある通常ケースでは出さず、shipped behavior と分離する (2026-05-07 lesson と一致)。
+Future Action: hook handler に必須フィールド検査を追加するときは、(1) gwt 自身の不変条件 (GWT_SESSION_ID) だけ fail-closed、(2) provider 供給値の欠落は fail-open し persisted session metadata を破壊しない、(3) regression test で persisted id 保持と exit 0 を固定、(4) 診断ログは fallback 不能時のみ。runtime_state と daemon_runtime の両経路を必ず揃える。
+
+## 2026-06-04 — Fresh browser checks must seed agent windows, not rely on Start Work
+
+Type: lesson
+Context: SPEC-2012 visual verification was blocked twice because the isolated browser-check HOME had no Git HTTPS credentials and the user attempted Start Work/Launch flows that created remote work branches.
+Learning: For UI verification that needs an Agent window, prepare the fresh checkout with a current-branch Agent window before handing off the URL. For Claude Code startup auto-resume, the seeded session must include exact agent_session_id plus lifecycle evidence such as last_hook_event_at or last_completed_stop_at; otherwise it is filtered out.
+Future Action: When using browser-check for Agent-window behavior, never ask the user to Start Work in the isolated HOME. Seed or launch the required current-branch Agent window first, verify with headless/browser checks that no branch-auth error is present, then share the URL.
+
+## 2026-06-04 — Fresh Claude verification can be blocked by existing live Work agent focus
+
+Type: lesson
+Context: SPEC-2012 visual verification needed a Claude Code window in an isolated browser-check HOME. Launch Wizard normal mode appeared to close successfully but did not create Claude while a live Codex pane was already assigned to the same Work.
+Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
+Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
