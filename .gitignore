@@ -96,3 +96,6 @@ __pycache__/
 /specs/
 tasks/spec-*/
 package-lock.json
+
+# Playwright MCP automation artifacts
+.playwright-mcp/
