@@ -46,6 +46,9 @@ pub enum BranchCleanupBlockedReason {
 pub enum BranchCleanupRisk {
     Unmerged,
     RemoteTracking,
+    // SPEC-2009 FR-070: a protected base branch (main/master/develop) selectable
+    // for LOCAL cleanup only — its remote counterpart is always protected.
+    ProtectedBase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,13 +277,8 @@ fn build_cleanup_info(
         .cloned()
         .flatten();
 
-    if gwt_git::is_protected_branch(execution_branch_name) {
-        return blocked_cleanup_info(
-            execution_branch,
-            upstream,
-            BranchCleanupBlockedReason::ProtectedBranch,
-        );
-    }
+    // CurrentHead / ActiveSession take precedence over the protected-base
+    // policy below: a checked-out or in-use protected branch stays Blocked.
     if current_head_branch.is_some_and(|head| head == execution_branch_name) {
         return blocked_cleanup_info(
             execution_branch,
@@ -294,6 +292,25 @@ fn build_cleanup_info(
             upstream,
             BranchCleanupBlockedReason::ActiveSession,
         );
+    }
+    // SPEC-2009 FR-070: protected base branches (main/master/develop) are
+    // selectable for LOCAL cleanup as Risky — remote deletion stays protected
+    // (enforced in branch_cleanup execution and gwt-git delete_remote_branch).
+    // They are Risky (not Safe), so "Select all safe" never sweeps them up
+    // (FR-072).
+    if gwt_git::is_protected_branch(execution_branch_name) {
+        let merge_target = cleanup_targets
+            .get(execution_branch_name)
+            .cloned()
+            .flatten();
+        return BranchCleanupInfo {
+            availability: BranchCleanupAvailability::Risky,
+            execution_branch,
+            merge_target,
+            upstream,
+            blocked_reason: None,
+            risks: vec![BranchCleanupRisk::ProtectedBase],
+        };
     }
     let merge_target = cleanup_targets
         .get(execution_branch_name)
@@ -701,6 +718,80 @@ mod tests {
                 .as_ref()
                 .map(|target| target.reference.as_str()),
             Some("origin/develop")
+        );
+    }
+
+    fn local_entry(name: &str, is_head: bool) -> BranchListEntry {
+        BranchListEntry {
+            name: name.to_string(),
+            scope: BranchScope::Local,
+            is_head,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: Some("2026-05-20 08:30:00 +0000".to_string()),
+            cleanup_ready: false,
+            cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
+        }
+    }
+
+    #[test]
+    fn protected_local_branch_is_risky_selectable_and_remote_protected() {
+        // SPEC-2009 FR-070: local main/develop are selectable for LOCAL cleanup
+        // as Risky (not Blocked), so they can be deleted while the remote stays
+        // protected.
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", false)],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Risky
+        );
+        assert_eq!(hydrated[0].cleanup.blocked_reason, None);
+        assert!(hydrated[0]
+            .cleanup
+            .risks
+            .contains(&BranchCleanupRisk::ProtectedBase));
+    }
+
+    #[test]
+    fn protected_branch_checked_out_stays_blocked() {
+        // FR-070: a checked-out protected branch is still Blocked (git refuses
+        // to delete a branch checked out in a worktree).
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", true)],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Blocked
+        );
+        assert_eq!(
+            hydrated[0].cleanup.blocked_reason,
+            Some(BranchCleanupBlockedReason::CurrentHead)
+        );
+    }
+
+    #[test]
+    fn protected_branch_with_active_session_stays_blocked() {
+        // FR-070: an in-use protected branch is still Blocked.
+        let sessions = HashSet::from(["develop".to_string()]);
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", false)],
+            &sessions,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Blocked
+        );
+        assert_eq!(
+            hydrated[0].cleanup.blocked_reason,
+            Some(BranchCleanupBlockedReason::ActiveSession)
         );
     }
 }

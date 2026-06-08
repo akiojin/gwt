@@ -242,16 +242,31 @@ export function renderBranchCleanupModal({
   }
   dialogEl.appendChild(list);
   if (supportsRemoteDelete) {
+    // SPEC-2009 FR-070: protected base branches (main/develop) are never
+    // deleted from the remote — force the remote-delete toggle off + disabled
+    // when any selected branch is a protected base branch.
+    const hasProtectedBaseSelection = selectedEntries.some((entry) =>
+      (entry.cleanup.risks || []).includes("protected_base"),
+    );
     const toggleRow = createNode("label", "branch-cleanup-toggle-row");
     const checkbox = createNode("input", "");
     checkbox.type = "checkbox";
-    checkbox.checked = Boolean(state.cleanupModal.deleteRemote);
+    checkbox.disabled = hasProtectedBaseSelection;
+    checkbox.checked = hasProtectedBaseSelection
+      ? false
+      : Boolean(state.cleanupModal.deleteRemote);
     checkbox.addEventListener("change", () => {
       onDeleteRemoteToggle(checkbox.checked);
     });
     toggleRow.appendChild(checkbox);
     toggleRow.appendChild(
-      createNode("span", "", "Also delete matching remote branches"),
+      createNode(
+        "span",
+        "",
+        hasProtectedBaseSelection
+          ? "Remote base branches are protected and won't be deleted"
+          : "Also delete matching remote branches",
+      ),
     );
     dialogEl.appendChild(toggleRow);
   }

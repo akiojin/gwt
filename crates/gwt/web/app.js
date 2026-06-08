@@ -11426,6 +11426,8 @@
               return "remote-tracking";
             case "unmerged":
               return "unmerged";
+            case "protected_base":
+              return "protected base (remote kept)";
             default:
               return "warning";
           }
