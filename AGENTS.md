@@ -47,6 +47,7 @@
 - バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
+- **Work と Branches は単一の統合サーフェス**（ブランチ一覧を背骨に、各ブランチ配下の Work を agent session 単位で表示）で提示する。ただし **Work identity は agent session 単位（1 agent : 1 Work、SPEC-2359 W-12 / FR-348）を維持**し、branch / worktree / PR は Work の裏方 metadata。「Work=Branch」は **UI 上の統合プレゼンテーション**を指し、identity の差し戻しではない。canonical な設計は SPEC-2359（`gwtd issue spec 2359`）を正本とする
 
 ### 🔒 ブランチ保護ルール
 
