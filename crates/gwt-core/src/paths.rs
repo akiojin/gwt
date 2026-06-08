@@ -755,8 +755,21 @@ mod tests {
 
     fn git_commit_allow_empty(path: &Path, message: &str) {
         let mut cmd = crate::process::hidden_command("git");
-        cmd.args(["commit", "--allow-empty", "-m", message])
-            .current_dir(path);
+        // Pin the author/committer identity via -c flags so the commit does not
+        // depend on an ambient git user.name/user.email. scrub_git_env removes
+        // GIT_* env, and CI Linux runners have no global identity, so without
+        // this the commit fails with "Author identity unknown".
+        cmd.args([
+            "-c",
+            "user.name=gwt-test",
+            "-c",
+            "user.email=gwt-test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            message,
+        ])
+        .current_dir(path);
         crate::process::scrub_git_env(&mut cmd);
         let output = cmd.output().expect("git commit");
         assert!(
