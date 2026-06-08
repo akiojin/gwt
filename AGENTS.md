@@ -47,7 +47,7 @@
 - バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
-- **Work と Branches は単一の統合サーフェス**（ブランチ一覧を背骨に、各ブランチ配下の Work を agent session 単位で表示）で提示する。ただし **Work identity は agent session 単位（1 agent : 1 Work、SPEC-2359 W-12 / FR-348）を維持**し、branch / worktree / PR は Work の裏方 metadata。「Work=Branch」は **UI 上の統合プレゼンテーション**を指し、identity の差し戻しではない。canonical な設計は SPEC-2359（`gwtd issue spec 2359`）を正本とする
+- **Work と Branches は単一の Work 主導サーフェス**で提示する。スパインは Active Work（= branch、常に 1 つ以上の agent を持つ）で、各 Work 配下に agent（`agent_id` = agent 種別、session 横断で安定）ごとにグループ化した複数 session（`session_id`）を表示する（Work → Agent → Session）。agent の居ない git ブランチは Work ではなく、折り畳みの「Other branches (idle)」に退避し Launch / cleanup のみ提供する。**実装の Work identity は branch 由来・1 Work に複数 agent**（`active_work_items_from_projection` が agent を branch でグルーピング）であり、SPEC-2359 W-12 の「1 agent : 1 Work」(FR-348) は未実装ドリフトのため UI はこれを採用しない。canonical な設計は SPEC-2359 W-13/US-67（`gwtd issue spec 2359`）を正本とする
 
 ### 🔒 ブランチ保護ルール
 

@@ -221,11 +221,60 @@ test("Unified Work surface merges Work and Branches into one view without a tab 
   assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
 });
 
-test("Branch backbone nests active works under their branch and keeps non-work branches (1 agent:1 Work)", () => {
+test("Work spine groups a Work's agents by agent_id into Work → Agent → Sessions", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "proj",
+    title: "Project",
+    status_category: "active",
+    active_works: [
+      makeWork("w1", "Parser cleanup", "active", "work/feature-a", [
+        makeAgent("codex", "session-a", "active", "parser refactor"),
+        makeAgent("codex", "session-b", "active", "add tests"),
+        makeAgent("claude", "session-c", "blocked", "waiting review"),
+      ]),
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const work = fixture.body.querySelector('.workspace-work-group[data-workspace-id="w1"]');
+  assert.ok(work, "the Work is the spine row");
+  assert.ok(
+    work.querySelector('.workspace-overview-row[data-workspace-id="w1"]'),
+    "the Work keeps a selectable header row",
+  );
+
+  const codex = work.querySelector('.workspace-work-agent[data-agent-id="codex"]');
+  const claude = work.querySelector('.workspace-work-agent[data-agent-id="claude"]');
+  assert.ok(codex, "agents are grouped by agent_id (Codex)");
+  assert.ok(claude, "agents are grouped by agent_id (Claude Code)");
+  assert.equal(
+    codex.querySelectorAll(".workspace-work-session[data-session-id]").length,
+    2,
+    "one agent (agent_id) groups its multiple sessions",
+  );
+  assert.equal(
+    claude.querySelectorAll(".workspace-work-session[data-session-id]").length,
+    1,
+  );
+  const sessionIds = Array.from(
+    codex.querySelectorAll(".workspace-work-session[data-session-id]"),
+    (node) => node.dataset.sessionId,
+  );
+  assert.deepEqual(sessionIds, ["session-a", "session-b"]);
+});
+
+test("Idle branches with no agent are collapsed below the Work spine and are not Works", () => {
   const fixture = createFixture();
   const branches = fakeBranchesSurface([
-    branchEntry("work/feature-a", { is_head: true }),
-    branchEntry("main"),
+    branchEntry("work/feature-a"),
+    branchEntry("main", { is_head: true }),
+    branchEntry("develop"),
   ]);
   const surface = createSurface(
     fixture,
@@ -233,10 +282,7 @@ test("Branch backbone nests active works under their branch and keeps non-work b
       id: "proj",
       title: "Project",
       status_category: "active",
-      active_works: [
-        makeWork("w1", "Parser cleanup", "active", "work/feature-a"),
-        makeWork("w2", "UI polish", "active", "work/feature-a"),
-      ],
+      active_works: [makeWork("w1", "Parser", "active", "work/feature-a")],
       unassigned_agents: [],
     },
     { branchesSurface: branches },
@@ -247,31 +293,37 @@ test("Branch backbone nests active works under their branch and keeps non-work b
     sendFocus() {},
   });
 
-  const featureRow = fixture.body.querySelector(
-    '.workspace-branch-row[data-branch-name="work/feature-a"]',
-  );
-  assert.ok(featureRow, "the work branch is a row in the backbone");
-  const nested = Array.from(
-    featureRow.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
-  ).map((node) => node.dataset.workspaceId);
-  assert.deepEqual(
-    nested,
-    ["w1", "w2"],
-    "both agent-session works are nested under their branch (identity stays per agent session)",
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-work-group[data-workspace-id]").length,
+    1,
+    "only Works are on the spine",
   );
 
-  const mainRow = fixture.body.querySelector(
-    '.workspace-branch-row[data-branch-name="main"]',
-  );
-  assert.ok(mainRow, "a non-work branch still appears in the backbone");
+  const idle = fixture.body.querySelector(".workspace-idle-branches");
+  assert.ok(idle, "idle branches have their own collapsible section");
+  const toggle = idle.querySelector("[data-action='toggle-idle-branches']");
+  assert.match(toggle.textContent, /Other branches \(idle\) \(2\)/);
   assert.equal(
-    mainRow.querySelectorAll(".workspace-overview-row[data-workspace-id]").length,
+    idle.querySelectorAll(".workspace-branch-row.is-idle").length,
     0,
-    "a non-work branch has no nested works",
+    "collapsed by default",
+  );
+
+  toggle.click();
+  const expanded = fixture.body.querySelector(".workspace-idle-branches");
+  const idleNames = Array.from(
+    expanded.querySelectorAll(".workspace-branch-row.is-idle[data-branch-name]"),
+    (node) => node.dataset.branchName,
+  ).sort();
+  assert.deepEqual(idleNames, ["develop", "main"]);
+  assert.equal(
+    expanded.querySelector('.workspace-branch-row[data-branch-name="work/feature-a"]'),
+    null,
+    "a branch that backs a Work is never in the idle section",
   );
 });
 
-test("Branch backbone requests branches on mount and routes branch cleanup to the SPEC-2009 modal", () => {
+test("Branches load on mount and branch cleanup routes to the SPEC-2009 modal", () => {
   const fixture = createFixture();
   const requested = [];
   const cleanups = [];
@@ -299,25 +351,22 @@ test("Branch backbone requests branches on mount and routes branch cleanup to th
   assert.deepEqual(
     requested,
     [fixture.windowData.id],
-    "the unified view requests branches once on mount when empty",
+    "branches load once on mount so the idle section can fill",
   );
 
   const cleanupBtn = fixture.body.querySelector("[data-action='open-branch-cleanup']");
-  assert.ok(cleanupBtn, "branch cleanup action is present in the unified view");
+  assert.ok(cleanupBtn, "branch cleanup action is present");
   cleanupBtn.click();
   assert.deepEqual(
     cleanups,
     [fixture.windowData.id],
-    "branch cleanup opens the SPEC-2009 cleanup modal (distinct from Work close)",
+    "cleanup opens the SPEC-2009 modal",
   );
 });
 
-test("Branch backbone Launch and Resume reuse the existing branch protocol", () => {
+test("Per-Work Launch and Resume reuse the existing branch protocol", () => {
   const fixture = createFixture();
   const sent = [];
-  const branches = fakeBranchesSurface([
-    branchEntry("work/feature-a", { resume: { available: true, reason: "" } }),
-  ]);
   const surface = createSurface(
     fixture,
     {
@@ -327,7 +376,7 @@ test("Branch backbone Launch and Resume reuse the existing branch protocol", () 
       active_works: [makeWork("w1", "Parser", "active", "work/feature-a")],
       unassigned_agents: [],
     },
-    { branchesSurface: branches, send: (message) => sent.push(message) },
+    { send: (message) => sent.push(message) },
   );
 
   surface.mount(fixture.body, fixture.windowData, {
@@ -335,43 +384,16 @@ test("Branch backbone Launch and Resume reuse the existing branch protocol", () 
     sendFocus() {},
   });
 
-  const branchRow = fixture.body.querySelector(
-    '.workspace-branch-row[data-branch-name="work/feature-a"]',
-  );
-  branchRow.querySelector("[data-branch-row-action='launch']").click();
-  branchRow.querySelector("[data-branch-row-action='resume']").click();
+  const work = fixture.body.querySelector('.workspace-work-group[data-workspace-id="w1"]');
+  work.querySelector("[data-branch-row-action='launch']").click();
+  work.querySelector("[data-branch-row-action='resume']").click();
 
   const launch = sent.find((m) => m.kind === "open_launch_wizard");
   const resume = sent.find((m) => m.kind === "resume_branch_latest_agent");
-  assert.ok(launch, "launch sends open_launch_wizard");
-  assert.equal(launch.branch_name, "work/feature-a");
-  assert.ok(resume, "resume sends resume_branch_latest_agent");
-  assert.equal(resume.branch_name, "work/feature-a");
-});
-
-test("Detached works without a branch stay visible in the unified view", () => {
-  const fixture = createFixture();
-  const branches = fakeBranchesSurface([branchEntry("main")]);
-  const surface = createSurface(
-    fixture,
-    {
-      id: "proj",
-      title: "Project",
-      status_category: "active",
-      active_works: [makeWork("w-detached", "No branch work", "active", "")],
-      unassigned_agents: [],
-    },
-    { branchesSurface: branches },
-  );
-
-  surface.mount(fixture.body, fixture.windowData, {
-    focusWindowLocally() {},
-    sendFocus() {},
-  });
-
+  assert.ok(launch && launch.branch_name === "work/feature-a", "launch sends open_launch_wizard");
   assert.ok(
-    fixture.body.querySelector('.workspace-overview-row[data-workspace-id="w-detached"]'),
-    "a branchless work remains visible",
+    resume && resume.branch_name === "work/feature-a",
+    "resume sends resume_branch_latest_agent",
   );
 });
 
@@ -584,20 +606,25 @@ function branchEntry(name, extra = {}) {
   };
 }
 
-function makeWork(id, title, status, branch) {
+function makeAgent(agentId, sessionId, status, focus) {
+  const names = { codex: "Codex", claude: "Claude Code", gemini: "Gemini" };
+  return {
+    session_id: sessionId,
+    agent_id: agentId,
+    display_name: names[agentId] || agentId,
+    status_category: status,
+    title_summary: focus,
+    current_focus: focus,
+  };
+}
+
+function makeWork(id, title, status, branch, agents) {
   return {
     id,
     title,
     status_category: status,
     branch,
-    agents: [
-      {
-        session_id: `agent-${id}`,
-        display_name: "Agent",
-        status_category: status,
-        title_summary: title,
-      },
-    ],
+    agents: agents || [makeAgent("codex", `session-${id}`, status, title)],
   };
 }
 
