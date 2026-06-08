@@ -2224,9 +2224,29 @@ test("Branch Cleanup survives WebSocket reconnect without synthetic failed rows"
     /kind:\s*"clear_branch_cleanup_status"/,
     /operation_id:\s*operationId/,
     /function\s+branchCleanupEventIsStale\(/,
+    /function\s+isBranchCleanupStatusUnavailable\(/,
   ]) {
     assert.match(appSource, pattern, `expected reconnect-safe cleanup wiring: ${pattern}`);
   }
+  const handleSocketOpenBody = extractFunctionBody(appSource, "handleSocketOpen");
+  const flushIndex = handleSocketOpenBody.indexOf("while (pendingMessages.length > 0)");
+  const syncIndex = handleSocketOpenBody.indexOf("syncRunningBranchCleanups();");
+  assert.notEqual(flushIndex, -1, "reconnect must flush pending messages");
+  assert.notEqual(syncIndex, -1, "reconnect must sync running cleanup operations");
+  assert.ok(
+    flushIndex < syncIndex,
+    "queued cleanup start messages must be sent before sync_branch_cleanup",
+  );
+  const branchErrorIndex = appSource.indexOf('case "branch_error":');
+  const cleanupUnavailableIndex = appSource.indexOf(
+    "isBranchCleanupStatusUnavailable(event.message)",
+    branchErrorIndex,
+  );
+  const failIndex = appSource.indexOf("failRunningBranchCleanup(event.id, event.message)", branchErrorIndex);
+  assert.ok(
+    cleanupUnavailableIndex !== -1 && cleanupUnavailableIndex < failIndex,
+    "sync status-unavailable errors must not become synthetic failed cleanup rows",
+  );
   assert.ok(
     branchCleanupSource.includes("Reconnecting to cleanup status..."),
     "running modal should report reconnecting cleanup status",

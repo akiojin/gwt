@@ -3483,11 +3483,10 @@ mod tests {
             .is_empty());
         let sync_after_clear =
             runtime.sync_branch_cleanup_events("client-2", &branches_id, cleanup_operation_id);
-        assert!(matches!(
-            sync_after_clear.first().map(|event| &event.event),
-            Some(BackendEvent::BranchError { message, .. })
-                if message.contains("Cleanup status unavailable")
-        ));
+        assert!(
+            sync_after_clear.is_empty(),
+            "missing cleanup snapshots must not synthesize failed branch results"
+        );
 
         let wizard_events =
             runtime.open_launch_wizard("client-1", &branches_id, "feature/demo", Some(42));

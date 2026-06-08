@@ -7794,13 +7794,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(client_id, event)];
             }
         }
-        vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Cleanup status unavailable; refresh branches to verify".to_string(),
-            },
-        )]
+        Vec::new()
     }
 
     pub(crate) fn clear_branch_cleanup_status_events(

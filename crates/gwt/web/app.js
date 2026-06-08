@@ -1703,10 +1703,10 @@
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
-        syncRunningBranchCleanups();
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
+        syncRunningBranchCleanups();
       }
 
       function handleSocketMessage(event) {
@@ -11361,6 +11361,14 @@
         return true;
       }
 
+      function isBranchCleanupStatusUnavailable(message) {
+        return (
+          typeof message === "string" &&
+          /^Cleanup status unavail/.test(message) &&
+          /refresh branches to verify$/.test(message)
+        );
+      }
+
       function cleanupToggleClass(entry, state) {
         if (state.cleanupSelected.has(entry.name)) {
           return "selected";
@@ -14733,6 +14741,15 @@
             );
             state.loading = false;
             if (state.cleanupModal.stage === "running") {
+              if (isBranchCleanupStatusUnavailable(event.message)) {
+                markRunningBranchCleanupConnectionInterrupted(event.id);
+                if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+                  frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
+                  break;
+                }
+                frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+                break;
+              }
               failRunningBranchCleanup(event.id, event.message);
               if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
                 frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
