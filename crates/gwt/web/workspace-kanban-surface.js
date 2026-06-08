@@ -60,6 +60,24 @@ export function createWorkspaceKanbanSurface({
     }
   }
 
+  // SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
+  // agent-session Work lifecycle state (active / paused / done / discarded)
+  // rendered as a badge on each Work card.
+  function formatLifecycleStateLabel(state) {
+    switch (String(state || "active").toLowerCase()) {
+      case "active":
+        return "Active";
+      case "paused":
+        return "Paused";
+      case "done":
+        return "Done";
+      case "discarded":
+        return "Discarded";
+      default:
+        return "Active";
+    }
+  }
+
   function compactPath(value) {
     const text = compactText(value);
     if (!text) return "";
@@ -111,6 +129,13 @@ export function createWorkspaceKanbanSurface({
       next_action: compactText(item?.next_action),
       blocked_reason: compactText(item?.blocked_reason),
       lifecycle_stage: item?.lifecycle_stage || fallback.lifecycle_stage || "",
+      // SPEC-2359 Phase W-12 (FR-349/FR-351): agent-session Work lifecycle
+      // state (active / paused / done / discarded). Distinct from the U-6
+      // status-derived `lifecycle_stage`. Defaults to "active" so legacy
+      // projections without the field keep rendering an Active Work badge.
+      lifecycle_state:
+        item?.lifecycle_state || fallback.lifecycle_state || "active",
+      closed_at: item?.closed_at || fallback.closed_at || null,
       branch: compactText(item?.branch || primaryContainer.branch || fallback.branch),
       worktree_path: compactText(
         item?.worktree_path || primaryContainer.worktree_path || fallback.worktree_path,
@@ -199,7 +224,19 @@ export function createWorkspaceKanbanSurface({
 
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
-    copy.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    const titleRow = createNode("span", "workspace-overview-row-title-row");
+    titleRow.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
+    // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
+    // so the Work surface is the single home for Work lifecycle.
+    const lifecycleBadge = createNode(
+      "span",
+      "workspace-overview-lifecycle",
+      formatLifecycleStateLabel(item.lifecycle_state),
+    );
+    lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
+    titleRow.appendChild(lifecycleBadge);
+    copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
     appendMetaText(meta, item.branch);
@@ -409,6 +446,28 @@ export function createWorkspaceKanbanSurface({
     resumeButton.dataset.action = "resume-workspace";
     resumeButton.addEventListener("click", () => resumeWorkspace(workspace));
     actions.appendChild(resumeButton);
+    // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
+    // closing. Done / Discard are explicit user closes (FR-350 — agent stop
+    // alone never closes a Work). The actual cleanup is a follow-up slice, so
+    // these buttons only emit the `close_work` message for now.
+    const lifecycleState = String(workspace.lifecycle_state || "active").toLowerCase();
+    if (lifecycleState !== "done" && lifecycleState !== "discarded") {
+      const doneButton = createNode("button", "wizard-button", "Done");
+      doneButton.type = "button";
+      doneButton.dataset.action = "close-work-done";
+      doneButton.addEventListener("click", () =>
+        send({ kind: "close_work", work_id: workspace.id, close_kind: "done" }),
+      );
+      actions.appendChild(doneButton);
+
+      const discardButton = createNode("button", "wizard-button", "Discard");
+      discardButton.type = "button";
+      discardButton.dataset.action = "close-work-discard";
+      discardButton.addEventListener("click", () =>
+        send({ kind: "close_work", work_id: workspace.id, close_kind: "discarded" }),
+      );
+      actions.appendChild(discardButton);
+    }
     if (workspace.cleanup_candidate) {
       const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";

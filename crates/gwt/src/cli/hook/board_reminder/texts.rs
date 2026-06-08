@@ -75,14 +75,14 @@ Targeted posts are prefixed with a structured marker (currently the `>>` token) 
 line in the recipient's reminder injection. Prefer typed `--mention ...` for new posts; keep `--target` \
 for compatibility with older agents. Omit both for broadcast.\n\
 \n\
-**Workspace / Git environment guidance**:\n\
+**Work / Git environment guidance**:\n\
 - AGENTS.md is project-local: follow the target repository's AGENTS.md when present, \
 but do not assume gwt's AGENTS.md applies to other projects.\n\
 - Do NOT create, switch, or delete branches/worktrees manually (`git checkout -b`, \
 `git switch -c`, `git branch -D`, `git worktree add/remove`). gwt Start Work / \
 Launch materialization owns Git environment creation.\n\
-- Board is the coordination/history log; Workspace is the current state. When your current task, \
-summary, next action, or focus changes, update Workspace with `gwtd workspace update`.\n\
+- Board is the coordination/history log; Work is the current state. When your current task, \
+summary, next action, or focus changes, update Work with `gwtd workspace update`.\n\
 - For Agent/window title bars, keep the short label separate from long summaries: use \
 `--title-summary '<short title>'` with `gwtd board post` or `gwtd workspace update --agent-session <id>`.\n\
 \n\
@@ -131,14 +131,14 @@ targeted post は受信側 reminder injection の entry 行先頭に structured 
 新しい投稿では typed `--mention ...` を優先し、`--target` は older agent 互換に使います。\
 broadcast の場合はどちらも省略します。\n\
 \n\
-**Workspace / Git environment guidance**:\n\
+**Work / Git environment guidance**:\n\
 - AGENTS.md は project-local です。対象 repository に AGENTS.md がある場合はそれを優先し、\
 gwt の AGENTS.md を他 project に適用しないでください。\n\
 - branch / worktree を手動で作成、切替、削除しないでください（`git checkout -b`、\
 `git switch -c`、`git branch -D`、`git worktree add/remove`）。Git 環境作成は gwt Start Work / \
 Launch materialization が担当します。\n\
-- Board は coordination/history log、Workspace は current state です。現在の task、summary、\
-next action、focus が変わったら `gwtd workspace update` で Workspace を更新します。\n\
+- Board は coordination/history log、Work は current state です。現在の task、summary、\
+next action、focus が変わったら `gwtd workspace update` で Work を更新します。\n\
 - Agent/window title bar では短い label と長い summary を分けます。`gwtd board post` または \
 `gwtd workspace update --agent-session <id>` で `--title-summary '<short title>'` を使います。\n\
 \n\
@@ -167,8 +167,8 @@ and put AI coordination details in the body when another agent needs them.\n\
 AGENTS.md is project-local. Do NOT create, switch, or delete branches/worktrees \
 manually; gwt Start Work / Launch materialization owns Git environment creation.\n\
 \n\
-Board is history; Workspace is current state. If the work summary, next action, or focus changed, \
-update Workspace with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.\n";
+Board is history; Work is current state. If the work summary, next action, or focus changed, \
+update Work with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.\n";
 
 pub(super) const USER_PROMPT_REMINDER_SHORT_JA: &str = "# Board Post Reminder\n\
 \n\
@@ -185,7 +185,7 @@ AI coordination details は必要な場合に本文へ入れてください。\n
 AGENTS.md は project-local です。branch / worktree を手動で作成、切替、削除しないでください。\
 Git 環境作成は gwt Start Work / Launch materialization が担当します。\n\
 \n\
-Board は history、Workspace は current state です。work summary、next action、focus が変わったら \
+Board は history、Work は current state です。work summary、next action、focus が変わったら \
 `gwtd workspace update` で更新し、Agent/window title bar には `--title-summary '<short title>'` を使います。\n";
 
 // Stop reminders are emitted as `systemMessage` (user-facing) because
@@ -193,42 +193,42 @@ Board は history、Workspace は current state です。work summary、next act
 // Phrasing is therefore user-oriented rather than agent-oriented.
 pub(super) const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
 expect a final handoff, prompt the agent to post what it completed to the shared Board \
-with `gwtd board post --kind status --title-summary '<short title>'` before handing off. Board is history; Workspace is current \
-state. If the work summary, next action, or focus changed, prompt the agent to update Workspace \
+with `gwtd board post --kind status --title-summary '<short title>'` before handing off. Board is history; Work is current \
+state. If the work summary, next action, or focus changed, prompt the agent to update Work \
 with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.";
 
 pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
-Board recently; no additional completed-status post is required before stopping. If Workspace \
+Board recently; no additional completed-status post is required before stopping. If Work \
 current state changed, update it with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.";
 
 pub(super) const STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): agent が停止しようとしています。\
 最終 handoff が必要な場合は、停止前に `gwtd board post --kind status --title-summary '<short title>'` で\
-完了内容を共有 Board に投稿するよう促してください。Board は history、Workspace は current state です。\
-work summary、next action、focus が変わった場合は `gwtd workspace update` で Workspace を更新し、\
+完了内容を共有 Board に投稿するよう促してください。Board は history、Work は current state です。\
+work summary、next action、focus が変わった場合は `gwtd workspace update` で Work を更新し、\
 Agent/window title bar には `--title-summary '<short title>'` を使います。";
 
 pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): agent は最近 Board に投稿済みです。\
-停止前に追加の completed-status post は不要です。Workspace current state が変わった場合は \
+停止前に追加の completed-status post は不要です。Work current state が変わった場合は \
 `gwtd workspace update` で更新し、Agent/window title bar には `--title-summary '<short title>'` を使います。";
 
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
 If this task produced a reusable lesson, decision, failure pattern, or agent workflow correction, \
 run `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` \
-before declaring the work done. It writes `tasks/memory.md` with `Type`, `Context`, `Learning`, and \
-`Future Action` fields. Legacy `tasks/lessons.md` is only a compatibility fallback; prefer \
-`tasks/memory.md` for new memory.\n";
+before declaring the work done. It writes `.gwt/work/memory.md` with `Type`, `Context`, `Learning`, and \
+`Future Action` fields. Legacy `tasks/memory.md` / `tasks/lessons.md` are only a compatibility fallback; prefer \
+`.gwt/work/memory.md` for new memory.\n";
 
 pub(super) const MEMORY_UPDATE_REMINDER_JA: &str = "# Memory Reminder\n\
 \n\
 この作業で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、\
 完了宣言前に `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` \
 を実行してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで \
-`tasks/memory.md` に記録します。legacy `tasks/lessons.md` は互換 fallback のみです。\n";
+`.gwt/work/memory.md` に記録します。legacy `tasks/memory.md` / `tasks/lessons.md` は互換 fallback のみです。\n";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` before stopping. The command writes `tasks/memory.md` with `Type`, `Context`, `Learning`, and `Future Action` fields.";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` before stopping. The command writes `.gwt/work/memory.md` with `Type`, `Context`, `Learning`, and `Future Action` fields.";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで `tasks/memory.md` に記録します。";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで `.gwt/work/memory.md` に記録します。";
 
 pub(super) const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
@@ -301,8 +301,8 @@ pub(super) fn no_recent_posts_line(lang: ReminderLanguage) -> &'static str {
 /// SPEC-1933 FR-010 / SC-003.
 pub(super) fn format_language_directive(lang: &str) -> String {
     match reminder_language(lang) {
-        ReminderLanguage::Ja => "\n**Use language: ja** for narrative outputs（Board 投稿本文と Workspace summaries。gwtd subcommands、flags、code examples は English のまま）。\n".to_string(),
-        ReminderLanguage::En => "\n**Use language: en** for narrative outputs (Board post bodies and Workspace summaries; gwtd subcommands, flags, and code examples stay English).\n".to_string(),
+        ReminderLanguage::Ja => "\n**Use language: ja** for narrative outputs（Board 投稿本文と Work summaries。gwtd subcommands、flags、code examples は English のまま）。\n".to_string(),
+        ReminderLanguage::En => "\n**Use language: en** for narrative outputs (Board post bodies and Work summaries; gwtd subcommands, flags, and code examples stay English).\n".to_string(),
     }
 }
 
@@ -323,7 +323,7 @@ pub(super) fn title_summary_required_reminder(lang: &str) -> &'static str {
 \n\
 完了/進行中/ブロック中などの状態は `--status`、`--current-focus`、`--summary`、または Board `--body` に分けてください。設定が済むまで毎ターンこの指示を再掲します。\n\
 \n\
-**Use language: ja** for narrative outputs（Board 投稿本文、Workspace summaries、Agent title-summary）。gwtd subcommands、flags、code examples は English のまま。\n",
+**Use language: ja** for narrative outputs（Board 投稿本文、Work summaries、Agent title-summary）。gwtd subcommands、flags、code examples は English のまま。\n",
         ReminderLanguage::En => "# Agent Title — set it before you respond\n\
 \n\
 This Agent window has no `title-summary` yet. Before you start responding to the user, your **first action** must set this window's work purpose as its title-summary. This is not optional.\n\
@@ -339,7 +339,7 @@ Rules:\n\
 \n\
 Keep completion/progress/blocker state in `--status`, `--current-focus`, `--summary`, or Board `--body`. This instruction repeats every turn until the title is set.\n\
 \n\
-**Use language: en** for narrative outputs (Board post bodies, Workspace summaries, and Agent title-summary; gwtd subcommands, flags, and code examples stay English).\n",
+**Use language: en** for narrative outputs (Board post bodies, Work summaries, and Agent title-summary; gwtd subcommands, flags, and code examples stay English).\n",
     }
 }
 

@@ -240,7 +240,7 @@ test("every color token has a forced-colors fallback for high-contrast mode", ()
   // render correctly. Without this, custom tokens leak through and the
   // user sees the design system colors instead of system colors.
   //
-  // Memory 2 (tasks/memory.md 2026-05-04): naive regex `[\s\S]*?\n\}`
+  // Memory 2 (.gwt/work/memory.md 2026-05-04): naive regex `[\s\S]*?\n\}`
   // undercaptures @media bodies because nested rules have their own
   // closing braces. Use brace-depth tracking instead.
   const forcedColorsBody = extractMediaBlock(tokensCss, "forced-colors: active");
