@@ -627,15 +627,15 @@ export function createWorkspaceKanbanSurface({
 
     row.appendChild(header);
 
-    const works = createNode("div", "workspace-branch-works");
-    if (group.works.length === 0) {
-      works.appendChild(createNode("div", "workspace-overview-empty", "No active work"));
-    } else {
+    // US-67 #3 — a branch with no active work shows only its header (no work
+    // overlay), so the backbone stays compact across many branches.
+    if (group.works.length > 0) {
+      const works = createNode("div", "workspace-branch-works");
       for (const work of group.works) {
         works.appendChild(renderWorkspaceRow(windowId, state, work));
       }
+      row.appendChild(works);
     }
-    row.appendChild(works);
     return row;
   }
 
