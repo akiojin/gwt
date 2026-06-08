@@ -149,7 +149,7 @@ test.describe("Branch Cleanup E2E", () => {
     await expect(modal.getByRole("button", { name: "Close" })).toBeVisible();
   });
 
-  test("explains branch detail checks and interrupted cleanup safety", async ({
+  test("explains branch detail checks and self-heals after interruption", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -196,32 +196,19 @@ test.describe("Branch Cleanup E2E", () => {
 
     await page.evaluate(() => window.__branchDetailFixture.close());
 
+    // SPEC-2009 FR-064/FR-066: the detail check self-heals on reconnect. The
+    // Branches surface re-requests automatically and returns to the checking
+    // state — there is no alarming "Branch detail check interrupted" banner and
+    // never a manual "Refresh to verify cleanup safety" step.
     await expect(notice.locator(".branch-notice-title")).toHaveText(
-      "Branch detail check interrupted",
+      "Checking branch details",
     );
-    await expect(notice).toContainText("Refresh to verify cleanup safety.");
-    await expect(branch.locator(".branch-cleanup-badge")).toHaveText(
-      "Safety unknown",
-    );
+    await expect(notice).not.toContainText("Refresh to verify cleanup safety");
+    await expect(branch.locator(".branch-cleanup-badge")).toHaveText("checking");
     await expect(branch.locator(".branch-cleanup-toggle")).toHaveAttribute(
       "title",
-      "Refresh to verify cleanup safety",
+      "Checking cleanup safety",
     );
-    await expect
-      .poll(() =>
-        notice.evaluate(
-          (element) =>
-            window.getComputedStyle(element, "::before").animationName,
-        ),
-      )
-      .toBe("none");
-    await expect
-      .poll(() =>
-        branch
-          .locator(".branch-cleanup-badge")
-          .evaluate((element) => window.getComputedStyle(element).animationName),
-      )
-      .toBe("none");
   });
 
   test("honors reduced motion for branch detail check animations", async ({

@@ -1200,6 +1200,11 @@ pub enum BackendEvent {
         id: String,
         phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
+        // SPEC-2009 FR-067: monotonic load id so the frontend can drop a stale
+        // (older) in-flight load delivered out of order after an evict/reconnect.
+        // `#[serde(default)]` keeps older payloads (load_id absent) deserializing.
+        #[serde(default)]
+        load_id: u64,
     },
     BoardEntries {
         id: String,
@@ -2336,6 +2341,7 @@ mod tests {
             id: "branches-1".to_string(),
             phase: BranchEntriesPhase::Inventory,
             entries: Vec::new(),
+            load_id: 7,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");
@@ -2347,6 +2353,9 @@ mod tests {
             value.get("phase"),
             Some(&Value::String("inventory".to_string()))
         );
+        // SPEC-2009 FR-067: load_id rides the wire so the frontend can drop a
+        // stale (older) load delivered out of order after an evict/reconnect.
+        assert_eq!(value.get("load_id"), Some(&Value::from(7u64)));
     }
 
     #[test]
@@ -2379,6 +2388,7 @@ mod tests {
                     reason: None,
                 },
             }],
+            load_id: 0,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");
@@ -2444,6 +2454,7 @@ mod tests {
                     reason: None,
                 },
             }],
+            load_id: 0,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");

@@ -219,11 +219,24 @@ pub fn launch_controls_js() -> &'static str {
     include_str!("../web/launch-controls.js")
 }
 
+// SPEC-2009 Phase 7 (FR-064..FR-067) — Branches detail-check reconnect
+// self-heal / last-known retention / stale-load guard. app.js imports this at
+// module top level, so the asset MUST be registered or the ES module load
+// fails and the splash hangs.
+pub fn branch_list_state_js() -> &'static str {
+    include_str!("../web/branch-list-state.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
         source: branch_cleanup_modal_js,
         marker: "renderBranchCleanupModal",
+    },
+    RootJsModuleAsset {
+        path: "/branch-list-state.js",
+        source: branch_list_state_js,
+        marker: "applyBranchEntriesEvent",
     },
     RootJsModuleAsset {
         path: "/close-project-tab-confirm-modal.js",
@@ -582,6 +595,8 @@ mod tests {
             include_str!("../web/styles/app.css"),
             "\n",
             include_str!("../web/app.js"),
+            "\n",
+            include_str!("../web/branch-list-state.js"),
             "\n",
             include_str!("../web/board-surface.js"),
             "\n",
@@ -2334,15 +2349,23 @@ mod tests {
         );
         for expected in [
             "Checking branch details",
-            "Branch detail check interrupted",
+            // SPEC-2009 FR-066: the interrupted detail check now self-heals on
+            // reconnect, so the copy is reassuring rather than alarming.
+            "Reconnecting branch details",
+            "Recovering automatically",
             "Safety unknown",
-            "Refresh to verify cleanup safety",
         ] {
             assert!(
                 html.contains(expected),
                 "expected Branches bundle to include clarity copy: {expected}",
             );
         }
+        // FR-066: the manual "Refresh to verify cleanup safety" banner copy is
+        // gone — the detail check recovers without a user-driven refresh.
+        assert!(
+            !html.contains("Refresh to verify cleanup safety"),
+            "expected the manual-refresh detail-check banner copy to be removed",
+        );
         assert!(
             !html.contains("Cleanup status unavailable"),
             "expected Branches bundle to avoid ambiguous cleanup unavailable copy",

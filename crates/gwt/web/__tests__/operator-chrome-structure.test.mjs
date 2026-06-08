@@ -16,6 +16,7 @@ const projectTabsRendererSource = readFileSync(
   "utf8",
 );
 const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
+const branchListStateSource = readFileSync(resolve(here, "../branch-list-state.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const workspaceOverviewPath = resolve(here, "../workspace-kanban-surface.js");
 const workspaceOverviewSource = existsSync(workspaceOverviewPath)
@@ -2183,13 +2184,15 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
     /function\s+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)/,
     "expected a dedicated Branches loading connection-loss helper",
   );
+  // SPEC-2009 FR-064/FR-065: the connection-loss transition lives in the
+  // extracted branch-list-state module (markBranchDetailInterrupted).
   assert.match(
-    appSource,
-    /failLoadingBranchesOnConnectionLoss[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
+    branchListStateSource,
+    /function\s+markBranchDetailInterrupted\(state\)[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
     "expected connection loss to clear stale Branches loading flags",
   );
   assert.match(
-    appSource,
+    branchListStateSource,
     /Connection lost while loading branches/,
     "expected initial branch inventory loss to surface a retryable error",
   );
@@ -2198,22 +2201,48 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
     /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
     "expected socket disconnect to re-render Branches after clearing stale loading",
   );
-});
-
-test("Branches detail-check state explains checking and interrupted cleanup safety", () => {
+  // SPEC-2009 FR-064: reconnect self-heal re-requests interrupted Branches
+  // windows automatically — no manual Refresh needed.
   assert.match(
     appSource,
-    /function\s+branchLoadStatusSummary\(state\)/,
+    /branchWindowNeedsResync\(state\)[\s\S]+requestBranches\(windowId\)/,
+    "expected reconnect to auto re-hydrate interrupted Branches windows",
+  );
+});
+
+test("Branches detail-check state self-heals and retains last-known cleanup safety", () => {
+  assert.match(
+    branchListStateSource,
+    /export\s+function\s+branchLoadStatusSummary\(state\)/,
     "expected Branches to derive a status summary from branch load state",
   );
+  // SPEC-2009 FR-066: the interrupted detail check self-heals on reconnect, so
+  // the copy is reassuring rather than an alarming manual-refresh banner.
   for (const copy of [
     "Checking branch details",
-    "Branch detail check interrupted",
-    "Safety unknown",
-    "Refresh to verify cleanup safety",
+    "Reconnecting branch details",
+    "Recovering automatically",
   ]) {
-    assert.ok(appSource.includes(copy), `expected Branches clarity copy: ${copy}`);
+    assert.ok(
+      branchListStateSource.includes(copy),
+      `expected Branches clarity copy: ${copy}`,
+    );
   }
+  // First-load fallback only; carried-over rows keep their real badge.
+  assert.ok(appSource.includes("Safety unknown"), "expected first-load fallback copy");
+  // FR-066: the manual "Refresh to verify cleanup safety" copy is gone for good.
+  assert.ok(
+    !appSource.includes("Refresh to verify cleanup safety") &&
+      !branchListStateSource.includes("Refresh to verify cleanup safety"),
+    "expected the manual-refresh detail-check banner copy to be removed",
+  );
+  // FR-065: carried last-known badges are flagged stale so destructive
+  // selection stays gated on fresh verification.
+  assert.match(
+    branchListStateSource,
+    /cleanup_stale/,
+    "expected last-known retention to flag carried cleanup badges",
+  );
   assert.doesNotMatch(
     appSource,
     /Cleanup status unavailable/,

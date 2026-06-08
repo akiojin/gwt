@@ -9,6 +9,19 @@ use serde::{Deserialize, Serialize};
 
 type RemoteBaseBranchRanks = HashMap<String, u8>;
 
+// SPEC-2009 FR-067: monotonic id for one Branches detail-check load. The
+// inventory and the matching hydrated event of a single load share the id; the
+// frontend ignores any branch_entries event whose load_id is older than the
+// newest it has applied, so an evict/reconnect cannot let a stale in-flight
+// load overwrite fresh data. `Ordering` here is `cmp::Ordering` (imported
+// above), so the atomic ordering is fully qualified to avoid the name clash.
+static BRANCH_LOAD_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Returns the next monotonic Branches detail-check load id (SPEC-2009 FR-067).
+pub fn next_branch_load_id() -> u64 {
+    BRANCH_LOAD_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchCleanupAvailability {
@@ -444,6 +457,17 @@ fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_branch_load_id_is_strictly_increasing() {
+        // SPEC-2009 FR-067: ids must be monotonic so the frontend can drop a
+        // stale (older) load delivered out of order after an evict/reconnect.
+        let a = next_branch_load_id();
+        let b = next_branch_load_id();
+        let c = next_branch_load_id();
+        assert!(a < b, "expected {a} < {b}");
+        assert!(b < c, "expected {b} < {c}");
+    }
 
     fn make_branch(
         name: &str,
