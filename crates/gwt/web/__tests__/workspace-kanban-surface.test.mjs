@@ -302,6 +302,45 @@ test("A Work whose sessions are all terminated shows a completed summary, not a 
   assert.match(work.textContent, /1 completed session/);
 });
 
+test("Multiple session-works on one branch collapse into a single place (survives W-12 backend)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "proj",
+    title: "Project",
+    status_category: "active",
+    // W-12 backend keys a Work per session, so one branch yields several works.
+    active_works: [
+      makeWork("work-session-a", "parser refactor", "active", "work/feature-a", [
+        makeAgent("codex", "s-a", "active", "parser refactor"),
+      ]),
+      makeWork("work-session-b", "add tests", "active", "work/feature-a", [
+        makeAgent("codex", "s-b", "active", "add tests"),
+      ]),
+      makeWork("work-session-c", "review", "blocked", "work/feature-a", [
+        makeAgent("claude", "s-c", "blocked", "waiting review"),
+      ]),
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // The branch (the place) collapses the three session-works into one row.
+  const places = fixture.body.querySelectorAll(
+    '.workspace-work-group[data-branch-name="work/feature-a"]',
+  );
+  assert.equal(places.length, 1, "one place per branch, regardless of backend Work keying");
+  const sessions = places[0].querySelectorAll(".workspace-work-session[data-session-id]");
+  assert.deepEqual(
+    Array.from(sessions, (node) => node.dataset.sessionId).sort(),
+    ["s-a", "s-b", "s-c"],
+    "all sessions on the branch are flattened under the one place",
+  );
+});
+
 test("Idle branches collapse below the spine; work branches and their remote counterparts are excluded", () => {
   const fixture = createFixture();
   const branches = fakeBranchesSurface([

@@ -714,6 +714,85 @@ export function createWorkspaceKanbanSurface({
     return section;
   }
 
+  function aggregatePlaceStatus(sessions, fallback) {
+    const statuses = (sessions || []).map((s) => String(s.status_category || "").toLowerCase());
+    if (statuses.includes("blocked")) return "blocked";
+    if (statuses.some((s) => s === "active" || s === "running")) return "active";
+    return fallback || "idle";
+  }
+
+  // SPEC-2359 US-67 (Option A) — Work = the place (branch). Group the
+  // projection's works by branch so a place is the same regardless of how the
+  // backend keys a Work: branch-derived (W-8, one work per branch) or
+  // session-derived (W-12, one work per session). All sessions on a branch are
+  // flattened under one place. A single work on its branch keeps its own
+  // identity; multiple session-works on one branch aggregate into one place.
+  function placesFromProjection(projection) {
+    const works = workspacesFromProjection(projection);
+    // Only the active_works stream carries per-Work branches (W-8 branch-keyed
+    // or W-12 session-keyed). The legacy works/journal fallback inherits the
+    // projection branch, so grouping it by branch would wrongly collapse it.
+    const hasActiveWorks =
+      Array.isArray(projection?.active_works) && projection.active_works.length > 0;
+    if (!hasActiveWorks) return works;
+    const order = [];
+    const byBranch = new Map();
+    const branchless = [];
+    for (const work of works) {
+      const base = branchBaseName(work.branch);
+      if (!base) {
+        branchless.push(work);
+        continue;
+      }
+      if (!byBranch.has(base)) {
+        byBranch.set(base, []);
+        order.push(base);
+      }
+      byBranch.get(base).push(work);
+    }
+    const places = [];
+    for (const base of order) {
+      const group = byBranch.get(base);
+      if (group.length === 1) {
+        places.push(group[0]);
+        continue;
+      }
+      const first = group[0];
+      const agents = [];
+      const events = [];
+      const board_refs = [];
+      for (const work of group) {
+        if (Array.isArray(work.agents)) agents.push(...work.agents);
+        if (Array.isArray(work.events)) events.push(...work.events);
+        if (Array.isArray(work.board_refs)) board_refs.push(...work.board_refs);
+      }
+      const withPr = group.find((work) => work.pr_number);
+      places.push({
+        id: `place-${base}`,
+        title: first.branch || base,
+        branch: first.branch,
+        owner: group.find((work) => work.owner)?.owner || first.owner,
+        summary: group.find((work) => work.summary)?.summary || first.summary,
+        intent: first.intent,
+        status_text: first.status_text,
+        next_action: first.next_action,
+        blocked_reason: group.find((work) => work.blocked_reason)?.blocked_reason || "",
+        lifecycle_stage: first.lifecycle_stage,
+        worktree_path: first.worktree_path,
+        pr_number: withPr?.pr_number || null,
+        pr_url: withPr?.pr_url || "",
+        pr_state: withPr?.pr_state || "",
+        board_refs,
+        events,
+        agents,
+        updated_at: first.updated_at,
+        status_category: aggregatePlaceStatus(agents, first.status_category),
+      });
+    }
+    for (const work of branchless) places.push(work);
+    return places;
+  }
+
   function renderWorkspaceOverviewWindow(windowId, force) {
     const element = windowMap.get(windowId);
     if (!element) return;
@@ -736,17 +815,17 @@ export function createWorkspaceKanbanSurface({
     if (!force && state._lastSignature !== undefined && state._lastSignature === signature) return;
     state._lastSignature = signature;
 
-    const workspaces = workspacesFromProjection(projection);
+    const places = placesFromProjection(projection);
     const unassignedAgents = unassignedAgentsFromProjection(projection);
-    const selected = selectedWorkspace(state, workspaces);
-    const idleBranches = idleBranchEntries(workspaces, branchState);
+    const selected = selectedWorkspace(state, places);
+    const idleBranches = idleBranchEntries(places, branchState);
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
       if (!projection && !branchState) {
         status.textContent = "No Work projection";
       } else {
-        const parts = [`${workspaces.length} Active Works`];
+        const parts = [`${places.length} Active Works`];
         if (branchState) parts.push(`${idleBranches.length} Idle Branches`);
         parts.push(`${unassignedAgents.length} Unassigned Agents`);
         status.textContent = parts.join(" · ");
@@ -769,7 +848,7 @@ export function createWorkspaceKanbanSurface({
     // in a collapsed section below.
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
-    if (workspaces.length === 0) {
+    if (places.length === 0) {
       list.appendChild(
         createNode(
           "div",
@@ -782,8 +861,8 @@ export function createWorkspaceKanbanSurface({
         ),
       );
     } else {
-      for (const work of workspaces) {
-        list.appendChild(renderWorkGroup(windowId, state, work));
+      for (const place of places) {
+        list.appendChild(renderWorkGroup(windowId, state, place));
       }
     }
     if (branchState && idleBranches.length > 0) {
