@@ -580,18 +580,10 @@ export function createWorkspaceKanbanSurface({
     toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
     toolbar.appendChild(toolbarMain);
 
+    // SPEC-2359: single fused Workspace surface — the Work / Git Branches tab
+    // toggle is removed. The spine lists persistent Workspaces (Active+Paused);
+    // the detail pane shows the selected Workspace's sessions / branch / PR.
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
-    const tabGroup = createNode("div", "workspace-tab-group");
-    const workTab = createNode("button", "workspace-tab is-active", "Work");
-    workTab.type = "button";
-    workTab.dataset.workTab = "work";
-    const branchTab = createNode("button", "workspace-tab", "Git Branches");
-    branchTab.type = "button";
-    branchTab.dataset.workTab = "branches";
-    tabGroup.appendChild(workTab);
-    tabGroup.appendChild(branchTab);
-    toolbarActions.appendChild(tabGroup);
-
     const refreshBtn = createNode("button", "icon-button", "↻");
     refreshBtn.dataset.action = "refresh-workspace-overview";
     refreshBtn.setAttribute("aria-label", "Refresh Work");
@@ -600,7 +592,6 @@ export function createWorkspaceKanbanSurface({
     root.appendChild(toolbar);
 
     const workShell = createNode("div", "workspace-overview-shell");
-    workShell.dataset.workSection = "work";
     const listPane = createNode("aside", "workspace-overview-list-pane");
     listPane.setAttribute("aria-label", "Work list");
     listPane.appendChild(createNode("div", "workspace-overview-section-label", "Active Works"));
@@ -616,44 +607,6 @@ export function createWorkspaceKanbanSurface({
     workShell.appendChild(detailPane);
     root.appendChild(workShell);
 
-    const branchShell = createNode("div", "workspace-branches-shell");
-    branchShell.dataset.workSection = "branches";
-    branchShell.hidden = true;
-    const branchRoot = createNode("div", "branch-list-root");
-    const branchToolbar = createNode("div", "branch-toolbar workspace-toolbar is-stacked");
-    const branchToolbarMain = createNode("div", "branch-toolbar-main workspace-toolbar-main");
-    branchToolbarMain.appendChild(createNode("div", "branch-heading", "Git Branches"));
-    const filterGroup = createNode("div", "branch-filter-group");
-    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
-      const btn = createNode("button", "branch-filter-button", label);
-      btn.type = "button";
-      btn.dataset.branchFilter = filter;
-      filterGroup.appendChild(btn);
-    }
-    branchToolbarMain.appendChild(filterGroup);
-    branchToolbar.appendChild(branchToolbarMain);
-    const branchToolbarActions = createNode("div", "branch-toolbar-actions workspace-toolbar-actions");
-    const selectionActions = createNode("div", "branch-selection-actions");
-    const cleanupBtn = createNode("button", "wizard-button branch-cleanup-trigger", "Clean Up");
-    cleanupBtn.type = "button";
-    cleanupBtn.dataset.action = "open-branch-cleanup";
-    selectionActions.appendChild(cleanupBtn);
-    branchToolbarActions.appendChild(selectionActions);
-    const branchRefreshBtn = createNode("button", "icon-button", "↻");
-    branchRefreshBtn.dataset.action = "refresh-branches";
-    branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
-    branchToolbarActions.appendChild(branchRefreshBtn);
-    branchToolbar.appendChild(branchToolbarActions);
-    branchRoot.appendChild(branchToolbar);
-    const branchNotice = createNode("div", "branch-notice");
-    branchNotice.hidden = true;
-    branchRoot.appendChild(branchNotice);
-    const branchScroll = createNode("div", "branch-scroll workspace-scroll");
-    branchScroll.appendChild(createNode("div", "branch-list"));
-    branchRoot.appendChild(branchScroll);
-    branchShell.appendChild(branchRoot);
-    root.appendChild(branchShell);
-
     parent.appendChild(root);
     return root;
   }
@@ -666,51 +619,6 @@ export function createWorkspaceKanbanSurface({
       focusWindowLocally?.(windowData.id);
       sendFocus?.(windowData.id);
     });
-
-    for (const tab of parent.querySelectorAll("[data-work-tab]")) {
-      tab.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const target = tab.dataset.workTab;
-        for (const t of parent.querySelectorAll("[data-work-tab]")) {
-          t.classList.toggle("is-active", t.dataset.workTab === target);
-        }
-        for (const section of parent.querySelectorAll("[data-work-section]")) {
-          section.hidden = section.dataset.workSection !== target;
-        }
-        if (target === "branches" && branchesSurface) {
-          const state = branchesSurface.ensureBranchListState(windowData.id);
-          if (state.entries.length === 0 && !state.loading && !state.error) {
-            branchesSurface.requestBranches(windowData.id);
-          }
-          branchesSurface.renderBranches(windowData.id);
-        }
-      });
-    }
-
-    if (branchesSurface) {
-      const branchRefresh = parent.querySelector("[data-action='refresh-branches']");
-      branchRefresh?.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const state = branchesSurface.ensureBranchListState(windowData.id);
-        state.error = "";
-        state.notice = "";
-        branchesSurface.requestBranches(windowData.id);
-        branchesSurface.renderBranches(windowData.id);
-      });
-      for (const button of parent.querySelectorAll("[data-branch-filter]")) {
-        button.addEventListener("click", (event) => {
-          event.stopPropagation();
-          const state = branchesSurface.ensureBranchListState(windowData.id);
-          state.filter = button.dataset.branchFilter;
-          branchesSurface.renderBranches(windowData.id);
-        });
-      }
-      parent.querySelector("[data-action='open-branch-cleanup']")
-        ?.addEventListener("click", (event) => {
-          event.stopPropagation();
-          branchesSurface.openBranchCleanupModal(windowData.id);
-        });
-    }
 
     const refresh = parent.querySelector("[data-action='refresh-workspace-overview']");
     refresh?.addEventListener("click", (event) => {
