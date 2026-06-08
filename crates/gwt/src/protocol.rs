@@ -418,12 +418,24 @@ pub enum FrontendEvent {
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        #[serde(default)]
+        operation_id: Option<String>,
+    },
+    SyncBranchCleanup {
+        id: String,
+        operation_id: String,
+    },
+    ClearBranchCleanupStatus {
+        id: String,
+        operation_id: String,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -1294,10 +1306,14 @@ pub enum BackendEvent {
     },
     BranchCleanupResult {
         id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
         branch: String,
         execution_branch: Option<String>,
         index: usize,

@@ -495,6 +495,7 @@
       });
       let branchCleanupWindowId = null;
       const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
+      let branchCleanupOperationSequence = 0;
       let windowListOpen = false;
       let windowListEntries = [];
       let titlebarClickState = null;
@@ -1663,12 +1664,7 @@
         if (!connected) {
           for (const [windowId, state] of branchListStateMap.entries()) {
             let shouldRenderBranches = false;
-            if (
-              failRunningBranchCleanup(
-                windowId,
-                "Connection lost while cleaning up branches",
-              )
-            ) {
+            if (markRunningBranchCleanupConnectionInterrupted(windowId)) {
               shouldRenderBranches = true;
             }
             if (failLoadingBranchesOnConnectionLoss(windowId, state)) {
@@ -1707,6 +1703,7 @@
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        syncRunningBranchCleanups();
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
@@ -2887,6 +2884,8 @@
           forceFilesystemDelete: false,
           progress: null,
           results: [],
+          operationId: null,
+          connectionInterrupted: false,
         };
         branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
         renderBranchCleanupModal();
@@ -7084,6 +7083,8 @@
               forceFilesystemDelete: false,
               progress: null,
               results: [],
+              operationId: null,
+              connectionInterrupted: false,
             },
           });
         }
@@ -11281,9 +11282,37 @@
         };
       }
 
+      function newBranchCleanupOperationId(windowId) {
+        branchCleanupOperationSequence += 1;
+        const safeWindowId = String(windowId || "cleanup").replace(/[^a-zA-Z0-9_-]/g, "-");
+        return `${safeWindowId}-${Date.now()}-${branchCleanupOperationSequence}`;
+      }
+
+      function branchCleanupEventIsStale(state, event) {
+        return Boolean(
+          event.operation_id &&
+            state.cleanupModal.operationId !== event.operation_id,
+        );
+      }
+
+      function syncRunningBranchCleanups() {
+        for (const [windowId, state] of branchListStateMap.entries()) {
+          const operationId = state.cleanupModal.operationId;
+          if (state.cleanupModal.stage !== "running" || !operationId) {
+            continue;
+          }
+          send({
+            kind: "sync_branch_cleanup",
+            id: windowId,
+            operation_id: operationId,
+          });
+        }
+      }
+
       function updateBranchCleanupProgress(windowId, event) {
         const state = ensureBranchListState(windowId);
         const branches = Array.from(state.cleanupSelected);
+        state.cleanupModal.connectionInterrupted = false;
         if (!state.cleanupModal.progress) {
           state.cleanupModal.progress = initialBranchCleanupProgress(
             branches.length > 0 ? branches : [event.branch],
@@ -11316,6 +11345,18 @@
         state.cleanupModal.open = true;
         state.cleanupModal.stage = "result";
         state.cleanupModal.results = branchCleanupFailureResults(state, message);
+        state.cleanupModal.connectionInterrupted = false;
+        branchCleanupWindowId = windowId;
+        return true;
+      }
+
+      function markRunningBranchCleanupConnectionInterrupted(windowId) {
+        const state = ensureBranchListState(windowId);
+        if (state.cleanupModal.stage !== "running") {
+          return false;
+        }
+        state.cleanupModal.open = true;
+        state.cleanupModal.connectionInterrupted = true;
         branchCleanupWindowId = windowId;
         return true;
       }
@@ -11560,6 +11601,8 @@
         state.cleanupModal.forceFilesystemDelete = false;
         state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
+        state.cleanupModal.operationId = null;
+        state.cleanupModal.connectionInterrupted = false;
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
       }
@@ -11580,6 +11623,15 @@
         state.cleanupModal.forceFilesystemDelete = false;
         state.cleanupModal.progress = null;
         state.cleanupModal.results = [];
+        if (state.cleanupModal.operationId) {
+          send({
+            kind: "clear_branch_cleanup_status",
+            id: windowId,
+            operation_id: state.cleanupModal.operationId,
+          });
+        }
+        state.cleanupModal.operationId = null;
+        state.cleanupModal.connectionInterrupted = false;
         if (branchCleanupWindowId === windowId) {
           branchCleanupWindowId = null;
         }
@@ -11595,9 +11647,12 @@
           return;
         }
         state.notice = "";
+        const operationId = newBranchCleanupOperationId(windowId);
         state.cleanupModal.stage = "running";
         state.cleanupModal.progress = initialBranchCleanupProgress(branches);
         state.cleanupModal.results = [];
+        state.cleanupModal.operationId = operationId;
+        state.cleanupModal.connectionInterrupted = false;
         renderBranchCleanupModal();
         if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
           send({
@@ -11605,6 +11660,7 @@
             branch: branches[0],
             delete_remote: state.cleanupModal.deleteRemote,
             force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
+            operation_id: operationId,
           });
           return;
         }
@@ -11614,6 +11670,7 @@
           branches,
           delete_remote: state.cleanupModal.deleteRemote,
           force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
+          operation_id: operationId,
         });
       }
 
@@ -14631,10 +14688,17 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
+            if (branchCleanupEventIsStale(state, event)) {
+              break;
+            }
             state.cleanupSelected.clear();
             state.cleanupModal.open = true;
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
+            state.cleanupModal.connectionInterrupted = false;
+            if (event.operation_id) {
+              state.cleanupModal.operationId = event.operation_id;
+            }
             branchCleanupWindowId = event.id;
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
@@ -14645,6 +14709,12 @@
             break;
           }
           case "branch_cleanup_progress": {
+            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+              event.id,
+            );
+            if (branchCleanupEventIsStale(state, event)) {
+              break;
+            }
             frontendUnits.branchesFileTreeSurface.updateBranchCleanupProgress(
               event.id,
               event,

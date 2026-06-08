@@ -106,6 +106,15 @@ export function renderBranchCleanupModal({
         runningCopy,
       ),
     );
+    if (state.cleanupModal.connectionInterrupted) {
+      dialogEl.appendChild(
+        createNode(
+          "div",
+          "branch-cleanup-connection-status",
+          "Reconnecting to cleanup status...",
+        ),
+      );
+    }
     if (current?.message) {
       dialogEl.appendChild(
         createNode("div", "branch-cleanup-item-copy", current.message),

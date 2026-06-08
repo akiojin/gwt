@@ -2146,6 +2146,7 @@ mod tests {
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
+            branch_cleanup_operations: Arc::new(Mutex::new(HashMap::new())),
             server_url: None,
             usage_refresh: None,
         };
@@ -3092,7 +3093,7 @@ mod tests {
         ));
 
         let cleanup_missing =
-            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false);
+            runtime.run_branch_cleanup_events("client-1", "missing", &[], false, false, None);
         assert_eq!(cleanup_missing.len(), 1);
         assert!(matches!(
             cleanup_missing[0].event,
@@ -3100,7 +3101,7 @@ mod tests {
         ));
 
         let cleanup_wrong =
-            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false);
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false, false, None);
         assert_eq!(cleanup_wrong.len(), 1);
         assert!(matches!(
             cleanup_wrong[0].event,
@@ -3417,6 +3418,7 @@ mod tests {
         );
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
         let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+        let cleanup_operation_id = "cleanup-op-1";
 
         let cleanup_events = runtime.run_branch_cleanup_events(
             "client-1",
@@ -3424,6 +3426,7 @@ mod tests {
             &[String::from("feature/prune-me")],
             false,
             false,
+            Some(cleanup_operation_id),
         );
         assert!(cleanup_events.is_empty());
         wait_for_recorded_event("branch cleanup progress dispatch", &events, |events| {
@@ -3432,8 +3435,14 @@ mod tests {
                     event,
                     UserEvent::Dispatch(dispatched)
                         if dispatched.iter().any(|outbound| matches!(
-                            outbound.event,
-                            BackendEvent::BranchCleanupProgress { .. }
+                            (&outbound.target, &outbound.event),
+                            (
+                                DispatchTarget::Broadcast,
+                                BackendEvent::BranchCleanupProgress {
+                                    operation_id: Some(operation_id),
+                                    ..
+                                },
+                            ) if operation_id == cleanup_operation_id
                         ))
                 )
             })
@@ -3444,12 +3453,41 @@ mod tests {
                     event,
                     UserEvent::Dispatch(dispatched)
                         if dispatched.iter().any(|outbound| matches!(
-                            outbound.event,
-                            BackendEvent::BranchCleanupResult { .. }
+                            (&outbound.target, &outbound.event),
+                            (
+                                DispatchTarget::Broadcast,
+                                BackendEvent::BranchCleanupResult {
+                                    operation_id: Some(operation_id),
+                                    ..
+                                },
+                            ) if operation_id == cleanup_operation_id
                         ))
                 )
             })
         });
+        let sync_events =
+            runtime.sync_branch_cleanup_events("client-2", &branches_id, cleanup_operation_id);
+        assert_eq!(sync_events.len(), 1);
+        assert!(matches!(
+            (&sync_events[0].target, &sync_events[0].event),
+            (
+                DispatchTarget::Client(client_id),
+                BackendEvent::BranchCleanupResult {
+                    operation_id: Some(operation_id),
+                    ..
+                },
+            ) if client_id == "client-2" && operation_id == cleanup_operation_id
+        ));
+        assert!(runtime
+            .clear_branch_cleanup_status_events(&branches_id, cleanup_operation_id)
+            .is_empty());
+        let sync_after_clear =
+            runtime.sync_branch_cleanup_events("client-2", &branches_id, cleanup_operation_id);
+        assert!(matches!(
+            sync_after_clear.first().map(|event| &event.event),
+            Some(BackendEvent::BranchError { message, .. })
+                if message.contains("Cleanup status unavailable")
+        ));
 
         let wizard_events =
             runtime.open_launch_wizard("client-1", &branches_id, "feature/demo", Some(42));
@@ -3738,6 +3776,7 @@ mod tests {
                 branches: vec!["feature/missing".to_string()],
                 delete_remote: false,
                 force_filesystem_delete: false,
+                operation_id: None,
             },
         );
         assert!(cleanup_events.is_empty());

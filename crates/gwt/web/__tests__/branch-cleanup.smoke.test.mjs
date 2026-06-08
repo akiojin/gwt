@@ -69,6 +69,8 @@ function makeState(overrides = {}) {
       forceFilesystemDelete: false,
       progress: null,
       results: [],
+      operationId: null,
+      connectionInterrupted: false,
       timeoutId: null,
       ...overrides.cleanupModal,
     },
@@ -294,6 +296,52 @@ test("running stage: renders running heading and copy", () => {
   assert.equal(rows.length, 3);
   assert.match(rows[1].textContent, /work\/b/);
   assert.match(rows[1].textContent, /running/);
+});
+
+test("running stage: shows reconnecting status without replacing progress", () => {
+  const { modalEl, dialogEl, createNode } = mount();
+  const state = makeState({
+    cleanupModal: {
+      open: true,
+      stage: "running",
+      connectionInterrupted: true,
+      progress: {
+        current: {
+          branch: "work/b",
+          index: 2,
+          total: 3,
+          message: "Removing work/b",
+        },
+        items: [
+          { branch: "work/a", status: "done", message: "Deleted local branch" },
+          { branch: "work/b", status: "running", message: "Removing work/b" },
+          { branch: "work/c", status: "pending", message: "" },
+        ],
+      },
+    },
+  });
+
+  renderBranchCleanupModal({
+    modalEl,
+    dialogEl,
+    windowId: "win-1",
+    state,
+    selectedEntries: [makeEntry("feature/a"), makeEntry("feature/b")],
+    createNode,
+    resultSummary,
+    mergeTargetText,
+    riskLabels,
+    onCancel: () => {},
+    onSubmit: () => {},
+    onDeleteRemoteToggle: () => {},
+  });
+
+  const status = dialogEl.querySelector(".branch-cleanup-connection-status");
+  assert.ok(status, "expected reconnecting status line");
+  assert.equal(status.textContent, "Reconnecting to cleanup status...");
+  const rows = dialogEl.querySelectorAll(".branch-cleanup-progress-item");
+  assert.equal(rows.length, 3);
+  assert.doesNotMatch(dialogEl.textContent, /Connection lost while cleaning up branches/);
 });
 
 test("result stage: renders summary, per-result rows and Close button", () => {

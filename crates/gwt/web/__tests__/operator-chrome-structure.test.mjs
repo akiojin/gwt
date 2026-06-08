@@ -2200,6 +2200,43 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
   );
 });
 
+test("Branch Cleanup survives WebSocket reconnect without synthetic failed rows", () => {
+  const setConnectionStateBody = extractFunctionBody(appSource, "setConnectionState");
+  assert.match(
+    setConnectionStateBody,
+    /markRunningBranchCleanupConnectionInterrupted\(windowId\)/,
+    "socket loss should mark running cleanup as interrupted",
+  );
+  assert.doesNotMatch(
+    setConnectionStateBody,
+    /failRunningBranchCleanup/,
+    "socket loss must not convert running cleanup into failed result rows",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /Connection lost while cleaning up branches/,
+    "cleanup should not synthesize per-branch failed rows on WebSocket loss",
+  );
+  for (const pattern of [
+    /function\s+newBranchCleanupOperationId\(/,
+    /function\s+syncRunningBranchCleanups\(/,
+    /kind:\s*"sync_branch_cleanup"/,
+    /kind:\s*"clear_branch_cleanup_status"/,
+    /operation_id:\s*operationId/,
+    /function\s+branchCleanupEventIsStale\(/,
+  ]) {
+    assert.match(appSource, pattern, `expected reconnect-safe cleanup wiring: ${pattern}`);
+  }
+  assert.ok(
+    branchCleanupSource.includes("Reconnecting to cleanup status..."),
+    "running modal should report reconnecting cleanup status",
+  );
+  assert.ok(
+    inlineStyle.includes(".branch-cleanup-connection-status"),
+    "reconnecting cleanup status should have a dedicated CSS selector",
+  );
+});
+
 test("Branches detail-check state explains checking and interrupted cleanup safety", () => {
   assert.match(
     appSource,
