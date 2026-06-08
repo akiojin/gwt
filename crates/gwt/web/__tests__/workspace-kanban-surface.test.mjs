@@ -201,7 +201,7 @@ test("Workspace resume action asks backend for resumable agents", () => {
   assert.equal(sent[0].workspace_id, "workspace-current");
 });
 
-test("Tab switcher remains visible after switching to Git Branches", () => {
+test("Unified Work surface merges Work and Branches into one view without a tab toggle (SPEC-2359 W-13/US-67)", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
 
@@ -210,30 +210,169 @@ test("Tab switcher remains visible after switching to Git Branches", () => {
     sendFocus() {},
   });
 
-  const tabs = fixture.body.querySelectorAll("[data-work-tab]");
-  assert.equal(tabs.length, 2, "should have Work and Git Branches tabs");
+  assert.equal(
+    fixture.body.querySelectorAll("[data-work-tab]").length,
+    0,
+    "the Work/Git Branches tab toggle must be gone",
+  );
+  assert.equal(fixture.body.querySelector(".workspace-tab-group"), null);
+  assert.equal(fixture.body.querySelector("[data-work-section='branches']"), null);
+  assert.ok(fixture.body.querySelector(".workspace-overview-root"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
+});
 
-  const branchTab = fixture.body.querySelector("[data-work-tab='branches']");
-  branchTab.click();
+test("Branch backbone nests active works under their branch and keeps non-work branches (1 agent:1 Work)", () => {
+  const fixture = createFixture();
+  const branches = fakeBranchesSurface([
+    branchEntry("work/feature-a", { is_head: true }),
+    branchEntry("main"),
+  ]);
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj",
+      title: "Project",
+      status_category: "active",
+      active_works: [
+        makeWork("w1", "Parser cleanup", "active", "work/feature-a"),
+        makeWork("w2", "UI polish", "active", "work/feature-a"),
+      ],
+      unassigned_agents: [],
+    },
+    { branchesSurface: branches },
+  );
 
-  const workSection = fixture.body.querySelector("[data-work-section='work']");
-  const branchSection = fixture.body.querySelector("[data-work-section='branches']");
-  assert.equal(workSection.hidden, true, "work section should be hidden");
-  assert.equal(branchSection.hidden, false, "branches section should be visible");
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
 
-  const tabGroupAfter = fixture.body.querySelector(".workspace-tab-group");
-  assert.ok(tabGroupAfter, "tab group should still exist in DOM");
-  assert.equal(tabGroupAfter.hidden, false, "tab group should not be hidden");
+  const featureRow = fixture.body.querySelector(
+    '.workspace-branch-row[data-branch-name="work/feature-a"]',
+  );
+  assert.ok(featureRow, "the work branch is a row in the backbone");
+  const nested = Array.from(
+    featureRow.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  ).map((node) => node.dataset.workspaceId);
+  assert.deepEqual(
+    nested,
+    ["w1", "w2"],
+    "both agent-session works are nested under their branch (identity stays per agent session)",
+  );
 
-  const workTabAfter = fixture.body.querySelector("[data-work-tab='work']");
-  assert.ok(workTabAfter, "Work tab should remain accessible");
-  assert.equal(workTabAfter.classList.contains("is-active"), false);
-  assert.equal(branchTab.classList.contains("is-active"), true);
+  const mainRow = fixture.body.querySelector(
+    '.workspace-branch-row[data-branch-name="main"]',
+  );
+  assert.ok(mainRow, "a non-work branch still appears in the backbone");
+  assert.equal(
+    mainRow.querySelectorAll(".workspace-overview-row[data-workspace-id]").length,
+    0,
+    "a non-work branch has no nested works",
+  );
+});
 
-  workTabAfter.click();
-  assert.equal(workSection.hidden, false, "work section should reappear");
-  assert.equal(branchSection.hidden, true, "branches section should hide");
-  assert.equal(workTabAfter.classList.contains("is-active"), true);
+test("Branch backbone requests branches on mount and routes branch cleanup to the SPEC-2009 modal", () => {
+  const fixture = createFixture();
+  const requested = [];
+  const cleanups = [];
+  const branches = fakeBranchesSurface([], {
+    requestBranches: (id) => requested.push(id),
+    openBranchCleanupModal: (id) => cleanups.push(id),
+  });
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj",
+      title: "Project",
+      status_category: "active",
+      active_works: [],
+      unassigned_agents: [],
+    },
+    { branchesSurface: branches },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.deepEqual(
+    requested,
+    [fixture.windowData.id],
+    "the unified view requests branches once on mount when empty",
+  );
+
+  const cleanupBtn = fixture.body.querySelector("[data-action='open-branch-cleanup']");
+  assert.ok(cleanupBtn, "branch cleanup action is present in the unified view");
+  cleanupBtn.click();
+  assert.deepEqual(
+    cleanups,
+    [fixture.windowData.id],
+    "branch cleanup opens the SPEC-2009 cleanup modal (distinct from Work close)",
+  );
+});
+
+test("Branch backbone Launch and Resume reuse the existing branch protocol", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const branches = fakeBranchesSurface([
+    branchEntry("work/feature-a", { resume: { available: true, reason: "" } }),
+  ]);
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj",
+      title: "Project",
+      status_category: "active",
+      active_works: [makeWork("w1", "Parser", "active", "work/feature-a")],
+      unassigned_agents: [],
+    },
+    { branchesSurface: branches, send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const branchRow = fixture.body.querySelector(
+    '.workspace-branch-row[data-branch-name="work/feature-a"]',
+  );
+  branchRow.querySelector("[data-branch-row-action='launch']").click();
+  branchRow.querySelector("[data-branch-row-action='resume']").click();
+
+  const launch = sent.find((m) => m.kind === "open_launch_wizard");
+  const resume = sent.find((m) => m.kind === "resume_branch_latest_agent");
+  assert.ok(launch, "launch sends open_launch_wizard");
+  assert.equal(launch.branch_name, "work/feature-a");
+  assert.ok(resume, "resume sends resume_branch_latest_agent");
+  assert.equal(resume.branch_name, "work/feature-a");
+});
+
+test("Detached works without a branch stay visible in the unified view", () => {
+  const fixture = createFixture();
+  const branches = fakeBranchesSurface([branchEntry("main")]);
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj",
+      title: "Project",
+      status_category: "active",
+      active_works: [makeWork("w-detached", "No branch work", "active", "")],
+      unassigned_agents: [],
+    },
+    { branchesSurface: branches },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.ok(
+    fixture.body.querySelector('.workspace-overview-row[data-workspace-id="w-detached"]'),
+    "a branchless work remains visible",
+  );
 });
 
 test("Workspace refresh action rerenders locally without inventing a protocol event", () => {
@@ -427,4 +566,61 @@ function createNode(document, tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function branchEntry(name, extra = {}) {
+  return {
+    name,
+    scope: "local",
+    is_head: false,
+    upstream: null,
+    last_commit_date: null,
+    ahead: 0,
+    behind: 0,
+    cleanup_ready: false,
+    cleanup: {},
+    resume: { available: false, reason: "No resumable session" },
+    ...extra,
+  };
+}
+
+function makeWork(id, title, status, branch) {
+  return {
+    id,
+    title,
+    status_category: status,
+    branch,
+    agents: [
+      {
+        session_id: `agent-${id}`,
+        display_name: "Agent",
+        status_category: status,
+        title_summary: title,
+      },
+    ],
+  };
+}
+
+function fakeBranchesSurface(entries, overrides = {}) {
+  const states = new Map();
+  return {
+    ensureBranchListState(windowId) {
+      if (!states.has(windowId)) {
+        states.set(windowId, {
+          entries: entries.slice(),
+          filter: "all",
+          loading: false,
+          error: "",
+          notice: "",
+          cleanupSelected: new Set(),
+          selectedBranchName: "",
+        });
+      }
+      return states.get(windowId);
+    },
+    requestBranches() {},
+    renderBranches() {},
+    openBranchCleanupModal() {},
+    ...overrides,
+  };
 }

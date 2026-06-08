@@ -7694,6 +7694,9 @@
           renderBranches: (...a) => renderBranches(...a),
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
+        // SPEC-2359 W-13/US-67 — branch-row Resume needs canvas bounds, same as
+        // the Branches surface launch path.
+        visibleBounds: () => visibleBounds(),
       });
 
       function boardTimestampLabel(value) {
@@ -14345,6 +14348,9 @@
             state.notice = "";
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+            // SPEC-2359 W-13/US-67 — branch entries also feed the unified Work
+            // surface backbone, so refresh open Work windows after they arrive.
+            workspaceOverviewSurface.renderWindows();
             // SPEC-2356 — feed git layer count into the Operator Status Strip.
             const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
             applyOperatorTelemetryCounts({

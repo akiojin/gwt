@@ -11,6 +11,7 @@ export function createWorkspaceKanbanSurface({
   workspaceWindowById,
   openWorkspaceResumePicker,
   branchesSurface,
+  visibleBounds,
 }) {
   const workspaceStateMap = new Map();
 
@@ -472,6 +473,193 @@ export function createWorkspaceKanbanSurface({
     );
   }
 
+  function normalizedBranchName(value) {
+    return String(value || "").trim();
+  }
+
+  // Read-only access to the Branches surface state (SPEC-2009). The unified
+  // Work surface (SPEC-2359 W-13/US-67) consumes branch entries to build a
+  // branch backbone but never mutates the Branches render path.
+  function branchListState(windowId) {
+    if (!branchesSurface || typeof branchesSurface.ensureBranchListState !== "function") {
+      return null;
+    }
+    try {
+      return branchesSurface.ensureBranchListState(windowId);
+    } catch {
+      return null;
+    }
+  }
+
+  function branchEntryVisibleForFilter(entry, filter) {
+    if (!filter || filter === "all") return true;
+    return entry.scope === filter;
+  }
+
+  // Join Active Works (agent-session identity, FR-348) onto branch rows by
+  // branch name. Works always create their branch group so active work is
+  // never hidden by a branch filter; branch entries add non-work branches.
+  function buildBranchBackbone(workspaces, branchState) {
+    const groups = [];
+    const groupByName = new Map();
+    const detached = [];
+
+    function ensureGroup(name, entry) {
+      let group = groupByName.get(name);
+      if (!group) {
+        group = { name, entry: entry || null, works: [] };
+        groupByName.set(name, group);
+        groups.push(group);
+      } else if (entry && !group.entry) {
+        group.entry = entry;
+      }
+      return group;
+    }
+
+    for (const work of workspaces) {
+      const branch = normalizedBranchName(work.branch);
+      if (!branch) {
+        detached.push(work);
+        continue;
+      }
+      ensureGroup(branch).works.push(work);
+    }
+
+    const entries = Array.isArray(branchState?.entries) ? branchState.entries : [];
+    const filter = branchState?.filter || "all";
+    for (const entry of entries) {
+      const name = normalizedBranchName(entry.name);
+      if (!name) continue;
+      if (groupByName.has(name)) {
+        ensureGroup(name, entry);
+        continue;
+      }
+      if (!branchEntryVisibleForFilter(entry, filter)) continue;
+      ensureGroup(name, entry);
+    }
+
+    return { groups, detached };
+  }
+
+  function renderBranchGroup(windowId, state, group, branchState) {
+    const row = createNode("div", "workspace-branch-row");
+    row.dataset.branchName = group.name;
+    const entry = group.entry;
+
+    const header = createNode("div", "workspace-branch-head");
+
+    const cleanupSet =
+      branchState && branchState.cleanupSelected instanceof Set
+        ? branchState.cleanupSelected
+        : null;
+    if (cleanupSet && entry && entry.cleanup_ready) {
+      const isSelected = cleanupSet.has(group.name);
+      const toggle = createNode(
+        "button",
+        "workspace-branch-cleanup-toggle",
+        isSelected ? "☑" : "☐",
+      );
+      toggle.type = "button";
+      toggle.dataset.branchCleanupToggle = group.name;
+      toggle.setAttribute("aria-pressed", isSelected ? "true" : "false");
+      toggle.title = "Select branch for cleanup";
+      toggle.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (cleanupSet.has(group.name)) cleanupSet.delete(group.name);
+        else cleanupSet.add(group.name);
+        renderWorkspaceOverviewWindow(windowId, true);
+      });
+      header.appendChild(toggle);
+    }
+
+    const nameWrap = createNode("div", "workspace-branch-name");
+    nameWrap.appendChild(createNode("span", "workspace-branch-name-text", group.name));
+    if (entry?.is_head) {
+      nameWrap.appendChild(createNode("span", "workspace-branch-head-badge", "HEAD"));
+    }
+    header.appendChild(nameWrap);
+
+    const meta = createNode("div", "workspace-branch-meta");
+    if (entry) {
+      appendMetaText(meta, entry.scope);
+      appendMetaText(
+        meta,
+        entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced",
+      );
+    }
+    appendMetaText(
+      meta,
+      `${group.works.length} Work${group.works.length === 1 ? "" : "s"}`,
+    );
+    header.appendChild(meta);
+
+    const actions = createNode("div", "workspace-branch-actions");
+    const resumeBtn = createNode("button", "branch-row-action", "Resume");
+    resumeBtn.type = "button";
+    resumeBtn.dataset.branchRowAction = "resume";
+    const resumeAvailable = Boolean(entry?.resume?.available);
+    resumeBtn.disabled = !resumeAvailable;
+    resumeBtn.title = resumeAvailable
+      ? `Resume latest agent on ${group.name}`
+      : entry?.resume?.reason || "No resumable session";
+    resumeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (resumeBtn.disabled) return;
+      send({
+        kind: "resume_branch_latest_agent",
+        id: windowId,
+        branch_name: group.name,
+        bounds: typeof visibleBounds === "function" ? visibleBounds() : undefined,
+      });
+    });
+    actions.appendChild(resumeBtn);
+
+    const launchBtn = createNode("button", "branch-row-action primary", "Launch");
+    launchBtn.type = "button";
+    launchBtn.dataset.branchRowAction = "launch";
+    launchBtn.title = `Launch Agent on ${group.name}`;
+    launchBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      send({ kind: "open_launch_wizard", id: windowId, branch_name: group.name });
+    });
+    actions.appendChild(launchBtn);
+    header.appendChild(actions);
+
+    row.appendChild(header);
+
+    const works = createNode("div", "workspace-branch-works");
+    if (group.works.length === 0) {
+      works.appendChild(createNode("div", "workspace-overview-empty", "No active work"));
+    } else {
+      for (const work of group.works) {
+        works.appendChild(renderWorkspaceRow(windowId, state, work));
+      }
+    }
+    row.appendChild(works);
+    return row;
+  }
+
+  function renderDetachedGroup(windowId, state, works) {
+    const row = createNode("div", "workspace-branch-row is-detached");
+    row.dataset.branchName = "";
+    const header = createNode("div", "workspace-branch-head");
+    header.appendChild(createNode("span", "workspace-branch-name-text", "Other Work"));
+    header.appendChild(
+      createNode(
+        "div",
+        "workspace-branch-meta",
+        `${works.length} Work${works.length === 1 ? "" : "s"}`,
+      ),
+    );
+    row.appendChild(header);
+    const list = createNode("div", "workspace-branch-works");
+    for (const work of works) {
+      list.appendChild(renderWorkspaceRow(windowId, state, work));
+    }
+    row.appendChild(list);
+    return row;
+  }
+
   function renderWorkspaceOverviewWindow(windowId, force) {
     const element = windowMap.get(windowId);
     if (!element) return;
@@ -479,7 +667,17 @@ export function createWorkspaceKanbanSurface({
     if (!root) return;
 
     const projection = getActiveWorkProjection();
-    const signature = JSON.stringify(projection);
+    const branchState = branchListState(windowId);
+    const signature = JSON.stringify({
+      projection,
+      entries: branchState ? branchState.entries : null,
+      filter: branchState ? branchState.filter : null,
+      loading: branchState ? branchState.loading : false,
+      error: branchState ? branchState.error : "",
+      cleanup: branchState && branchState.cleanupSelected instanceof Set
+        ? Array.from(branchState.cleanupSelected)
+        : null,
+    });
     const state = ensureState(windowId);
     if (!force && state._lastSignature !== undefined && state._lastSignature === signature) return;
     state._lastSignature = signature;
@@ -487,21 +685,64 @@ export function createWorkspaceKanbanSurface({
     const workspaces = workspacesFromProjection(projection);
     const unassignedAgents = unassignedAgentsFromProjection(projection);
     const selected = selectedWorkspace(state, workspaces);
+    const { groups, detached } = buildBranchBackbone(workspaces, branchState);
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
-      status.textContent = projection
-        ? `${workspaces.length} Active Works · ${unassignedAgents.length} Unassigned Agents`
-        : "No Work projection";
+      if (!projection && !branchState) {
+        status.textContent = "No Work projection";
+      } else {
+        const parts = [`${workspaces.length} Active Works`];
+        if (branchState) parts.push(`${groups.length} Branches`);
+        parts.push(`${unassignedAgents.length} Unassigned Agents`);
+        status.textContent = parts.join(" · ");
+      }
+    }
+
+    const activeFilter = branchState?.filter || "local";
+    for (const button of root.querySelectorAll("[data-branch-filter]")) {
+      button.classList.toggle("is-active", button.dataset.branchFilter === activeFilter);
+      button.classList.toggle("active", button.dataset.branchFilter === activeFilter);
+    }
+
+    const cleanupBtn = root.querySelector("[data-action='open-branch-cleanup']");
+    if (cleanupBtn) {
+      const selectedCount =
+        branchState && branchState.cleanupSelected instanceof Set
+          ? branchState.cleanupSelected.size
+          : 0;
+      cleanupBtn.disabled = selectedCount === 0;
+      cleanupBtn.textContent =
+        selectedCount === 0 ? "Clean Up" : `Clean Up (${selectedCount})`;
+    }
+
+    const branchNotice = root.querySelector(".branch-notice");
+    if (branchNotice) {
+      if (branchState?.error) {
+        branchNotice.hidden = false;
+        branchNotice.textContent = branchState.error;
+      } else {
+        branchNotice.hidden = true;
+        branchNotice.textContent = "";
+      }
     }
 
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
-    if (workspaces.length === 0) {
-      list.appendChild(createNode("div", "workspace-overview-empty", "No Work"));
+    if (groups.length === 0 && detached.length === 0) {
+      list.appendChild(
+        createNode(
+          "div",
+          "workspace-overview-empty",
+          branchState?.loading ? "Loading branches" : "No Work",
+        ),
+      );
     } else {
-      for (const workspace of workspaces) {
-        list.appendChild(renderWorkspaceRow(windowId, state, workspace));
+      for (const group of groups) {
+        list.appendChild(renderBranchGroup(windowId, state, group, branchState));
+      }
+      if (detached.length > 0) {
+        list.appendChild(renderDetachedGroup(windowId, state, detached));
       }
     }
 
@@ -521,49 +762,10 @@ export function createWorkspaceKanbanSurface({
     toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
     toolbar.appendChild(toolbarMain);
 
+    // SPEC-2359 W-13/US-67 — Work and Branches are a single branch-backbone
+    // view, so the branch filter / cleanup / refresh controls live directly in
+    // the unified toolbar instead of behind a Work/Git Branches tab toggle.
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
-    const tabGroup = createNode("div", "workspace-tab-group");
-    const workTab = createNode("button", "workspace-tab is-active", "Work");
-    workTab.type = "button";
-    workTab.dataset.workTab = "work";
-    const branchTab = createNode("button", "workspace-tab", "Git Branches");
-    branchTab.type = "button";
-    branchTab.dataset.workTab = "branches";
-    tabGroup.appendChild(workTab);
-    tabGroup.appendChild(branchTab);
-    toolbarActions.appendChild(tabGroup);
-
-    const refreshBtn = createNode("button", "icon-button", "↻");
-    refreshBtn.dataset.action = "refresh-workspace-overview";
-    refreshBtn.setAttribute("aria-label", "Refresh Work");
-    toolbarActions.appendChild(refreshBtn);
-    toolbar.appendChild(toolbarActions);
-    root.appendChild(toolbar);
-
-    const workShell = createNode("div", "workspace-overview-shell");
-    workShell.dataset.workSection = "work";
-    const listPane = createNode("aside", "workspace-overview-list-pane");
-    listPane.setAttribute("aria-label", "Work list");
-    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Active Works"));
-    const listBox = createNode("div", "workspace-overview-list");
-    listBox.setAttribute("role", "listbox");
-    listPane.appendChild(listBox);
-    const queueSlot = createNode("div");
-    queueSlot.dataset.role = "workspace-agent-queue-slot";
-    listPane.appendChild(queueSlot);
-    workShell.appendChild(listPane);
-    const detailPane = createNode("main", "workspace-overview-detail-pane");
-    detailPane.setAttribute("aria-label", "Work detail");
-    workShell.appendChild(detailPane);
-    root.appendChild(workShell);
-
-    const branchShell = createNode("div", "workspace-branches-shell");
-    branchShell.dataset.workSection = "branches";
-    branchShell.hidden = true;
-    const branchRoot = createNode("div", "branch-list-root");
-    const branchToolbar = createNode("div", "branch-toolbar workspace-toolbar is-stacked");
-    const branchToolbarMain = createNode("div", "branch-toolbar-main workspace-toolbar-main");
-    branchToolbarMain.appendChild(createNode("div", "branch-heading", "Git Branches"));
     const filterGroup = createNode("div", "branch-filter-group");
     for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
       const btn = createNode("button", "branch-filter-button", label);
@@ -571,29 +773,47 @@ export function createWorkspaceKanbanSurface({
       btn.dataset.branchFilter = filter;
       filterGroup.appendChild(btn);
     }
-    branchToolbarMain.appendChild(filterGroup);
-    branchToolbar.appendChild(branchToolbarMain);
-    const branchToolbarActions = createNode("div", "branch-toolbar-actions workspace-toolbar-actions");
-    const selectionActions = createNode("div", "branch-selection-actions");
+    toolbarActions.appendChild(filterGroup);
+
     const cleanupBtn = createNode("button", "wizard-button branch-cleanup-trigger", "Clean Up");
     cleanupBtn.type = "button";
     cleanupBtn.dataset.action = "open-branch-cleanup";
-    selectionActions.appendChild(cleanupBtn);
-    branchToolbarActions.appendChild(selectionActions);
+    cleanupBtn.disabled = true;
+    toolbarActions.appendChild(cleanupBtn);
+
     const branchRefreshBtn = createNode("button", "icon-button", "↻");
     branchRefreshBtn.dataset.action = "refresh-branches";
     branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
-    branchToolbarActions.appendChild(branchRefreshBtn);
-    branchToolbar.appendChild(branchToolbarActions);
-    branchRoot.appendChild(branchToolbar);
+    toolbarActions.appendChild(branchRefreshBtn);
+
+    const refreshBtn = createNode("button", "icon-button", "⟳");
+    refreshBtn.dataset.action = "refresh-workspace-overview";
+    refreshBtn.setAttribute("aria-label", "Refresh Work");
+    toolbarActions.appendChild(refreshBtn);
+    toolbar.appendChild(toolbarActions);
+    root.appendChild(toolbar);
+
+    const shell = createNode("div", "workspace-overview-shell");
+    const listPane = createNode("aside", "workspace-overview-list-pane");
+    listPane.setAttribute("aria-label", "Branch and Work list");
+    listPane.appendChild(
+      createNode("div", "workspace-overview-section-label", "Branches & Active Works"),
+    );
     const branchNotice = createNode("div", "branch-notice");
     branchNotice.hidden = true;
-    branchRoot.appendChild(branchNotice);
-    const branchScroll = createNode("div", "branch-scroll workspace-scroll");
-    branchScroll.appendChild(createNode("div", "branch-list"));
-    branchRoot.appendChild(branchScroll);
-    branchShell.appendChild(branchRoot);
-    root.appendChild(branchShell);
+    listPane.appendChild(branchNotice);
+    const listBox = createNode("div", "workspace-overview-list");
+    listBox.setAttribute("role", "list");
+    listPane.appendChild(listBox);
+    const queueSlot = createNode("div");
+    queueSlot.dataset.role = "workspace-agent-queue-slot";
+    listPane.appendChild(queueSlot);
+    shell.appendChild(listPane);
+
+    const detailPane = createNode("main", "workspace-overview-detail-pane");
+    detailPane.setAttribute("aria-label", "Work detail");
+    shell.appendChild(detailPane);
+    root.appendChild(shell);
 
     parent.appendChild(root);
     return root;
@@ -608,26 +828,6 @@ export function createWorkspaceKanbanSurface({
       sendFocus?.(windowData.id);
     });
 
-    for (const tab of parent.querySelectorAll("[data-work-tab]")) {
-      tab.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const target = tab.dataset.workTab;
-        for (const t of parent.querySelectorAll("[data-work-tab]")) {
-          t.classList.toggle("is-active", t.dataset.workTab === target);
-        }
-        for (const section of parent.querySelectorAll("[data-work-section]")) {
-          section.hidden = section.dataset.workSection !== target;
-        }
-        if (target === "branches" && branchesSurface) {
-          const state = branchesSurface.ensureBranchListState(windowData.id);
-          if (state.entries.length === 0 && !state.loading && !state.error) {
-            branchesSurface.requestBranches(windowData.id);
-          }
-          branchesSurface.renderBranches(windowData.id);
-        }
-      });
-    }
-
     if (branchesSurface) {
       const branchRefresh = parent.querySelector("[data-action='refresh-branches']");
       branchRefresh?.addEventListener("click", (event) => {
@@ -636,14 +836,14 @@ export function createWorkspaceKanbanSurface({
         state.error = "";
         state.notice = "";
         branchesSurface.requestBranches(windowData.id);
-        branchesSurface.renderBranches(windowData.id);
+        renderWorkspaceOverviewWindow(windowData.id, true);
       });
       for (const button of parent.querySelectorAll("[data-branch-filter]")) {
         button.addEventListener("click", (event) => {
           event.stopPropagation();
           const state = branchesSurface.ensureBranchListState(windowData.id);
           state.filter = button.dataset.branchFilter;
-          branchesSurface.renderBranches(windowData.id);
+          renderWorkspaceOverviewWindow(windowData.id, true);
         });
       }
       parent.querySelector("[data-action='open-branch-cleanup']")
@@ -658,6 +858,21 @@ export function createWorkspaceKanbanSurface({
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
     });
+
+    // SPEC-2359 W-13/US-67 — load branches once so the unified backbone can show
+    // non-work branches alongside Active Works (the Branches surface state is
+    // shared read-only; the Branches render path itself is left untouched).
+    if (branchesSurface) {
+      const state = branchesSurface.ensureBranchListState(windowData.id);
+      if (
+        (state.entries?.length || 0) === 0 &&
+        !state.loading &&
+        !state.error
+      ) {
+        branchesSurface.requestBranches(windowData.id);
+      }
+    }
+
     renderWorkspaceOverviewWindow(windowData.id);
   }
 

@@ -2028,6 +2028,89 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
+/* SPEC-2359 W-13/US-67 — unified Work surface: branch backbone with nested works. */
+.workspace-branch-row {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-surface) 96%, var(--color-canvas));
+}
+
+.workspace-branch-row.is-detached {
+  background: var(--color-surface);
+  border-style: dashed;
+}
+
+.workspace-branch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.workspace-branch-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.workspace-branch-name-text {
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-branch-head-badge {
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: 700;
+  color: var(--color-state-active);
+  border: 1px solid var(--color-state-active);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
+
+.workspace-branch-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  color: var(--color-text-muted);
+}
+
+.workspace-branch-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.workspace-branch-cleanup-toggle {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--type-sm);
+  line-height: 1;
+}
+
+.workspace-branch-works {
+  display: grid;
+  gap: 6px;
+  padding-left: 12px;
+  margin-left: 4px;
+  border-left: 2px solid var(--color-border);
+}
+
 .workspace-overview-row-copy,
 .workspace-overview-row-title,
 .workspace-overview-row-meta {
