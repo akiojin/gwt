@@ -145,11 +145,22 @@ pub fn hydrate_branch_entries_with_active_sessions(
     let gone_branches = gwt_git::list_gone_branches(&git_root)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let cleanup_targets = build_cleanup_targets(&git_root, &entries, &gone_branches)?;
+    // SPEC-2009 FR-070: a bare repo's symbolic HEAD (e.g. main) is NOT a real
+    // worktree checkout — gwt resolves the default branch from origin/HEAD — so
+    // it must not block its branch from local cleanup.
+    let head_is_real_checkout = !repo_root_is_bare(&git_root);
     Ok(hydrate_branch_entries(
         entries,
         active_session_branches,
         &cleanup_targets,
+        head_is_real_checkout,
     ))
+}
+
+fn repo_root_is_bare(git_root: &Path) -> bool {
+    gwt_git::Repository::open(git_root)
+        .map(|repo| repo.is_bare())
+        .unwrap_or(false)
 }
 
 pub fn list_branch_entries_with_active_sessions(
@@ -219,11 +230,19 @@ fn hydrate_branch_entries(
     entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
     cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
+    head_is_real_checkout: bool,
 ) -> Vec<BranchListEntry> {
-    let current_head_branch = entries
-        .iter()
-        .find(|branch| branch.scope == BranchScope::Local && branch.is_head)
-        .map(|branch| branch.name.clone());
+    // Only a real worktree checkout blocks cleanup as the current HEAD. In a
+    // bare repository the symbolic HEAD is not a checkout, so it must not block
+    // its branch (SPEC-2009 FR-070).
+    let current_head_branch = if head_is_real_checkout {
+        entries
+            .iter()
+            .find(|branch| branch.scope == BranchScope::Local && branch.is_head)
+            .map(|branch| branch.name.clone())
+    } else {
+        None
+    };
     let local_upstreams: HashMap<String, Option<String>> = entries
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
@@ -704,7 +723,7 @@ mod tests {
             )),
         )]);
 
-        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
+        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets, true);
 
         assert!(hydrated[0].cleanup_ready);
         assert_eq!(
@@ -745,6 +764,7 @@ mod tests {
             vec![local_entry("develop", false)],
             &HashSet::new(),
             &HashMap::new(),
+            true,
         );
         assert_eq!(
             hydrated[0].cleanup.availability,
@@ -765,6 +785,7 @@ mod tests {
             vec![local_entry("develop", true)],
             &HashSet::new(),
             &HashMap::new(),
+            true,
         );
         assert_eq!(
             hydrated[0].cleanup.availability,
@@ -784,6 +805,7 @@ mod tests {
             vec![local_entry("develop", false)],
             &sessions,
             &HashMap::new(),
+            true,
         );
         assert_eq!(
             hydrated[0].cleanup.availability,
@@ -793,5 +815,29 @@ mod tests {
             hydrated[0].cleanup.blocked_reason,
             Some(BranchCleanupBlockedReason::ActiveSession)
         );
+    }
+
+    #[test]
+    fn bare_repo_symbolic_head_does_not_block_protected_base() {
+        // SPEC-2009 FR-070: in a bare repo the symbolic HEAD (e.g. main) is not
+        // a real worktree checkout — gwt resolves the default branch from
+        // origin/HEAD — so main must be Risky-selectable for LOCAL cleanup, not
+        // Blocked as the current HEAD. `head_is_real_checkout = false` models a
+        // bare root.
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("main", true)],
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Risky
+        );
+        assert_eq!(hydrated[0].cleanup.blocked_reason, None);
+        assert!(hydrated[0]
+            .cleanup
+            .risks
+            .contains(&BranchCleanupRisk::ProtectedBase));
     }
 }
