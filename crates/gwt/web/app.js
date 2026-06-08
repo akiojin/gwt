@@ -2762,7 +2762,41 @@
       // preset grid. Buttons are walked in document order; ←→ step within a
       // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
       // currently-focused tile so the keyboard glow tracks the cursor.
-      const PRESET_GRID_COLUMNS = 2;
+      // SPEC-2356 landscape weighted deck — roving is geometry direction-nearest
+      // (not a fixed column-count jump) so the 45/33/22 weighted columns and the
+      // uneven per-column row counts navigate intuitively. The handler reads real
+      // tile geometry; a too-diagonal candidate (>~63°) is rejected so pressing
+      // Down at the bottom of a short column clamps instead of leaping columns.
+      function findGeometryNeighbor(buttons, current, key) {
+        const src = buttons[current].getBoundingClientRect();
+        const sx = src.left + src.width / 2;
+        const sy = src.top + src.height / 2;
+        const AXIS_BIAS = 2.5;
+        let best = -1;
+        let bestScore = Infinity;
+        buttons.forEach((btn, i) => {
+          if (i === current) return;
+          const r = btn.getBoundingClientRect();
+          const dx = r.left + r.width / 2 - sx;
+          const dy = r.top + r.height / 2 - sy;
+          const inDirection =
+            (key === "ArrowRight" && dx > 1) ||
+            (key === "ArrowLeft" && dx < -1) ||
+            (key === "ArrowDown" && dy > 1) ||
+            (key === "ArrowUp" && dy < -1);
+          if (!inDirection) return;
+          const horizontal = key === "ArrowRight" || key === "ArrowLeft";
+          const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
+          const secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
+          if (secondary > primary * 2) return;
+          const score = primary + secondary * AXIS_BIAS;
+          if (score < bestScore) {
+            bestScore = score;
+            best = i;
+          }
+        });
+        return best;
+      }
       function presetRovingButtons() {
         return [...modal.querySelectorAll(".preset-button")];
       }
@@ -2804,12 +2838,8 @@
           return;
         }
         event.preventDefault();
-        let next = current;
-        if (key === "ArrowRight") next = Math.min(current + 1, buttons.length - 1);
-        else if (key === "ArrowLeft") next = Math.max(current - 1, 0);
-        else if (key === "ArrowDown") next = Math.min(current + PRESET_GRID_COLUMNS, buttons.length - 1);
-        else if (key === "ArrowUp") next = Math.max(current - PRESET_GRID_COLUMNS, 0);
-        setActivePresetButton(buttons, next);
+        const next = findGeometryNeighbor(buttons, current, key);
+        if (next >= 0) setActivePresetButton(buttons, next);
       }
       function openModal() {
         // SPEC-2356 — capture trigger BEFORE adding .open so we can

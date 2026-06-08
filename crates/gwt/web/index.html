@@ -414,6 +414,10 @@
         >
           <p class="preset-modal__kicker"><span class="preset-modal__tick" aria-hidden="true">▸</span>DEPLOY A SURFACE</p>
           <h2 id="preset-modal-title">Add window</h2>
+          <!-- SPEC-2356 landscape redesign (Plan B, weighted deck): the three
+               categorized sections lay out as side-by-side weighted columns inside
+               .preset-deck so the deck stays low and never overflows short viewports. -->
+          <div class="preset-deck">
           <div class="preset-section" data-category="surface">
             <div class="preset-section-label">Surfaces</div>
             <div class="preset-list">
@@ -506,6 +510,7 @@
               </button>
             </div>
           </div>
+          </div><!-- /.preset-deck -->
           <div class="modal-footer">
             <span class="preset-modal__hint">↑↓←→ move · ↵ deploy · esc close</span>
             <button class="text-button" id="close-modal">Cancel</button>

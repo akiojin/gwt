@@ -2244,6 +2244,24 @@ kbd.op-kbd {
 :root[data-theme] .preset-section[data-category="config"] {
   --cat-accent: var(--color-text-muted);
 }
+/* SPEC-2356 landscape deck — give each category column a faint accent wash plus
+   an accent-tinted section-label underline so the weighted columns read as
+   distinct bands. Tokens only; light/dark swap stays automatic. */
+:root[data-theme] .preset-deck .preset-section[data-category="surface"] {
+  background: color-mix(in oklab, var(--color-state-active) 4%, transparent);
+}
+:root[data-theme] .preset-deck .preset-section[data-category="knowledge"] {
+  background: color-mix(in oklab, var(--agent-claude) 4%, transparent);
+}
+:root[data-theme] .preset-deck .preset-section[data-category="config"] {
+  background: color-mix(in oklab, var(--color-text-muted) 3%, transparent);
+}
+:root[data-theme] .preset-deck .preset-section-label {
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-3);
+  border-bottom: 1px solid
+    color-mix(in oklab, var(--cat-accent, var(--color-text-muted)) 40%, transparent);
+}
 :root[data-theme] .preset-button {
   background: var(--color-surface);
   color: var(--color-text);
@@ -2273,7 +2291,11 @@ kbd.op-kbd {
 :root[data-theme] .modal-shell.is-surface-deck {
   position: relative;
   isolation: isolate;
-  overflow: hidden;
+  /* SPEC-2356 landscape redesign: clip the horizontal atmosphere bleed but keep
+     a vertical scroll safety net so very short viewports can still reach every
+     deck tile (the deck fits without scroll on normal viewports). */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 :root[data-theme] .modal-shell.is-surface-deck::before {
   content: "";
