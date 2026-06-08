@@ -221,7 +221,7 @@ test("Unified Work surface merges Work and Branches into one view without a tab 
   assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
 });
 
-test("Work spine groups a Work's agents by agent_id into Work → Agent → Sessions", () => {
+test("Work lists its live sessions flat, focus-led with the agent type as a tag (Option A)", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, {
     id: "proj",
@@ -230,8 +230,9 @@ test("Work spine groups a Work's agents by agent_id into Work → Agent → Sess
     active_works: [
       makeWork("w1", "Parser cleanup", "active", "work/feature-a", [
         makeAgent("codex", "session-a", "active", "parser refactor"),
-        makeAgent("codex", "session-b", "active", "add tests"),
-        makeAgent("claude", "session-c", "blocked", "waiting review"),
+        makeAgent("codex", "session-b", "active", "add unit tests"),
+        makeAgent("claude", "session-c", "blocked", "waiting on review"),
+        makeAgent("codex", "session-done", "done", "old work"),
       ]),
     ],
     unassigned_agents: [],
@@ -249,30 +250,63 @@ test("Work spine groups a Work's agents by agent_id into Work → Agent → Sess
     "the Work keeps a selectable header row",
   );
 
-  const codex = work.querySelector('.workspace-work-agent[data-agent-id="codex"]');
-  const claude = work.querySelector('.workspace-work-agent[data-agent-id="claude"]');
-  assert.ok(codex, "agents are grouped by agent_id (Codex)");
-  assert.ok(claude, "agents are grouped by agent_id (Claude Code)");
-  assert.equal(
-    codex.querySelectorAll(".workspace-work-session[data-session-id]").length,
-    2,
-    "one agent (agent_id) groups its multiple sessions",
+  // No agent-type grouping layer — the agent type alone does not identify work.
+  assert.equal(work.querySelector(".workspace-work-agent"), null, "no agent-type grouping");
+
+  // Only the 3 LIVE sessions are listed flat; the terminated one is summarized.
+  const sessions = Array.from(
+    work.querySelectorAll(".workspace-work-session[data-session-id]"),
   );
-  assert.equal(
-    claude.querySelectorAll(".workspace-work-session[data-session-id]").length,
-    1,
+  assert.deepEqual(
+    sessions.map((node) => node.dataset.sessionId),
+    ["session-a", "session-b", "session-c"],
+    "live sessions are listed flat, terminated ones are not",
   );
-  const sessionIds = Array.from(
-    codex.querySelectorAll(".workspace-work-session[data-session-id]"),
-    (node) => node.dataset.sessionId,
+
+  // Each session is focus-led (work content), with status + agent-type tag.
+  const first = sessions[0];
+  assert.match(
+    first.querySelector(".workspace-work-session-focus").textContent,
+    /parser refactor/,
   );
-  assert.deepEqual(sessionIds, ["session-a", "session-b"]);
+  assert.match(first.querySelector(".workspace-work-session-agent").textContent, /Codex/);
+  assert.ok(first.querySelector(".workspace-work-session-status"), "status is shown");
+  assert.equal(first.dataset.status, "active");
+  assert.equal(sessions[2].dataset.status, "blocked");
+  assert.match(work.textContent, /1 completed session/);
 });
 
-test("Idle branches with no agent are collapsed below the Work spine and are not Works", () => {
+test("A Work whose sessions are all terminated shows a completed summary, not a bare header", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "proj",
+    title: "Project",
+    status_category: "active",
+    active_works: [
+      makeWork("w1", "Done work", "done", "work/x", [
+        makeAgent("codex", "s1", "done", "shipped"),
+      ]),
+    ],
+    unassigned_agents: [],
+  });
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+  const work = fixture.body.querySelector('.workspace-work-group[data-workspace-id="w1"]');
+  assert.equal(
+    work.querySelectorAll(".workspace-work-session[data-session-id]").length,
+    0,
+    "no live session rows",
+  );
+  assert.match(work.textContent, /1 completed session/);
+});
+
+test("Idle branches collapse below the spine; work branches and their remote counterparts are excluded", () => {
   const fixture = createFixture();
   const branches = fakeBranchesSurface([
     branchEntry("work/feature-a"),
+    branchEntry("origin/work/feature-a", { scope: "remote" }),
     branchEntry("main", { is_head: true }),
     branchEntry("develop"),
   ]);
@@ -302,6 +336,7 @@ test("Idle branches with no agent are collapsed below the Work spine and are not
   const idle = fixture.body.querySelector(".workspace-idle-branches");
   assert.ok(idle, "idle branches have their own collapsible section");
   const toggle = idle.querySelector("[data-action='toggle-idle-branches']");
+  // feature-a (work) and origin/work/feature-a (its remote counterpart) excluded.
   assert.match(toggle.textContent, /Other branches \(idle\) \(2\)/);
   assert.equal(
     idle.querySelectorAll(".workspace-branch-row.is-idle").length,
@@ -311,25 +346,28 @@ test("Idle branches with no agent are collapsed below the Work spine and are not
 
   toggle.click();
   const expanded = fixture.body.querySelector(".workspace-idle-branches");
+  // The scope filter lives inside the idle section, not the global toolbar.
+  assert.ok(
+    expanded.querySelector(".branch-filter-group [data-branch-filter='local']"),
+    "the Local/Remote/All filter is scoped to the idle section",
+  );
   const idleNames = Array.from(
     expanded.querySelectorAll(".workspace-branch-row.is-idle[data-branch-name]"),
     (node) => node.dataset.branchName,
   ).sort();
   assert.deepEqual(idleNames, ["develop", "main"]);
   assert.equal(
-    expanded.querySelector('.workspace-branch-row[data-branch-name="work/feature-a"]'),
+    expanded.querySelector('[data-branch-name="origin/work/feature-a"]'),
     null,
-    "a branch that backs a Work is never in the idle section",
+    "a work branch's remote counterpart is never in the idle section",
   );
 });
 
-test("Branches load on mount and branch cleanup routes to the SPEC-2009 modal", () => {
+test("Branches load on mount; the Work toolbar has no branch-cleanup button (cleanup lives in the Branches surface)", () => {
   const fixture = createFixture();
   const requested = [];
-  const cleanups = [];
   const branches = fakeBranchesSurface([], {
     requestBranches: (id) => requested.push(id),
-    openBranchCleanupModal: (id) => cleanups.push(id),
   });
   const surface = createSurface(
     fixture,
@@ -353,14 +391,10 @@ test("Branches load on mount and branch cleanup routes to the SPEC-2009 modal", 
     [fixture.windowData.id],
     "branches load once on mount so the idle section can fill",
   );
-
-  const cleanupBtn = fixture.body.querySelector("[data-action='open-branch-cleanup']");
-  assert.ok(cleanupBtn, "branch cleanup action is present");
-  cleanupBtn.click();
-  assert.deepEqual(
-    cleanups,
-    [fixture.windowData.id],
-    "cleanup opens the SPEC-2009 modal",
+  assert.equal(
+    fixture.body.querySelector("[data-action='open-branch-cleanup']"),
+    null,
+    "branch cleanup is not in the Work surface (it belongs to the Branches surface)",
   );
 });
 

@@ -196,7 +196,12 @@ export function createWorkspaceKanbanSurface({
     row.type = "button";
     row.dataset.workspaceId = item.id;
     row.dataset.status = String(item.status_category || "idle").toLowerCase();
-    row.setAttribute("aria-selected", state.selectedId === item.id ? "true" : "false");
+    const isSelected = state.selectedId === item.id;
+    // aria-selected drives the CSS/test contract; aria-current is what AT
+    // actually announces on a default-role button.
+    row.setAttribute("aria-selected", isSelected ? "true" : "false");
+    if (isSelected) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
 
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
@@ -496,92 +501,87 @@ export function createWorkspaceKanbanSurface({
     return entry.scope === filter;
   }
 
-  // SPEC-2359 W-13/US-67 — Work-led model: a Work (= branch/worktree, always
-  // has at least one agent) groups its flat agent-session summaries by
-  // agent_id (the agent type, e.g. Codex / Claude Code). agent_id is stable
-  // across sessions; session_id is unique per session. This yields the
-  // Work → Agent → Sessions hierarchy with no backend change.
-  function groupAgentsByAgentId(agents) {
-    const groups = [];
-    const byId = new Map();
-    for (const agent of agents || []) {
-      const key = String(agent.agent_id || agent.display_name || agent.session_id || "agent");
-      let group = byId.get(key);
-      if (!group) {
-        group = {
-          agent_id: key,
-          display_name: agent.display_name || agent.agent_id || "Agent",
-          sessions: [],
-        };
-        byId.set(key, group);
-        groups.push(group);
-      }
-      group.sessions.push(agent);
-    }
-    return groups;
+  // SPEC-2359 W-13/US-67 — Work-led model (Option A). Branch = Work = the place
+  // work happens; a session is the work content. A Work always has >=1 agent.
+  // Its LIVE sessions are shown flat (work-content / focus led), each tagged
+  // with its agent type — the agent type alone does not identify the work, so
+  // there is no agent-type grouping layer.
+  const LIVE_SESSION_STATUSES = new Set(["active", "blocked", "idle", "running"]);
+
+  function isLiveSession(session) {
+    return LIVE_SESSION_STATUSES.has(
+      String(session?.status_category || "").toLowerCase(),
+    );
   }
 
-  function agentGroupStatus(group) {
-    const statuses = group.sessions.map((s) => String(s.status_category || "").toLowerCase());
-    if (statuses.includes("blocked")) return "blocked";
-    if (statuses.some((s) => s === "active" || s === "running")) return "active";
-    return "idle";
+  // Strip remote prefixes so a Work's branch and its remote-tracking
+  // counterpart (origin/<branch>) are treated as the same place.
+  function branchBaseName(value) {
+    return normalizedBranchName(value)
+      .replace(/^refs\/remotes\//, "")
+      .replace(/^remotes\//, "")
+      .replace(/^origin\//, "");
   }
 
-  // Branches that back no active Work — pure git branches with no agent. The
-  // user model: a Work always has an agent, so these idle branches are not
-  // Works. They live in a collapsed "Other branches" section for Launch /
-  // cleanup only, never on the Work spine.
+  // Branches that back no active Work — pure git branches with no agent. A Work
+  // always has an agent, so these are not Works; they live in a collapsed
+  // "Other branches (idle)" section for Launch only. A work branch and its
+  // remote-tracking counterpart are excluded together.
   function idleBranchEntries(workspaces, branchState) {
     const entries = Array.isArray(branchState?.entries) ? branchState.entries : [];
     if (entries.length === 0) return [];
     const workBranches = new Set(
-      workspaces.map((work) => normalizedBranchName(work.branch)).filter(Boolean),
+      workspaces.map((work) => branchBaseName(work.branch)).filter(Boolean),
     );
     const filter = branchState?.filter || "local";
     return entries.filter((entry) => {
       const name = normalizedBranchName(entry.name);
-      if (!name || workBranches.has(name)) return false;
+      if (!name || workBranches.has(branchBaseName(name))) return false;
       return branchEntryVisibleForFilter(entry, filter);
     });
   }
 
+  function sessionFocus(session) {
+    return session.title_summary || session.current_focus || "No focus set";
+  }
+
+  function agentTypeLabel(session) {
+    return session.display_name || session.agent_id || "Agent";
+  }
+
+  // One flat session row: status + work content (focus) lead; the agent type
+  // is a small trailing tag.
   function renderSessionRow(session) {
     const row = createNode("article", "workspace-work-session");
     row.dataset.sessionId = session.session_id || "";
-    row.dataset.status = String(session.status_category || "idle").toLowerCase();
-    const meta = createNode("div", "workspace-work-session-meta");
-    appendMetaText(meta, agentStatusLabel?.(session.status_category));
-    appendMetaText(meta, session.title_summary || session.current_focus || "No focus set");
-    row.appendChild(meta);
+    const status = String(session.status_category || "idle").toLowerCase();
+    row.dataset.status = status;
+    row.appendChild(
+      createNode(
+        "span",
+        "workspace-work-session-status",
+        agentStatusLabel?.(status) || status,
+      ),
+    );
+    row.appendChild(
+      createNode("span", "workspace-work-session-focus", sessionFocus(session)),
+    );
+    row.appendChild(
+      createNode("span", "workspace-work-session-agent", agentTypeLabel(session)),
+    );
     return row;
   }
 
-  function renderAgentGroup(group) {
-    const wrap = createNode("div", "workspace-work-agent");
-    wrap.dataset.agentId = group.agent_id;
-    wrap.dataset.status = agentGroupStatus(group);
-    const head = createNode("div", "workspace-work-agent-head");
-    head.appendChild(createNode("span", "workspace-work-agent-name", group.display_name));
-    const count = group.sessions.length;
-    head.appendChild(
-      createNode(
-        "span",
-        "workspace-work-agent-count",
-        `${count} session${count === 1 ? "" : "s"}`,
-      ),
+  function completedNote(count) {
+    return createNode(
+      "div",
+      "workspace-overview-empty",
+      `${count} completed session${count === 1 ? "" : "s"}`,
     );
-    wrap.appendChild(head);
-    const sessions = createNode("div", "workspace-work-sessions");
-    for (const session of group.sessions) {
-      sessions.appendChild(renderSessionRow(session));
-    }
-    wrap.appendChild(sessions);
-    return wrap;
   }
 
-  // A Work is the spine row: its branch is the identity, and under it the
-  // agents (grouped by agent_id) each list their sessions.
+  // A Work is the spine row: branch = the place; its live sessions = the work
+  // content. Terminated sessions are summarized, not listed.
   function renderWorkGroup(windowId, state, work) {
     const group = createNode("div", "workspace-work-group");
     group.dataset.workspaceId = work.id;
@@ -619,14 +619,23 @@ export function createWorkspaceKanbanSurface({
       group.appendChild(actions);
     }
 
-    const agentGroups = groupAgentsByAgentId(work.agents);
-    if (agentGroups.length > 0) {
-      const agentsWrap = createNode("div", "workspace-work-agents");
-      for (const agentGroup of agentGroups) {
-        agentsWrap.appendChild(renderAgentGroup(agentGroup));
+    const allSessions = Array.isArray(work.agents) ? work.agents : [];
+    const live = allSessions.filter(isLiveSession);
+    const terminated = allSessions.length - live.length;
+    const sessionsWrap = createNode("div", "workspace-work-sessions");
+    if (live.length > 0) {
+      for (const session of live) {
+        sessionsWrap.appendChild(renderSessionRow(session));
       }
-      group.appendChild(agentsWrap);
+      if (terminated > 0) sessionsWrap.appendChild(completedNote(terminated));
+    } else if (terminated > 0) {
+      sessionsWrap.appendChild(completedNote(terminated));
+    } else {
+      sessionsWrap.appendChild(
+        createNode("div", "workspace-overview-empty", "No active sessions"),
+      );
     }
+    group.appendChild(sessionsWrap);
     return group;
   }
 
@@ -649,34 +658,31 @@ export function createWorkspaceKanbanSurface({
     section.appendChild(toggle);
     if (!expanded) return section;
 
+    // Local/Remote/All only ever scoped idle branches — keep the filter here,
+    // clearly labeled to this section, not in the global toolbar.
+    const activeFilter = branchState?.filter || "local";
+    const filterGroup = createNode("div", "branch-filter-group");
+    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
+      const btn = createNode("button", "branch-filter-button", label);
+      btn.type = "button";
+      btn.dataset.branchFilter = filter;
+      btn.classList.toggle("is-active", filter === activeFilter);
+      btn.classList.toggle("active", filter === activeFilter);
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (branchState) branchState.filter = filter;
+        renderWorkspaceOverviewWindow(windowId, true);
+      });
+      filterGroup.appendChild(btn);
+    }
+    section.appendChild(filterGroup);
+
     const list = createNode("div", "workspace-idle-branch-list");
-    const cleanupSet =
-      branchState && branchState.cleanupSelected instanceof Set
-        ? branchState.cleanupSelected
-        : null;
     for (const entry of entries) {
       const name = normalizedBranchName(entry.name);
       const row = createNode("div", "workspace-branch-row is-idle");
       row.dataset.branchName = name;
       const head = createNode("div", "workspace-branch-head");
-      if (cleanupSet && entry.cleanup_ready) {
-        const isSelected = cleanupSet.has(name);
-        const cb = createNode(
-          "button",
-          "workspace-branch-cleanup-toggle",
-          isSelected ? "☑" : "☐",
-        );
-        cb.type = "button";
-        cb.setAttribute("aria-pressed", isSelected ? "true" : "false");
-        cb.title = "Select branch for cleanup";
-        cb.addEventListener("click", (event) => {
-          event.stopPropagation();
-          if (cleanupSet.has(name)) cleanupSet.delete(name);
-          else cleanupSet.add(name);
-          renderWorkspaceOverviewWindow(windowId, true);
-        });
-        head.appendChild(cb);
-      }
       const nameWrap = createNode("div", "workspace-branch-name");
       nameWrap.appendChild(createNode("span", "workspace-branch-name-text", name));
       if (entry.is_head) {
@@ -747,23 +753,6 @@ export function createWorkspaceKanbanSurface({
       }
     }
 
-    const activeFilter = branchState?.filter || "local";
-    for (const button of root.querySelectorAll("[data-branch-filter]")) {
-      button.classList.toggle("is-active", button.dataset.branchFilter === activeFilter);
-      button.classList.toggle("active", button.dataset.branchFilter === activeFilter);
-    }
-
-    const cleanupBtn = root.querySelector("[data-action='open-branch-cleanup']");
-    if (cleanupBtn) {
-      const selectedCount =
-        branchState && branchState.cleanupSelected instanceof Set
-          ? branchState.cleanupSelected.size
-          : 0;
-      cleanupBtn.disabled = selectedCount === 0;
-      cleanupBtn.textContent =
-        selectedCount === 0 ? "Clean Up" : `Clean Up (${selectedCount})`;
-    }
-
     const branchNotice = root.querySelector(".branch-notice");
     if (branchNotice) {
       if (branchState?.error) {
@@ -775,9 +764,9 @@ export function createWorkspaceKanbanSurface({
       }
     }
 
-    // Work-led spine: every Work has at least one agent; each Work groups its
-    // agents (by agent_id) and their sessions. Idle git branches (no agent)
-    // are not Works and live in a collapsed section below.
+    // Work-led spine: each Work (a place = branch) lists its live sessions
+    // (the work content). Idle git branches (no agent) are not Works and live
+    // in a collapsed section below.
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
     if (workspaces.length === 0) {
@@ -817,25 +806,10 @@ export function createWorkspaceKanbanSurface({
     toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
     toolbar.appendChild(toolbarMain);
 
-    // SPEC-2359 W-13/US-67 — Work-led unified view. The spine is Active Works;
-    // the branch filter / cleanup / refresh controls drive the collapsed
-    // "Other branches (idle)" section rather than a separate Branches tab.
+    // SPEC-2359 W-13/US-67 — Work-led unified view. The spine is Active Works.
+    // Branch scope filter lives inside the collapsed "Other branches (idle)"
+    // section; branch cleanup belongs to the Branches surface (SPEC-2009).
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
-    const filterGroup = createNode("div", "branch-filter-group");
-    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
-      const btn = createNode("button", "branch-filter-button", label);
-      btn.type = "button";
-      btn.dataset.branchFilter = filter;
-      filterGroup.appendChild(btn);
-    }
-    toolbarActions.appendChild(filterGroup);
-
-    const cleanupBtn = createNode("button", "wizard-button branch-cleanup-trigger", "Clean Up");
-    cleanupBtn.type = "button";
-    cleanupBtn.dataset.action = "open-branch-cleanup";
-    cleanupBtn.disabled = true;
-    toolbarActions.appendChild(cleanupBtn);
-
     const branchRefreshBtn = createNode("button", "icon-button", "↻");
     branchRefreshBtn.dataset.action = "refresh-branches";
     branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
@@ -893,19 +867,6 @@ export function createWorkspaceKanbanSurface({
         branchesSurface.requestBranches(windowData.id);
         renderWorkspaceOverviewWindow(windowData.id, true);
       });
-      for (const button of parent.querySelectorAll("[data-branch-filter]")) {
-        button.addEventListener("click", (event) => {
-          event.stopPropagation();
-          const state = branchesSurface.ensureBranchListState(windowData.id);
-          state.filter = button.dataset.branchFilter;
-          renderWorkspaceOverviewWindow(windowData.id, true);
-        });
-      }
-      parent.querySelector("[data-action='open-branch-cleanup']")
-        ?.addEventListener("click", (event) => {
-          event.stopPropagation();
-          branchesSurface.openBranchCleanupModal(windowData.id);
-        });
     }
 
     const refresh = parent.querySelector("[data-action='refresh-workspace-overview']");
