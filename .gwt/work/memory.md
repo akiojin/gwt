@@ -6677,6 +6677,27 @@ Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が b
 Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
 Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。
 
+## 2026-06-04 — Workspace→Work 統合は FR-334 決定済みだが実装未完了（agent guidance 含む）
+
+Type: lesson
+Context: SPEC-2359 FR-334 で canonical naming=Work と決定済み。だが WorkspaceProjection struct(850+行)/workspace_projection.rs/gwtd workspace CLI/.gwt/workspace/ storage/WorkspaceState protocol、特に coordination_guidance.rs:24,79 の agent guidance が今も「Workspace を update しろ」と指示している。
+Learning: enum/UI label だけ Work に統一され、domain/CLI/storage/protocol/agent guidance が未統一の technical debt。agent guidance が残る限り agent は Workspace 用語で作業し続けるため、命名統一の核は coordination_guidance.rs。
+Future Action: Work 系の作業前に coordination_guidance.rs と命名統一の残作業を確認する。FR-334 完遂は SPEC-2359 Phase W-12 (US-66/FR-357/358) で扱う。
+
+## 2026-06-04 — Work 概念モデル = agent session + lifecycle（Board とは分離維持）
+
+Type: lesson
+Context: gwt-discussion で Work UI/UX 全面再設計に合意。Work=agent session 単位(1 agent:1 Work)、lifecycle Active/Paused/Done/Discarded、手動 close まで一覧に残す、Canvas 専用 surface 集約(サイドバー Active Works 撤去)、cleanup は worktree のみ削除、repo-local 追跡で永続コア/揮発ランタイムの 2 層。
+Learning: Work current state と Board は責務分離(event log vs snapshot、shared vs project-scoped、author vs owner)。統合せず board_refs/board_entry_id でリンクする。FR-008 と 2026-05-07 lesson(Board を current state に流用するな、live 照合せよ)を維持。
+Future Action: Work state を Board に統合しようとしない。Active 判定は必ず live session/window 照合を挟む。設計の正本は SPEC-2359 Phase W-12。
+
+## 2026-06-06 — repo-local tracked ファイルは --show-toplevel(現 worktree)に解決する。--git-common-dir は bare repo を返す
+
+Type: lesson
+Context: SPEC-2359 W-12 Slice 5b で gwt_repo_local_work_dir が resolve_main_worktree_root(git rev-parse --git-common-dir)を使い、gwt の workspace-home layout(親が bare repo gwt.git を持つ)では bare repo dir(gwt.git)に解決。bare repo は working tree を持たないため .gwt/work/events.jsonl/memory.md が tracked されず gwt.git/.gwt/work/ に書かれ、committed の <worktree>/.gwt/work/ と不一致になった。
+Learning: git-tracked な repo-local ファイルの配置先は必ず git rev-parse --show-toplevel(現在の worktree の working tree root)で解決する。--git-common-dir / main_worktree_root は linked worktree で共有 git dir(しばしば bare)を返し working tree が無いので tracked file には使えない。worktree 横断の共有は filesystem 共有でなく git commit + merge=union で行う(各 worktree が自分の .gwt/work/ を持つ)。
+Future Action: repo-local tracked ファイルの path helper は --show-toplevel ベースにする。CLI 書込み先と committed 場所が一致するか git ls-files/git show で確認する。
+
 ## 2026-06-04 — Board/storage tests must share env lock
 
 Type: lesson
@@ -6718,6 +6739,20 @@ Type: lesson
 Context: SPEC-2012 visual verification needed a Claude Code window in an isolated browser-check HOME. Launch Wizard normal mode appeared to close successfully but did not create Claude while a live Codex pane was already assigned to the same Work.
 Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
 Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
+
+## 2026-06-08 — 遅れたブランチの test-file マージは ours+append だけでは develop の base-test 修正を取りこぼす
+
+Type: lesson
+Context: SPEC-2359 W-12 / SPEC-2356 ブランチ (develop 76 commit 遅れ) のマージで operator-chrome-structure.test.mjs が 1400 行の単一巨大 conflict 化。ours(私の119テスト)を土台に develop の新規 perf テスト33個を append する戦略を取ったが、develop が base テスト 'Launch wizard runtime confirmation' を contract 変更 (showConfirm 追加) していたのに ours が旧版を保持し、merged app.js (develop の launch wizard) と不一致で1件 RED になった。
+Learning: ours+append-theirs'-new-tests 戦略は『theirs が base テストを変更し ours が触っていない』ケースを取りこぼす。新規テスト名 (comm -13 base theirs) は拾えても、同名 base テストの body 変更は拾えない。全テストランナーを oracle にすれば contract 不一致は RED として顕在化するので、append 後に必ず full suite を回し、RED の base テストは theirs 版へ swap する。obsolete 化したテスト (削除済み関数参照) のみ除外する。
+Future Action: 大きく遅れたブランチの test-file conflict は (1) theirs を土台に git apply --3way で ours の diff を当てるか、(2) ours+append 後に full suite を oracle にして RED を theirs 版へ swap する。どちらでも append/swap 後に full frontend+cargo suite で 0 fail を確認してから commit する。
+
+## 2026-06-08 — browser-check の session.json seed: recent_projects は RecentProjectEntry 構造体配列 (string 配列は起動 panic)
+
+Type: lesson
+Context: merged build で fresh 隔離インスタンスを起動した際、seed した session.json の recent_projects を文字列配列 ['<repo>'] にしたら 'app runtime: invalid type: string, expected struct RecentProjectEntry' で起動 panic (main.rs:6356)。RecentProjectEntry は persistence.rs:122 で { path, title, kind } 構造体。develop 側でスキーマが string→struct に変わっていた。
+Learning: browser-check で session.json を seed する時、recent_projects は { path, title, kind } の構造体配列。空 [] にすればプロジェクトタブ (tabs) だけでアプリに着地でき安全。古い string 配列形式は新ビルドで起動を落とす。これは seed バグであり製品バグではない。
+Future Action: browser-check の seed では recent_projects は [] にするか persistence.rs の RecentProjectEntry 現行 shape をその場で確認してから書く。起動 panic 時は seed スキーマ不一致をまず疑い、CHECK_HOME/.gwt/session.json を現行 struct 定義と突き合わせる。
 
 ## 2026-06-07 — Branches Resume 不可の真因は scope 照合ではなく in-memory session cache の陳腐化（初期診断の訂正）
 

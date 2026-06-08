@@ -11,7 +11,6 @@ export function createWorkspaceKanbanSurface({
   workspaceWindowById,
   openWorkspaceResumePicker,
   branchesSurface,
-  visibleBounds,
 }) {
   const workspaceStateMap = new Map();
 
@@ -58,6 +57,24 @@ export function createWorkspaceKanbanSurface({
               )
               .join(" ")
           : "";
+    }
+  }
+
+  // SPEC-2359 Phase W-12 (FR-349/FR-351): human-readable label for the
+  // agent-session Work lifecycle state (active / paused / done / discarded)
+  // rendered as a badge on each Work card.
+  function formatLifecycleStateLabel(state) {
+    switch (String(state || "active").toLowerCase()) {
+      case "active":
+        return "Active";
+      case "paused":
+        return "Paused";
+      case "done":
+        return "Done";
+      case "discarded":
+        return "Discarded";
+      default:
+        return "Active";
     }
   }
 
@@ -112,6 +129,13 @@ export function createWorkspaceKanbanSurface({
       next_action: compactText(item?.next_action),
       blocked_reason: compactText(item?.blocked_reason),
       lifecycle_stage: item?.lifecycle_stage || fallback.lifecycle_stage || "",
+      // SPEC-2359 Phase W-12 (FR-349/FR-351): agent-session Work lifecycle
+      // state (active / paused / done / discarded). Distinct from the U-6
+      // status-derived `lifecycle_stage`. Defaults to "active" so legacy
+      // projections without the field keep rendering an Active Work badge.
+      lifecycle_state:
+        item?.lifecycle_state || fallback.lifecycle_state || "active",
+      closed_at: item?.closed_at || fallback.closed_at || null,
       branch: compactText(item?.branch || primaryContainer.branch || fallback.branch),
       worktree_path: compactText(
         item?.worktree_path || primaryContainer.worktree_path || fallback.worktree_path,
@@ -196,16 +220,23 @@ export function createWorkspaceKanbanSurface({
     row.type = "button";
     row.dataset.workspaceId = item.id;
     row.dataset.status = String(item.status_category || "idle").toLowerCase();
-    const isSelected = state.selectedId === item.id;
-    // aria-selected drives the CSS/test contract; aria-current is what AT
-    // actually announces on a default-role button.
-    row.setAttribute("aria-selected", isSelected ? "true" : "false");
-    if (isSelected) row.setAttribute("aria-current", "true");
-    else row.removeAttribute("aria-current");
+    row.setAttribute("aria-selected", state.selectedId === item.id ? "true" : "false");
 
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
-    copy.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    const titleRow = createNode("span", "workspace-overview-row-title-row");
+    titleRow.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
+    // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
+    // so the Work surface is the single home for Work lifecycle.
+    const lifecycleBadge = createNode(
+      "span",
+      "workspace-overview-lifecycle",
+      formatLifecycleStateLabel(item.lifecycle_state),
+    );
+    lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
+    titleRow.appendChild(lifecycleBadge);
+    copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
     appendMetaText(meta, item.branch);
@@ -415,6 +446,28 @@ export function createWorkspaceKanbanSurface({
     resumeButton.dataset.action = "resume-workspace";
     resumeButton.addEventListener("click", () => resumeWorkspace(workspace));
     actions.appendChild(resumeButton);
+    // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
+    // closing. Done / Discard are explicit user closes (FR-350 — agent stop
+    // alone never closes a Work). The actual cleanup is a follow-up slice, so
+    // these buttons only emit the `close_work` message for now.
+    const lifecycleState = String(workspace.lifecycle_state || "active").toLowerCase();
+    if (lifecycleState !== "done" && lifecycleState !== "discarded") {
+      const doneButton = createNode("button", "wizard-button", "Done");
+      doneButton.type = "button";
+      doneButton.dataset.action = "close-work-done";
+      doneButton.addEventListener("click", () =>
+        send({ kind: "close_work", work_id: workspace.id, close_kind: "done" }),
+      );
+      actions.appendChild(doneButton);
+
+      const discardButton = createNode("button", "wizard-button", "Discard");
+      discardButton.type = "button";
+      discardButton.dataset.action = "close-work-discard";
+      discardButton.addEventListener("click", () =>
+        send({ kind: "close_work", work_id: workspace.id, close_kind: "discarded" }),
+      );
+      actions.appendChild(discardButton);
+    }
     if (workspace.cleanup_candidate) {
       const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";
@@ -478,321 +531,6 @@ export function createWorkspaceKanbanSurface({
     );
   }
 
-  function normalizedBranchName(value) {
-    return String(value || "").trim();
-  }
-
-  // Read-only access to the Branches surface state (SPEC-2009). The unified
-  // Work surface (SPEC-2359 W-13/US-67) consumes branch entries to build a
-  // branch backbone but never mutates the Branches render path.
-  function branchListState(windowId) {
-    if (!branchesSurface || typeof branchesSurface.ensureBranchListState !== "function") {
-      return null;
-    }
-    try {
-      return branchesSurface.ensureBranchListState(windowId);
-    } catch {
-      return null;
-    }
-  }
-
-  function branchEntryVisibleForFilter(entry, filter) {
-    if (!filter || filter === "all") return true;
-    return entry.scope === filter;
-  }
-
-  // SPEC-2359 W-13/US-67 — Work-led model (Option A). Branch = Work = the place
-  // work happens; a session is the work content. A Work always has >=1 agent.
-  // Its LIVE sessions are shown flat (work-content / focus led), each tagged
-  // with its agent type — the agent type alone does not identify the work, so
-  // there is no agent-type grouping layer.
-  const LIVE_SESSION_STATUSES = new Set(["active", "blocked", "idle", "running"]);
-
-  function isLiveSession(session) {
-    return LIVE_SESSION_STATUSES.has(
-      String(session?.status_category || "").toLowerCase(),
-    );
-  }
-
-  // Strip remote prefixes so a Work's branch and its remote-tracking
-  // counterpart (origin/<branch>) are treated as the same place.
-  function branchBaseName(value) {
-    return normalizedBranchName(value)
-      .replace(/^refs\/remotes\//, "")
-      .replace(/^remotes\//, "")
-      .replace(/^origin\//, "");
-  }
-
-  // Branches that back no active Work — pure git branches with no agent. A Work
-  // always has an agent, so these are not Works; they live in a collapsed
-  // "Other branches (idle)" section for Launch only. A work branch and its
-  // remote-tracking counterpart are excluded together.
-  function idleBranchEntries(workspaces, branchState) {
-    const entries = Array.isArray(branchState?.entries) ? branchState.entries : [];
-    if (entries.length === 0) return [];
-    const workBranches = new Set(
-      workspaces.map((work) => branchBaseName(work.branch)).filter(Boolean),
-    );
-    const filter = branchState?.filter || "local";
-    return entries.filter((entry) => {
-      const name = normalizedBranchName(entry.name);
-      if (!name || workBranches.has(branchBaseName(name))) return false;
-      return branchEntryVisibleForFilter(entry, filter);
-    });
-  }
-
-  function sessionFocus(session) {
-    return session.title_summary || session.current_focus || "No focus set";
-  }
-
-  function agentTypeLabel(session) {
-    return session.display_name || session.agent_id || "Agent";
-  }
-
-  // One flat session row: status + work content (focus) lead; the agent type
-  // is a small trailing tag.
-  function renderSessionRow(session) {
-    const row = createNode("article", "workspace-work-session");
-    row.dataset.sessionId = session.session_id || "";
-    const status = String(session.status_category || "idle").toLowerCase();
-    row.dataset.status = status;
-    row.appendChild(
-      createNode(
-        "span",
-        "workspace-work-session-status",
-        agentStatusLabel?.(status) || status,
-      ),
-    );
-    row.appendChild(
-      createNode("span", "workspace-work-session-focus", sessionFocus(session)),
-    );
-    row.appendChild(
-      createNode("span", "workspace-work-session-agent", agentTypeLabel(session)),
-    );
-    return row;
-  }
-
-  function completedNote(count) {
-    return createNode(
-      "div",
-      "workspace-overview-empty",
-      `${count} completed session${count === 1 ? "" : "s"}`,
-    );
-  }
-
-  // A Work is the spine row: branch = the place; its live sessions = the work
-  // content. Terminated sessions are summarized, not listed.
-  function renderWorkGroup(windowId, state, work) {
-    const group = createNode("div", "workspace-work-group");
-    group.dataset.workspaceId = work.id;
-    if (work.branch) group.dataset.branchName = work.branch;
-
-    // Reuse the existing selectable Work row as the group header so selection
-    // → detail and the established row contract keep working.
-    group.appendChild(renderWorkspaceRow(windowId, state, work));
-
-    if (work.branch) {
-      const actions = createNode("div", "workspace-work-actions");
-      const resumeBtn = createNode("button", "branch-row-action", "Resume");
-      resumeBtn.type = "button";
-      resumeBtn.dataset.branchRowAction = "resume";
-      resumeBtn.title = `Resume latest agent on ${work.branch}`;
-      resumeBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        send({
-          kind: "resume_branch_latest_agent",
-          id: windowId,
-          branch_name: work.branch,
-          bounds: typeof visibleBounds === "function" ? visibleBounds() : undefined,
-        });
-      });
-      actions.appendChild(resumeBtn);
-      const launchBtn = createNode("button", "branch-row-action primary", "Launch");
-      launchBtn.type = "button";
-      launchBtn.dataset.branchRowAction = "launch";
-      launchBtn.title = `Launch Agent on ${work.branch}`;
-      launchBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        send({ kind: "open_launch_wizard", id: windowId, branch_name: work.branch });
-      });
-      actions.appendChild(launchBtn);
-      group.appendChild(actions);
-    }
-
-    const allSessions = Array.isArray(work.agents) ? work.agents : [];
-    const live = allSessions.filter(isLiveSession);
-    const terminated = allSessions.length - live.length;
-    const sessionsWrap = createNode("div", "workspace-work-sessions");
-    if (live.length > 0) {
-      for (const session of live) {
-        sessionsWrap.appendChild(renderSessionRow(session));
-      }
-      if (terminated > 0) sessionsWrap.appendChild(completedNote(terminated));
-    } else if (terminated > 0) {
-      sessionsWrap.appendChild(completedNote(terminated));
-    } else {
-      sessionsWrap.appendChild(
-        createNode("div", "workspace-overview-empty", "No active sessions"),
-      );
-    }
-    group.appendChild(sessionsWrap);
-    return group;
-  }
-
-  function renderIdleBranches(windowId, state, entries, branchState) {
-    const section = createNode("section", "workspace-idle-branches");
-    const expanded = Boolean(state.idleExpanded);
-    const toggle = createNode(
-      "button",
-      "workspace-idle-toggle",
-      `${expanded ? "▾" : "▸"} Other branches (idle) (${entries.length})`,
-    );
-    toggle.type = "button";
-    toggle.dataset.action = "toggle-idle-branches";
-    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-    toggle.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.idleExpanded = !state.idleExpanded;
-      renderWorkspaceOverviewWindow(windowId, true);
-    });
-    section.appendChild(toggle);
-    if (!expanded) return section;
-
-    // Local/Remote/All only ever scoped idle branches — keep the filter here,
-    // clearly labeled to this section, not in the global toolbar.
-    const activeFilter = branchState?.filter || "local";
-    const filterGroup = createNode("div", "branch-filter-group");
-    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
-      const btn = createNode("button", "branch-filter-button", label);
-      btn.type = "button";
-      btn.dataset.branchFilter = filter;
-      btn.classList.toggle("is-active", filter === activeFilter);
-      btn.classList.toggle("active", filter === activeFilter);
-      btn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (branchState) branchState.filter = filter;
-        renderWorkspaceOverviewWindow(windowId, true);
-      });
-      filterGroup.appendChild(btn);
-    }
-    section.appendChild(filterGroup);
-
-    const list = createNode("div", "workspace-idle-branch-list");
-    for (const entry of entries) {
-      const name = normalizedBranchName(entry.name);
-      const row = createNode("div", "workspace-branch-row is-idle");
-      row.dataset.branchName = name;
-      const head = createNode("div", "workspace-branch-head");
-      const nameWrap = createNode("div", "workspace-branch-name");
-      nameWrap.appendChild(createNode("span", "workspace-branch-name-text", name));
-      if (entry.is_head) {
-        nameWrap.appendChild(createNode("span", "workspace-branch-head-badge", "HEAD"));
-      }
-      head.appendChild(nameWrap);
-      const meta = createNode("div", "workspace-branch-meta");
-      appendMetaText(meta, entry.scope);
-      appendMetaText(
-        meta,
-        entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced",
-      );
-      head.appendChild(meta);
-      const actions = createNode("div", "workspace-branch-actions");
-      const launchBtn = createNode("button", "branch-row-action primary", "Launch");
-      launchBtn.type = "button";
-      launchBtn.dataset.branchRowAction = "launch";
-      launchBtn.title = `Launch Agent on ${name}`;
-      launchBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        send({ kind: "open_launch_wizard", id: windowId, branch_name: name });
-      });
-      actions.appendChild(launchBtn);
-      head.appendChild(actions);
-      row.appendChild(head);
-      list.appendChild(row);
-    }
-    section.appendChild(list);
-    return section;
-  }
-
-  function aggregatePlaceStatus(sessions, fallback) {
-    const statuses = (sessions || []).map((s) => String(s.status_category || "").toLowerCase());
-    if (statuses.includes("blocked")) return "blocked";
-    if (statuses.some((s) => s === "active" || s === "running")) return "active";
-    return fallback || "idle";
-  }
-
-  // SPEC-2359 US-67 (Option A) — Work = the place (branch). Group the
-  // projection's works by branch so a place is the same regardless of how the
-  // backend keys a Work: branch-derived (W-8, one work per branch) or
-  // session-derived (W-12, one work per session). All sessions on a branch are
-  // flattened under one place. A single work on its branch keeps its own
-  // identity; multiple session-works on one branch aggregate into one place.
-  function placesFromProjection(projection) {
-    const works = workspacesFromProjection(projection);
-    // Only the active_works stream carries per-Work branches (W-8 branch-keyed
-    // or W-12 session-keyed). The legacy works/journal fallback inherits the
-    // projection branch, so grouping it by branch would wrongly collapse it.
-    const hasActiveWorks =
-      Array.isArray(projection?.active_works) && projection.active_works.length > 0;
-    if (!hasActiveWorks) return works;
-    const order = [];
-    const byBranch = new Map();
-    const branchless = [];
-    for (const work of works) {
-      const base = branchBaseName(work.branch);
-      if (!base) {
-        branchless.push(work);
-        continue;
-      }
-      if (!byBranch.has(base)) {
-        byBranch.set(base, []);
-        order.push(base);
-      }
-      byBranch.get(base).push(work);
-    }
-    const places = [];
-    for (const base of order) {
-      const group = byBranch.get(base);
-      if (group.length === 1) {
-        places.push(group[0]);
-        continue;
-      }
-      const first = group[0];
-      const agents = [];
-      const events = [];
-      const board_refs = [];
-      for (const work of group) {
-        if (Array.isArray(work.agents)) agents.push(...work.agents);
-        if (Array.isArray(work.events)) events.push(...work.events);
-        if (Array.isArray(work.board_refs)) board_refs.push(...work.board_refs);
-      }
-      const withPr = group.find((work) => work.pr_number);
-      places.push({
-        id: `place-${base}`,
-        title: first.branch || base,
-        branch: first.branch,
-        owner: group.find((work) => work.owner)?.owner || first.owner,
-        summary: group.find((work) => work.summary)?.summary || first.summary,
-        intent: first.intent,
-        status_text: first.status_text,
-        next_action: first.next_action,
-        blocked_reason: group.find((work) => work.blocked_reason)?.blocked_reason || "",
-        lifecycle_stage: first.lifecycle_stage,
-        worktree_path: first.worktree_path,
-        pr_number: withPr?.pr_number || null,
-        pr_url: withPr?.pr_url || "",
-        pr_state: withPr?.pr_state || "",
-        board_refs,
-        events,
-        agents,
-        updated_at: first.updated_at,
-        status_category: aggregatePlaceStatus(agents, first.status_category),
-      });
-    }
-    for (const work of branchless) places.push(work);
-    return places;
-  }
-
   function renderWorkspaceOverviewWindow(windowId, force) {
     const element = windowMap.get(windowId);
     if (!element) return;
@@ -800,73 +538,30 @@ export function createWorkspaceKanbanSurface({
     if (!root) return;
 
     const projection = getActiveWorkProjection();
-    const branchState = branchListState(windowId);
-    const signature = JSON.stringify({
-      projection,
-      entries: branchState ? branchState.entries : null,
-      filter: branchState ? branchState.filter : null,
-      loading: branchState ? branchState.loading : false,
-      error: branchState ? branchState.error : "",
-      cleanup: branchState && branchState.cleanupSelected instanceof Set
-        ? Array.from(branchState.cleanupSelected)
-        : null,
-    });
+    const signature = JSON.stringify(projection);
     const state = ensureState(windowId);
     if (!force && state._lastSignature !== undefined && state._lastSignature === signature) return;
     state._lastSignature = signature;
 
-    const places = placesFromProjection(projection);
+    const workspaces = workspacesFromProjection(projection);
     const unassignedAgents = unassignedAgentsFromProjection(projection);
-    const selected = selectedWorkspace(state, places);
-    const idleBranches = idleBranchEntries(places, branchState);
+    const selected = selectedWorkspace(state, workspaces);
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
-      if (!projection && !branchState) {
-        status.textContent = "No Work projection";
-      } else {
-        const parts = [`${places.length} Active Works`];
-        if (branchState) parts.push(`${idleBranches.length} Idle Branches`);
-        parts.push(`${unassignedAgents.length} Unassigned Agents`);
-        status.textContent = parts.join(" · ");
-      }
+      status.textContent = projection
+        ? `${workspaces.length} Active Works · ${unassignedAgents.length} Unassigned Agents`
+        : "No Work projection";
     }
 
-    const branchNotice = root.querySelector(".branch-notice");
-    if (branchNotice) {
-      if (branchState?.error) {
-        branchNotice.hidden = false;
-        branchNotice.textContent = branchState.error;
-      } else {
-        branchNotice.hidden = true;
-        branchNotice.textContent = "";
-      }
-    }
-
-    // Work-led spine: each Work (a place = branch) lists its live sessions
-    // (the work content). Idle git branches (no agent) are not Works and live
-    // in a collapsed section below.
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
-    if (places.length === 0) {
-      list.appendChild(
-        createNode(
-          "div",
-          "workspace-overview-empty",
-          branchState?.loading
-            ? "Loading Work…"
-            : projection || branchState
-              ? "No active Work"
-              : "No Work projection",
-        ),
-      );
+    if (workspaces.length === 0) {
+      list.appendChild(createNode("div", "workspace-overview-empty", "No Work"));
     } else {
-      for (const place of places) {
-        list.appendChild(renderWorkGroup(windowId, state, place));
+      for (const workspace of workspaces) {
+        list.appendChild(renderWorkspaceRow(windowId, state, workspace));
       }
-    }
-    if (branchState && idleBranches.length > 0) {
-      list.appendChild(renderIdleBranches(windowId, state, idleBranches, branchState));
     }
 
     const queue = root.querySelector("[data-role='workspace-agent-queue-slot']");
@@ -885,43 +580,79 @@ export function createWorkspaceKanbanSurface({
     toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
     toolbar.appendChild(toolbarMain);
 
-    // SPEC-2359 W-13/US-67 — Work-led unified view. The spine is Active Works.
-    // Branch scope filter lives inside the collapsed "Other branches (idle)"
-    // section; branch cleanup belongs to the Branches surface (SPEC-2009).
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
-    const branchRefreshBtn = createNode("button", "icon-button", "↻");
-    branchRefreshBtn.dataset.action = "refresh-branches";
-    branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
-    toolbarActions.appendChild(branchRefreshBtn);
+    const tabGroup = createNode("div", "workspace-tab-group");
+    const workTab = createNode("button", "workspace-tab is-active", "Work");
+    workTab.type = "button";
+    workTab.dataset.workTab = "work";
+    const branchTab = createNode("button", "workspace-tab", "Git Branches");
+    branchTab.type = "button";
+    branchTab.dataset.workTab = "branches";
+    tabGroup.appendChild(workTab);
+    tabGroup.appendChild(branchTab);
+    toolbarActions.appendChild(tabGroup);
 
-    const refreshBtn = createNode("button", "icon-button", "⟳");
+    const refreshBtn = createNode("button", "icon-button", "↻");
     refreshBtn.dataset.action = "refresh-workspace-overview";
     refreshBtn.setAttribute("aria-label", "Refresh Work");
     toolbarActions.appendChild(refreshBtn);
     toolbar.appendChild(toolbarActions);
     root.appendChild(toolbar);
 
-    const shell = createNode("div", "workspace-overview-shell");
+    const workShell = createNode("div", "workspace-overview-shell");
+    workShell.dataset.workSection = "work";
     const listPane = createNode("aside", "workspace-overview-list-pane");
-    listPane.setAttribute("aria-label", "Active Works list");
-    listPane.appendChild(
-      createNode("div", "workspace-overview-section-label", "Active Works"),
-    );
-    const branchNotice = createNode("div", "branch-notice");
-    branchNotice.hidden = true;
-    listPane.appendChild(branchNotice);
+    listPane.setAttribute("aria-label", "Work list");
+    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Active Works"));
     const listBox = createNode("div", "workspace-overview-list");
-    listBox.setAttribute("role", "list");
+    listBox.setAttribute("role", "listbox");
     listPane.appendChild(listBox);
     const queueSlot = createNode("div");
     queueSlot.dataset.role = "workspace-agent-queue-slot";
     listPane.appendChild(queueSlot);
-    shell.appendChild(listPane);
-
+    workShell.appendChild(listPane);
     const detailPane = createNode("main", "workspace-overview-detail-pane");
     detailPane.setAttribute("aria-label", "Work detail");
-    shell.appendChild(detailPane);
-    root.appendChild(shell);
+    workShell.appendChild(detailPane);
+    root.appendChild(workShell);
+
+    const branchShell = createNode("div", "workspace-branches-shell");
+    branchShell.dataset.workSection = "branches";
+    branchShell.hidden = true;
+    const branchRoot = createNode("div", "branch-list-root");
+    const branchToolbar = createNode("div", "branch-toolbar workspace-toolbar is-stacked");
+    const branchToolbarMain = createNode("div", "branch-toolbar-main workspace-toolbar-main");
+    branchToolbarMain.appendChild(createNode("div", "branch-heading", "Git Branches"));
+    const filterGroup = createNode("div", "branch-filter-group");
+    for (const [label, filter] of [["Local", "local"], ["Remote", "remote"], ["All", "all"]]) {
+      const btn = createNode("button", "branch-filter-button", label);
+      btn.type = "button";
+      btn.dataset.branchFilter = filter;
+      filterGroup.appendChild(btn);
+    }
+    branchToolbarMain.appendChild(filterGroup);
+    branchToolbar.appendChild(branchToolbarMain);
+    const branchToolbarActions = createNode("div", "branch-toolbar-actions workspace-toolbar-actions");
+    const selectionActions = createNode("div", "branch-selection-actions");
+    const cleanupBtn = createNode("button", "wizard-button branch-cleanup-trigger", "Clean Up");
+    cleanupBtn.type = "button";
+    cleanupBtn.dataset.action = "open-branch-cleanup";
+    selectionActions.appendChild(cleanupBtn);
+    branchToolbarActions.appendChild(selectionActions);
+    const branchRefreshBtn = createNode("button", "icon-button", "↻");
+    branchRefreshBtn.dataset.action = "refresh-branches";
+    branchRefreshBtn.setAttribute("aria-label", "Refresh branches");
+    branchToolbarActions.appendChild(branchRefreshBtn);
+    branchToolbar.appendChild(branchToolbarActions);
+    branchRoot.appendChild(branchToolbar);
+    const branchNotice = createNode("div", "branch-notice");
+    branchNotice.hidden = true;
+    branchRoot.appendChild(branchNotice);
+    const branchScroll = createNode("div", "branch-scroll workspace-scroll");
+    branchScroll.appendChild(createNode("div", "branch-list"));
+    branchRoot.appendChild(branchScroll);
+    branchShell.appendChild(branchRoot);
+    root.appendChild(branchShell);
 
     parent.appendChild(root);
     return root;
@@ -936,6 +667,26 @@ export function createWorkspaceKanbanSurface({
       sendFocus?.(windowData.id);
     });
 
+    for (const tab of parent.querySelectorAll("[data-work-tab]")) {
+      tab.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const target = tab.dataset.workTab;
+        for (const t of parent.querySelectorAll("[data-work-tab]")) {
+          t.classList.toggle("is-active", t.dataset.workTab === target);
+        }
+        for (const section of parent.querySelectorAll("[data-work-section]")) {
+          section.hidden = section.dataset.workSection !== target;
+        }
+        if (target === "branches" && branchesSurface) {
+          const state = branchesSurface.ensureBranchListState(windowData.id);
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            branchesSurface.requestBranches(windowData.id);
+          }
+          branchesSurface.renderBranches(windowData.id);
+        }
+      });
+    }
+
     if (branchesSurface) {
       const branchRefresh = parent.querySelector("[data-action='refresh-branches']");
       branchRefresh?.addEventListener("click", (event) => {
@@ -944,8 +695,21 @@ export function createWorkspaceKanbanSurface({
         state.error = "";
         state.notice = "";
         branchesSurface.requestBranches(windowData.id);
-        renderWorkspaceOverviewWindow(windowData.id, true);
+        branchesSurface.renderBranches(windowData.id);
       });
+      for (const button of parent.querySelectorAll("[data-branch-filter]")) {
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const state = branchesSurface.ensureBranchListState(windowData.id);
+          state.filter = button.dataset.branchFilter;
+          branchesSurface.renderBranches(windowData.id);
+        });
+      }
+      parent.querySelector("[data-action='open-branch-cleanup']")
+        ?.addEventListener("click", (event) => {
+          event.stopPropagation();
+          branchesSurface.openBranchCleanupModal(windowData.id);
+        });
     }
 
     const refresh = parent.querySelector("[data-action='refresh-workspace-overview']");
@@ -953,21 +717,6 @@ export function createWorkspaceKanbanSurface({
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
     });
-
-    // SPEC-2359 W-13/US-67 — load branches once so the unified backbone can show
-    // non-work branches alongside Active Works (the Branches surface state is
-    // shared read-only; the Branches render path itself is left untouched).
-    if (branchesSurface) {
-      const state = branchesSurface.ensureBranchListState(windowData.id);
-      if (
-        (state.entries?.length || 0) === 0 &&
-        !state.loading &&
-        !state.error
-      ) {
-        branchesSurface.requestBranches(windowData.id);
-      }
-    }
-
     renderWorkspaceOverviewWindow(windowData.id);
   }
 

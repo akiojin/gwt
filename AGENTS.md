@@ -6,12 +6,12 @@
 
 - **この AGENTS.md は gwt リポジトリ専用**のローカル運用ルールであり、gwt が開く任意プロジェクト向けの汎用 Agent 指示ではない。
 - gwt を使って他プロジェクトを開発する場合、そのプロジェクト自身の `AGENTS.md` / `CLAUDE.md` / README 等を優先する。
-- gwt 共通の Agent 運用（Board/Workspace 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Workspace の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
+- gwt 共通の Agent 運用（Board/Work 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、3 つの注入経路で配信する: managed hooks（SessionStart/UserPromptSubmit/Stop reminder）+ generated guidance（`.claude/skills/gwt-coordination/SKILL.md` および `.codex/skills/gwt-coordination/SKILL.md`）+ launch context（`GWT_SESSION_ID` 等）。canonical source は `crates/gwt-skills/src/coordination_guidance.rs` の 1 箇所。重複ドリフト防止のため、Board/Work の operational content（kind taxonomy、audience selection、body template、tool-unit post 禁止など）を AGENTS.md に複製しない。詳細な投稿手順は generated guidance 経由で agent に届く。
 
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
-- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd memory add` で `tasks/memory.md` に記録し、同種の作業を始める前に確認する。`tasks/lessons.md` は legacy alias / 移行 stub として扱う。
+- **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策や再利用可能な判断は `gwtd memory add` で `.gwt/work/memory.md` に記録し、同種の作業を始める前に確認する。`tasks/memory.md` / `tasks/lessons.md` は legacy alias / 移行 stub として扱う。
 - **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
 - **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
@@ -47,7 +47,6 @@
 - バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
-- **Work と Branches は単一の Work 主導サーフェス**で提示する。スパインは Active Work（= branch、常に 1 つ以上の agent を持つ）で、各 Work 配下に agent（`agent_id` = agent 種別、session 横断で安定）ごとにグループ化した複数 session（`session_id`）を表示する（Work → Agent → Session）。agent の居ない git ブランチは Work ではなく、折り畳みの「Other branches (idle)」に退避し Launch / cleanup のみ提供する。**実装の Work identity は branch 由来・1 Work に複数 agent**（`active_work_items_from_projection` が agent を branch でグルーピング）であり、SPEC-2359 W-12 の「1 agent : 1 Work」(FR-348) は未実装ドリフトのため UI はこれを採用しない。canonical な設計は SPEC-2359 W-13/US-67（`gwtd issue spec 2359`）を正本とする
 
 ### 🔒 ブランチ保護ルール
 
@@ -109,7 +108,7 @@
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、tasks/memory.md 参照）
+- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → `gwtd issue spec create` → `--edit spec` → roundtrip 検証を安全に実行する。直接 `gwtd issue spec create -f` を呼ぶと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、.gwt/work/memory.md 参照）
 - GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（gwt-register-spec の validation が強制する 7 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
@@ -153,8 +152,8 @@
 
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
-- 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` で `tasks/memory.md` に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。`gwtd lessons add` は legacy alias として同じ `tasks/memory.md` に追記する。
-- 同種の作業を始める前に `tasks/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は `gwtd memory add --title <text> --context <text> --learning <text> --future-action <text>` で `.gwt/work/memory.md` に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。`gwtd lessons add` は legacy alias として同じ `.gwt/work/memory.md` に追記する。
+- 同種の作業を始める前に `.gwt/work/memory.md` を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search --memory "<query>"` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 
@@ -214,9 +213,9 @@
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
-### Board / Workspace 運用ガイダンスの所在
+### Board / Work 運用ガイダンスの所在
 
-Board / Workspace の operational rules（投稿 kind、audience selection、body template、
+Board / Work の operational rules（投稿 kind、audience selection、body template、
 tool-unit post 禁止 など）は AGENTS.md には書かない。canonical source は
 `crates/gwt-skills/src/coordination_guidance.rs` のみで、そこから 2 つの経路に配信される:
 
@@ -228,7 +227,7 @@ tool-unit post 禁止 など）は AGENTS.md には書かない。canonical sour
   `board_reminder.rs` が動的注入する reminder text。`GWT_SESSION_ID` 環境変数が
   設定された session で発火する。
 
-Board は coordination/history log、Workspace は current state という分離は維持する。
+Board は coordination/history log、Work は current state という分離は維持する。
 新しい kind や mention 構文の更新は canonical source を編集して再 materialize する。
 AGENTS.md には複製しない（複製ドリフトが SPEC-1935 で問題化したため）。
 

@@ -208,13 +208,33 @@ mod tests {
     }
 
     #[test]
-    fn tasks_memory_md_is_watched_despite_tasks_skip() {
+    fn gwt_work_memory_md_is_watched_despite_gwt_skip() {
         let root = Path::new("/repo");
-        let path = root.join("tasks/memory.md");
+        let path = root.join(".gwt/work/memory.md");
 
         let policy = default_index_path_policy();
         let gi = build_gitignore(root);
         assert!(!is_ignored(&policy, &gi, root, &path));
+    }
+
+    #[test]
+    fn gwt_work_discussions_md_is_watched_despite_gwt_skip() {
+        let root = Path::new("/repo");
+        let path = root.join(".gwt/work/discussions.md");
+
+        let policy = default_index_path_policy();
+        let gi = build_gitignore(root);
+        assert!(!is_ignored(&policy, &gi, root, &path));
+    }
+
+    #[test]
+    fn gwt_work_events_jsonl_remains_skipped() {
+        let root = Path::new("/repo");
+        let path = root.join(".gwt/work/events.jsonl");
+
+        let policy = default_index_path_policy();
+        let gi = build_gitignore(root);
+        assert!(is_ignored(&policy, &gi, root, &path));
     }
 
     #[test]

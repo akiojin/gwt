@@ -1,18 +1,18 @@
 ---
 name: gwt-memory-search
-description: "Semantic search over the project's memory log at `tasks/memory.md` using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search memory', 'find related memory', 'check past failures', 'has this been hit before', '過去 memory を引いて', '同じ失敗があるか確認して'."
+description: "Semantic search over the project's memory log at `.gwt/work/memory.md` using vector embeddings. Use when looking for past post-mortem fixes, prior re-occurrence prevention notes, or before starting work that resembles an earlier failure. Use when user says 'search memory', 'find related memory', 'check past failures', 'has this been hit before', '過去 memory を引いて', '同じ失敗があるか確認して'."
 ---
 
 # Memory Search
 
 gwt maintains a vector search index over post-mortem memory entries kept in
-`tasks/memory.md` using ChromaDB embeddings (model:
+`.gwt/work/memory.md` using ChromaDB embeddings (model:
 `intfloat/multilingual-e5-base`). Each H2 section (`## YYYY-MM-DD — title` plus
 the canonical `### 事象 / 原因 / 再発防止策` subsections) is chunked and
 embedded. The index is repo-scoped and stored at
 `~/.gwt/index/<repo-hash>/memory/`, shared across worktrees. Memory is the
 only canonical record of post-mortem learning for this project. Use
-`gwtd memory add` for new entries; direct edits to `tasks/memory.md` are only
+`gwtd memory add` for new entries; direct edits to `.gwt/work/memory.md` are only
 for unusual bulk cleanup.
 
 ## gwtd resolution
@@ -37,7 +37,7 @@ Minimum workflow:
 
 1. Run `search-memory` with 2-3 semantic queries derived from the request.
 2. Pick the most relevant past memory if one exists.
-3. Read the matching section in `tasks/memory.md` before deciding the
+3. Read the matching section in `.gwt/work/memory.md` before deciding the
    approach. Reuse the existing prevention strategy when applicable.
 
 ## Environment
@@ -68,7 +68,7 @@ automatically:
 ```
 
 If the memory index does not yet exist, the runner builds it inline (full
-mode) from `<project_root>/tasks/memory.md` and emits NDJSON progress on
+mode) from `<project_root>/.gwt/work/memory.md` and emits NDJSON progress on
 stderr before returning the search result.
 
 To force a full re-index (normally handled by the project watcher or the
@@ -96,7 +96,7 @@ index.
 
 When a memory spans multiple chunks (long body or paragraph-split), only the
 best-scoring chunk per `(date, title)` pair is surfaced. Use the `heading`
-field to locate the exact section in `tasks/memory.md`.
+field to locate the exact section in `.gwt/work/memory.md`.
 
 ## When to use
 
@@ -110,7 +110,7 @@ field to locate the exact section in `tasks/memory.md`.
 ## Write path
 
 Use `gwtd memory add` for new reusable learning. `gwtd lessons add` remains a
-legacy CLI alias and writes the same canonical `tasks/memory.md` file:
+legacy CLI alias and writes the same canonical `.gwt/work/memory.md` file:
 
 ```bash
 "$GWT_BIN" memory add \
