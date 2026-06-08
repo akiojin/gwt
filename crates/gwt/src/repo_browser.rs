@@ -15,9 +15,22 @@ pub fn spawn_branch_load_async(
     window_id: String,
     project_root: PathBuf,
     active_session_branches: HashSet<String>,
-    resume_sessions: Vec<gwt_agent::Session>,
+    sessions_dir: PathBuf,
 ) {
     thread::spawn(move || {
+        // Load resume candidates fresh from disk (off the main thread) rather
+        // than from the GUI's in-memory session cache, so branch Resume
+        // availability reflects session TOMLs updated out-of-process by the
+        // hook CLI after launch (#2995).
+        let resume_sessions = gwt::launch_wizard::load_sessions(&sessions_dir);
+        // Refresh the main-thread Launch Wizard cache from this same disk-fresh
+        // load BEFORE the branch entries (and their enabled Resume buttons)
+        // reach the client. The event queue is FIFO, so a later Resume click
+        // resolves against fresh data via the in-memory cache without ever
+        // scanning the session directory on the UI thread (#2995).
+        proxy.send(UserEvent::RefreshLaunchWizardSessions(
+            resume_sessions.clone(),
+        ));
         dispatch_branch_load_progressive(
             &proxy,
             &window_id,
@@ -212,6 +225,29 @@ mod tests {
 
         assert_eq!(entries[0].resume, BranchResumeInfo::available());
         assert_eq!(entries[1].resume, BranchResumeInfo::unavailable());
+    }
+
+    #[test]
+    fn branch_resume_availability_uses_disk_fresh_loaded_sessions() {
+        // #2995: the branch load reads sessions fresh from disk via
+        // gwt::launch_wizard::load_sessions, so a session TOML persisted after
+        // the in-memory cache was built is still marked resumable on the next
+        // branch load (no process restart needed).
+        let repo = tempfile::tempdir().expect("repo");
+        let sessions_dir = tempfile::tempdir().expect("sessions");
+        let mut session = gwt_agent::Session::new(
+            repo.path(),
+            "feature/disk-fresh",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        session.agent_session_id = Some("claude-disk-1".to_string());
+        session.save(sessions_dir.path()).expect("save session");
+
+        let loaded = gwt::launch_wizard::load_sessions(sessions_dir.path());
+        let mut entries = vec![local_branch("feature/disk-fresh", false)];
+        apply_branch_resume_availability(repo.path(), &mut entries, &loaded);
+
+        assert_eq!(entries[0].resume, BranchResumeInfo::available());
     }
 
     #[test]
