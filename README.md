@@ -109,6 +109,7 @@ the tray menu:
 - **Open in browser** — launches the OS default browser at
   `http://127.0.0.1:<port>/`. The same URL can be opened in any other
   browser too.
+- **Copy URL** — copies the running tray process URL to the OS clipboard.
 - **About GWT** — opens the browser About / Version surface for the
   running tray process.
 - **Quit** — gracefully shuts the tray icon, embedded server, and

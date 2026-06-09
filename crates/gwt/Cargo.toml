@@ -25,6 +25,7 @@ gwt-core.workspace = true
 gwt-docker.workspace = true
 gwt-git.workspace = true
 gwt-github.workspace = true
+gwt-clipboard.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
 tracing.workspace = true
