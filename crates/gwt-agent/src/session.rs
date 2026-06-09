@@ -35,6 +35,18 @@ pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
 /// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`].
 pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 
+/// One agent-tool conversation session observed for a gwt session (a Work, in
+/// the Workspace → Work → Session model). Claude Code / Codex can split a
+/// single launch into multiple conversation UUIDs (`/clear`, context-limit,
+/// resume fork); each distinct UUID is appended here forward-only by
+/// [`persist_agent_session_id`] instead of overwriting `agent_session_id`, so
+/// the projection can render the full Session list under a Work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSessionHistoryEntry {
+    pub agent_session_id: String,
+    pub started_at: DateTime<Utc>,
+}
+
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -53,6 +65,12 @@ pub struct Session {
     pub branch: String,
     pub agent_id: AgentId,
     pub agent_session_id: Option<String>,
+    /// Forward-only history of agent-tool conversation sessions (the Session
+    /// level of Workspace → Work → Session). Appended by
+    /// [`persist_agent_session_id`] the first time a new `agent_session_id` is
+    /// observed. Empty for sessions persisted before this field existed.
+    #[serde(default)]
+    pub session_history: Vec<AgentSessionHistoryEntry>,
     pub status: AgentStatus,
     pub tool_version: Option<String>,
     pub model: Option<String>,
@@ -157,6 +175,7 @@ impl Session {
             branch: branch.into(),
             agent_id,
             agent_session_id: None,
+            session_history: Vec::new(),
             status: AgentStatus::Unknown,
             tool_version: None,
             model: None,
@@ -564,6 +583,20 @@ pub fn persist_agent_session_id(
     if session.agent_session_id.as_deref() == Some(agent_session_id) {
         return Ok(());
     }
+    // Forward-only Session history: record each distinct conversation UUID the
+    // first time we see it, before promoting it to the latest. Splits already
+    // arrive via the SessionStart hook, so appending here (instead of
+    // overwriting) is enough to reconstruct the full Session list under a Work.
+    if !session
+        .session_history
+        .iter()
+        .any(|entry| entry.agent_session_id == agent_session_id)
+    {
+        session.session_history.push(AgentSessionHistoryEntry {
+            agent_session_id: agent_session_id.to_string(),
+            started_at: Utc::now(),
+        });
+    }
     session.agent_session_id = Some(agent_session_id.to_string());
     session.save(sessions_dir)
 }
@@ -947,6 +980,37 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
+    }
+
+    // SPEC-2359 Workspace → Work → Session: Claude Code / Codex can split one
+    // launch (Work) into multiple conversation UUIDs. `persist_agent_session_id`
+    // must keep every distinct UUID as forward-only Session history instead of
+    // overwriting, so the projection can render the full Session list.
+    #[test]
+    fn persist_agent_session_id_appends_session_history_forward_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(dir.path()).unwrap();
+
+        // First conversation UUID.
+        persist_agent_session_id(dir.path(), &session_id, "agent-1").unwrap();
+        // Duplicate of the current latest — must not add a second history entry.
+        persist_agent_session_id(dir.path(), &session_id, "agent-1").unwrap();
+        // Split: a new conversation UUID arrives (/clear, context limit, fork).
+        persist_agent_session_id(dir.path(), &session_id, "agent-2").unwrap();
+
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        // Latest stays the most recent conversation (resume target).
+        assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-2"));
+        // History keeps each distinct conversation in arrival order.
+        let history: Vec<&str> = loaded
+            .session_history
+            .iter()
+            .map(|entry| entry.agent_session_id.as_str())
+            .collect();
+        assert_eq!(history, vec!["agent-1", "agent-2"]);
+        assert!(loaded.session_history[0].started_at <= loaded.session_history[1].started_at);
     }
 
     #[test]
