@@ -8,8 +8,9 @@ use super::*;
 #[test]
 fn cli_command_family_split_round_trip_parses() {
     use crate::cli::{
-        ActionsCommand, BoardCommand, CliCommand, DiscussCommand, HookCommand, IndexCommand,
-        IssueCommand, MemoryCommand, PaneCommand, PrCommand, UpdateCommand, WorkspaceCommand,
+        ActionsCommand, BoardCommand, CliCommand, DiagnosticsCommand, DiscussCommand, HookCommand,
+        IndexCommand, IssueCommand, MemoryCommand, PaneCommand, PrCommand, UpdateCommand,
+        WorkspaceCommand,
     };
 
     fn s(value: &str) -> String {
@@ -84,6 +85,13 @@ fn cli_command_family_split_round_trip_parses() {
             scope: IndexScope::All
         })
     ));
+
+    // gwtd diagnostics cpu --json
+    let cmd = parse_diagnostics_args(&[s("cpu"), s("--json")]).expect("parse diagnostics cpu");
+    assert_eq!(
+        cmd,
+        CliCommand::Diagnostics(DiagnosticsCommand::Cpu { json: true })
+    );
 
     // gwtd memory add ...
     let cmd = parse_memory_args(&[

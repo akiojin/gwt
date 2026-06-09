@@ -6781,3 +6781,24 @@ Type: lesson
 Context: 「Work surface 作り直し」で、ユーザーの『Work』をライブ active_work_projection(稼働中 agent から導出・停止で消える非永続)と誤解し、agent 一覧を spine にして何度も方向を外した(branch 背骨→Active Works→Option A→…と4回以上やり直し)。
 Learning: ユーザーの Work(=Workspace)は永続概念: 1 Start Work 単位、branch と 1:1 だがローカル branch 消失でも永続、own id、.gwt/work/events.jsonl で git 追跡、lifecycle Active/Paused/Done/Discarded、複数 session を順番に束ね(active は 1 つ)、linked SPEC/Issue/PR、Board スレッドを内包。= develop の WorkspaceWorkItem(W-12)。一覧は is_incomplete(Active+Paused)。ライブ projection は agent が無いと空で、ユーザー視覚検証も不能になる。
 Future Action: Work/Workspace 一覧 UI は最初に『永続 WorkspaceWorkItem store(load_workspace_work_items / .gwt/work/events.jsonl, develop W-12)』を土台にする。Work は agent/branch の有無に依存しない永続概念だと最初に確認。SPEC の最新フェーズ(W-12)を実装の正本とし、UI を projection ではなく永続 store に接続する。
+
+## 2026-06-09 — Avoid wall-clock upper bounds for async coalesce tests
+
+Type: failure-pattern
+Context: pre-pr verification for PR #3001 repeatedly failed in the full suite on app_runtime::persist_dispatcher::tests::suppresses_identical_snapshot_while_pending while isolated runs passed.
+Learning: The test asserted an elapsed wall-clock upper bound that included scheduler and disk latency, so suite load could fail the test even when duplicate enqueue suppression was correct.
+Future Action: For async coalescing and background-worker tests, assert internal state transitions or use deterministic test harnesses instead of wall-clock upper bounds for completion time.
+
+## 2026-06-09 — Lock HOME readers in parallel Rust tests
+
+Type: lesson
+Context: PR #3001 の Linux Test (Rust) で workspace_projection::tests::resolve_workspace_id_for_session_returns_none_when_session_missing が save_workspace_projection(...).unwrap() の ENOENT で失敗した。
+Learning: 同じ test binary 内で HOME を一時ディレクトリに差し替えるテストがある場合、HOME を変更しないテストでも gwt_home()/gwt_workspace_*_for_repo_path() を読むなら env_lock が必要。読み手が lock を取らないと、差し替えテストの TempDir drop と write_atomic の create/open が競合する。
+Future Action: HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL など process-wide env から path を導くテストを追加・変更するときは、env を変更する側だけでなく読む側にも crate::test_support::env_lock() を適用する。
+
+## 2026-06-09 — Installed app/runtime staleness can hide CPU regressions
+
+Type: failure-pattern
+Context: SPEC-1939 Phase 67 investigated >100% CPU in the installed GWT.app while a fresh target/debug/gwt checkout was idle.
+Learning: Current-checkout smoke passing is insufficient when the running installed app uses an older binary/runtime runner; compare installed/current hashes, runtime manifest runner hash, child runner processes, and recent log storm counters.
+Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --json against the live machine before declaring the checkout fixed, and explicitly record whether installed app/runtime remain stale.

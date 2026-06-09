@@ -3905,8 +3905,15 @@ mod tests {
         a
     }
 
+    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn resolve_workspace_id_for_session_returns_assigned_workspace_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3922,6 +3929,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_session_returns_none_for_unassigned_agent() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-B", "codex"));
@@ -3932,6 +3940,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_session_returns_none_when_session_missing() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let projection = WorkspaceProjection::default_for_project(dir.path());
         save_workspace_projection(dir.path(), &projection).unwrap();
@@ -3944,6 +3953,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_session_matches_session_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3959,6 +3969,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_agent_matches_display_or_agent_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3979,6 +3990,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_returns_none_for_unassigned_target() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-E", "codex"));
@@ -3996,6 +4008,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_user_or_branch_kind_returns_none() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
