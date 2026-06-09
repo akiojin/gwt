@@ -3,7 +3,7 @@
 //! `ultracode` is a Claude Code *session setting* (not an effort level): it
 //! sends `xhigh` to the model and additionally enables dynamic workflow
 //! orchestration. It is available only on models that support `xhigh`
-//! (Opus 4.7 / 4.8) and requires Claude Code >= 2.1.154 with workflows
+//! (Opus 4.7 / 4.8, Fable 5) and requires Claude Code >= 2.1.154 with workflows
 //! enabled. These helpers determine, before launch, whether the installed
 //! Claude Code can actually use ultracode so the Launch Wizard only offers it
 //! when usable.
