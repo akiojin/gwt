@@ -2164,17 +2164,19 @@
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
-        not_started: "Not Started",
+        starting: "Starting",
         idle: "Idle",
         waiting: "Waiting",
         stopped: "Stopped",
         error: "Error",
       });
 
+      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
+      // spellings (and the older `starting`→running conflation) normalize to it.
       const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        starting: "running",
-        notstarted: "not_started",
-        "not-started": "not_started",
+        not_started: "starting",
+        notstarted: "starting",
+        "not-started": "starting",
         ready: "idle",
         exited: "stopped",
       });
@@ -4393,10 +4395,9 @@
       // `idle` until the design language explicitly handles them.
       function mapAgentTelemetryState(runtimeState) {
         switch (runtimeState) {
-          case "starting":
           case "running":
             return "active";
-          case "not_started":
+          case "starting":
             return "not_started";
           case "ready":
           case "idle":
@@ -4424,7 +4425,7 @@
               detailMap.set(windowId, detail);
             } else if (
               runtimeState === "running" ||
-              runtimeState === "not_started" ||
+              runtimeState === "starting" ||
               runtimeState === "idle" ||
               runtimeState === "waiting"
             ) {

@@ -1850,21 +1850,21 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_agent_runtime_maps_not_started_separately() {
+    fn embedded_web_agent_runtime_maps_starting_separately() {
         let js = app_js();
         let html = frontend_styles_bundle();
 
         assert!(
-            js.contains("not_started: \"Not Started\""),
-            "expected embedded js to expose a Not Started runtime label",
+            js.contains("starting: \"Starting\""),
+            "expected embedded js to expose a Starting runtime label (US-69)",
         );
         assert!(
-            js.contains("case \"not_started\":") && js.contains("return \"not_started\";"),
-            "expected embedded js to keep pre-lifecycle agent telemetry separate",
+            js.contains("case \"starting\":") && js.contains("return \"not_started\";"),
+            "expected the starting runtime state to map onto the separate not_started telemetry rim",
         );
         assert!(
-            html.contains(".status-chip.not_started .status-dot"),
-            "expected embedded html to define a not_started status chip variant",
+            html.contains(".status-chip.starting .status-dot"),
+            "expected embedded html to define a starting status chip variant",
         );
     }
 

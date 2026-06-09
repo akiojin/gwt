@@ -4472,7 +4472,7 @@ fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str 
 fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
     match status {
         crate::WindowProcessStatus::Running => "running",
-        crate::WindowProcessStatus::NotStarted => "not_started",
+        crate::WindowProcessStatus::Starting => "starting",
         crate::WindowProcessStatus::Idle => "idle",
         crate::WindowProcessStatus::Waiting => "waiting",
         crate::WindowProcessStatus::Stopped => "stopped",
