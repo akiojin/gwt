@@ -57,7 +57,13 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     const active = page.locator('.workspace-detail-session[data-active="true"]');
     await expect(active).toHaveCount(1);
     await expect(active).toContainText("conv-bbb");
-    await expect(active).toContainText("active");
+    // The active Session is badged "Current"; past Sessions are badged "Past".
+    await expect(
+      active.locator('.workspace-detail-session-badge[data-session-state="current"]'),
+    ).toHaveText("Current");
+    await expect(
+      page.locator('.workspace-detail-session-badge[data-session-state="past"]'),
+    ).toHaveText("Past");
 
     // Each Work renders one Agent header (the agent/tool name), always shown,
     // so two Sessions of one Work never look like two Agents. The Session rows

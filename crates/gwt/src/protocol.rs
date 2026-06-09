@@ -975,12 +975,22 @@ pub struct WorkspaceJournalEntryView {
 /// gwt session / launch id). A single Work (launch) can hold several of these
 /// because Claude Code / Codex split conversations on `/clear`, context limit,
 /// or resume fork.
+fn default_resumable_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistorySessionView {
     pub agent_session_id: String,
     pub started_at: String,
     /// True for the Work's current (latest) conversation session.
     pub is_active: bool,
+    /// SPEC-2359: whether this conversation can be handed to the agent CLI as a
+    /// `--resume` target. When false the surface renders the Session as
+    /// history-only (no Resume control) so a button that would silently fail is
+    /// never shown. Defaults to true for forward compatibility.
+    #[serde(default = "default_resumable_true")]
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -2043,6 +2043,42 @@ kbd.op-kbd {
   white-space: nowrap;
 }
 
+/* Session name line = Current/Past badge + truncated conversation id. */
+.workspace-detail-session-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-detail-session-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-detail-session-badge {
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  padding: 0 var(--space-2);
+}
+
+.workspace-detail-session-badge[data-session-state="current"] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Start Fresh fallback (every Session history-only) sits right-aligned. */
+.workspace-detail-session-fresh {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .workspace-detail-header {
   display: flex;
   align-items: flex-start;

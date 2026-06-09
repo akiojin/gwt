@@ -321,6 +321,20 @@ impl Session {
         self.exact_resume_session_id().is_some()
     }
 
+    /// True when `id` is a conversation handle gwt can hand the agent CLI as a
+    /// `--resume` target — non-empty and not the Codex placeholder. Used to gate
+    /// per-Session Resume: a Session row whose conversation is not resumable
+    /// shows no Resume control (history-only) instead of a button that silently
+    /// fails. gwt deliberately does not read the agent tool's conversation store
+    /// (no format coupling), so this only rejects ids that are structurally
+    /// unusable; a handle that the agent CLI no longer has still launches and
+    /// surfaces its own error.
+    pub fn is_resumable_conversation(&self, id: &str) -> bool {
+        let id = id.trim();
+        !(id.is_empty()
+            || (matches!(self.agent_id, AgentId::Codex) && id == CODEX_PLACEHOLDER_SESSION_ID))
+    }
+
     /// Resolve the agent-side resume handle for a Workspace → Work → Session
     /// resume. When `requested` names a specific Session (a conversation UUID
     /// from [`Session::session_history`]) that conversation is resumed;
@@ -329,13 +343,7 @@ impl Session {
     /// Codex-placeholder requests are ignored so they fall back to the latest
     /// handle instead of trying to resume an unusable id.
     pub fn resume_session_id_for(&self, requested: Option<&str>) -> Option<String> {
-        let usable = |value: &str| -> bool {
-            let value = value.trim();
-            !(value.is_empty()
-                || (matches!(self.agent_id, AgentId::Codex)
-                    && value == CODEX_PLACEHOLDER_SESSION_ID))
-        };
-        if let Some(requested) = requested.filter(|value| usable(value)) {
+        if let Some(requested) = requested.filter(|value| self.is_resumable_conversation(value)) {
             return Some(requested.trim().to_string());
         }
         self.exact_resume_session_id().map(str::to_string)
@@ -1062,6 +1070,23 @@ display_name = "Claude Code"
             session.resume_session_id_for(Some(CODEX_PLACEHOLDER_SESSION_ID)),
             Some("conv-latest".to_string()),
         );
+    }
+
+    // SPEC-2359: per-Session Resume must hide the Resume control for a
+    // conversation that cannot be resumed (empty handle / Codex placeholder)
+    // rather than showing a button that silently fails.
+    #[test]
+    fn is_resumable_conversation_rejects_blank_and_codex_placeholder() {
+        let codex = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        assert!(codex.is_resumable_conversation("95862acd-a761-4fd0"));
+        assert!(!codex.is_resumable_conversation(""));
+        assert!(!codex.is_resumable_conversation("   "));
+        assert!(!codex.is_resumable_conversation(CODEX_PLACEHOLDER_SESSION_ID));
+
+        // The placeholder is Codex-specific; for Claude Code it is a normal id.
+        let claude = Session::new("/tmp/wt", "feature/x", AgentId::ClaudeCode);
+        assert!(claude.is_resumable_conversation(CODEX_PLACEHOLDER_SESSION_ID));
+        assert!(!claude.is_resumable_conversation(" "));
     }
 
     #[test]

@@ -515,7 +515,7 @@ impl AppRuntime {
             );
         }
 
-        if let Some(window_id) = self
+        if let Some((window_id, live_gwt_session)) = self
             .active_agent_sessions
             .iter()
             .find(|(window_id, session)| {
@@ -531,8 +531,17 @@ impl AppRuntime {
                             )
                         })
             })
-            .map(|(window_id, _)| window_id.clone())
+            .map(|(window_id, session)| (window_id.clone(), session.session_id.clone()))
         {
+            // SPEC-2359 D1: focusing a live window resumes the conversation it is
+            // already running. If the user clicked Resume on a *different* (older)
+            // Session, focusing would silently drop that intent — surface a
+            // visible error instead of pretending the request succeeded.
+            if self.resume_conversation_conflicts(agent_session_id.as_deref(), &live_gwt_session) {
+                return reply_error(
+                    "This Work is currently running a different conversation; stop it before resuming an older Session.".to_string(),
+                );
+            }
             return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
         }
 
@@ -552,7 +561,35 @@ impl AppRuntime {
             (!session.branch.trim().is_empty()).then_some(session.branch.as_str()),
             Some(session.worktree_path.as_path()),
         ) {
+            // D1: the matched live window may belong to a *different* Work on the
+            // same branch/worktree. Resolve its gwt session id and apply the same
+            // conversation-conflict guard before focusing.
+            let live_gwt_session = self
+                .active_agent_sessions
+                .iter()
+                .find(|(candidate, _)| candidate.as_str() == window_id.as_str())
+                .map(|(_, live)| live.session_id.clone());
+            if let Some(live_gwt_session) = live_gwt_session {
+                if self
+                    .resume_conversation_conflicts(agent_session_id.as_deref(), &live_gwt_session)
+                {
+                    return reply_error(
+                    "This Work is currently running a different conversation; stop it before resuming an older Session.".to_string(),
+                );
+                }
+            }
             return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+        }
+
+        // SPEC-2359 D2: a Session persisted on another machine (or whose worktree
+        // was removed) carries a worktree_path that does not exist here. Validate
+        // synchronously so the user gets an immediate, clear message instead of a
+        // deferred async launch failure.
+        if !session.worktree_path.as_path().exists() {
+            return reply_error(format!(
+                "Worktree path not found on this machine ({}); this Session may have been created on another machine.",
+                session.worktree_path.display()
+            ));
         }
 
         // Build a fresh LaunchConfig from the persisted Session and add the
@@ -631,6 +668,31 @@ impl AppRuntime {
             Ok(events) => events,
             Err(error) => reply_error(error),
         }
+    }
+
+    /// SPEC-2359 D1: true when a specific conversation was requested for resume
+    /// but the live window a focus would land on is running a *different*
+    /// conversation. `live_gwt_session_id` is the gwt session id (Work) owning
+    /// that live window; its Session TOML's latest `agent_session_id` is the
+    /// conversation it is currently running. Returns false when no specific
+    /// conversation was requested (a plain Work resume is satisfied by focus).
+    fn resume_conversation_conflicts(
+        &self,
+        requested: Option<&str>,
+        live_gwt_session_id: &str,
+    ) -> bool {
+        let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+            return false;
+        };
+        let live_conversation = {
+            let path = self
+                .sessions_dir
+                .join(format!("{live_gwt_session_id}.toml"));
+            gwt_agent::Session::load_and_migrate(&path)
+                .ok()
+                .and_then(|session| session.agent_session_id)
+        };
+        live_conversation.as_deref().map(str::trim) != Some(requested)
     }
 
     pub(crate) fn resume_branch_latest_agent_events(

@@ -365,6 +365,14 @@ export function createWorkspaceKanbanSurface({
         for (const session of sessions) {
           group.appendChild(renderSessionRow(work, session));
         }
+        // E1: when every Session is history-only (none resumable) on a
+        // non-running Work, no per-Session Resume appears anywhere — offer a
+        // "Start Fresh" control so the Work stays launchable. Distinct label so
+        // the user knows it starts a new conversation, not a resumed one.
+        const startFresh = renderStartFreshButton(work, sessions);
+        if (startFresh) {
+          group.appendChild(startFresh);
+        }
       }
       wrap.appendChild(group);
     }
@@ -416,6 +424,12 @@ export function createWorkspaceKanbanSurface({
     if (!work || !work.session_id) {
       return null;
     }
+    // A conversation gwt cannot hand the agent CLI as a `--resume` target is
+    // history-only; render no Resume so a button that would silently fail is
+    // never shown. (backend sets resumable; absent === assume resumable.)
+    if (session && session.resumable === false) {
+      return null;
+    }
     const button = createNode("button", "wizard-button is-compact", "Resume");
     button.type = "button";
     button.dataset.action = "resume-session";
@@ -423,9 +437,40 @@ export function createWorkspaceKanbanSurface({
     const agentSessionId = session && session.agent_session_id;
     if (agentSessionId) {
       button.dataset.agentSessionId = agentSessionId;
+      button.setAttribute("aria-label", `Resume conversation ${agentSessionId}`);
+    } else {
+      button.setAttribute("aria-label", "Resume this conversation");
     }
     button.addEventListener("click", () => resumeSession(work, session));
     return button;
+  }
+
+  function renderStartFreshButton(work, sessions) {
+    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
+    if (status === "active" || status === "running") {
+      return null;
+    }
+    if (!work || !work.session_id) {
+      return null;
+    }
+    const list = Array.isArray(sessions) ? sessions : [];
+    // If any Session is resumable, a per-Session Resume is already shown — no
+    // need for a Work-level fallback.
+    const anyResumable = list.some(
+      (entry) => entry && entry.resumable !== false && entry.agent_session_id,
+    );
+    if (anyResumable) {
+      return null;
+    }
+    const wrap = createNode("div", "workspace-detail-session-fresh");
+    const button = createNode("button", "wizard-button is-compact", "Start Fresh");
+    button.type = "button";
+    button.dataset.action = "resume-work";
+    button.dataset.sessionId = work.session_id;
+    button.setAttribute("aria-label", "Start a fresh conversation for this Work");
+    button.addEventListener("click", () => resumeWork(work));
+    wrap.appendChild(button);
+    return wrap;
   }
 
   function resumeSession(work, session) {
@@ -450,8 +495,48 @@ export function createWorkspaceKanbanSurface({
   }
 
   function shortSessionId(value) {
+    // 12 chars keeps distinct conversation UUIDs visually distinguishable
+    // (8 chars collapsed near-identical prefixes); the full id is on hover.
     const text = String(value || "");
-    return text.length > 8 ? text.slice(0, 8) : text;
+    return text.length > 12 ? text.slice(0, 12) : text;
+  }
+
+  // SPEC-2359: human-friendly relative time for Session rows. Mirrors
+  // workspace-resume-picker-modal.js's formatter; kept local to avoid wiring a
+  // new shared module. TODO: consolidate into one shared time util.
+  function formatRelativeTime(iso) {
+    if (typeof iso !== "string" || !iso) {
+      return "";
+    }
+    const ms = Date.parse(iso);
+    if (Number.isNaN(ms)) {
+      return iso;
+    }
+    const diff = Date.now() - ms;
+    if (diff < 0) {
+      // Future timestamp (clock skew): fall back to an absolute rendering.
+      return new Date(ms).toLocaleString();
+    }
+    if (diff < 1000) {
+      return "just now";
+    }
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) {
+      return `${sec}s ago`;
+    }
+    const min = Math.floor(sec / 60);
+    if (min < 60) {
+      return `${min}m ago`;
+    }
+    const hr = Math.floor(min / 60);
+    if (hr < 24) {
+      return `${hr}h ago`;
+    }
+    const days = Math.floor(hr / 24);
+    if (days < 7) {
+      return `${days}d ago`;
+    }
+    return new Date(ms).toLocaleDateString();
   }
 
   function renderSessionRow(work, session) {
@@ -463,20 +548,56 @@ export function createWorkspaceKanbanSurface({
     // label + meta sit on the left; Resume for this conversation sits on the
     // right of the same list element.
     const main = createNode("div", "workspace-detail-session-main");
-    const sessionId = session && session.agent_session_id;
-    const label = sessionId ? `Session ${shortSessionId(sessionId)}` : "Session";
-    main.appendChild(createNode("div", "workspace-detail-session-name", label));
-    const meta = createNode("div", "workspace-detail-session-meta");
-    if (active) {
-      appendMetaText(meta, "active");
+
+    // Name line: a clear Current/Past badge makes "latest vs past" read at a
+    // glance (replacing the previous subtle "active" text); the truncated
+    // conversation id carries the full id on hover.
+    const nameRow = createNode("div", "workspace-detail-session-name");
+    const fullId = session && session.agent_session_id ? String(session.agent_session_id) : "";
+    const badge = createNode(
+      "span",
+      "workspace-detail-session-badge",
+      active ? "Current" : "Past",
+    );
+    badge.dataset.sessionState = active ? "current" : "past";
+    nameRow.appendChild(badge);
+    const idLabel = createNode(
+      "span",
+      "workspace-detail-session-id",
+      fullId ? `Session ${shortSessionId(fullId)}` : "Session",
+    );
+    if (fullId) {
+      idLabel.title = fullId;
     }
-    appendMetaText(meta, session ? session.started_at : work.updated_at);
+    nameRow.appendChild(idLabel);
+    main.appendChild(nameRow);
+
+    const meta = createNode("div", "workspace-detail-session-meta");
+    const startedAt = session ? session.started_at : work.updated_at;
+    const relative = formatRelativeTime(startedAt);
+    if (relative) {
+      const time = createNode("span", "", relative);
+      if (startedAt) {
+        time.title = String(startedAt); // absolute timestamp on hover
+      }
+      meta.appendChild(time);
+    }
     main.appendChild(meta);
     row.appendChild(main);
+
     const resume = renderSessionResumeButton(work, session);
     if (resume) {
       row.appendChild(resume);
     }
+
+    // E4: expose the row's identity / state / resumability to assistive tech.
+    const stateLabel = active ? "Current" : "Past";
+    const resumableLabel = resume ? "resumable" : "history only";
+    const ariaParts = [`Session ${fullId}`.trim(), stateLabel, resumableLabel];
+    if (relative) {
+      ariaParts.push(`started ${relative}`);
+    }
+    row.setAttribute("aria-label", ariaParts.join(", "));
     return row;
   }
 

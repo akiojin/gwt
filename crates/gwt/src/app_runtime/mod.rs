@@ -2643,15 +2643,23 @@ fn workspace_work_agent_view_from_ref(
         .get(agent.session_id.as_str())
         .map(|session| {
             let latest = session.agent_session_id.as_deref();
-            session
-                .session_history
-                .iter()
+            // Render Sessions in stable chronological order (oldest first) so
+            // clock skew or delayed persistence cannot scramble the timeline;
+            // the append order alone is not guaranteed monotonic.
+            let mut entries: Vec<_> = session.session_history.iter().collect();
+            entries.sort_by_key(|entry| entry.started_at);
+            entries
+                .into_iter()
                 .map(|entry| gwt::WorkspaceHistorySessionView {
                     agent_session_id: entry.agent_session_id.clone(),
                     started_at: entry
                         .started_at
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     is_active: latest == Some(entry.agent_session_id.as_str()),
+                    // A Session whose conversation handle is structurally
+                    // unusable (empty / Codex placeholder) is history-only; the
+                    // surface hides its Resume control.
+                    resumable: session.is_resumable_conversation(&entry.agent_session_id),
                 })
                 .collect()
         })
@@ -3959,12 +3967,19 @@ impl AppRuntime {
             // no placeholder are orphans (the workspace lost the window); keep
             // the conservative status / freshness gates so old, windowless
             // sessions are not resurrected at startup.
+            // SPEC-2359 G: a Session whose worktree no longer exists on this
+            // machine (moved machines, deleted repo, a path from another OS)
+            // cannot be auto-resumed; skip here so a stale path never reaches an
+            // async spawn that fails later. Applies to both placeholder and
+            // orphan sessions (orphans previously skipped this check).
+            if !session.worktree_path.exists() {
+                continue;
+            }
             let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
-            if placeholder_tab.is_some() {
-                if !session.worktree_path.exists() {
-                    continue;
-                }
-            } else {
+            // Orphan sessions (workspace lost the window) keep the conservative
+            // status / freshness gates so old, windowless sessions are not
+            // resurrected; placeholder sessions restore regardless (Issue #2942).
+            if placeholder_tab.is_none() {
                 if !startup_auto_resume_window_was_open(&session) {
                     continue;
                 }
@@ -17136,6 +17151,101 @@ exit 1
             &event.event,
             BackendEvent::WorkspaceResumeAgentError { session_id, message }
                 if session_id == "stopped-session" && !message.is_empty()
+        ));
+    }
+
+    // SPEC-2359 D2: a Session whose worktree no longer exists on this machine
+    // (created on another machine / removed repo) must fail synchronously with a
+    // clear message instead of spawning and erroring asynchronously.
+    #[test]
+    fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let ghost_worktree = temp.path().join("ghost-worktree");
+        let mut session =
+            gwt_agent::Session::new(&ghost_worktree, "feature/ghost", gwt_agent::AgentId::Codex);
+        session.id = "session-ghost".to_string();
+        session.agent_session_id = Some("conv-ghost".to_string());
+        session.save(&runtime.sessions_dir).expect("save session");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspaceAgent {
+                session_id: "session-ghost".to_string(),
+                agent_session_id: None,
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let event = events
+            .first()
+            .expect("resume must reply on missing worktree");
+        assert!(matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { session_id, message }
+                if session_id == "session-ghost" && message.contains("Worktree path not found")
+        ));
+    }
+
+    // SPEC-2359 D1: requesting a *specific* past conversation while a live window
+    // is running a *different* conversation must surface a visible error, not
+    // silently focus the live window (which would drop the requested resume).
+    #[test]
+    fn app_runtime_resume_workspace_agent_errors_when_live_window_runs_other_conversation() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let mut active = sample_active_agent_session("tab-1", &window_id);
+        active.session_id = "work-live".to_string();
+        active.window_id = window_id.clone();
+        runtime.active_agent_sessions.insert(window_id, active);
+
+        // The live window is running "conv-current"; the user clicked Resume on
+        // an older conversation ("conv-old").
+        let mut session = gwt_agent::Session::new(&repo, "feature/live", gwt_agent::AgentId::Codex);
+        session.id = "work-live".to_string();
+        session.agent_session_id = Some("conv-current".to_string());
+        session.save(&runtime.sessions_dir).expect("save session");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspaceAgent {
+                session_id: "work-live".to_string(),
+                agent_session_id: Some("conv-old".to_string()),
+                bounds: canvas_bounds(),
+            },
+        );
+
+        let event = events
+            .first()
+            .expect("resume must reply on conversation conflict");
+        assert!(matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { session_id, message }
+                if session_id == "work-live" && message.contains("different conversation")
         ));
     }
 

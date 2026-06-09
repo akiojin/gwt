@@ -175,9 +175,22 @@ test("Workspace detail renders Sessions under a Work, highlighting the active on
   assert.equal(sessions.length, 2, "one row per conversation Session");
   const active = sessions.filter((row) => row.dataset.active === "true");
   assert.equal(active.length, 1, "exactly one active Session");
-  // The active row carries the latest conversation's (truncated) id and marker.
+  // The active row carries the latest conversation's (truncated) id and a clear
+  // "Current" badge; past rows are badged "Past".
   assert.match(active[0].textContent, /conv-bbb/);
-  assert.match(active[0].textContent, /active/);
+  const activeBadge = active[0].querySelector(".workspace-detail-session-badge");
+  assert.equal(activeBadge.textContent, "Current");
+  assert.equal(activeBadge.dataset.sessionState, "current");
+  const pastRow = sessions.find((row) => row.dataset.active !== "true");
+  const pastBadge = pastRow.querySelector(".workspace-detail-session-badge");
+  assert.equal(pastBadge.textContent, "Past");
+  assert.equal(pastBadge.dataset.sessionState, "past");
+  // The full conversation id is available on hover even though the visible id is
+  // truncated.
+  assert.equal(
+    active[0].querySelector(".workspace-detail-session-id").title,
+    "conv-bbbb2222",
+  );
   // Each Work renders exactly one Agent header (the agent/tool name), always
   // shown, so two Sessions of one Work never look like two Agents. The Session
   // rows are labelled "Session ...", not with the agent name.
@@ -329,6 +342,46 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.equal(sent[0].session_id, "work-launch-1");
   assert.equal(sent[0].agent_session_id, "conv-older1111");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+});
+
+test("Non-resumable Sessions are history-only; a Start Fresh control keeps the Work launchable (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused Work whose only conversations cannot be resumed here (e.g. pruned
+  // or placeholder handles). Each Session row must render without a Resume, and
+  // the Work must still expose a way to launch a fresh conversation.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
+    { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },
+  ];
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // Both Session rows render (history is visible) but carry no Resume control.
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
+
+  // A single Start Fresh fallback launches a new conversation on the Work.
+  const fresh = fixture.body.querySelector(".workspace-detail-session-fresh [data-action='resume-work']");
+  assert.ok(fresh, "Start Fresh control appears when no Session is resumable");
+  assert.equal(fresh.textContent, "Start Fresh");
+  assert.equal(fresh.dataset.sessionId, "work-launch-1");
+  fresh.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  // Start Fresh carries no specific conversation → backend resolves latest/fresh.
+  assert.equal(sent[0].agent_session_id, undefined);
 });
 
 test("Workspace surface is a single fused view with no Work/Git Branches tab toggle (SPEC-2359)", () => {
