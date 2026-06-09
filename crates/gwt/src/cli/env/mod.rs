@@ -182,6 +182,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "index" => super::parse_index_args(&rest),
+        "diagnostics" => super::parse_diagnostics_args(&rest),
         "memory" | "lessons" => parse_memory_args(&rest),
         "discussion" => parse_discussion_args(&rest),
         "hook" => parse_hook_args(&rest),

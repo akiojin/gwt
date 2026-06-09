@@ -6774,3 +6774,10 @@ Type: lesson
 Context: PR #3001 の Linux Test (Rust) で workspace_projection::tests::resolve_workspace_id_for_session_returns_none_when_session_missing が save_workspace_projection(...).unwrap() の ENOENT で失敗した。
 Learning: 同じ test binary 内で HOME を一時ディレクトリに差し替えるテストがある場合、HOME を変更しないテストでも gwt_home()/gwt_workspace_*_for_repo_path() を読むなら env_lock が必要。読み手が lock を取らないと、差し替えテストの TempDir drop と write_atomic の create/open が競合する。
 Future Action: HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL など process-wide env から path を導くテストを追加・変更するときは、env を変更する側だけでなく読む側にも crate::test_support::env_lock() を適用する。
+
+## 2026-06-09 — Installed app/runtime staleness can hide CPU regressions
+
+Type: failure-pattern
+Context: SPEC-1939 Phase 67 investigated >100% CPU in the installed GWT.app while a fresh target/debug/gwt checkout was idle.
+Learning: Current-checkout smoke passing is insufficient when the running installed app uses an older binary/runtime runner; compare installed/current hashes, runtime manifest runner hash, child runner processes, and recent log storm counters.
+Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --json against the live machine before declaring the checkout fixed, and explicitly record whether installed app/runtime remain stale.

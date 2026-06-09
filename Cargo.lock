@@ -1287,6 +1287,7 @@ dependencies = [
  "gwt-github",
  "gwt-skills",
  "gwt-terminal",
+ "hex",
  "ignore",
  "image",
  "libc",

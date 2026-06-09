@@ -14,7 +14,7 @@ pub mod runtime;
 
 use gwt_github::{client::ApiError, SpecOpsError};
 
-use super::{CliEnv, CliParseError, IndexCommand, IndexScope};
+use super::{CliEnv, CliParseError};
 
 use audit::{
     audit_log_dir, audit_rebuild_result, audit_rebuild_start, audit_runner_progress, audit_status,
@@ -24,6 +24,27 @@ use runtime::{
     format_runner_failure, parse_runner_json, rebuild_actions, render_index_status,
     resolve_index_context, run_runner_rebuild, run_runner_status,
 };
+
+/// SPEC-1942 family enum for `gwtd index ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexCommand {
+    /// `gwtd index status`.
+    Status,
+    /// `gwtd index rebuild [--scope <scope>]`.
+    Rebuild { scope: IndexScope },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScope {
+    All,
+    Issues,
+    Specs,
+    Memory,
+    Discussions,
+    Board,
+    Files,
+    FilesDocs,
+}
 
 pub fn parse(args: &[String]) -> Result<IndexCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
