@@ -72,6 +72,17 @@ pub fn project_index_runner_path() -> PathBuf {
     project_index_runner_path_from(&crate::paths::gwt_home())
 }
 
+/// Return this binary's bundled project-index runner content hash without
+/// mutating the shared runtime directory.
+pub fn bundled_project_index_runner_hash() -> String {
+    content_hash(RUNNER_SOURCE)
+}
+
+/// Return the shared project-index runtime manifest path.
+pub fn project_index_runtime_manifest_path() -> PathBuf {
+    crate::paths::gwt_runtime_dir().join(RUNTIME_MANIFEST_FILE)
+}
+
 /// Return the Python executable for this binary's content-addressed index venv.
 pub fn project_index_python_path() -> PathBuf {
     project_index_python_path_from(&crate::paths::gwt_home())
