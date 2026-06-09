@@ -1280,6 +1280,7 @@ dependencies = [
  "futures-util",
  "gwt-agent",
  "gwt-ai",
+ "gwt-clipboard",
  "gwt-config",
  "gwt-core",
  "gwt-docker",
