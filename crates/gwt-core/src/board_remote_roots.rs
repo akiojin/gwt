@@ -73,9 +73,17 @@ pub fn append_root_mapping(repo_root: &Path, mapping: &RootMapping) -> Result<()
         .create(true)
         .append(true)
         .open(&path)?;
-    serde_json::to_writer(&mut file, mapping)
+    // Serialize to a single buffer (line + trailing newline) and emit it with
+    // ONE `write_all`. On POSIX an O_APPEND write of <= PIPE_BUF bytes is
+    // atomic across processes, so concurrent appends from multiple agents on
+    // the same repo never interleave their bytes. `serde_json::to_writer` issues
+    // many small writes per value, which DID interleave and corrupt lines under
+    // multi-agent posting (SPEC-2963); load then silently skipped the corrupt
+    // lines and re-created duplicate thread roots.
+    let mut line = serde_json::to_string(mapping)
         .map_err(|error| GwtError::Other(format!("board-remote-roots json: {error}")))?;
-    file.write_all(b"\n")?;
+    line.push('\n');
+    file.write_all(line.as_bytes())?;
     file.sync_all()?;
     Ok(())
 }
@@ -221,6 +229,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_root_mappings(dir.path()).is_empty());
         assert!(find_root_mapping(dir.path(), "slack", "CH", "ws-a").is_none());
+    }
+
+    #[test]
+    fn concurrent_appends_do_not_interleave() {
+        // SPEC-2963: multiple agents on the same repo append concurrently. Each
+        // line must stay intact (no byte interleaving) so load never has to skip
+        // a corrupt line and re-create a duplicate thread root.
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(dir.path().to_path_buf());
+        let threads = 8usize;
+        let per_thread = 40usize;
+        let barrier = Arc::new(Barrier::new(threads));
+        let mut handles = Vec::new();
+        for t in 0..threads {
+            let root = Arc::clone(&root);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..per_thread {
+                    let m = mapping(&format!("ws-{t}-{i}"), &format!("ts-{t}-{i}"), 100, "h");
+                    append_root_mapping(&root, &m).unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Every non-empty line must parse: a corrupt (interleaved) line proves a
+        // non-atomic write.
+        let path = gwt_board_remote_roots_path(&root);
+        let content = fs::read_to_string(&path).unwrap();
+        let mut count = 0usize;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            serde_json::from_str::<RootMapping>(line)
+                .unwrap_or_else(|error| panic!("interleaved/corrupt line: {error}\n{line}"));
+            count += 1;
+        }
+        assert_eq!(
+            count,
+            threads * per_thread,
+            "every append present, none lost or merged"
+        );
+        assert_eq!(load_root_mappings(&root).len(), threads * per_thread);
     }
 
     #[test]
