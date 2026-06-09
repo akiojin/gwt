@@ -46,9 +46,11 @@ pub enum Scope {
     Issues,
     /// Repo-scoped: cached SPEC Issue search index.
     Specs,
-    /// Repo-scoped: post-mortem fix knowledge sourced from `tasks/memory.md`.
+    /// Repo-scoped: post-mortem fix knowledge sourced from
+    /// `.gwt/work/memory.md`.
     Memory,
-    /// Repo-scoped: discussion knowledge sourced from `tasks/discussions.md`.
+    /// Repo-scoped: discussion knowledge sourced from
+    /// `.gwt/work/discussions.md`.
     Discussions,
     /// Worktree-scoped: project source code files.
     FilesCode,

@@ -131,24 +131,41 @@ pub fn run<E: CliEnv>(
     }
 }
 
-/// Renames `tasks/lessons.md` to `tasks/memory.md` when `memory.md` does not
-/// yet exist. Idempotent — returns `Ok(true)` only when a rename happened.
-pub fn migrate_legacy_lessons_file(repo_root: &Path) -> std::io::Result<bool> {
-    let tasks_dir = repo_root.join("tasks");
-    let memory_path = tasks_dir.join("memory.md");
-    let lessons_path = tasks_dir.join("lessons.md");
-    if memory_path.exists() || !lessons_path.exists() {
+/// Moves a legacy `tasks/memory.md` (or, failing that, `tasks/lessons.md`)
+/// into the repo-local `.gwt/work/memory.md` location when the new file does
+/// not yet exist. Idempotent — returns `Ok(true)` only when a move happened.
+///
+/// SPEC-2359 Phase W-12: project memory moved out of the untracked `tasks/`
+/// directory into the git-tracked `.gwt/work/` directory. This one-time
+/// migration preserves any existing memory without losing history.
+pub fn migrate_legacy_memory_file(repo_root: &Path) -> std::io::Result<bool> {
+    let memory_path = gwt_core::paths::gwt_repo_local_memory_path(repo_root);
+    if memory_path.exists() {
         return Ok(false);
     }
-    fs::rename(&lessons_path, &memory_path)?;
+    let tasks_dir = repo_root.join("tasks");
+    let legacy_memory = tasks_dir.join("memory.md");
+    let legacy_lessons = tasks_dir.join("lessons.md");
+    let source = if legacy_memory.exists() {
+        legacy_memory
+    } else if legacy_lessons.exists() {
+        legacy_lessons
+    } else {
+        return Ok(false);
+    };
+    if let Some(parent) = memory_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&source, &memory_path)?;
     Ok(true)
 }
 
 fn append_memory_entry(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Result<PathBuf> {
-    let tasks_dir = repo_root.join("tasks");
-    fs::create_dir_all(&tasks_dir)?;
-    let path = tasks_dir.join("memory.md");
-    migrate_legacy_lessons_file(repo_root)?;
+    migrate_legacy_memory_file(repo_root)?;
+    let path = gwt_core::paths::gwt_repo_local_memory_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     ensure_memory_file(&path)?;
 
     let date = add

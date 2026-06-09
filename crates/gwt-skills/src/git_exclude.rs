@@ -192,11 +192,16 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     if targets.is_empty() {
         return patterns;
     }
-    // project-local `.gwt/` holds only gwt-managed files (project.toml,
-    // discussion.md, agent homes). Exclude it as a broad pattern so any
-    // future gwt-managed path under `.gwt/` is covered without listing
-    // each subpath individually.
-    push_unique(&mut patterns, ".gwt/");
+    // project-local `.gwt/` holds gwt-managed files (project.toml,
+    // discussion.md, agent homes). Exclude its contents broadly, but carve out
+    // `.gwt/work/` so the tracked Work persistent core (`.gwt/work/events.jsonl`,
+    // `.gwt/work/memory.md`, `.gwt/work/discussions.md`) is committed with the
+    // repo (SPEC-2359 Phase W-12). `.gwt/*` excludes the children without
+    // excluding the `.gwt/` directory itself, so the later `!.gwt/work/`
+    // negation can re-include the Work directory (re-inclusion is impossible
+    // only when a parent directory is excluded).
+    push_unique(&mut patterns, ".gwt/*");
+    push_unique(&mut patterns, "!.gwt/work/");
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         push_unique(&mut patterns, ".claude/skills/gwt-*");
         push_unique(&mut patterns, ".claude/commands/gwt-*");
@@ -235,7 +240,8 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
-        assert!(result.contains("\n.gwt/\n"));
+        assert!(result.contains("\n.gwt/*\n"));
+        assert!(result.contains("\n!.gwt/work/\n"));
         assert!(result.contains("docker-compose.override.yml"));
         assert!(!result.contains(".gwt/discussion.md"));
         assert!(!result.contains(".gwt/opencode/"));
@@ -251,7 +257,8 @@ mod tests {
         let result = replace_managed_block_for_targets("", &[ManagedAssetTarget::Hermes]).unwrap();
 
         assert!(result.contains(BEGIN_MARKER));
-        assert!(result.contains("\n.gwt/\n"));
+        assert!(result.contains("\n.gwt/*\n"));
+        assert!(result.contains("\n!.gwt/work/\n"));
         assert!(!result.contains(".claude/skills/gwt-*"));
         assert!(!result.contains(".codex/skills/gwt-*"));
         assert!(!result.contains(".gwt/discussion.md"));
@@ -261,11 +268,23 @@ mod tests {
     }
 
     #[test]
-    fn adds_broad_gwt_dir_pattern_when_any_target_specified() {
+    fn excludes_gwt_contents_but_carves_out_tracked_work_dir() {
         let result = replace_managed_block("").unwrap();
         assert!(
-            result.contains("\n.gwt/\n"),
-            "managed block should contain broad `.gwt/` pattern: {result}"
+            result.contains("\n.gwt/*\n"),
+            "managed block should exclude `.gwt/` contents via `.gwt/*`: {result}"
+        );
+        assert!(
+            result.contains("\n!.gwt/work/\n"),
+            "managed block should carve out the tracked `.gwt/work/` dir: {result}"
+        );
+        // The negation must follow the broad exclusion so the Work dir is
+        // re-included (gitignore evaluates patterns top-to-bottom).
+        let exclude_idx = result.find("\n.gwt/*\n").unwrap();
+        let carveout_idx = result.find("\n!.gwt/work/\n").unwrap();
+        assert!(
+            exclude_idx < carveout_idx,
+            "`.gwt/*` must precede `!.gwt/work/` so the carve-out re-includes: {result}"
         );
     }
 
@@ -294,8 +313,8 @@ mod tests {
     fn broad_gwt_dir_pattern_present_for_single_provider_target() {
         let result = replace_managed_block_for_targets("", &[ManagedAssetTarget::Codex]).unwrap();
         assert!(
-            result.contains("\n.gwt/\n"),
-            "single-target managed block should contain broad `.gwt/` pattern: {result}"
+            result.contains("\n.gwt/*\n") && result.contains("\n!.gwt/work/\n"),
+            "single-target managed block should exclude `.gwt/` contents but carve out `.gwt/work/`: {result}"
         );
         assert!(
             !result.contains(".gwt/discussion.md"),

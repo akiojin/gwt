@@ -10,7 +10,7 @@ use crate::BranchListEntry;
 
 mod quick_start;
 
-pub use quick_start::load_quick_start_entries;
+pub use quick_start::{load_quick_start_entries, load_sessions};
 
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];

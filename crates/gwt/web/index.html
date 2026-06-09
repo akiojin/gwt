@@ -129,28 +129,7 @@
             </div>
           </div>
         </div>
-        <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar layers">
-          <div class="op-sidebar__section">
-            <h3 class="op-sidebar__heading">
-              <span>Layers</span>
-              <span class="op-sidebar__count" id="op-sidebar-count">0</span>
-            </h3>
-            <button class="op-layer" type="button" data-layer="agents" aria-pressed="true">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Agents</span>
-              <span class="op-layer__count" id="op-layer-count-agents">0</span>
-            </button>
-            <button class="op-layer" type="button" data-layer="git" aria-pressed="true">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Git</span>
-              <span class="op-layer__count" id="op-layer-count-git">0</span>
-            </button>
-            <button class="op-layer" type="button" data-layer="hooks" aria-pressed="true">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Hooks</span>
-              <span class="op-layer__count" id="op-layer-count-hooks">0</span>
-            </button>
-          </div>
+        <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar">
           <div class="op-sidebar__section">
             <h3 class="op-sidebar__heading">
               <span>Quick</span>
@@ -176,15 +155,55 @@
               <kbd class="op-layer__kbd">⌘ L</kbd>
             </button>
           </div>
-          <div class="op-sidebar__section op-active-work" id="op-active-work" aria-live="polite" hidden>
+          <!-- SPEC-2356 operator chrome cleanup: window operations move out of the
+               right-bottom floating toolbar into a flat sidebar Windows section.
+               IDs are preserved so app.js handlers stay wired by id. -->
+          <div class="op-sidebar__section op-sidebar__section--windows">
             <h3 class="op-sidebar__heading">
-              <span>Active Works</span>
-              <span class="op-sidebar__count" id="op-active-work-count">0</span>
+              <span>Windows</span>
             </h3>
-            <div class="op-work-summary" id="op-active-work-summary">
-              <div class="op-work-empty">No active works</div>
+            <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
+            <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+            <button class="arrange-button" id="align-button" aria-label="Align windows without resizing">Align</button>
+            <div class="window-list-shell">
+              <button
+                class="arrange-button"
+                id="window-list-button"
+                aria-label="List windows"
+                aria-expanded="false"
+              >
+                Windows
+              </button>
+              <div class="window-list-panel" id="window-list-panel" hidden></div>
             </div>
-            <div class="op-agent-list" id="op-active-work-agents"></div>
+            <button class="add-button" id="add-button" aria-label="Add window">+</button>
+          </div>
+          <!-- SPEC-2356 operator chrome cleanup: Command Palette trigger moves
+               from the right-bottom toolbar into the sidebar. -->
+          <div class="op-sidebar__section op-sidebar__section--palette">
+            <h3 class="op-sidebar__heading">
+              <span>Palette</span>
+            </h3>
+            <button
+              class="arrange-button op-palette-trigger"
+              id="op-palette-button"
+              aria-label="Command palette"
+              title="Command palette (⌘K / ⌘P)"
+              aria-keyshortcuts="Meta+K Meta+P"
+            >
+              <span class="op-palette-trigger__label">⌘K</span>
+              <span class="op-palette-trigger__hint">Palette</span>
+            </button>
+          </div>
+          <!-- SPEC-2356 operator chrome cleanup: the Update CTA moves from the
+               fixed bottom-right corner into this sidebar Update section. The CTA
+               shell (update-cta.js) mounts into #update-cta-anchor; the sidebar
+               peeks/badges when an update becomes available. -->
+          <div class="op-sidebar__section op-sidebar__section--update">
+            <h3 class="op-sidebar__heading">
+              <span>Update</span>
+            </h3>
+            <div id="update-cta-anchor" class="op-sidebar__update-anchor"></div>
           </div>
         </aside>
         <div class="canvas-area">
@@ -225,51 +244,11 @@
               </button>
             </div>
           </div>
-          <div class="floating-actions" id="floating-window-controls">
-            <button
-              class="arrange-button op-palette-trigger"
-              id="op-palette-button"
-              aria-label="Command palette"
-              title="Command palette (⌘K / ⌘P)"
-              aria-keyshortcuts="Meta+K Meta+P"
-            >
-              <span class="op-palette-trigger__label">⌘K</span>
-              <span class="op-palette-trigger__hint">Palette</span>
-            </button>
-            <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
-            <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
-            <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <div
-              class="op-window-controls-peek"
-              role="button"
-              tabindex="0"
-              aria-label="Show window controls"
-              aria-controls="floating-window-controls-actions"
-              data-hover-reveal="window-controls"
-            ></div>
-            <div class="floating-window-controls-group" id="floating-window-controls-actions">
-              <div class="floating-window-controls-group" id="floating-window-controls-primary">
-                <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
-                <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
-                <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
-                <div class="window-list-shell" data-window-control="true">
-                  <button
-                    class="arrange-button"
-                    id="window-list-button"
-                    aria-label="List windows"
-                    aria-expanded="false"
-                    data-window-control="true"
-                  >
-                    Windows
-                  </button>
-                  <div class="window-list-panel" id="window-list-panel" hidden></div>
-                </div>
-              </div>
-              <div class="floating-window-controls-group" id="floating-window-controls-add">
-                <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
-              </div>
-            </div>
-          </div>
+          <!-- SPEC-2356 operator chrome cleanup: the right-bottom floating
+               toolbar (Palette / Zoom / Tile / Stack / Align / Windows / Add)
+               and the window-controls peek band are removed. Palette + window
+               operations live in the sidebar; Zoom lives in the Status Strip;
+               the bottom-right canvas corner is left empty. -->
           <div
             class="op-sidebar-peek"
             role="button"
@@ -305,6 +284,16 @@
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">WK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
+          </div>
+          <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
+               moves from the right-bottom floating toolbar into the Status Strip
+               so it is always visible. IDs are unchanged so app.js handlers stay
+               wired by id. -->
+          <div class="op-status-strip__cell op-status-strip__cell--zoom">
+            <span class="op-status-strip__label">ZOOM</span>
+            <button type="button" class="op-status-strip__zoom-button" id="zoom-out-button" aria-label="Zoom out">-</button>
+            <button type="button" class="op-status-strip__zoom-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
+            <button type="button" class="op-status-strip__zoom-button" id="zoom-in-button" aria-label="Zoom in">+</button>
           </div>
           <button
             type="button"
@@ -417,63 +406,113 @@
       </div>
       <div class="modal-backdrop" id="preset-modal" aria-hidden="true">
         <div
-          class="modal-shell"
+          class="modal-shell is-surface-deck"
           role="dialog"
           aria-modal="true"
           aria-labelledby="preset-modal-title"
           tabindex="-1"
         >
+          <p class="preset-modal__kicker"><span class="preset-modal__tick" aria-hidden="true">▸</span>DEPLOY A SURFACE</p>
           <h2 id="preset-modal-title">Add window</h2>
-          <div class="preset-section">
-            <div class="preset-section-label">Work</div>
+          <!-- SPEC-2356 landscape redesign (Plan B, weighted deck): the three
+               categorized sections lay out as side-by-side weighted columns inside
+               .preset-deck so the deck stays low and never overflows short viewports. -->
+          <div class="preset-deck">
+          <div class="preset-section" data-category="surface">
+            <div class="preset-section-label">Surfaces</div>
             <div class="preset-list">
-              <button class="preset-button" data-preset="file_tree">
-                <strong>File Tree</strong>
-                <span>Browse repository files in a read-only tree</span>
+              <button class="preset-button" data-preset="file_tree" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">⊟</span>
+                <span class="preset-button__text">
+                  <strong>File Tree</strong>
+                  <span>Browse repository files in a read-only tree</span>
+                </span>
               </button>
-              <button class="preset-button" data-preset="settings">
-                <strong>Settings</strong>
-                <span>Manage custom agents and launch presets</span>
+              <button class="preset-button" data-preset="logs" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">≡</span>
+                <span class="preset-button__text">
+                  <strong>Logs</strong>
+                  <span>Open the logs surface</span>
+                </span>
               </button>
-              <button class="preset-button" data-preset="index">
-                <strong>Index</strong>
-                <span>Search indexed project content</span>
+              <button class="preset-button" data-preset="console" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">❯</span>
+                <span class="preset-button__text">
+                  <strong>Console</strong>
+                  <span>External process stdout/stderr per kind</span>
+                </span>
               </button>
-              <button class="preset-button" data-preset="profile">
-                <strong>Profile</strong>
-                <span>Manage env profiles and variables</span>
+              <button class="preset-button" data-preset="board" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">▦</span>
+                <span class="preset-button__text">
+                  <strong>Board</strong>
+                  <span>Open the board surface</span>
+                </span>
               </button>
-              <button class="preset-button" data-preset="logs">
-                <strong>Logs</strong>
-                <span>Open the logs surface</span>
-              </button>
-              <button class="preset-button" data-preset="issue">
-                <strong>Issue</strong>
-                <span>Open the issue surface</span>
-              </button>
-              <button class="preset-button" data-preset="spec">
-                <strong>SPEC</strong>
-                <span>Open the SPEC surface</span>
-              </button>
-              <button class="preset-button" data-preset="work">
-                <strong>Work</strong>
-                <span>Open the Work overview</span>
-              </button>
-              <button class="preset-button" data-preset="board">
-                <strong>Board</strong>
-                <span>Open the board surface</span>
-              </button>
-              <button class="preset-button" data-preset="pr">
-                <strong>PR</strong>
-                <span>Open the PR surface</span>
-              </button>
-              <button class="preset-button" data-preset="console">
-                <strong>Console</strong>
-                <span>External process stdout/stderr per kind</span>
+              <button class="preset-button" data-preset="work" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">◆</span>
+                <span class="preset-button__text">
+                  <strong>Work</strong>
+                  <span>Open the Work overview</span>
+                </span>
               </button>
             </div>
           </div>
+          <div class="preset-section" data-category="knowledge">
+            <div class="preset-section-label">GitHub &amp; Knowledge</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="issue" data-category="knowledge">
+                <span class="preset-button__icon" aria-hidden="true">◍</span>
+                <span class="preset-button__text">
+                  <strong>Issue</strong>
+                  <span>Open the issue surface</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="spec" data-category="knowledge">
+                <span class="preset-button__icon" aria-hidden="true">❡</span>
+                <span class="preset-button__text">
+                  <strong>SPEC</strong>
+                  <span>Open the SPEC surface</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="pr" data-category="knowledge">
+                <span class="preset-button__icon" aria-hidden="true">⇄</span>
+                <span class="preset-button__text">
+                  <strong>PR</strong>
+                  <span>Open the PR surface</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="index" data-category="knowledge">
+                <span class="preset-button__icon" aria-hidden="true">⌕</span>
+                <span class="preset-button__text">
+                  <strong>Index</strong>
+                  <span>Search indexed project content</span>
+                </span>
+              </button>
+            </div>
+          </div>
+          <div class="preset-section" data-category="config">
+            <div class="preset-section-label">Configuration</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="settings" data-category="config">
+                <span class="preset-button__icon" aria-hidden="true">⚙</span>
+                <span class="preset-button__text">
+                  <strong>Settings</strong>
+                  <span>Manage custom agents and launch presets</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="profile" data-category="config">
+                <span class="preset-button__icon" aria-hidden="true">◑</span>
+                <span class="preset-button__text">
+                  <strong>Profile</strong>
+                  <span>Manage env profiles and variables</span>
+                </span>
+              </button>
+            </div>
+          </div>
+          </div><!-- /.preset-deck -->
           <div class="modal-footer">
+            <span class="preset-modal__hint">↑↓←→ move · ↵ deploy · esc close</span>
             <button class="text-button" id="close-modal">Cancel</button>
           </div>
         </div>

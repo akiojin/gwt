@@ -1,6 +1,6 @@
 """Tests for the discussions semantic index scope.
 
-Discussion entries live in `tasks/discussions.md` as H2 sections with the
+Discussion entries live in `.gwt/work/discussions.md` as H2 sections with the
 canonical shape:
 
     ## YYYY-MM-DD — title
@@ -60,9 +60,9 @@ Agent role badges should show Codex or Claude Code.
 class LoadDiscussionDocumentsTests(unittest.TestCase):
     def _write_discussions_file(self, contents: str) -> Path:
         root = Path(tempfile.mkdtemp())
-        tasks = root / "tasks"
-        tasks.mkdir(parents=True, exist_ok=True)
-        (tasks / "discussions.md").write_text(contents, encoding="utf-8")
+        work_dir = root / ".gwt" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "discussions.md").write_text(contents, encoding="utf-8")
         return root
 
     def test_returns_chunks_for_each_h2_section(self):
@@ -71,7 +71,7 @@ class LoadDiscussionDocumentsTests(unittest.TestCase):
 
         self.assertEqual(len(discussions), 2)
         self.assertEqual(len(manifest), 1)
-        self.assertEqual(manifest[0]["path"], "tasks/discussions.md")
+        self.assertEqual(manifest[0]["path"], ".gwt/work/discussions.md")
 
     def test_extracts_status_topics_and_related_specs(self):
         root = self._write_discussions_file(SAMPLE_DISCUSSIONS)
@@ -119,9 +119,9 @@ class ActionIndexDiscussionsTests(unittest.TestCase):
     def test_full_mode_writes_manifest_and_chunks(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
             root = Path(wt)
-            tasks = root / "tasks"
-            tasks.mkdir(parents=True, exist_ok=True)
-            (tasks / "discussions.md").write_text(SAMPLE_DISCUSSIONS, encoding="utf-8")
+            work_dir = root / ".gwt" / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (work_dir / "discussions.md").write_text(SAMPLE_DISCUSSIONS, encoding="utf-8")
             collection = _FakeCollection()
 
             with mock.patch.object(
@@ -150,7 +150,7 @@ class ActionIndexDiscussionsTests(unittest.TestCase):
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["path"], "tasks/discussions.md")
+            self.assertEqual(entries[0]["path"], ".gwt/work/discussions.md")
 
 
 class _FakeClient:

@@ -34,9 +34,11 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
 });
 
 test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal triggers", async () => {
-  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-032): chrome visibility runs through
-  // the hover-reveal state machine driven by the peek 帯, with no chip
+  // SPEC-2356 Phase 9 (FR-021/FR-032): chrome visibility runs through the
+  // hover-reveal state machine driven by the sidebar peek 帯, with no chip
   // toggles, no localStorage persistence, and a one-shot legacy migration.
+  // SPEC-2356 operator chrome cleanup: window controls fold into the sidebar,
+  // so the separate window-controls peek 帯 is retired.
   const { initOperatorShell } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const storage = memoryStorage();
@@ -77,14 +79,13 @@ test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal trigger
     );
 
     const sidebarPeek = document.querySelector(".op-sidebar-peek");
-    const windowControlsPeek = document.querySelector(".op-window-controls-peek");
     assert.ok(sidebarPeek, "fixture must include sidebar peek 帯");
-    assert.ok(windowControlsPeek, "fixture must include window controls peek 帯");
-    assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
     assert.equal(
-      windowControlsPeek.getAttribute("aria-controls"),
-      "floating-window-controls-actions",
+      document.querySelector(".op-window-controls-peek"),
+      null,
+      "window controls peek 帯 is retired — controls live in the sidebar",
     );
+    assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
 
     // FR-032: legacy keys must be removed on init.
     assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
@@ -94,14 +95,9 @@ test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal trigger
     assert.equal(document.documentElement.dataset.opSidebar, undefined);
     assert.equal(document.documentElement.dataset.opWindowControls, undefined);
 
-    // Hover the sidebar peek 帯 → revealed; window controls remain hidden.
+    // Hover the sidebar peek 帯 → revealed (window controls reveal with it).
     sidebarPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
     assert.equal(document.documentElement.dataset.opSidebar, "revealed");
-    assert.equal(document.documentElement.dataset.opWindowControls, undefined);
-
-    // Hover the window controls peek 帯 → revealed independently.
-    windowControlsPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
-    assert.equal(document.documentElement.dataset.opWindowControls, "revealed");
 
     // Storage must remain untouched by hover reveal (no persistence in Phase 9).
     assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);

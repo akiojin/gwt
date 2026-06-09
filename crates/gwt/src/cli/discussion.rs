@@ -163,13 +163,37 @@ pub fn run<E: CliEnv>(
     }
 }
 
+/// Moves a legacy `tasks/discussions.md` into the repo-local
+/// `.gwt/work/discussions.md` location when the new file does not yet exist.
+/// Idempotent — returns `Ok(true)` only when a move happened.
+///
+/// SPEC-2359 Phase W-12: the discussion log moved out of the untracked
+/// `tasks/` directory into the git-tracked `.gwt/work/` directory.
+pub fn migrate_legacy_discussions_file(repo_root: &Path) -> std::io::Result<bool> {
+    let new_path = gwt_core::paths::gwt_repo_local_discussions_path(repo_root);
+    if new_path.exists() {
+        return Ok(false);
+    }
+    let legacy = repo_root.join("tasks").join("discussions.md");
+    if !legacy.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = new_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(&legacy, &new_path)?;
+    Ok(true)
+}
+
 fn update_discussion_entry(
     repo_root: &Path,
     update: &DiscussionUpdateCommand,
 ) -> std::io::Result<PathBuf> {
-    let tasks_dir = repo_root.join("tasks");
-    fs::create_dir_all(&tasks_dir)?;
-    let path = tasks_dir.join("discussions.md");
+    migrate_legacy_discussions_file(repo_root)?;
+    let path = gwt_core::paths::gwt_repo_local_discussions_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     ensure_discussions_file(&path)?;
 
     let mut content = fs::read_to_string(&path)?;
