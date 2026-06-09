@@ -3297,7 +3297,8 @@ impl LaunchWizardState {
     fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
         if self.agent_is_codex() {
             CODEX_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude" && is_claude_opus_model(self.model.as_str())
+        } else if self.effective_agent_id() == "claude"
+            && is_claude_opus_tier_model(self.model.as_str())
         {
             let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
             // `ultracode` is opt-in and only usable on Opus 4.7/4.8 with a
@@ -3649,18 +3650,24 @@ fn default_launch_path(
 
 const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.8)";
 
-fn is_claude_opus_model(model: &str) -> bool {
-    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus"
+// Fable 5 shares the Opus 4.7/4.8 effort surface (low..max), so both models
+// use the same opus-tier reasoning ladder.
+fn is_claude_opus_tier_model(model: &str) -> bool {
+    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus" || model == "fable"
 }
 
 fn is_claude_effort_capable_model(model: &str) -> bool {
-    is_claude_opus_model(model) || model == "sonnet"
+    is_claude_opus_tier_model(model) || model == "sonnet"
 }
 
-const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
+const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 5] = [
     ModelDisplayOption {
         label: CLAUDE_DEFAULT_MODEL_LABEL,
         description: "Most capable for complex work",
+    },
+    ModelDisplayOption {
+        label: "fable",
+        description: "Most capable for the hardest, longest-running tasks",
     },
     ModelDisplayOption {
         label: "opus",
@@ -3766,7 +3773,7 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Ultracode",
         stored_value: "ultracode",
-        description: "Top-tier effort plus dynamic workflow orchestration (Opus only)",
+        description: "Top-tier effort plus dynamic workflow orchestration (Opus-tier only)",
         is_default: false,
     },
 ];
@@ -4465,7 +4472,7 @@ fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str 
 fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
     match status {
         crate::WindowProcessStatus::Running => "running",
-        crate::WindowProcessStatus::NotStarted => "not_started",
+        crate::WindowProcessStatus::Starting => "starting",
         crate::WindowProcessStatus::Idle => "idle",
         crate::WindowProcessStatus::Waiting => "waiting",
         crate::WindowProcessStatus::Stopped => "stopped",
@@ -7805,8 +7812,10 @@ mod tests {
             .iter()
             .any(|option| option.value == "continue"));
 
-        assert!(current_model_options("claude").contains(&"sonnet"));
-        assert!(current_model_options("claude").contains(&"Default (Opus 4.8)"));
+        assert_eq!(
+            current_model_options("claude"),
+            vec!["Default (Opus 4.8)", "fable", "opus", "sonnet", "haiku"]
+        );
         assert_eq!(
             current_model_options("codex"),
             vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
@@ -8536,7 +8545,7 @@ mod tests {
         assert_eq!(default.stored_value, "xhigh");
     }
 
-    fn opus_state(ultracode_supported: bool) -> LaunchWizardState {
+    fn claude_state(model: &str, ultracode_supported: bool) -> LaunchWizardState {
         let agent_options = vec![AgentOption {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
@@ -8551,13 +8560,13 @@ mod tests {
         // field at render time — see `current_reasoning_options`).
         ctx.ultracode_supported = ultracode_supported;
         let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
-        // Drive current_reasoning_options() down the Claude Opus branch.
+        // Drive current_reasoning_options() down the requested Claude model branch.
         state.agent_id = "claude".to_string();
-        state.model = "opus".to_string();
+        state.model = model.to_string();
         state
     }
 
-    fn opus_reasoning_values(state: &LaunchWizardState) -> Vec<&'static str> {
+    fn claude_reasoning_values(state: &LaunchWizardState) -> Vec<&'static str> {
         state
             .current_reasoning_options()
             .iter()
@@ -8567,18 +8576,49 @@ mod tests {
 
     #[test]
     fn opus_reasoning_includes_ultracode_when_supported() {
-        let values = opus_reasoning_values(&opus_state(true));
+        let values = claude_reasoning_values(&claude_state("opus", true));
         assert!(values.contains(&"ultracode"));
         assert_eq!(values.last(), Some(&"ultracode"));
     }
 
     #[test]
     fn opus_reasoning_excludes_ultracode_when_unsupported() {
-        let values = opus_reasoning_values(&opus_state(false));
+        let values = claude_reasoning_values(&claude_state("opus", false));
         assert!(!values.contains(&"ultracode"));
         // Common levels remain intact when ultracode is gated out.
         assert!(values.contains(&"xhigh"));
         assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_matches_opus_ladder_with_xhigh_default() {
+        let values = claude_reasoning_values(&claude_state("fable", true));
+        assert_eq!(
+            values,
+            ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]
+        );
+        let state = claude_state("fable", true);
+        let default = state
+            .current_reasoning_options()
+            .iter()
+            .find(|option| option.is_default)
+            .map(|option| option.stored_value);
+        assert_eq!(default, Some("xhigh"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_when_unsupported() {
+        let values = claude_reasoning_values(&claude_state("fable", false));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_is_effort_capable_for_launch() {
+        let mut state = claude_state("fable", true);
+        state.reasoning = "xhigh".to_string();
+        assert_eq!(state.reasoning_level_for_launch(), Some("xhigh"));
     }
 
     #[test]

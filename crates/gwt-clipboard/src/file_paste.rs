@@ -210,13 +210,39 @@ pub(crate) fn read_clipboard() -> Result<String, ClipboardError> {
 
 /// Write text to the system clipboard using platform-specific tools.
 pub(crate) fn write_clipboard(text: &str) -> Result<(), ClipboardError> {
-    if cfg!(target_os = "macos") {
-        pipe_to_command("pbcopy", &[], text)
-    } else if cfg!(target_os = "linux") {
-        pipe_to_command("wl-copy", &[], text)
-            .or_else(|_| pipe_to_command("xclip", &["-selection", "clipboard"], text))
+    let Some(command) = clipboard_write_command_for_target_os(std::env::consts::OS) else {
+        return Err(ClipboardError::UnsupportedPlatform);
+    };
+
+    let result = pipe_to_command(command.program, command.args, text);
+    if std::env::consts::OS == "linux" {
+        result.or_else(|_| pipe_to_command("xclip", &["-selection", "clipboard"], text))
     } else {
-        Err(ClipboardError::UnsupportedPlatform)
+        result
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardCommand {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+fn clipboard_write_command_for_target_os(target_os: &str) -> Option<ClipboardCommand> {
+    match target_os {
+        "macos" => Some(ClipboardCommand {
+            program: "pbcopy",
+            args: &[],
+        }),
+        "linux" => Some(ClipboardCommand {
+            program: "wl-copy",
+            args: &[],
+        }),
+        "windows" => Some(ClipboardCommand {
+            program: "clip",
+            args: &[],
+        }),
+        _ => None,
     }
 }
 
@@ -368,5 +394,23 @@ mod tests {
             ClipboardPasteContent::FilePaths(paths)
                 if paths == vec![PathBuf::from("//fileserver/share/report.txt")]
         ));
+    }
+
+    #[test]
+    fn clipboard_write_command_uses_windows_clip() {
+        let command = clipboard_write_command_for_target_os("windows").unwrap();
+        assert_eq!(command.program, "clip");
+        assert!(command.args.is_empty());
+    }
+
+    #[test]
+    fn clipboard_write_command_pins_existing_unix_tools() {
+        let macos = clipboard_write_command_for_target_os("macos").unwrap();
+        assert_eq!(macos.program, "pbcopy");
+        assert!(macos.args.is_empty());
+
+        let linux = clipboard_write_command_for_target_os("linux").unwrap();
+        assert_eq!(linux.program, "wl-copy");
+        assert!(linux.args.is_empty());
     }
 }

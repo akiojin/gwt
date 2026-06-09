@@ -14478,7 +14478,7 @@ exit 1
             .find(|window| window.id == "tab-1::agent-1")
             .unwrap();
 
-        assert_eq!(window.status, WindowProcessStatus::NotStarted);
+        assert_eq!(window.status, WindowProcessStatus::Starting);
         assert_eq!(tab.running_agent_count, 0);
         assert!(tab.running_agents.is_empty());
     }
@@ -14502,7 +14502,7 @@ exit 1
             .find(|window| window.id == "tab-1::agent-1")
             .unwrap();
 
-        assert_eq!(window.status, WindowProcessStatus::NotStarted);
+        assert_eq!(window.status, WindowProcessStatus::Starting);
     }
 
     #[test]

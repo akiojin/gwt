@@ -2300,9 +2300,8 @@ kbd.op-kbd {
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
 }
-:root[data-theme] .status-chip.starting,
 :root[data-theme] .status-chip.running { color: var(--color-state-active); border-color: var(--color-state-active); }
-:root[data-theme] .status-chip.not_started,
+:root[data-theme] .status-chip.starting,
 :root[data-theme] .status-chip.ready,
 :root[data-theme] .status-chip.idle,
 :root[data-theme] .status-chip.waiting { color: var(--color-state-idle); border-color: var(--color-state-idle); }

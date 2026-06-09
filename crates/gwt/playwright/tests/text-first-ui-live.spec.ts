@@ -53,20 +53,20 @@ test.describe("Text-first UI live readability", () => {
                         tab_group_active: false,
                       },
                       {
-                        id: "text-first-not-started-agent",
+                        id: "text-first-starting-agent",
                         title: "Codex",
                         preset: "codex",
                         geometry: { x: 880, y: 120, width: 520, height: 360 },
                         z_index: 12,
-                        status: "not_started",
+                        status: "starting",
                         minimized: false,
                         maximized: false,
                         pre_maximize_geometry: null,
                         persist: true,
                         purpose_title: null,
                         dynamic_title: "Codex",
-                        dynamic_title_detail: "Readable not-started transcript",
-                        agent_id: "agent-not-started",
+                        dynamic_title_detail: "Readable starting transcript",
+                        agent_id: "agent-starting",
                         agent_color: "cyan",
                         tab_group_id: null,
                         tab_group_active: false,
@@ -87,7 +87,7 @@ test.describe("Text-first UI live readability", () => {
     await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
-    for (const id of ["text-first-idle-agent", "text-first-not-started-agent"]) {
+    for (const id of ["text-first-idle-agent", "text-first-starting-agent"]) {
       const workspaceWindow = page.locator(`.workspace-window[data-id="${id}"]`);
       await expect(workspaceWindow).toBeVisible();
       await expect(workspaceWindow).toHaveCSS("opacity", "1");
@@ -96,6 +96,13 @@ test.describe("Text-first UI live readability", () => {
         "rgba(0, 0, 0, 0)",
       );
     }
+
+    // US-69: a pre-lifecycle agent surfaces as "Starting" (not "Not Started").
+    await expect(
+      page.locator(
+        '.workspace-window[data-id="text-first-starting-agent"] .status-label',
+      ),
+    ).toHaveText("Starting");
 
     await page.screenshot({
       path: testInfo.outputPath(`text-first-${theme}-window.png`),
