@@ -316,56 +316,68 @@ export function createWorkspaceKanbanSurface({
     }
   }
 
-  function appendAgents(container, agents) {
-    if (!agents || agents.length === 0) {
-      container.appendChild(createNode("div", "workspace-overview-empty", "No assigned agents"));
+  // SPEC-2359 Workspace → Work → Session: the detail is Session-centric. Each
+  // `work` (a launch, carried in `workspace.agents`) holds its conversation
+  // Sessions in `work.sessions`. Sessions render as the primary rows; a Work
+  // heading only appears when the Workspace has more than one Work. Persistent
+  // Works always render (no live-only filtering), so Paused Workspaces are not
+  // mislabelled "No assigned agents".
+  function appendWorks(container, works) {
+    const list = Array.isArray(works) ? works : [];
+    if (list.length === 0) {
+      container.appendChild(createNode("div", "workspace-overview-empty", "No Work yet"));
       return;
     }
-    const liveStatuses = new Set(["active", "blocked", "idle", "running"]);
-    const live = agents.filter((a) => liveStatuses.has(String(a.status_category || "").toLowerCase()));
-    const terminated = agents.length - live.length;
-
-    if (live.length === 0) {
-      const msg = terminated > 0
-        ? `No active agents (${terminated} completed)`
-        : "No assigned agents";
-      container.appendChild(createNode("div", "workspace-overview-empty", msg));
-      return;
+    const showWorkHeadings = list.length > 1;
+    const wrap = createNode("div", "workspace-detail-work-list");
+    for (const work of list) {
+      if (showWorkHeadings) {
+        wrap.appendChild(
+          createNode(
+            "div",
+            "workspace-detail-work-heading",
+            work.display_name || work.agent_id || "Work",
+          ),
+        );
+      }
+      const sessions = Array.isArray(work.sessions) ? work.sessions : [];
+      if (sessions.length === 0) {
+        // A Work whose conversation Session has not been recorded yet still
+        // appears as a single row so the Work is never hidden.
+        wrap.appendChild(renderSessionRow(work, null));
+        continue;
+      }
+      for (const session of sessions) {
+        wrap.appendChild(renderSessionRow(work, session));
+      }
     }
-
-    const INITIAL_LIMIT = 5;
-    const list = createNode("div", "workspace-detail-agent-list");
-    const visible = live.slice(0, INITIAL_LIMIT);
-    const hidden = live.slice(INITIAL_LIMIT);
-    for (const agent of visible) {
-      list.appendChild(renderAgentRow(agent));
-    }
-    container.appendChild(list);
-    if (hidden.length > 0) {
-      const more = createNode("button", "workspace-detail-more", `${hidden.length} more agents`);
-      more.type = "button";
-      more.addEventListener("click", () => {
-        for (const agent of hidden) {
-          list.appendChild(renderAgentRow(agent));
-        }
-        more.remove();
-      });
-      container.appendChild(more);
-    }
-    if (terminated > 0) {
-      container.appendChild(createNode("div", "workspace-overview-empty", `${terminated} completed agents`));
-    }
+    container.appendChild(wrap);
   }
 
-  function renderAgentRow(agent) {
-    const row = createNode("article", "workspace-detail-agent");
-    row.dataset.status = String(agent.status_category || "idle").toLowerCase();
+  function shortSessionId(value) {
+    const text = String(value || "");
+    return text.length > 8 ? text.slice(0, 8) : text;
+  }
+
+  function renderSessionRow(work, session) {
+    const row = createNode("article", "workspace-detail-session");
+    const active = Boolean(session && session.is_active);
+    row.dataset.active = active ? "true" : "false";
     row.appendChild(
-      createNode("div", "workspace-detail-agent-name", agent.display_name || agent.agent_id || "Agent"),
+      createNode(
+        "div",
+        "workspace-detail-session-name",
+        work.display_name || work.agent_id || "Agent",
+      ),
     );
-    const meta = createNode("div", "workspace-detail-agent-meta");
-    appendMetaText(meta, agentStatusLabel?.(agent.status_category));
-    appendMetaText(meta, agent.title_summary || agent.current_focus);
+    const meta = createNode("div", "workspace-detail-session-meta");
+    if (active) {
+      appendMetaText(meta, "active");
+    }
+    if (session && session.agent_session_id) {
+      appendMetaText(meta, shortSessionId(session.agent_session_id));
+    }
+    appendMetaText(meta, session ? session.started_at : work.updated_at);
     row.appendChild(meta);
     return row;
   }
@@ -488,8 +500,8 @@ export function createWorkspaceKanbanSurface({
       }),
     );
     container.appendChild(
-      detailSection("Agents", (body) => {
-        appendAgents(body, workspace.agents);
+      detailSection("Work", (body) => {
+        appendWorks(body, workspace.agents);
       }),
     );
     container.appendChild(

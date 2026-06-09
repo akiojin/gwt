@@ -1929,6 +1929,7 @@ kbd.op-kbd {
 .workspace-overview-row-meta,
 .workspace-overview-agent-meta,
 .workspace-detail-agent-meta,
+.workspace-detail-session-meta,
 .workspace-detail-event-meta,
 .workspace-detail-subtitle {
   display: flex;
@@ -1948,6 +1949,7 @@ kbd.op-kbd {
 
 .workspace-overview-agent-row,
 .workspace-detail-agent,
+.workspace-detail-session,
 .workspace-detail-event {
   min-width: 0;
   padding: 9px 10px;
@@ -1956,8 +1958,36 @@ kbd.op-kbd {
   background: var(--color-surface-elevated);
 }
 
+/* Workspace → Work → Session: Sessions list under each Work; the active
+   (latest) conversation Session is accented, and a Work heading separates
+   launches only when a Workspace has more than one Work. */
+.workspace-detail-work-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspace-detail-work-heading {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 650;
+  color: var(--color-text-muted);
+}
+
+.workspace-detail-work-list > .workspace-detail-work-heading:first-child {
+  margin-top: 0;
+}
+
+.workspace-detail-session[data-active="true"] {
+  border-color: var(--color-accent);
+  box-shadow: inset 2px 0 0 0 var(--color-accent);
+}
+
 .workspace-overview-agent-name,
 .workspace-detail-agent-name,
+.workspace-detail-session-name,
 .workspace-detail-event-title {
   min-width: 0;
   overflow: hidden;

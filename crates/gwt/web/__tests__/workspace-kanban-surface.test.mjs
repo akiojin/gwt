@@ -142,7 +142,7 @@ test("Workspace detail renders structured body sections without preformatted dum
   );
   assert.deepEqual(sectionTitles, [
     "Summary",
-    "Agents",
+    "Work",
     "Lifecycle",
     "Work Context",
     "Coordination",
@@ -154,6 +154,72 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /work\/20260521-0234/);
   assert.match(text, /repo\/work\/20260521-0234/);
   assert.match(text, /board-claim-1/);
+});
+
+test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A single Work (launch) whose conversation split into two Sessions; the
+  // latest is active.
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-aaaa1111", started_at: "2026-05-21T03:20:00Z", is_active: false },
+    { agent_session_id: "conv-bbbb2222", started_at: "2026-05-21T04:00:00Z", is_active: true },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const sessions = Array.from(fixture.body.querySelectorAll(".workspace-detail-session"));
+  assert.equal(sessions.length, 2, "one row per conversation Session");
+  const active = sessions.filter((row) => row.dataset.active === "true");
+  assert.equal(active.length, 1, "exactly one active Session");
+  // The active row carries the latest conversation's (truncated) id and marker.
+  assert.match(active[0].textContent, /conv-bbb/);
+  assert.match(active[0].textContent, /active/);
+  // A single Work shows no Work heading (heading only when multiple Works).
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-detail-work-heading").length,
+    0,
+  );
+  // Persistent data renders, never the stale "No assigned agents" placeholder.
+  assert.doesNotMatch(fixture.body.textContent, /No assigned agents/);
+});
+
+test("Workspace detail shows a Work heading per launch when a Workspace has multiple Works", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents = [
+    {
+      session_id: "launch-1",
+      agent_id: "codex",
+      display_name: "Codex",
+      sessions: [
+        { agent_session_id: "conv-1", started_at: "2026-05-21T03:20:00Z", is_active: true },
+      ],
+    },
+    {
+      session_id: "launch-2",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      sessions: [
+        { agent_session_id: "conv-2", started_at: "2026-05-21T05:00:00Z", is_active: false },
+      ],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const headings = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-work-heading"),
+    (node) => node.textContent,
+  );
+  assert.deepEqual(headings, ["Codex", "Claude Code"]);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
 });
 
 test("Workspace list selection updates the detail pane", () => {
