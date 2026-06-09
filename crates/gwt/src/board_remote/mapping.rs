@@ -118,6 +118,42 @@ pub fn workspace_summary_card(
     (title, lines.join("\n"))
 }
 
+/// SPEC-2963: a one-line "who + kind + origin" header for a remote post so a
+/// Slack/Teams reader can tell who posted and the entry type (the remote shows
+/// only the OAuth identity otherwise). Mirrors the Local board / CLI
+/// `format_author`: `<author> (<author_kind>) · <kind>[· <branch>[ / <session>]]`.
+pub fn board_entry_meta_line(entry: &BoardEntry) -> String {
+    let author_kind = match entry.author_kind {
+        AuthorKind::Agent => "agent",
+        AuthorKind::User => "user",
+        AuthorKind::System => "system",
+    };
+    let mut line = format!(
+        "{} ({}) · {}",
+        entry.author.trim(),
+        author_kind,
+        entry.kind.as_str()
+    );
+    let branch = entry
+        .origin_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session = entry
+        .origin_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(8).collect::<String>());
+    match (branch, session) {
+        (Some(branch), Some(session)) => line.push_str(&format!(" · {branch} / {session}")),
+        (Some(branch), None) => line.push_str(&format!(" · {branch}")),
+        (None, Some(session)) => line.push_str(&format!(" · {session}")),
+        (None, None) => {}
+    }
+    line
+}
+
 /// Stable hash of a rendered root card (title + body), used to detect when the
 /// Workspace summary changed so the root message is updated. Deterministic
 /// across runs (fixed-seed `DefaultHasher`).
@@ -283,5 +319,55 @@ mod tests {
             vec![],
         );
         assert_eq!(resolve_channel(&broadcast, &map, None), None);
+    }
+
+    #[test]
+    fn meta_line_names_author_kind_and_origin() {
+        // SPEC-2963: a remote reader must be able to tell who posted + the kind.
+        let mut agent = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        agent.origin_branch = Some("feature/x".to_string());
+        agent.origin_session_id = Some("95862acd-a761-4fd0".to_string());
+        let line = board_entry_meta_line(&agent);
+        assert!(line.contains("Codex (agent)"), "author + kind tag: {line}");
+        assert!(line.contains("status"), "entry kind: {line}");
+        assert!(line.contains("feature/x"), "origin branch: {line}");
+        assert!(line.contains("95862acd"), "short session id: {line}");
+        assert!(
+            !line.contains("95862acd-a761"),
+            "session truncated to 8: {line}"
+        );
+
+        // User / system author kinds, and no origin -> no trailing origin part.
+        let user = BoardEntry::new(
+            AuthorKind::User,
+            "akiojin",
+            BoardEntryKind::Decision,
+            "b",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        assert_eq!(board_entry_meta_line(&user), "akiojin (user) · decision");
+        let system = BoardEntry::new(
+            AuthorKind::System,
+            "gwt",
+            BoardEntryKind::Blocked,
+            "b",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        assert_eq!(board_entry_meta_line(&system), "gwt (system) · blocked");
     }
 }

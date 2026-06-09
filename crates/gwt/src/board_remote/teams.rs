@@ -113,11 +113,14 @@ impl TeamsProvider {
     }
 
     /// Post a channel message (root, when `reply_to` is None) or a reply, and
-    /// return the created message id. `subject` is only valid on roots.
+    /// return the created message id. `subject` is only valid on roots. `meta`
+    /// adds a bold "who · kind · origin" line before the body (entry replies
+    /// only; SPEC-2963) so a reader can tell who posted and the entry type.
     fn post_graph_message(
         &self,
         team: &str,
         chan: &str,
+        meta: Option<&str>,
         title: Option<&str>,
         body_markdown: &str,
         reply_to: Option<&str>,
@@ -128,7 +131,13 @@ impl TeamsProvider {
             }
             None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
         };
-        let content = markdown::markdown_to_teams_html(body_markdown);
+        // Prepend the meta as a bold markdown line so the shared renderer escapes
+        // and sanitizes it consistently with the body.
+        let content_markdown = match meta.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(meta) => format!("**{meta}**\n\n{body_markdown}"),
+            None => body_markdown.to_string(),
+        };
+        let content = markdown::markdown_to_teams_html(&content_markdown);
         let mut payload =
             serde_json::json!({ "body": { "contentType": "html", "content": content } });
         if reply_to.is_none() {
@@ -204,7 +213,8 @@ impl TeamsProvider {
             return Ok(existing.root_id);
         }
 
-        let root_id = self.post_graph_message(team, chan, Some(&card_title), &card_body, None)?;
+        let root_id =
+            self.post_graph_message(team, chan, None, Some(&card_title), &card_body, None)?;
         let _ = gwt_core::board_remote_roots::append_root_mapping(
             worktree_root,
             &gwt_core::board_remote_roots::RootMapping {
@@ -394,7 +404,11 @@ impl BoardProvider for TeamsProvider {
         // refreshed when the Workspace changes. `entry.parent_id` collapses into
         // the single Workspace thread (Teams channel replies are one level deep).
         let root_id = self.ensure_thread_root(worktree_root, &team, &chan, &channel, &entry)?;
-        self.post_graph_message(&team, &chan, None, &entry.body, Some(&root_id))?;
+        // The reply carries a "who · kind · origin" meta line so a reader can
+        // tell who posted and the entry type (SPEC-2963). Replies carry no
+        // subject (Graph rejects it), so the meta lives in the body.
+        let meta = mapping::board_entry_meta_line(&entry);
+        self.post_graph_message(&team, &chan, Some(&meta), None, &entry.body, Some(&root_id))?;
         self.cache.invalidate();
         self.load_snapshot(worktree_root)
     }
@@ -891,6 +905,36 @@ mod tests {
         assert!(posts[0]
             .0
             .contains("/teams/team-1/channels/chan-1/messages/OLD/replies"));
+    }
+
+    #[test]
+    fn reply_carries_author_meta_root_does_not() {
+        // SPEC-2963: the reply body leads with a bold "who · kind" meta so a
+        // reader can tell who posted; the root summary card carries no meta.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(
+            &root,
+            entry("hello").with_audience(vec!["ws-a".to_string()]),
+        )
+        .unwrap();
+        let calls = posts.lock().unwrap().clone();
+        // Root card (calls[0]) is the Workspace summary, no author/kind meta.
+        assert!(
+            !calls[0].1.contains("(user)") && !calls[0].1.contains("· status"),
+            "root card has no meta: {}",
+            calls[0].1
+        );
+        // Reply (calls[1]) leads with the who·kind meta.
+        assert!(
+            calls[1].1.contains("You (user)") && calls[1].1.contains("status"),
+            "reply carries the meta: {}",
+            calls[1].1
+        );
     }
 
     #[test]

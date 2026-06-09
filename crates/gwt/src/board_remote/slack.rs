@@ -167,12 +167,24 @@ impl SlackProvider {
         }
     }
 
-    /// Build Block Kit blocks (optional header + body section) and a plain-text
-    /// fallback for a title/body pair. Empty blocks serialize to `"[]"`.
-    fn build_blocks(title: Option<&str>, body_markdown: &str) -> (String, String) {
+    /// Build Block Kit blocks (optional meta context + header + body section)
+    /// and a plain-text fallback. `meta` is a small "who · kind · origin" line
+    /// shown only on entry replies (SPEC-2963), not on root cards. Empty blocks
+    /// serialize to `"[]"`.
+    fn build_blocks(
+        meta: Option<&str>,
+        title: Option<&str>,
+        body_markdown: &str,
+    ) -> (String, String) {
         let title = title.map(str::trim).filter(|t| !t.is_empty());
         let mrkdwn = markdown::markdown_to_slack_mrkdwn(body_markdown);
         let mut blocks: Vec<serde_json::Value> = Vec::new();
+        if let Some(meta) = meta.map(str::trim).filter(|m| !m.is_empty()) {
+            blocks.push(serde_json::json!({
+                "type": "context",
+                "elements": [{ "type": "mrkdwn", "text": meta }]
+            }));
+        }
         if let Some(title) = title {
             let header_text: String = title.chars().take(150).collect();
             blocks.push(serde_json::json!({
@@ -188,23 +200,29 @@ impl SlackProvider {
             }));
         }
         let blocks_json = serde_json::Value::Array(blocks).to_string();
-        let fallback = match title {
+        let body_fallback = match title {
             Some(title) => format!("{title}\n{body_markdown}"),
             None => body_markdown.to_string(),
+        };
+        let fallback = match meta.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(meta) => format!("{meta}\n{body_fallback}"),
+            None => body_fallback,
         };
         (blocks_json, fallback)
     }
 
-    /// Post a message (optionally as a reply under `thread_ts`). Returns the new
+    /// Post a message (optionally as a reply under `thread_ts`). `meta` adds a
+    /// "who · kind · origin" context line (entry replies only). Returns the new
     /// message ts (the thread root id for a root post).
     fn post_message(
         &self,
         channel: &str,
+        meta: Option<&str>,
         title: Option<&str>,
         body_markdown: &str,
         thread_ts: Option<&str>,
     ) -> Result<String> {
-        let (blocks_json, fallback) = Self::build_blocks(title, body_markdown);
+        let (blocks_json, fallback) = Self::build_blocks(meta, title, body_markdown);
         let mut params: Vec<(&str, &str)> = vec![("channel", channel), ("text", &fallback)];
         if blocks_json != "[]" {
             params.push(("blocks", &blocks_json));
@@ -236,6 +254,7 @@ impl SlackProvider {
     }
 
     /// Update an existing message (the Workspace root summary card; SPEC-2963).
+    /// The root card carries no per-entry meta line.
     fn update_message(
         &self,
         channel: &str,
@@ -243,7 +262,7 @@ impl SlackProvider {
         title: Option<&str>,
         body_markdown: &str,
     ) -> Result<()> {
-        let (blocks_json, fallback) = Self::build_blocks(title, body_markdown);
+        let (blocks_json, fallback) = Self::build_blocks(None, title, body_markdown);
         let mut params: Vec<(&str, &str)> =
             vec![("channel", channel), ("ts", ts), ("text", &fallback)];
         if blocks_json != "[]" {
@@ -305,7 +324,7 @@ impl SlackProvider {
             return Ok(existing.root_id);
         }
 
-        let root_ts = self.post_message(channel, Some(&card_title), &card_body, None)?;
+        let root_ts = self.post_message(channel, None, Some(&card_title), &card_body, None)?;
         let _ = gwt_core::board_remote_roots::append_root_mapping(
             worktree_root,
             &gwt_core::board_remote_roots::RootMapping {
@@ -399,8 +418,12 @@ impl BoardProvider for SlackProvider {
         // specific Board entry) collapses into the single Workspace thread since
         // Slack threads are one level deep.
         let root_ts = self.ensure_thread_root(worktree_root, &channel, &entry)?;
+        // The reply carries a "who · kind · origin" meta line so a Slack reader
+        // can tell who posted and the entry type (SPEC-2963).
+        let meta = mapping::board_entry_meta_line(&entry);
         self.post_message(
             &channel,
+            Some(&meta),
             entry.title.as_deref(),
             &entry.body,
             Some(&root_ts),
@@ -651,6 +674,13 @@ mod tests {
         params.iter().any(|(k, v)| k == key && v == value)
     }
 
+    fn param_value(params: &[(String, String)], key: &str) -> Option<String> {
+        params
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
     fn entry(body: &str) -> BoardEntry {
         BoardEntry::new(
             AuthorKind::User,
@@ -709,8 +739,24 @@ mod tests {
         assert!(!posts[0].iter().any(|(k, _)| k == "thread_ts"));
         // Reply: same channel, threads under the root ts (ts-1), carries body.
         assert!(has_param(&posts[1], "channel", "CH-A"));
-        assert!(has_param(&posts[1], "text", "threaded"));
         assert!(has_param(&posts[1], "thread_ts", "ts-1"));
+        let reply_text = param_value(&posts[1], "text").unwrap_or_default();
+        assert!(
+            reply_text.contains("threaded"),
+            "reply carries the body: {reply_text}"
+        );
+        // SPEC-2963: the reply carries a who·kind meta context block; the root
+        // card (posts[0]) does not.
+        let reply_blocks = param_value(&posts[1], "blocks").unwrap_or_default();
+        assert!(
+            reply_blocks.contains("\"context\"") && reply_blocks.contains("status"),
+            "reply has a meta context block naming the kind: {reply_blocks}"
+        );
+        let root_blocks = param_value(&posts[0], "blocks").unwrap_or_default();
+        assert!(
+            !root_blocks.contains("\"context\""),
+            "root card has no meta context block: {root_blocks}"
+        );
     }
 
     #[test]
