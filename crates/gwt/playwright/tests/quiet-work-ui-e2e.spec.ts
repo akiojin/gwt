@@ -59,8 +59,13 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(active).toContainText("conv-bbb");
     await expect(active).toContainText("active");
 
-    // A single Work shows no Work heading (headings only when multiple Works).
-    await expect(page.locator(".workspace-detail-work-heading")).toHaveCount(0);
+    // Each Work renders one Agent header (the agent/tool name), always shown,
+    // so two Sessions of one Work never look like two Agents. The Session rows
+    // are labelled "Session ...", not with the agent name.
+    const heading = page.locator(".workspace-detail-work-heading");
+    await expect(heading).toHaveCount(1);
+    await expect(heading).toHaveText("Codex");
+    await expect(sessions.first()).toContainText("Session");
     // Persistent data renders; never the stale "No assigned agents" placeholder.
     await expect(page.locator(".workspace-overview-detail-pane")).not.toContainText(
       "No assigned agents",

@@ -178,11 +178,13 @@ test("Workspace detail renders Sessions under a Work, highlighting the active on
   // The active row carries the latest conversation's (truncated) id and marker.
   assert.match(active[0].textContent, /conv-bbb/);
   assert.match(active[0].textContent, /active/);
-  // A single Work shows no Work heading (heading only when multiple Works).
-  assert.equal(
-    fixture.body.querySelectorAll(".workspace-detail-work-heading").length,
-    0,
-  );
+  // Each Work renders exactly one Agent header (the agent/tool name), always
+  // shown, so two Sessions of one Work never look like two Agents. The Session
+  // rows are labelled "Session ...", not with the agent name.
+  const headings = fixture.body.querySelectorAll(".workspace-detail-work-heading");
+  assert.equal(headings.length, 1, "one Agent header per Work");
+  assert.match(headings[0].textContent, /Codex/);
+  assert.match(sessions[0].textContent, /Session/);
   // Persistent data renders, never the stale "No assigned agents" placeholder.
   assert.doesNotMatch(fixture.body.textContent, /No assigned agents/);
 });

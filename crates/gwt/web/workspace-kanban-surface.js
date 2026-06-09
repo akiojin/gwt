@@ -329,35 +329,36 @@ export function createWorkspaceKanbanSurface({
       container.appendChild(createNode("div", "workspace-overview-empty", "No Work yet"));
       return;
     }
-    const showWorkHeadings = list.length > 1;
     const wrap = createNode("div", "workspace-detail-work-list");
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
-      // Per-Work head: the optional Work label (only when the Workspace holds
-      // more than one Work) plus the per-Work Resume control. Resume is a Work
-      // (launch) operation, so it lives here — not on the Workspace header.
+      // Each Work is one Agent (a launch). The Agent header names the agent
+      // (tool) and carries the per-Agent Resume control; the Work's Sessions
+      // (its conversation history) are listed under it as sub-rows. The header
+      // is always shown so two Sessions of one Work never look like two Agents.
       const head = createNode("div", "workspace-detail-work-head");
-      if (showWorkHeadings) {
-        head.appendChild(
-          createNode(
-            "div",
-            "workspace-detail-work-heading",
-            work.display_name || work.agent_id || "Work",
-          ),
-        );
-      }
+      head.appendChild(
+        createNode(
+          "div",
+          "workspace-detail-work-heading",
+          work.display_name || work.agent_id || "Agent",
+        ),
+      );
       const resumeBtn = renderWorkResumeButton(work);
       if (resumeBtn) {
         head.appendChild(resumeBtn);
       }
-      if (head.childNodes.length > 0) {
-        group.appendChild(head);
-      }
+      group.appendChild(head);
+
       const sessions = Array.isArray(work.sessions) ? work.sessions : [];
       if (sessions.length === 0) {
-        // A Work whose conversation Session has not been recorded yet still
-        // appears as a single row so the Work is never hidden.
-        group.appendChild(renderSessionRow(work, null));
+        group.appendChild(
+          createNode(
+            "div",
+            "workspace-overview-empty workspace-detail-session-empty",
+            "No session yet",
+          ),
+        );
       } else {
         for (const session of sessions) {
           group.appendChild(renderSessionRow(work, session));
@@ -411,19 +412,14 @@ export function createWorkspaceKanbanSurface({
     const row = createNode("article", "workspace-detail-session");
     const active = Boolean(session && session.is_active);
     row.dataset.active = active ? "true" : "false";
-    row.appendChild(
-      createNode(
-        "div",
-        "workspace-detail-session-name",
-        work.display_name || work.agent_id || "Agent",
-      ),
-    );
+    // The row is a Session (a conversation under the Agent), not the Agent
+    // itself — the Agent (tool) is named once on the group header above.
+    const sessionId = session && session.agent_session_id;
+    const label = sessionId ? `Session ${shortSessionId(sessionId)}` : "Session";
+    row.appendChild(createNode("div", "workspace-detail-session-name", label));
     const meta = createNode("div", "workspace-detail-session-meta");
     if (active) {
       appendMetaText(meta, "active");
-    }
-    if (session && session.agent_session_id) {
-      appendMetaText(meta, shortSessionId(session.agent_session_id));
     }
     appendMetaText(meta, session ? session.started_at : work.updated_at);
     row.appendChild(meta);
