@@ -266,19 +266,68 @@ test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () 
     sendFocus() {},
   });
 
-  // Resume lives on each Work row, not on the Workspace header.
+  // Resume lives on the list elements, not on the Workspace header. A Work with
+  // no recorded conversation still exposes Resume on its placeholder row.
   assert.equal(
     fixture.body.querySelector("[data-action='resume-workspace']"),
     null,
     "Workspace header no longer carries a Resume button",
   );
   const resume = fixture.body.querySelector("[data-action='resume-work']");
-  assert.ok(resume, "each resumable Work exposes its own Resume action");
+  assert.ok(resume, "a session-less Work still exposes a Resume action");
   assert.equal(resume.dataset.sessionId, "work-launch-1");
   resume.click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
   assert.equal(sent[0].session_id, "work-launch-1");
+  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+});
+
+test("Each Session row carries its own Resume that resumes that conversation (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused (resumable) Work whose conversation split into two Sessions. Each
+  // Session row is a list element, so each gets its own Resume control.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-older1111", started_at: "2026-05-21T03:20:00Z", is_active: false },
+    { agent_session_id: "conv-latest2222", started_at: "2026-05-21T04:00:00Z", is_active: true },
+  ];
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // One Resume per Session row (list element), not one per Work and not on the
+  // Workspace header.
+  assert.equal(fixture.body.querySelector("[data-action='resume-workspace']"), null);
+  assert.equal(fixture.body.querySelector("[data-action='resume-work']"), null);
+  const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
+  assert.equal(resumes.length, 2, "one Resume per conversation Session");
+  // Every Resume targets the same Work (gwt session id) but a distinct
+  // conversation (agent_session_id).
+  assert.deepEqual(
+    resumes.map((node) => node.dataset.sessionId),
+    ["work-launch-1", "work-launch-1"],
+  );
+  assert.deepEqual(
+    resumes.map((node) => node.dataset.agentSessionId),
+    ["conv-older1111", "conv-latest2222"],
+  );
+
+  // Resuming the older Session resumes that exact conversation, not the latest.
+  resumes[0].click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  assert.equal(sent[0].agent_session_id, "conv-older1111");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 

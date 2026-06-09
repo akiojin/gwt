@@ -76,11 +76,21 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
       "Workspace",
     );
-    // Resume lives on the Work, not the Workspace header.
+    // Resume lives on each Session row (one per conversation), not on the
+    // Workspace header and not as a single Work-level control.
     await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
-    const workResume = page.locator("[data-action='resume-work']");
-    await expect(workResume).toHaveCount(1);
-    await expect(workResume).toHaveAttribute("data-session-id", "agent-current");
+    await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
+    const sessionResume = page.locator("[data-action='resume-session']");
+    await expect(sessionResume).toHaveCount(2);
+    await expect(sessionResume.nth(0)).toHaveAttribute("data-session-id", "agent-current");
+    await expect(sessionResume.nth(0)).toHaveAttribute(
+      "data-agent-session-id",
+      "conv-aaaa1111",
+    );
+    await expect(sessionResume.nth(1)).toHaveAttribute(
+      "data-agent-session-id",
+      "conv-bbbb2222",
+    );
   });
 
   test("Release Notes opens as a modal-style op-global-window", async ({

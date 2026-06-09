@@ -333,9 +333,10 @@ export function createWorkspaceKanbanSurface({
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
       // Each Work is one Agent (a launch). The Agent header names the agent
-      // (tool) and carries the per-Agent Resume control; the Work's Sessions
-      // (its conversation history) are listed under it as sub-rows. The header
-      // is always shown so two Sessions of one Work never look like two Agents.
+      // (tool); the Work's Sessions (its conversation history) are listed under
+      // it as sub-rows, and Resume lives on each Session row (a single list
+      // element) so any conversation can be resumed directly. The header is
+      // always shown so two Sessions of one Work never look like two Agents.
       const head = createNode("div", "workspace-detail-work-head");
       head.appendChild(
         createNode(
@@ -344,21 +345,22 @@ export function createWorkspaceKanbanSurface({
           work.display_name || work.agent_id || "Agent",
         ),
       );
-      const resumeBtn = renderWorkResumeButton(work);
-      if (resumeBtn) {
-        head.appendChild(resumeBtn);
-      }
       group.appendChild(head);
 
       const sessions = Array.isArray(work.sessions) ? work.sessions : [];
       if (sessions.length === 0) {
-        group.appendChild(
-          createNode(
-            "div",
-            "workspace-overview-empty workspace-detail-session-empty",
-            "No session yet",
-          ),
+        // No conversation recorded yet — still expose a Resume control on the
+        // placeholder row so a session-less Work stays launchable.
+        const empty = createNode(
+          "div",
+          "workspace-overview-empty workspace-detail-session-empty",
+          "No session yet",
         );
+        const resumeBtn = renderWorkResumeButton(work);
+        if (resumeBtn) {
+          empty.appendChild(resumeBtn);
+        }
+        group.appendChild(empty);
       } else {
         for (const session of sessions) {
           group.appendChild(renderSessionRow(work, session));
@@ -398,9 +400,53 @@ export function createWorkspaceKanbanSurface({
       return;
     }
     // resume_workspace_agent resumes by the gwt session id (the Work / launch),
-    // which is exactly work.session_id — so this Work can be resumed directly
-    // without the Workspace-scoped picker.
+    // which is exactly work.session_id. Without an agent_session_id the Work's
+    // latest conversation (or a fresh start) is resumed.
     send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
+  }
+
+  function renderSessionResumeButton(work, session) {
+    // Resume sits on each Session row so a single conversation can be resumed
+    // directly. A live (running) Work has nothing to resume; only Paused /
+    // historical Works (or history view, which has no status) get the control.
+    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
+    if (status === "active" || status === "running") {
+      return null;
+    }
+    if (!work || !work.session_id) {
+      return null;
+    }
+    const button = createNode("button", "wizard-button is-compact", "Resume");
+    button.type = "button";
+    button.dataset.action = "resume-session";
+    button.dataset.sessionId = work.session_id;
+    const agentSessionId = session && session.agent_session_id;
+    if (agentSessionId) {
+      button.dataset.agentSessionId = agentSessionId;
+    }
+    button.addEventListener("click", () => resumeSession(work, session));
+    return button;
+  }
+
+  function resumeSession(work, session) {
+    const sessionId = work && work.session_id;
+    if (!sessionId) {
+      return;
+    }
+    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
+    if (!bounds) {
+      return;
+    }
+    // resume_workspace_agent loads the launch config from the gwt session id
+    // (the Work) and resumes the specific conversation named by
+    // agent_session_id (this Session row).
+    const agentSessionId = session && session.agent_session_id ? session.agent_session_id : null;
+    send({
+      kind: "resume_workspace_agent",
+      session_id: sessionId,
+      agent_session_id: agentSessionId,
+      bounds,
+    });
   }
 
   function shortSessionId(value) {
@@ -413,16 +459,24 @@ export function createWorkspaceKanbanSurface({
     const active = Boolean(session && session.is_active);
     row.dataset.active = active ? "true" : "false";
     // The row is a Session (a conversation under the Agent), not the Agent
-    // itself — the Agent (tool) is named once on the group header above.
+    // itself — the Agent (tool) is named once on the group header above. The
+    // label + meta sit on the left; Resume for this conversation sits on the
+    // right of the same list element.
+    const main = createNode("div", "workspace-detail-session-main");
     const sessionId = session && session.agent_session_id;
     const label = sessionId ? `Session ${shortSessionId(sessionId)}` : "Session";
-    row.appendChild(createNode("div", "workspace-detail-session-name", label));
+    main.appendChild(createNode("div", "workspace-detail-session-name", label));
     const meta = createNode("div", "workspace-detail-session-meta");
     if (active) {
       appendMetaText(meta, "active");
     }
     appendMetaText(meta, session ? session.started_at : work.updated_at);
-    row.appendChild(meta);
+    main.appendChild(meta);
+    row.appendChild(main);
+    const resume = renderSessionResumeButton(work, session);
+    if (resume) {
+      row.appendChild(resume);
+    }
     return row;
   }
 

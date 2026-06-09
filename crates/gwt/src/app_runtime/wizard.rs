@@ -487,6 +487,7 @@ impl AppRuntime {
         &mut self,
         client_id: &str,
         session_id: String,
+        agent_session_id: Option<String>,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let reply_error = |message: String| {
@@ -590,10 +591,12 @@ impl AppRuntime {
             builder = builder.linked_issue_number(linked);
         }
 
-        if let Some(resume_id) = session.exact_resume_session_id() {
+        // Resume the specific Session (conversation UUID) the user clicked when
+        // one was requested; otherwise resume the Work's latest conversation.
+        if let Some(resume_id) = session.resume_session_id_for(agent_session_id.as_deref()) {
             builder = builder
                 .session_mode(gwt_agent::SessionMode::Resume)
-                .resume_session_id(resume_id.to_string());
+                .resume_session_id(resume_id);
         } else {
             // Resume picker selected an entry without an agent-side
             // session id (e.g. Session toml exists but no `--resume`

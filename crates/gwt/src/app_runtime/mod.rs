@@ -4705,8 +4705,12 @@ impl AppRuntime {
             FrontendEvent::ListResumableAgents { workspace_id } => {
                 self.list_resumable_agents_events(&client_id, workspace_id)
             }
-            FrontendEvent::ResumeWorkspaceAgent { session_id, bounds } => {
-                self.resume_workspace_agent_events(&client_id, session_id, bounds)
+            FrontendEvent::ResumeWorkspaceAgent {
+                session_id,
+                agent_session_id,
+                bounds,
+            } => {
+                self.resume_workspace_agent_events(&client_id, session_id, agent_session_id, bounds)
             }
             FrontendEvent::ResumeBranchLatestAgent {
                 id,
@@ -17073,6 +17077,7 @@ exit 1
             "client-1".to_string(),
             FrontendEvent::ResumeWorkspaceAgent {
                 session_id: "missing-session".to_string(),
+                agent_session_id: None,
                 bounds: canvas_bounds(),
             },
         );
@@ -17119,6 +17124,7 @@ exit 1
             "client-1".to_string(),
             FrontendEvent::ResumeWorkspaceAgent {
                 session_id: "stopped-session".to_string(),
+                agent_session_id: None,
                 bounds: canvas_bounds(),
             },
         );

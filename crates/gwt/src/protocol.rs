@@ -516,11 +516,17 @@ pub enum FrontendEvent {
     /// SPEC-2359 US-42: spawn a single previously-assigned agent in the
     /// current Workspace without opening the Launch Wizard. The
     /// `session_id` matches one of the entries returned by
-    /// [`BackendEvent::WorkspaceResumableAgents`]. `bounds` carries the
-    /// frontend's current viewport so the spawned agent window appears at
-    /// a sensible position inside the visible canvas.
+    /// [`BackendEvent::WorkspaceResumableAgents`] and identifies the Work
+    /// (the gwt launch / Session TOML). `agent_session_id`, when present,
+    /// names a specific Session (a conversation UUID under that Work) so a
+    /// single Session row can be resumed directly; when absent the Work's
+    /// latest conversation is resumed. `bounds` carries the frontend's
+    /// current viewport so the spawned agent window appears at a sensible
+    /// position inside the visible canvas.
     ResumeWorkspaceAgent {
         session_id: String,
+        #[serde(default)]
+        agent_session_id: Option<String>,
         bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {

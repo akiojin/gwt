@@ -321,6 +321,26 @@ impl Session {
         self.exact_resume_session_id().is_some()
     }
 
+    /// Resolve the agent-side resume handle for a Workspace → Work → Session
+    /// resume. When `requested` names a specific Session (a conversation UUID
+    /// from [`Session::session_history`]) that conversation is resumed;
+    /// otherwise it falls back to the latest captured handle
+    /// ([`Session::exact_resume_session_id`], the plain Work resume). Blank or
+    /// Codex-placeholder requests are ignored so they fall back to the latest
+    /// handle instead of trying to resume an unusable id.
+    pub fn resume_session_id_for(&self, requested: Option<&str>) -> Option<String> {
+        let usable = |value: &str| -> bool {
+            let value = value.trim();
+            !(value.is_empty()
+                || (matches!(self.agent_id, AgentId::Codex)
+                    && value == CODEX_PLACEHOLDER_SESSION_ID))
+        };
+        if let Some(requested) = requested.filter(|value| usable(value)) {
+            return Some(requested.trim().to_string());
+        }
+        self.exact_resume_session_id().map(str::to_string)
+    }
+
     /// Check if the session should be marked as stopped due to idle timeout.
     pub fn should_mark_stopped(&self) -> bool {
         if self.status == AgentStatus::Stopped {
@@ -1011,6 +1031,37 @@ display_name = "Claude Code"
             .collect();
         assert_eq!(history, vec!["agent-1", "agent-2"]);
         assert!(loaded.session_history[0].started_at <= loaded.session_history[1].started_at);
+    }
+
+    // SPEC-2359 Workspace → Work → Session: a Session row (one conversation
+    // UUID) can be resumed directly. `resume_session_id_for` resumes the
+    // requested conversation when given one, and otherwise falls back to the
+    // latest captured handle (the plain Work resume).
+    #[test]
+    fn resume_session_id_for_prefers_requested_conversation() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.agent_session_id = Some("conv-latest".to_string());
+
+        // A specific (historical) Session is requested → resume that exact
+        // conversation, not the latest one.
+        assert_eq!(
+            session.resume_session_id_for(Some("conv-older")),
+            Some("conv-older".to_string()),
+        );
+        // No request → fall back to the latest captured conversation handle.
+        assert_eq!(
+            session.resume_session_id_for(None),
+            Some("conv-latest".to_string()),
+        );
+        // Blank / placeholder requests are ignored and fall back to latest.
+        assert_eq!(
+            session.resume_session_id_for(Some("   ")),
+            Some("conv-latest".to_string()),
+        );
+        assert_eq!(
+            session.resume_session_id_for(Some(CODEX_PLACEHOLDER_SESSION_ID)),
+            Some("conv-latest".to_string()),
+        );
     }
 
     #[test]

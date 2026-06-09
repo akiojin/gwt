@@ -2001,9 +2001,33 @@ kbd.op-kbd {
   font-size: var(--type-xs);
 }
 
+/* Each Session row is a list element: label + meta on the left, its own Resume
+   control on the right, so any conversation can be resumed directly. */
+.workspace-detail-session {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspace-detail-session-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 .workspace-detail-session[data-active="true"] {
   border-color: var(--color-accent);
   box-shadow: inset 2px 0 0 0 var(--color-accent);
+}
+
+/* No-session placeholder still carries a Resume control on the right. */
+.workspace-detail-session-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .workspace-overview-agent-name,
