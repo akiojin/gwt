@@ -2454,7 +2454,13 @@ fn append_paused_work_items(
             pr_url: container.and_then(|value| value.pr_url.clone()),
             pr_state: container.and_then(|value| value.pr_state.clone()),
             board_refs: work.board_refs.clone(),
-            agents: Vec::new(),
+            // Carry the persisted Work's agents (each with its Session history)
+            // so a Paused Workspace still renders Work → Session in the detail.
+            agents: work
+                .agents
+                .iter()
+                .map(paused_work_agent_view_from_history)
+                .collect(),
             // No live agent session owns this Work and it is not user-closed →
             // WorkAgentRuntime::None resolves to Paused (FR-350).
             lifecycle_state: work_active_lifecycle_state_wire(
@@ -2898,6 +2904,36 @@ fn active_work_agent_view_from_summary(
             .map(|kind| kind.as_str().to_string()),
         coordination_scope: agent.coordination_scope.clone(),
         updated_at: agent.updated_at.to_rfc3339(),
+        // Live projection summaries do not carry conversation history; Paused
+        // Works fill this in from the persisted Session via
+        // `paused_work_agent_view_from_history`.
+        sessions: Vec::new(),
+    }
+}
+
+/// Convert a persisted Work's agent (a launch, carrying its Session history) to
+/// the active-surface agent view so Paused Workspaces render their Work →
+/// Session list instead of an empty agent list.
+fn paused_work_agent_view_from_history(
+    agent: &gwt::WorkspaceHistoryAgentView,
+) -> gwt::ActiveWorkAgentView {
+    gwt::ActiveWorkAgentView {
+        session_id: agent.session_id.clone(),
+        window_id: None,
+        agent_id: agent.agent_id.clone().unwrap_or_default(),
+        display_name: agent.display_name.clone().unwrap_or_default(),
+        affiliation_status: "assigned".to_string(),
+        workspace_id: None,
+        status_category: "idle".to_string(),
+        current_focus: None,
+        title_summary: None,
+        branch: None,
+        worktree_path: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at: agent.updated_at.clone(),
+        sessions: agent.sessions.clone(),
     }
 }
 

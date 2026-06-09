@@ -941,6 +941,11 @@ pub struct ActiveWorkAgentView {
     pub last_board_entry_kind: Option<String>,
     pub coordination_scope: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Drives the Session-centric detail rendering; empty when no
+    /// Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2692,6 +2697,7 @@ mod tests {
                     last_board_entry_kind: Some("handoff".to_string()),
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
+                    sessions: Vec::new(),
                 }],
                 unassigned_agents: Vec::new(),
             }),
