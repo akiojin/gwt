@@ -3676,11 +3676,7 @@ const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     },
 ];
 
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
-    ModelDisplayOption {
-        label: "Default (Auto)",
-        description: "Use Codex default model (gpt-5.5)",
-    },
+const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     ModelDisplayOption {
         label: "gpt-5.5",
         description: "Frontier model for complex coding, research, and real-world work",
@@ -3694,16 +3690,8 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
         description: "Small, fast, and cost-efficient model for simpler coding tasks",
     },
     ModelDisplayOption {
-        label: "gpt-5.3-codex",
-        description: "Coding-optimized model",
-    },
-    ModelDisplayOption {
         label: "gpt-5.3-codex-spark",
         description: "Ultra-fast coding model",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.2",
-        description: "Optimized for professional work and long-running agents",
     },
 ];
 
@@ -5891,7 +5879,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_with_removed_codex_model_falls_back_to_auto() {
+    fn quick_start_with_removed_codex_model_falls_back_to_current_default() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -5917,11 +5905,11 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "Default (Auto)");
+        assert_eq!(state.model, "gpt-5.5");
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert!(config.model.is_none());
+                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -7257,7 +7245,7 @@ mod tests {
         assert_eq!(state.agent_id, "codex");
 
         state.step = LaunchWizardStep::ModelSelect;
-        state.selected = 1;
+        state.selected = 0;
         state.apply_selection();
         assert_eq!(state.model, "gpt-5.5");
 
@@ -7821,15 +7809,7 @@ mod tests {
         assert!(current_model_options("claude").contains(&"Default (Opus 4.8)"));
         assert_eq!(
             current_model_options("codex"),
-            vec![
-                "Default (Auto)",
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.3-codex",
-                "gpt-5.3-codex-spark",
-                "gpt-5.2",
-            ]
+            vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
         );
         assert_eq!(
             current_model_options("gemini"),
