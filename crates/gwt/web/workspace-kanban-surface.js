@@ -10,6 +10,7 @@ export function createWorkspaceKanbanSurface({
   windowMap,
   workspaceWindowById,
   openWorkspaceResumePicker,
+  getResumeBounds,
   branchesSurface,
 }) {
   const workspaceStateMap = new Map();
@@ -280,7 +281,7 @@ export function createWorkspaceKanbanSurface({
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
-      appendMetaText(meta, "No Work selected");
+      appendMetaText(meta, "No Workspace selected");
       appendMetaText(meta, agentStatusLabel?.(agent.status_category));
       appendMetaText(meta, agent.branch);
       row.appendChild(meta);
@@ -331,8 +332,13 @@ export function createWorkspaceKanbanSurface({
     const showWorkHeadings = list.length > 1;
     const wrap = createNode("div", "workspace-detail-work-list");
     for (const work of list) {
+      const group = createNode("div", "workspace-detail-work-group");
+      // Per-Work head: the optional Work label (only when the Workspace holds
+      // more than one Work) plus the per-Work Resume control. Resume is a Work
+      // (launch) operation, so it lives here — not on the Workspace header.
+      const head = createNode("div", "workspace-detail-work-head");
       if (showWorkHeadings) {
-        wrap.appendChild(
+        head.appendChild(
           createNode(
             "div",
             "workspace-detail-work-heading",
@@ -340,18 +346,60 @@ export function createWorkspaceKanbanSurface({
           ),
         );
       }
+      const resumeBtn = renderWorkResumeButton(work);
+      if (resumeBtn) {
+        head.appendChild(resumeBtn);
+      }
+      if (head.childNodes.length > 0) {
+        group.appendChild(head);
+      }
       const sessions = Array.isArray(work.sessions) ? work.sessions : [];
       if (sessions.length === 0) {
         // A Work whose conversation Session has not been recorded yet still
         // appears as a single row so the Work is never hidden.
-        wrap.appendChild(renderSessionRow(work, null));
-        continue;
+        group.appendChild(renderSessionRow(work, null));
+      } else {
+        for (const session of sessions) {
+          group.appendChild(renderSessionRow(work, session));
+        }
       }
-      for (const session of sessions) {
-        wrap.appendChild(renderSessionRow(work, session));
-      }
+      wrap.appendChild(group);
     }
     container.appendChild(wrap);
+  }
+
+  function renderWorkResumeButton(work) {
+    // A live (running) Work has nothing to resume; only Paused / historical
+    // Works get a Resume control. Works without a status (history view) are
+    // treated as resumable.
+    const status = String(work && work.status_category ? work.status_category : "").toLowerCase();
+    if (status === "active" || status === "running") {
+      return null;
+    }
+    if (!work || !work.session_id) {
+      return null;
+    }
+    const button = createNode("button", "wizard-button is-compact", "Resume");
+    button.type = "button";
+    button.dataset.action = "resume-work";
+    button.dataset.sessionId = work.session_id;
+    button.addEventListener("click", () => resumeWork(work));
+    return button;
+  }
+
+  function resumeWork(work) {
+    const sessionId = work && work.session_id;
+    if (!sessionId) {
+      return;
+    }
+    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
+    if (!bounds) {
+      return;
+    }
+    // resume_workspace_agent resumes by the gwt session id (the Work / launch),
+    // which is exactly work.session_id — so this Work can be resumed directly
+    // without the Workspace-scoped picker.
+    send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
   }
 
   function shortSessionId(value) {
@@ -437,7 +485,7 @@ export function createWorkspaceKanbanSurface({
   function renderWorkspaceDetail(container, workspace) {
     container.innerHTML = "";
     if (!workspace) {
-      const empty = createNode("div", "workspace-overview-empty", "No Work");
+      const empty = createNode("div", "workspace-overview-empty", "No Workspace selected");
       container.appendChild(empty);
       return;
     }
@@ -453,11 +501,10 @@ export function createWorkspaceKanbanSurface({
     header.appendChild(titleWrap);
 
     const actions = createNode("div", "workspace-detail-actions");
-    const resumeButton = createNode("button", "wizard-button", "Resume");
-    resumeButton.type = "button";
-    resumeButton.dataset.action = "resume-workspace";
-    resumeButton.addEventListener("click", () => resumeWorkspace(workspace));
-    actions.appendChild(resumeButton);
+    // SPEC-2359: Resume is a per-Work (launch) operation, so the Resume control
+    // lives on each Work row (see appendWorks / renderWorkResumeButton), not on
+    // the Workspace header. The Workspace header keeps only Workspace-level
+    // lifecycle actions (Done / Discard / Clean Up).
     // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
     // closing. Done / Discard are explicit user closes (FR-350 — agent stop
     // alone never closes a Work). The actual cleanup is a follow-up slice, so
@@ -562,14 +609,14 @@ export function createWorkspaceKanbanSurface({
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
       status.textContent = projection
-        ? `${workspaces.length} Active Works · ${unassignedAgents.length} Unassigned Agents`
-        : "No Work projection";
+        ? `${workspaces.length} Workspaces · ${unassignedAgents.length} Unassigned Agents`
+        : "No Workspace projection";
     }
 
     const list = root.querySelector(".workspace-overview-list");
     list.innerHTML = "";
     if (workspaces.length === 0) {
-      list.appendChild(createNode("div", "workspace-overview-empty", "No Work"));
+      list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
       for (const workspace of workspaces) {
         list.appendChild(renderWorkspaceRow(windowId, state, workspace));
@@ -588,7 +635,7 @@ export function createWorkspaceKanbanSurface({
 
     const toolbar = createNode("div", "workspace-toolbar is-stacked workspace-overview-toolbar");
     const toolbarMain = createNode("div", "workspace-toolbar-main");
-    toolbarMain.appendChild(createNode("div", "knowledge-heading", "Work"));
+    toolbarMain.appendChild(createNode("div", "knowledge-heading", "Workspace"));
     toolbarMain.appendChild(createNode("div", "knowledge-status workspace-overview-status-line"));
     toolbar.appendChild(toolbarMain);
 
@@ -598,15 +645,15 @@ export function createWorkspaceKanbanSurface({
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
     const refreshBtn = createNode("button", "icon-button", "↻");
     refreshBtn.dataset.action = "refresh-workspace-overview";
-    refreshBtn.setAttribute("aria-label", "Refresh Work");
+    refreshBtn.setAttribute("aria-label", "Refresh Workspaces");
     toolbarActions.appendChild(refreshBtn);
     toolbar.appendChild(toolbarActions);
     root.appendChild(toolbar);
 
     const workShell = createNode("div", "workspace-overview-shell");
     const listPane = createNode("aside", "workspace-overview-list-pane");
-    listPane.setAttribute("aria-label", "Work list");
-    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Active Works"));
+    listPane.setAttribute("aria-label", "Workspace list");
+    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Workspaces"));
     const listBox = createNode("div", "workspace-overview-list");
     listBox.setAttribute("role", "listbox");
     listPane.appendChild(listBox);

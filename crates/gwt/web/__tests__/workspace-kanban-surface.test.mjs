@@ -41,7 +41,7 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue, "unassigned agents should have a dedicated queue");
   assert.match(queue.textContent, /Unassigned Agents/);
-  assert.match(queue.textContent, /No Work selected/);
+  assert.match(queue.textContent, /No Workspace selected/);
   assert.match(queue.textContent, /Codex/);
   assert.equal(
     queue.querySelectorAll(".workspace-overview-agent-row").length,
@@ -102,11 +102,11 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
     sendFocus() {},
   });
 
-  assert.match(fixture.body.textContent, /Active Works/);
+  assert.match(fixture.body.textContent, /Workspaces/);
   assert.match(fixture.body.textContent, /Unassigned Agents/);
   assert.match(
     fixture.body.querySelector(".workspace-overview-status-line").textContent,
-    /2 Active Works · 1 Unassigned Agents/,
+    /2 Workspaces · 1 Unassigned Agents/,
   );
   const rows = Array.from(
     fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
@@ -120,7 +120,7 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue);
   assert.equal(queue.querySelectorAll(".workspace-overview-agent-row").length, 1);
-  assert.match(queue.textContent, /No Work selected/);
+  assert.match(queue.textContent, /No Workspace selected/);
 });
 
 test("Workspace detail renders structured body sections without preformatted dumps", () => {
@@ -247,11 +247,16 @@ test("Workspace list selection updates the detail pane", () => {
   assert.match(detailText, /Already merged/);
 });
 
-test("Workspace resume action asks backend for resumable agents", () => {
+test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused (resumable) Work — the active/running Work has nothing to resume.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
   const fixture = createFixture();
   const sent = [];
-  const surface = createSurface(fixture, sampleProjection(), {
+  const surface = createSurface(fixture, projection, {
     send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.mount(fixture.body, fixture.windowData, {
@@ -259,12 +264,20 @@ test("Workspace resume action asks backend for resumable agents", () => {
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-workspace']");
-  assert.ok(resume, "selected workspace should expose a resume action");
+  // Resume lives on each Work row, not on the Workspace header.
+  assert.equal(
+    fixture.body.querySelector("[data-action='resume-workspace']"),
+    null,
+    "Workspace header no longer carries a Resume button",
+  );
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  assert.ok(resume, "each resumable Work exposes its own Resume action");
+  assert.equal(resume.dataset.sessionId, "work-launch-1");
   resume.click();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "list_resumable_agents");
-  assert.equal(sent[0].workspace_id, "workspace-current");
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
 test("Workspace surface is a single fused view with no Work/Git Branches tab toggle (SPEC-2359)", () => {

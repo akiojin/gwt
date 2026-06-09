@@ -65,6 +65,17 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-detail-pane")).not.toContainText(
       "No assigned agents",
     );
+
+    // The surface is titled "Workspace" (the selected entity is a Workspace,
+    // not an individual Work).
+    await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
+      "Workspace",
+    );
+    // Resume lives on the Work, not the Workspace header.
+    await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
+    const workResume = page.locator("[data-action='resume-work']");
+    await expect(workResume).toHaveCount(1);
+    await expect(workResume).toHaveAttribute("data-session-id", "agent-current");
   });
 
   test("Release Notes opens as a modal-style op-global-window", async ({
@@ -172,7 +183,7 @@ async function installBackend(page: any) {
                 session_id: "agent-current",
                 agent_id: "codex",
                 display_name: "Codex",
-                status_category: "active",
+                status_category: "idle",
                 title_summary: "Phase 10 implementation",
                 current_focus: "Workspace Overview shell",
                 sessions: [

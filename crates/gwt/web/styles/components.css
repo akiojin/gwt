@@ -1968,16 +1968,37 @@ kbd.op-kbd {
   min-width: 0;
 }
 
+.workspace-detail-work-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Per-Work head: optional Work label on the left, the per-Work Resume control
+   on the right. Resume is a Work (launch) operation, not a Workspace one. */
+.workspace-detail-work-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
 .workspace-detail-work-heading {
-  margin-top: 6px;
+  min-width: 0;
+  overflow: hidden;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: 650;
   color: var(--color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.workspace-detail-work-list > .workspace-detail-work-heading:first-child {
-  margin-top: 0;
+.wizard-button.is-compact {
+  padding: 3px 10px;
+  font-size: var(--type-xs);
 }
 
 .workspace-detail-session[data-active="true"] {
