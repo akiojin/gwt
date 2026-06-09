@@ -958,12 +958,30 @@ pub struct WorkspaceJournalEntryView {
     pub agent_title_summary: Option<String>,
 }
 
+/// One agent-tool conversation session (the Session level of Workspace → Work →
+/// Session) shown under a Work. `agent_session_id` is the agent tool's
+/// conversation UUID and is distinct from the parent Work's `session_id` (the
+/// gwt session / launch id). A single Work (launch) can hold several of these
+/// because Claude Code / Codex split conversations on `/clear`, context limit,
+/// or resume fork.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistorySessionView {
+    pub agent_session_id: String,
+    pub started_at: String,
+    /// True for the Work's current (latest) conversation session.
+    pub is_active: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistoryAgentView {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub display_name: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Empty when no Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;

@@ -2550,8 +2550,37 @@ fn workspace_journal_entry_view_from_entry(
     }
 }
 
+/// Load all persisted agent sessions from `sessions_dir` (used to enrich the
+/// Workspace history view with the Session list under each Work). Mirrors the
+/// runtime's own session loader but is callable from free functions.
+fn load_agent_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
+        })
+        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        .collect()
+}
+
+/// Index agent sessions by their gwt session id (the Work / launch id) so the
+/// view builder can attach each Work's Session history.
+fn work_session_index(
+    sessions: &[gwt_agent::Session],
+) -> std::collections::HashMap<&str, &gwt_agent::Session> {
+    sessions
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect()
+}
+
 pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkspaceWorkItem,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
         id: item.id.clone(),
@@ -2579,7 +2608,7 @@ pub(crate) fn workspace_work_item_view_from_item(
         agents: item
             .agents
             .iter()
-            .map(workspace_work_agent_view_from_ref)
+            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index))
             .collect(),
         execution_containers: item
             .execution_containers
@@ -2598,7 +2627,29 @@ pub(crate) fn workspace_work_item_view_from_item(
 
 fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkspaceWorkAgentRef,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryAgentView {
+    // A Work's `session_id` is the gwt session id (the launch). It keys into the
+    // persisted Session whose forward-only `session_history` is the Session list
+    // (agent-tool conversation UUIDs) under this Work; the latest
+    // `agent_session_id` marks the currently active Session.
+    let sessions = session_index
+        .get(agent.session_id.as_str())
+        .map(|session| {
+            let latest = session.agent_session_id.as_deref();
+            session
+                .session_history
+                .iter()
+                .map(|entry| gwt::WorkspaceHistorySessionView {
+                    agent_session_id: entry.agent_session_id.clone(),
+                    started_at: entry
+                        .started_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    is_active: latest == Some(entry.agent_session_id.as_str()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     gwt::WorkspaceHistoryAgentView {
         session_id: agent.session_id.clone(),
         agent_id: agent.agent_id.clone(),
@@ -2606,6 +2657,7 @@ fn workspace_work_agent_view_from_ref(
         updated_at: agent
             .updated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        sessions,
     }
 }
 
@@ -5482,6 +5534,8 @@ impl AppRuntime {
                 .iter()
                 .map(workspace_journal_entry_view_from_entry)
                 .collect::<Vec<_>>();
+            let agent_sessions = load_agent_sessions(&self.sessions_dir);
+            let session_index = work_session_index(&agent_sessions);
             let workspaces =
                 gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
                     &tab.project_root,
@@ -5494,7 +5548,7 @@ impl AppRuntime {
                 )
                 .work_items
                 .iter()
-                .map(workspace_work_item_view_from_item)
+                .map(|item| workspace_work_item_view_from_item(item, &session_index))
                 .collect::<Vec<_>>();
             return Some(active_work_projection_from_saved_with_journal(
                 projection,
@@ -8134,6 +8188,8 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     .iter()
     .map(workspace_journal_entry_view_from_entry)
     .collect::<Vec<_>>();
+    let agent_sessions = load_agent_sessions(&gwt_core::paths::gwt_sessions_dir());
+    let session_index = work_session_index(&agent_sessions);
     let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
             .unwrap_or_else(
@@ -8144,7 +8200,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             )
             .work_items
             .iter()
-            .map(workspace_work_item_view_from_item)
+            .map(|item| workspace_work_item_view_from_item(item, &session_index))
             .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {
@@ -11216,6 +11272,51 @@ exit 1
             .persisted()
             .windows
             .is_empty());
+    }
+
+    // SPEC-2359 Workspace → Work → Session: a Work row (keyed by the gwt session
+    // id / launch) is enriched with its Session history (agent-tool conversation
+    // UUIDs) read from the persisted Session, with the latest marked active.
+    #[test]
+    fn workspace_work_agent_view_attaches_session_history() {
+        let mut session =
+            gwt_agent::Session::new("/tmp/wt", "feature/x", gwt_agent::AgentId::Codex);
+        session.id = "work-1".to_string();
+        session.agent_session_id = Some("conv-2".to_string());
+        session.session_history = vec![
+            gwt_agent::AgentSessionHistoryEntry {
+                agent_session_id: "conv-1".to_string(),
+                started_at: chrono::Utc::now(),
+            },
+            gwt_agent::AgentSessionHistoryEntry {
+                agent_session_id: "conv-2".to_string(),
+                started_at: chrono::Utc::now(),
+            },
+        ];
+        let sessions = vec![session];
+        let index = super::work_session_index(&sessions);
+
+        let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+            session_id: "work-1".to_string(),
+            agent_id: Some("codex".to_string()),
+            display_name: Some("Codex".to_string()),
+            updated_at: chrono::Utc::now(),
+        };
+        let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+
+        let ids: Vec<&str> = view
+            .sessions
+            .iter()
+            .map(|session| session.agent_session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["conv-1", "conv-2"]);
+        assert!(!view.sessions[0].is_active);
+        assert!(view.sessions[1].is_active, "latest conversation is active");
+
+        // A Work with no persisted Session yields an empty Session list, not a panic.
+        let empty_index = super::work_session_index(&[]);
+        let empty_view = super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index);
+        assert!(empty_view.sessions.is_empty());
     }
 
     fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
