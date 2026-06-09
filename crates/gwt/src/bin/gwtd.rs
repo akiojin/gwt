@@ -72,7 +72,7 @@ fn print_help() {
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
     println!("  pane        Inspect and control live agent panes");
-    println!("  workspace   Update Workspace current projection and summary journal");
+    println!("  workspace   Update Work current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
 }
@@ -103,14 +103,14 @@ fn family_help(family: &str) -> Option<String> {
 
 fn format_workspace_help() -> String {
     [
-        "gwtd workspace — Update Workspace current projection and summary journal.",
+        "gwtd workspace — Update Work current projection and summary journal.",
         "",
         "Usage: gwtd workspace update [fields]",
         "",
         "Fields:",
         "  --title <text>                         Current work title",
         "  --status <active|idle|blocked|done|unknown>",
-        "                                          Stable Workspace status category",
+        "                                          Stable Work status category",
         "  --status-text <text>                   User-facing current status",
         "  --summary <text>                       LLM-authored work summary",
         "  --next-action <text>                   Next visible action or handoff",
@@ -279,10 +279,10 @@ fn format_index_help() -> String {
 
 fn format_memory_help() -> String {
     [
-        "gwtd memory — Append reusable project memory to tasks/memory.md.",
+        "gwtd memory — Append reusable project memory to .gwt/work/memory.md.",
         "",
         "Usage: gwtd memory add [fields]",
-        "       gwtd lessons add [fields]   Legacy alias; writes tasks/memory.md",
+        "       gwtd lessons add [fields]   Legacy alias; writes .gwt/work/memory.md",
         "",
         "Fields:",
         "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",

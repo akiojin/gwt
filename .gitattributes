@@ -25,3 +25,8 @@ docker-compose.yaml text eol=lf
 *.gif binary
 *.ico binary
 *.pdf binary
+
+# SPEC-2359 Phase W-12 Slice 5b (FR-355): the repo-local Work event log is an
+# append-only JSONL. Use git's union merge driver so branch divergence keeps
+# every recorded event line instead of producing a conflict.
+**/.gwt/work/events.jsonl merge=union

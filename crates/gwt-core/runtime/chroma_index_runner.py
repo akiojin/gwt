@@ -32,7 +32,7 @@ INDEX_PATH_POLICY_FILE = "index_path_policy.json"
 FALLBACK_INDEX_PATH_POLICY = {
     "schema_version": 1,
     "max_file_size": 1_048_576,
-    "allow_paths": ["tasks/memory.md", "tasks/discussions.md"],
+    "allow_paths": [".gwt/work/memory.md", ".gwt/work/discussions.md"],
     "deny_root_prefixes": [
         ".git",
         ".claude",
@@ -2187,7 +2187,7 @@ def _parse_memory_heading(heading: str) -> tuple[str, str]:
 def _load_memory_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/tasks/memory.md`` and chunk it into memory units.
+    """Load ``<project_root>/.gwt/work/memory.md`` and chunk it into memory units.
 
     Returns a tuple ``(memory, manifest_entries)`` where ``manifest_entries``
     contains at most one entry describing the source file's mtime/size.
@@ -2195,7 +2195,7 @@ def _load_memory_documents(
     entry so that the runner can still detect future content additions.
     """
     root = Path(project_root)
-    source_path = root / "tasks" / "memory.md"
+    source_path = root / ".gwt" / "work" / "memory.md"
     if not source_path.is_file():
         return [], []
 
@@ -2210,7 +2210,7 @@ def _load_memory_documents(
         return [], []
     manifest_entries = [
         {
-            "path": "tasks/memory.md",
+            "path": ".gwt/work/memory.md",
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2290,7 +2290,7 @@ def action_index_memory_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``tasks/memory.md`` into the repo-scoped memory Chroma store.
+    """Index ``.gwt/work/memory.md`` into the repo-scoped memory Chroma store.
 
     `worktree_hash` is accepted for symmetry with the other v2 actions but is
     ignored — memory is repo-scoped. Manifest diff degenerates to a single
@@ -2413,9 +2413,9 @@ def _parse_related_specs(value: str) -> List[str]:
 def _load_discussion_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/tasks/discussions.md`` into discussion chunks."""
+    """Load ``<project_root>/.gwt/work/discussions.md`` into discussion chunks."""
     root = Path(project_root)
-    source_path = root / "tasks" / "discussions.md"
+    source_path = root / ".gwt" / "work" / "discussions.md"
     if not source_path.is_file():
         return [], []
 
@@ -2430,7 +2430,7 @@ def _load_discussion_documents(
         return [], []
     manifest_entries = [
         {
-            "path": "tasks/discussions.md",
+            "path": ".gwt/work/discussions.md",
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2523,7 +2523,7 @@ def action_index_discussions_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``tasks/discussions.md`` into the repo-scoped discussions store."""
+    """Index ``.gwt/work/discussions.md`` into the repo-scoped discussions store."""
     del worktree_hash
     db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
     discussions, new_entries = _load_discussion_documents(project_root)

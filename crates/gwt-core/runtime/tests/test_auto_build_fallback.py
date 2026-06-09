@@ -216,8 +216,8 @@ class AutoBuildFallbackTests(unittest.TestCase):
     def test_search_memory_auto_builds_when_index_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
-            (root / "tasks").mkdir(parents=True)
-            (root / "tasks" / "memory.md").write_text(
+            (root / ".gwt" / "work").mkdir(parents=True)
+            (root / ".gwt" / "work" / "memory.md").write_text(
                 "# Memory Learned\n\n"
                 "## 2026-05-20 — watcher debounce regression\n\n"
                 "### 事象\n watcher fired too often.\n\n"
@@ -250,8 +250,8 @@ class AutoBuildFallbackTests(unittest.TestCase):
     def test_search_memory_returns_index_missing_when_no_auto_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
-            (root / "tasks").mkdir(parents=True)
-            (root / "tasks" / "memory.md").write_text("# empty\n", encoding="utf-8")
+            (root / ".gwt" / "work").mkdir(parents=True)
+            (root / ".gwt" / "work" / "memory.md").write_text("# empty\n", encoding="utf-8")
             db_root = Path(tmp) / "index_root"
 
             result = runner.action_search_v2(
