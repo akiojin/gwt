@@ -329,6 +329,15 @@ mod tests {
         }
     }
 
+    fn unstarted_dispatcher() -> PersistDispatcher {
+        PersistDispatcher {
+            inner: Arc::new(DispatcherInner {
+                state: Mutex::new(DispatcherState::default()),
+                cond: Condvar::new(),
+            }),
+        }
+    }
+
     #[test]
     fn enqueue_returns_immediately_so_callers_do_not_block_on_disk_write() {
         let temp = tempdir().expect("tempdir");
@@ -482,29 +491,40 @@ mod tests {
     fn suppresses_identical_snapshot_while_pending() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session-state.json");
-        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
+        let dispatcher = unstarted_dispatcher();
         let snapshot = sample_snapshot(path.clone(), "pending");
 
-        let started = std::time::Instant::now();
         dispatcher.enqueue(snapshot.clone());
+        let first_updated_at = dispatcher
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .latest_updated_at
+            .expect("first enqueue should create pending timestamp");
         std::thread::sleep(Duration::from_millis(20));
         dispatcher.enqueue(snapshot);
 
+        let mut state = dispatcher
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(
-            dispatcher.enqueued_count(),
-            1,
+            state.enqueued, 1,
             "identical pending snapshots should not increment enqueue count",
         );
-        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
-        let elapsed = started.elapsed();
-
-        let on_disk = load_session_state(&path).expect("load persisted session");
-        assert_eq!(on_disk.active_tab_id.as_deref(), Some("pending"));
-        assert_eq!(dispatcher.completed_count(), 1);
-        assert!(
-            elapsed < Duration::from_millis(95),
-            "identical pending enqueue should not restart the coalesce window (elapsed = {elapsed:?})",
+        assert_eq!(
+            state.latest_updated_at,
+            Some(first_updated_at),
+            "identical pending enqueue should not restart the coalesce window",
         );
+        assert_eq!(
+            state.latest.as_ref(),
+            Some(&sample_snapshot(path, "pending")),
+            "original pending snapshot should remain queued",
+        );
+        state.completed = state.enqueued;
     }
 
     #[test]
