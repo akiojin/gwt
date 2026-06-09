@@ -6767,3 +6767,10 @@ Type: failure-pattern
 Context: pre-pr verification for PR #3001 repeatedly failed in the full suite on app_runtime::persist_dispatcher::tests::suppresses_identical_snapshot_while_pending while isolated runs passed.
 Learning: The test asserted an elapsed wall-clock upper bound that included scheduler and disk latency, so suite load could fail the test even when duplicate enqueue suppression was correct.
 Future Action: For async coalescing and background-worker tests, assert internal state transitions or use deterministic test harnesses instead of wall-clock upper bounds for completion time.
+
+## 2026-06-09 — Lock HOME readers in parallel Rust tests
+
+Type: lesson
+Context: PR #3001 の Linux Test (Rust) で workspace_projection::tests::resolve_workspace_id_for_session_returns_none_when_session_missing が save_workspace_projection(...).unwrap() の ENOENT で失敗した。
+Learning: 同じ test binary 内で HOME を一時ディレクトリに差し替えるテストがある場合、HOME を変更しないテストでも gwt_home()/gwt_workspace_*_for_repo_path() を読むなら env_lock が必要。読み手が lock を取らないと、差し替えテストの TempDir drop と write_atomic の create/open が競合する。
+Future Action: HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL など process-wide env から path を導くテストを追加・変更するときは、env を変更する側だけでなく読む側にも crate::test_support::env_lock() を適用する。
