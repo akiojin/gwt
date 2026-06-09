@@ -132,11 +132,21 @@ impl TeamsProvider {
             None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
         };
         // Prepend the meta as a bold markdown line so the shared renderer escapes
-        // and sanitizes it consistently with the body.
-        let content_markdown = match meta.map(str::trim).filter(|m| !m.is_empty()) {
-            Some(meta) => format!("**{meta}**\n\n{body_markdown}"),
-            None => body_markdown.to_string(),
-        };
+        // and sanitizes it consistently with the body. A reply (Graph `/replies`)
+        // cannot carry a `subject`, so the entry title is rendered into the body
+        // too — otherwise it is silently dropped, while Slack shows it as a
+        // header block. Root messages keep the title in `subject` (set below).
+        let mut sections: Vec<String> = Vec::new();
+        if let Some(meta) = meta.map(str::trim).filter(|m| !m.is_empty()) {
+            sections.push(format!("**{meta}**"));
+        }
+        if reply_to.is_some() {
+            if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+                sections.push(format!("**{title}**"));
+            }
+        }
+        sections.push(body_markdown.to_string());
+        let content_markdown = sections.join("\n\n");
         let content = markdown::markdown_to_teams_html(&content_markdown);
         let mut payload =
             serde_json::json!({ "body": { "contentType": "html", "content": content } });
@@ -404,11 +414,19 @@ impl BoardProvider for TeamsProvider {
         // refreshed when the Workspace changes. `entry.parent_id` collapses into
         // the single Workspace thread (Teams channel replies are one level deep).
         let root_id = self.ensure_thread_root(worktree_root, &team, &chan, &channel, &entry)?;
-        // The reply carries a "who · kind · origin" meta line so a reader can
-        // tell who posted and the entry type (SPEC-2963). Replies carry no
-        // subject (Graph rejects it), so the meta lives in the body.
+        // The reply carries a "who · kind · origin" meta line plus the entry
+        // title so a reader can tell who posted, the entry type, and its subject
+        // (SPEC-2963). Replies cannot carry a Graph subject, so both live in the
+        // body; the title would otherwise be dropped (Slack shows it as a header).
         let meta = mapping::board_entry_meta_line(&entry);
-        self.post_graph_message(&team, &chan, Some(&meta), None, &entry.body, Some(&root_id))?;
+        self.post_graph_message(
+            &team,
+            &chan,
+            Some(&meta),
+            entry.title.as_deref(),
+            &entry.body,
+            Some(&root_id),
+        )?;
         self.cache.invalidate();
         self.load_snapshot(worktree_root)
     }
@@ -938,7 +956,10 @@ mod tests {
     }
 
     #[test]
-    fn reply_post_omits_subject() {
+    fn reply_renders_title_in_body_without_subject() {
+        // SPEC-2963: Graph rejects a `subject` on /replies, so the entry title
+        // is rendered into the reply body (otherwise it is dropped — Slack shows
+        // it as a header block). The payload must still carry no `subject` key.
         let recorded = std::sync::Arc::new(MockGraph::default());
         let prov = TeamsProvider::new(
             "tok",
@@ -947,13 +968,17 @@ mod tests {
             Box::new(MockGraphShared(recorded.clone())),
             60,
         );
-        let mut reply = entry("re").with_title("ignored");
+        let mut reply = entry("body text").with_title("Release v2");
         reply.parent_id = Some("m1".to_string());
         prov.post_entry(&root(), reply).unwrap();
         let body = recorded.last_post_body.lock().unwrap().clone();
         assert!(
             !body.contains("\"subject\""),
             "replies must not carry a subject (Graph rejects it): {body}"
+        );
+        assert!(
+            body.contains("Release v2"),
+            "reply body carries the entry title: {body}"
         );
     }
 
