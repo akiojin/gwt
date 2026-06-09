@@ -55,6 +55,7 @@ fn tray_menu_pins_action_ids() {
     // a breaking change for in-flight tray menu definitions and must be
     // caught at compile time.
     assert!(TRAY_MENU.contains(r#"pub const OPEN: &str = "gwt.tray.open";"#));
+    assert!(TRAY_MENU.contains(r#"pub const COPY_URL: &str = "gwt.tray.copy_url";"#));
     assert!(TRAY_MENU.contains(r#"pub const QUIT: &str = "gwt.tray.quit";"#));
     assert!(TRAY_MENU.contains(r#"pub const ABOUT: &str = "gwt.tray.about";"#));
     assert!(
@@ -68,10 +69,14 @@ fn tray_menu_pins_action_ids() {
 }
 
 #[test]
-fn tray_menu_contract_is_open_about_quit_only() {
+fn tray_menu_contract_is_open_copy_url_about_quit() {
     assert!(
         MAIN_RS.contains(r#""Open in browser""#),
         "tray menu must expose Open in browser"
+    );
+    assert!(
+        MAIN_RS.contains(r#""Copy URL""#),
+        "tray menu must expose Copy URL"
     );
     assert!(
         MAIN_RS.contains(r#""About GWT""#),
@@ -89,6 +94,14 @@ fn tray_menu_contract_is_open_about_quit_only() {
     assert!(
         MAIN_RS.contains("about_url_for_browser_url(&browser_url)"),
         "About GWT handler must derive browser_url#about"
+    );
+    assert!(
+        MAIN_RS.contains("Some(MenuAction::CopyUrl)"),
+        "tray menu event loop must dispatch Copy URL"
+    );
+    assert!(
+        MAIN_RS.contains("ClipboardText::set_text(&browser_url)"),
+        "Copy URL handler must copy the root browser URL"
     );
 }
 

@@ -60,9 +60,9 @@ function createTabButton(document, send, requestCloseProjectTab) {
 const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
 
 const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-  starting: "running",
-  notstarted: "not_started",
-  "not-started": "not_started",
+  not_started: "starting",
+  notstarted: "starting",
+  "not-started": "starting",
   ready: "idle",
   exited: "stopped",
 });
@@ -123,23 +123,30 @@ export function renderProjectTabs({
   }
   const document = projectTabs.ownerDocument;
   const nextTabs = Array.isArray(tabs) ? tabs : [];
-  const nextIds = new Set(nextTabs.map((tab) => tab.id));
-
-  for (const button of projectTabs.querySelectorAll(
-    ".project-tab[data-project-tab-id]",
-  )) {
-    if (!nextIds.has(button.dataset.projectTabId)) {
-      button.remove();
-    }
+  const nextIds = new Set();
+  for (const tab of nextTabs) {
+    nextIds.add(tab.id);
   }
 
-  const existingButtons = new Map(
-    Array.from(
-      projectTabs.querySelectorAll(".project-tab[data-project-tab-id]"),
-    ).map((button) => [button.dataset.projectTabId, button]),
-  );
+  const existingButtons = new Map();
+  for (let index = projectTabs.children.length - 1; index >= 0; index -= 1) {
+    const button = projectTabs.children[index];
+    if (
+      !button.classList?.contains("project-tab") ||
+      !button.dataset?.projectTabId
+    ) {
+      continue;
+    }
+    const tabId = button.dataset.projectTabId;
+    if (!nextIds.has(tabId)) {
+      button.remove();
+      continue;
+    }
+    existingButtons.set(tabId, button);
+  }
 
-  nextTabs.forEach((tab, index) => {
+  for (let index = 0; index < nextTabs.length; index += 1) {
+    const tab = nextTabs[index];
     let button = existingButtons.get(tab.id);
     if (!button) {
       button = createTabButton(document, send, requestCloseProjectTab);
@@ -196,5 +203,5 @@ export function renderProjectTabs({
     if (current !== button) {
       projectTabs.insertBefore(button, current);
     }
-  });
+  }
 }

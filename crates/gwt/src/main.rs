@@ -19,10 +19,11 @@ use gwt::{
     load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
     read_binary_chunk, read_text_file,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
-    workspace_state_path, BackendEvent, BranchCleanupOptions, BranchEntriesPhase, BranchListEntry,
-    ContentLimits, DockerWizardContext, FileContentError, FrontendEvent, HookForwardTarget,
-    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
+    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
+    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -926,6 +927,14 @@ enum UserEvent {
         window_id: String,
         message: String,
     },
+    AttachmentPromptReady {
+        client_id: ClientId,
+        window_id: String,
+        operation_id: String,
+        prompt: String,
+        file_count: usize,
+        filename: Option<String>,
+    },
     LaunchWizardRuntimeResolved {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
@@ -944,6 +953,10 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
+    /// #2995: a disk-fresh session set loaded off-thread by the branch load.
+    /// Applied to the Launch Wizard cache on the main thread so branch Resume
+    /// availability/resolution stay fresh without main-thread disk I/O.
+    RefreshLaunchWizardSessions(Vec<gwt_agent::Session>),
     UpdateAvailable(gwt_core::update::UpdateState),
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
@@ -6459,11 +6472,14 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
+    let tray_copy_url =
+        MenuItem::with_id(gwt::cli::tray::menu::ids::COPY_URL, "Copy URL", true, None);
     let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     tray_menu
         .append_items(&[
             &tray_open,
+            &tray_copy_url,
             &PredefinedMenuItem::separator(),
             &tray_about,
             &PredefinedMenuItem::separator(),
@@ -6646,6 +6662,24 @@ fn main() -> std::io::Result<()> {
                     },
                 )]);
             }
+            Event::UserEvent(UserEvent::AttachmentPromptReady {
+                client_id,
+                window_id,
+                operation_id,
+                prompt,
+                file_count,
+                filename,
+            }) => {
+                let events = app.inject_attachment_prompt_events(
+                    client_id,
+                    window_id,
+                    operation_id,
+                    prompt,
+                    file_count,
+                    filename,
+                );
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
                 clients.dispatch(events);
@@ -6675,6 +6709,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {
+                app.apply_refreshed_launch_wizard_sessions(sessions);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));
@@ -6949,6 +6986,16 @@ fn main() -> std::io::Result<()> {
                                 error = %error,
                                 url = browser_url.as_str(),
                                 "tray Open menu failed to launch the default browser"
+                            );
+                        }
+                    }
+                    Some(MenuAction::CopyUrl) => {
+                        if let Err(error) = gwt_clipboard::ClipboardText::set_text(&browser_url) {
+                            tracing::warn!(
+                                target: "gwt_tray",
+                                error = %error,
+                                url = browser_url.as_str(),
+                                "tray Copy URL menu failed to copy browser URL to clipboard"
                             );
                         }
                     }

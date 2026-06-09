@@ -539,9 +539,12 @@ pub struct HostPackageRunnerFallbackReport {
 pub fn apply_host_package_runner_fallback_checked(
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<HostPackageRunnerFallbackReport, String> {
+    // Issue #2981: resolve a Windows-spawnable npx (prefers `npx.cmd`) instead of
+    // a bare `npx` that `CreateProcess` cannot launch after a failed bunx probe.
+    let fallback_executable = gwt_agent::resolve_host_npx_fallback_executable(&config.env_vars);
     apply_host_package_runner_fallback_checked_with_probe_and_repair(
         config,
-        "npx".to_string(),
+        fallback_executable,
         default_windows_npx_cache_base(),
         probe_host_package_runner_outcome,
         repair_windows_npx_cache,
@@ -1423,6 +1426,107 @@ mod tests {
         config
     }
 
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn git_status(repo: &Path, args: &[&str]) -> bool {
+        gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git status")
+            .success()
+    }
+
+    #[test]
+    fn start_work_launch_materialization_prepares_origin_develop_at_launch_time() {
+        let temp = tempdir().expect("tempdir");
+        let origin = temp.path().join("origin.git");
+        let repo = temp.path().join("repo");
+        run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+        run_git(
+            temp.path(),
+            &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "gwt"]);
+        run_git(&repo, &["checkout", "-qb", "develop"]);
+        fs::write(repo.join("README.md"), "develop\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "seed develop"]);
+        run_git(&repo, &["push", "-u", "origin", "develop"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        run_git(&repo, &["checkout", "-qb", "main"]);
+        fs::write(repo.join("README.md"), "main\n").expect("write readme");
+        run_git(&repo, &["commit", "-am", "seed main"]);
+        run_git(&repo, &["push", "-u", "origin", "main"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&repo, &["remote", "set-head", "origin", "-a"]);
+        run_git(&repo, &["checkout", "develop"]);
+        run_git(&origin, &["branch", "-D", "develop"]);
+        run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        assert!(
+            !git_status(
+                &repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/develop"
+                ],
+            ),
+            "fixture should start without local origin/develop"
+        );
+
+        let mut base_branch = Some("origin/develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+
+        resolve_launch_worktree_request(
+            &repo,
+            Some("work/20260607-1200"),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("resolve Start Work launch worktree");
+
+        assert_eq!(base_branch.as_deref(), Some("origin/develop"));
+        assert!(
+            git_status(
+                &repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/develop"
+                ],
+            ),
+            "final Start Work launch must prepare origin/develop"
+        );
+        let worktree = working_dir.expect("launch worktree path");
+        assert!(
+            worktree.exists(),
+            "final Start Work launch must materialize a worktree"
+        );
+        assert_eq!(
+            env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(worktree.to_str().expect("utf8 worktree")),
+        );
+    }
+
     #[test]
     fn windows_shell_process_command_maps_all_variants() {
         assert_eq!(
@@ -1860,7 +1964,12 @@ mod tests {
             .expect("resolution must never abort the launch");
 
         assert!(report.switched_to_fallback);
-        assert_eq!(config.command, "npx");
+        // Issue #2981: the fallback now resolves the npx executable on PATH
+        // (mirroring the primary runner) instead of emitting a bare `"npx"`.
+        assert_eq!(
+            config.command,
+            temp.path().join("npx").display().to_string()
+        );
         assert_eq!(config.args.first().map(String::as_str), Some("--yes"));
     }
 

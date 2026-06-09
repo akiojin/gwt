@@ -182,10 +182,12 @@ where
         .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
     refresh_worktree_assets(&worktree_path)?;
 
+    let npx_fallback_executable =
+        crate::launch::resolve_host_npx_fallback_executable(&config.env_vars);
     let used_host_package_runner_fallback = config.runtime_target == LaunchRuntimeTarget::Host
         && apply_host_package_runner_fallback_with_probe(
             &mut config,
-            "npx".to_string(),
+            npx_fallback_executable,
             probe_host_runner,
         );
 
@@ -1769,7 +1771,15 @@ mod tests {
 
         assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
         assert!(prepared.used_host_package_runner_fallback);
-        assert_eq!(prepared.process_launch.command, "npx");
+        // Issue #2981: the bunx→npx fallback now resolves the npx executable on
+        // PATH (a full path when npx is installed), so assert the runner identity
+        // by file stem rather than an exact bare-name string.
+        assert_eq!(
+            Path::new(&prepared.process_launch.command)
+                .file_stem()
+                .and_then(|stem| stem.to_str()),
+            Some("npx"),
+        );
         assert_eq!(
             prepared.process_launch.cwd.as_deref(),
             Some(worktree.as_path())
@@ -1810,7 +1820,12 @@ mod tests {
         assert!(sessions_dir
             .join(format!("{}.toml", prepared.session.id))
             .exists());
-        assert_eq!(prepared.session.launch_command, "npx");
+        assert_eq!(
+            Path::new(&prepared.session.launch_command)
+                .file_stem()
+                .and_then(|stem| stem.to_str()),
+            Some("npx"),
+        );
         assert_eq!(prepared.session.branch, "feature/demo");
     }
 
@@ -1849,7 +1864,15 @@ mod tests {
         .expect("prepare launch");
 
         assert!(prepared.used_host_package_runner_fallback);
-        assert_eq!(prepared.process_launch.command, "npx");
+        // Issue #2981: the bunx→npx fallback now resolves the npx executable on
+        // PATH (a full path when npx is installed), so assert the runner identity
+        // by file stem rather than an exact bare-name string.
+        assert_eq!(
+            Path::new(&prepared.process_launch.command)
+                .file_stem()
+                .and_then(|stem| stem.to_str()),
+            Some("npx"),
+        );
         assert_eq!(
             prepared.process_launch.args,
             vec![
@@ -1858,7 +1881,12 @@ mod tests {
                 "--print".to_string(),
             ]
         );
-        assert_eq!(prepared.session.launch_command, "npx");
+        assert_eq!(
+            Path::new(&prepared.session.launch_command)
+                .file_stem()
+                .and_then(|stem| stem.to_str()),
+            Some("npx"),
+        );
         assert_eq!(
             prepared.session.launch_args,
             vec![

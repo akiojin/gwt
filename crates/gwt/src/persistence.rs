@@ -34,10 +34,17 @@ pub fn default_canvas_viewport() -> CanvasViewport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowState {
-    #[serde(alias = "starting", alias = "ready")]
+    #[serde(alias = "ready")]
     Running,
-    #[serde(alias = "not-started", alias = "notStarted", alias = "NotStarted")]
-    NotStarted,
+    // US-69: renamed from `NotStarted`. Serializes to "starting"; legacy
+    // `not_started` spellings remain accepted for backward compatibility.
+    #[serde(
+        alias = "not_started",
+        alias = "not-started",
+        alias = "notStarted",
+        alias = "NotStarted"
+    )]
+    Starting,
     Idle,
     Waiting,
     #[serde(alias = "exited")]
@@ -48,8 +55,6 @@ pub enum WindowState {
 pub type WindowProcessStatus = WindowState;
 
 impl WindowState {
-    #[allow(non_upper_case_globals)]
-    pub const Starting: Self = Self::Running;
     #[allow(non_upper_case_globals)]
     pub const Ready: Self = Self::Running;
     #[allow(non_upper_case_globals)]
@@ -1219,10 +1224,10 @@ mod tests {
         let error = serde_json::from_str::<WindowState>(r#""error""#).expect("error");
 
         assert_eq!(waiting, WindowState::Waiting);
-        assert_eq!(not_started, WindowState::NotStarted);
+        assert_eq!(not_started, WindowState::Starting);
         assert_eq!(
             serde_json::to_string(&not_started).expect("serialize not started"),
-            r#""not_started""#
+            r#""starting""#
         );
         assert_eq!(idle, WindowState::Idle);
         assert_eq!(
@@ -1239,12 +1244,40 @@ mod tests {
         let legacy_exited =
             serde_json::from_str::<WindowState>(r#""exited""#).expect("legacy exited");
 
-        assert_eq!(legacy_starting, WindowState::Running);
+        // US-69: "starting" is now the canonical Starting variant (no longer Running).
+        assert_eq!(legacy_starting, WindowState::Starting);
         assert_eq!(legacy_ready, WindowState::Running);
         assert_eq!(legacy_exited, WindowState::Stopped);
         assert_eq!(
             serde_json::to_string(&WindowState::Waiting).expect("serialize"),
             r#""waiting""#
         );
+    }
+
+    #[test]
+    fn window_state_starting_variant_serializes_and_accepts_legacy_not_started() {
+        // US-69: NotStarted renamed to Starting; canonical serialized form is "starting".
+        assert_eq!(
+            serde_json::to_string(&WindowState::Starting).expect("serialize starting"),
+            r#""starting""#
+        );
+        // "starting" round-trips back to the Starting variant.
+        assert_eq!(
+            serde_json::from_str::<WindowState>(r#""starting""#).expect("starting"),
+            WindowState::Starting
+        );
+        // Backward compatibility: every legacy not_started spelling deserializes to Starting.
+        for legacy in [
+            r#""not_started""#,
+            r#""not-started""#,
+            r#""notStarted""#,
+            r#""NotStarted""#,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<WindowState>(legacy).expect("legacy not_started"),
+                WindowState::Starting,
+                "legacy {legacy} should map to Starting",
+            );
+        }
     }
 }

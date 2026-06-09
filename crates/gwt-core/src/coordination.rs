@@ -12,7 +12,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{paths::gwt_project_dir_for_repo_path, GwtError, Result};
+use crate::{config::BareProjectConfig, paths::gwt_project_dir_for_repo_path, GwtError, Result};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -762,20 +762,47 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     let mut cmd = crate::process::hidden_command("git");
-    cmd.args(["rev-parse", "--show-toplevel"])
+    cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree_root);
     crate::process::scrub_git_env(&mut cmd);
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let output = cmd.output().ok();
+    if let Some(output) = output.filter(|output| output.status.success()) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let common_dir = stdout
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let common_dir = PathBuf::from(common_dir);
+        let repo_root = if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+            common_dir.parent()?.to_path_buf()
+        } else {
+            common_dir
+        };
+        return Some(dunce::canonicalize(&repo_root).unwrap_or(repo_root));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let repo_root = stdout
-        .lines()
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(dunce::canonicalize(repo_root).unwrap_or_else(|_| PathBuf::from(repo_root)))
+    coordination_child_bare_repo(worktree_root)
+}
+
+fn coordination_child_bare_repo(worktree_root: &Path) -> Option<PathBuf> {
+    if let Ok(Some(config)) = BareProjectConfig::load(worktree_root) {
+        let candidate = worktree_root.join(config.bare_repo_name);
+        if is_bare_git_dir(&candidate) {
+            return Some(dunce::canonicalize(&candidate).unwrap_or(candidate));
+        }
+    }
+
+    let entries = std::fs::read_dir(worktree_root).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_bare_git_dir(path))
+        .min()
+        .map(|path| dunce::canonicalize(&path).unwrap_or(path))
+}
+
+fn is_bare_git_dir(path: &Path) -> bool {
+    path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists()
 }
 
 fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
@@ -920,9 +947,11 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
 }
 
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
+    let repo_root = coordination_repo_root(worktree_root);
+    let list_root = repo_root.as_deref().unwrap_or(worktree_root);
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
-        .current_dir(worktree_root);
+        .current_dir(list_root);
     crate::process::scrub_git_env(&mut cmd);
     let output = cmd.output();
     let mut dirs = match output {
@@ -937,6 +966,18 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
         }
         _ => vec![legacy_coordination_dir(worktree_root)],
     };
+    dirs.push(legacy_coordination_dir(worktree_root));
+    if let Some(repo_root) = repo_root
+        .as_deref()
+        .filter(|root| is_bare_git_dir(root))
+        .and_then(Path::parent)
+    {
+        dirs.push(legacy_coordination_dir(repo_root));
+    }
+    dirs = dirs
+        .into_iter()
+        .map(|dir| dunce::canonicalize(&dir).unwrap_or(dir))
+        .collect();
     dirs.sort();
     dirs.dedup();
     dirs
@@ -1451,6 +1492,12 @@ pub struct RemindersState {
     /// the title changes.
     #[serde(default)]
     pub phase_changed_in_window: bool,
+    /// Issue #2987: timestamp of the most recent memory-update reminder
+    /// injection. The board-reminder hook throttles the reminder using this
+    /// timestamp so it does not fire on every UserPromptSubmit turn. `None`
+    /// until the reminder fires for the first time.
+    #[serde(default)]
+    pub last_memory_reminded_at: Option<DateTime<Utc>>,
 }
 
 /// Directory that stores per-agent-session reminder sidecar files.
@@ -1745,7 +1792,7 @@ impl BoardProvider for LocalProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc, thread};
+    use std::{path::Path, str::FromStr, sync::Arc, thread};
 
     use chrono::TimeZone;
 
@@ -3190,6 +3237,153 @@ mod tests {
         assert_eq!(snapshot.board.entries[0].body, "legacy board post");
         assert!(!legacy_dir.exists());
         assert!(coordination_migration_marker_path(&project_dir).exists());
+    }
+
+    #[test]
+    fn workspace_home_with_child_bare_repo_shares_board_storage_with_worktree() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workspace = tempfile::tempdir().unwrap();
+        let gwt_home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", gwt_home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", gwt_home.path());
+        let (_bare_repo, worktree) =
+            make_workspace_home_with_child_bare_and_worktree(workspace.path());
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "from linked worktree",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let entry_id = entry.id.clone();
+        post_entry(&worktree, entry).unwrap();
+
+        assert_eq!(
+            coordination_dir(workspace.path()),
+            coordination_dir(&worktree)
+        );
+
+        let snapshot = load_snapshot(workspace.path()).unwrap();
+        assert!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == entry_id),
+            "workspace home must read entries written from linked worktrees"
+        );
+        assert!(!legacy_coordination_dir(workspace.path()).exists());
+    }
+
+    #[test]
+    fn workspace_home_legacy_coordination_is_migrated_to_project_scoped_board() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workspace = tempfile::tempdir().unwrap();
+        let gwt_home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", gwt_home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", gwt_home.path());
+        let (_bare_repo, worktree) =
+            make_workspace_home_with_child_bare_and_worktree(workspace.path());
+
+        let entry = BoardEntry::new(
+            AuthorKind::User,
+            "You",
+            BoardEntryKind::Status,
+            "legacy workspace-home post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let legacy_dir = legacy_coordination_dir(workspace.path());
+        write_events(
+            &legacy_dir.join(EVENTS_FILE_NAME),
+            &[CoordinationEvent::MessageAppended {
+                entry: entry.clone(),
+            }],
+        );
+
+        let snapshot = load_snapshot(workspace.path()).unwrap();
+
+        assert_eq!(
+            coordination_dir(workspace.path()),
+            coordination_dir(&worktree)
+        );
+        assert!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .any(|actual| actual.id == entry.id),
+            "workspace-home legacy Board entry must migrate into project-scoped storage"
+        );
+        assert!(!legacy_dir.exists());
+    }
+
+    fn make_workspace_home_with_child_bare_and_worktree(
+        workspace_home: &Path,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        std::fs::create_dir_all(workspace_home).unwrap();
+        let seed = workspace_home.join(".seed");
+        let bare_repo = workspace_home.join("gwt.git");
+        let worktree = workspace_home.join("work").join("feature");
+
+        run_git(
+            workspace_home,
+            &["init", "--initial-branch=main", seed.to_str().unwrap()],
+        );
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        std::fs::write(seed.join("README.md"), "# gwt\n").unwrap();
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "init"]);
+        run_git(
+            workspace_home,
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().unwrap(),
+                bare_repo.to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &bare_repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/gwt.git",
+            ],
+        );
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &bare_repo,
+            &["worktree", "add", worktree.to_str().unwrap(), "main"],
+        );
+
+        (bare_repo, worktree)
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(args).current_dir(cwd);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn write_events(path: &std::path::Path, events: &[CoordinationEvent]) {

@@ -180,6 +180,163 @@ pub fn gwt_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf
     gwt_workspace_work_events_path(&repo_hash)
 }
 
+/// Resolve the main worktree root (git common dir) for a repository or linked
+/// worktree path.
+///
+/// NOTE: repo-local, git-tracked files (`.gwt/work/…`) must NOT use this. For a
+/// linked worktree the common dir is the shared (often bare) git directory,
+/// which has no checked-out working tree to track files in. Those callers use
+/// [`resolve_current_worktree_root`] (`git rev-parse --show-toplevel`). This
+/// function remains a utility for resolving the canonical main repository root.
+///
+/// `gwt-core` cannot depend on `gwt-git`, so this mirrors
+/// `gwt_git::worktree::main_worktree_root`: it asks git for the absolute
+/// `--git-common-dir`, strips a trailing `.git`, and falls back to a
+/// first child bare repository for the workspace-home layout (a directory
+/// that contains child bare repos but is not itself a git work tree).
+///
+/// When the path cannot be resolved through git (for example a plain
+/// non-repository directory), the input path is returned unchanged so the
+/// caller still gets a deterministic, non-failing repo-local location.
+pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
+    let Ok(output) = crate::process::run_git_logged(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Some(repo_path),
+    ) else {
+        return first_child_bare_repository(repo_path).unwrap_or_else(|| repo_path.to_path_buf());
+    };
+
+    if !output.status.success() {
+        // Workspace-home layout: the home directory itself is not a git work
+        // tree, but it contains a child bare repository (e.g. `gwt.git`).
+        return first_child_bare_repository(repo_path)
+            .map(|bare| {
+                let bare = std::fs::canonicalize(&bare).unwrap_or(bare);
+                normalize_windows_child_process_path(&bare)
+            })
+            .unwrap_or_else(|| repo_path.to_path_buf());
+    }
+
+    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if common_dir.as_os_str().is_empty() {
+        return repo_path.to_path_buf();
+    }
+
+    if common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        if let Some(repo_root) = common_dir.parent() {
+            return normalize_windows_child_process_path(repo_root);
+        }
+    }
+
+    normalize_windows_child_process_path(&common_dir)
+}
+
+/// Return the first child bare repository directory under `repo_path`, if any.
+///
+/// A bare repository is identified by the presence of `HEAD`, `objects`, and
+/// `refs` entries. The lexicographically smallest match is chosen so the
+/// resolution is deterministic across platforms.
+fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(repo_path).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.join("HEAD").exists()
+                && path.join("objects").exists()
+                && path.join("refs").exists()
+        })
+        .min()
+}
+
+/// Resolve the current worktree's working-tree root via `git rev-parse
+/// --show-toplevel`.
+///
+/// Unlike [`resolve_main_worktree_root`] — which returns the shared git common
+/// dir (a bare repo such as `gwt.git` in the workspace-home layout) for a
+/// linked worktree — this returns the checked-out working tree of the *current*
+/// worktree, the only place a git-tracked file can actually live. Falls back to
+/// `repo_path` when git cannot resolve a toplevel (non-repository directory).
+pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
+    let Ok(output) = crate::process::run_git_logged(
+        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        Some(repo_path),
+    ) else {
+        return repo_path.to_path_buf();
+    };
+    if !output.status.success() {
+        return repo_path.to_path_buf();
+    }
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if toplevel.as_os_str().is_empty() {
+        return repo_path.to_path_buf();
+    }
+    normalize_windows_child_process_path(&toplevel)
+}
+
+/// Return the repo-local Work storage directory (`<worktree_root>/.gwt/work/`).
+///
+/// SPEC-2359 Phase W-12 Slice 5b (FR-353): the persistent Work core lives as a
+/// git-tracked file in the *current* worktree's working tree. Each worktree
+/// commits its own `.gwt/work/`; branch divergence is reconciled via the
+/// `merge=union` gitattribute (FR-355), not via a shared filesystem path. The
+/// shared git common dir (bare repo) is never used because it has no working
+/// tree to track files in.
+pub fn gwt_repo_local_work_dir(repo_root: &Path) -> PathBuf {
+    resolve_current_worktree_root(repo_root)
+        .join(".gwt")
+        .join("work")
+}
+
+/// Return the repo-local Work event log path
+/// (`<repo_root>/.gwt/work/events.jsonl`).
+///
+/// SPEC-2359 Phase W-12 Slice 5b (FR-353): the persistent core of a Work is
+/// the append-only event log. It is moved out of the home (untracked)
+/// project-state directory into a git-tracked, repo-local file so branch
+/// divergence is reconciled via the `merge=union` gitattribute (FR-355).
+/// Derived projection (`works.json`) and volatile runtime state
+/// (`current.json` / `journal.jsonl`) stay in home and are not repo-local.
+pub fn gwt_repo_local_work_events_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("events.jsonl")
+}
+
+/// Return the repo-local project memory path
+/// (`<repo_root>/.gwt/work/memory.md`).
+///
+/// SPEC-2359 Phase W-12: project memory (post-mortem entries written by
+/// `gwtd memory add`) is a git-tracked, repo-local file living under the
+/// shared `.gwt/work/` directory alongside the Work event log. The main
+/// worktree root is resolved first so every linked worktree of the same
+/// repository shares one canonical file.
+pub fn gwt_repo_local_memory_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("memory.md")
+}
+
+/// Return the repo-local discussion log path
+/// (`<repo_root>/.gwt/work/discussions.md`).
+///
+/// SPEC-2359 Phase W-12: the discussion log written by `gwtd discussion
+/// update` is a git-tracked, repo-local file under the shared `.gwt/work/`
+/// directory. The main worktree root is resolved first so linked worktrees
+/// share one canonical file.
+pub fn gwt_repo_local_discussions_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("discussions.md")
+}
+
+/// Return the repo-local remote-Board root-thread mapping path
+/// (`<repo_root>/.gwt/work/board-remote-roots.jsonl`).
+///
+/// SPEC-2963: Slack/Teams thread each Workspace under a "root" summary-card
+/// message. The mapping `(provider, channel, key) -> root message id` is
+/// git-tracked (like `events.jsonl`) so the root is created once and shared
+/// across machines/agents, reconciled on branch divergence by a `merge=union`
+/// gitattribute.
+pub fn gwt_board_remote_roots_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("board-remote-roots.jsonl")
+}
+
 /// Return the repo-scoped notes root (`~/.gwt/notes/`).
 pub fn gwt_notes_dir() -> PathBuf {
     gwt_home().join("notes")
@@ -594,5 +751,163 @@ mod tests {
             "git remote add origin failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn init_bare_git_repo(path: &Path) {
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(["init", "--bare", path.to_str().unwrap()]);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git init --bare");
+        assert!(
+            output.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_commit_allow_empty(path: &Path, message: &str) {
+        let mut cmd = crate::process::hidden_command("git");
+        // Pin the author/committer identity via -c flags so the commit does not
+        // depend on an ambient git user.name/user.email. scrub_git_env removes
+        // GIT_* env, and CI Linux runners have no global identity, so without
+        // this the commit fails with "Author identity unknown".
+        cmd.args([
+            "-c",
+            "user.name=gwt-test",
+            "-c",
+            "user.email=gwt-test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            message,
+        ])
+        .current_dir(path);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn comparable_path(path: &Path) -> String {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+    }
+
+    #[test]
+    fn gwt_repo_local_work_events_path_joins_repo_local_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let events = gwt_repo_local_work_events_path(&repo);
+        assert!(events.ends_with(PathBuf::from(".gwt").join("work").join("events.jsonl")));
+        // The repo-local path resolves to the main worktree root, so it lives
+        // under the repository working tree (not under ~/.gwt).
+        let root = resolve_main_worktree_root(&repo);
+        assert_eq!(
+            comparable_path(&events),
+            comparable_path(&root.join(".gwt").join("work").join("events.jsonl"))
+        );
+    }
+
+    #[test]
+    fn gwt_repo_local_memory_path_joins_repo_local_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let memory = gwt_repo_local_memory_path(&repo);
+        assert!(memory.ends_with(PathBuf::from(".gwt").join("work").join("memory.md")));
+        let root = resolve_main_worktree_root(&repo);
+        assert_eq!(
+            comparable_path(&memory),
+            comparable_path(&root.join(".gwt").join("work").join("memory.md"))
+        );
+    }
+
+    #[test]
+    fn gwt_repo_local_discussions_path_joins_repo_local_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let discussions = gwt_repo_local_discussions_path(&repo);
+        assert!(discussions.ends_with(PathBuf::from(".gwt").join("work").join("discussions.md")));
+        let root = resolve_main_worktree_root(&repo);
+        assert_eq!(
+            comparable_path(&discussions),
+            comparable_path(&root.join(".gwt").join("work").join("discussions.md"))
+        );
+    }
+
+    #[test]
+    fn repo_local_work_events_path_is_per_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("gwt");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+
+        let linked = tmp.path().join("develop");
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(["worktree", "add", "-b", "develop", linked.to_str().unwrap()])
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // A git-tracked Work event log lives in each worktree's OWN working
+        // tree — the shared git common dir (a bare repo in the workspace-home
+        // layout) has no working tree to track files in. So the linked worktree
+        // resolves to its own `.gwt/work/`, distinct from the primary's; branch
+        // divergence is reconciled via the `merge=union` gitattribute on merge,
+        // not via a shared filesystem path.
+        let linked_events = gwt_repo_local_work_events_path(&linked);
+        let repo_events = gwt_repo_local_work_events_path(&repo);
+        let tail = PathBuf::from(".gwt").join("work").join("events.jsonl");
+        assert_ne!(
+            comparable_path(&linked_events),
+            comparable_path(&repo_events)
+        );
+        assert_eq!(
+            comparable_path(&linked_events),
+            comparable_path(&std::fs::canonicalize(&linked).unwrap().join(&tail))
+        );
+        assert_eq!(
+            comparable_path(&repo_events),
+            comparable_path(&std::fs::canonicalize(&repo).unwrap().join(&tail))
+        );
+    }
+
+    #[test]
+    fn resolve_main_worktree_root_accepts_workspace_home_with_child_bare_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("gwt.git");
+        init_bare_git_repo(&bare);
+
+        // The home directory itself is not a git work tree; resolution must
+        // not fail and must fall back to the child bare repository.
+        let layout_root = resolve_main_worktree_root(tmp.path());
+        assert_eq!(
+            comparable_path(&layout_root),
+            comparable_path(&std::fs::canonicalize(&bare).unwrap())
+        );
+        // The repo-local path must still be derivable without panicking.
+        let events = gwt_repo_local_work_events_path(tmp.path());
+        assert!(events.ends_with(PathBuf::from(".gwt").join("work").join("events.jsonl")));
+    }
+
+    #[test]
+    fn resolve_main_worktree_root_falls_back_to_input_for_non_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = resolve_main_worktree_root(tmp.path());
+        assert_eq!(comparable_path(&root), comparable_path(tmp.path()));
     }
 }

@@ -1,6 +1,146 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.54.0] - 2026-06-09
+
+### Bug Fixes
+
+- **file-tree:** Resolve bare repo before listing worktrees in picker
+- **windows:** Resolve npx.cmd for host package-runner fallback after bunx probe failure
+- Semantic search の空コーパスを EMPTY_CORPUS 診断にして silent success を防ぐ
+- Align Board storage for workspace home
+- Bound project index status refresh
+- Prevent websocket state starvation
+- Suppress successful hook-live access logs
+- Suppress runtime state hook fan-out
+- Dedupe runtime state status events
+- Batch terminal output writes
+- Skip active work redraw on workspace state
+- Skip unchanged project tab redraws
+- Skip hidden recent project redraws
+- Skip viewport-only window reconciliation
+- Skip unchanged window list redraws
+- Skip unchanged project chrome writes
+- Skip unchanged window element writes
+- Skip unchanged focus class writes
+- Skip unchanged runtime status writes
+- Skip unchanged telemetry writes
+- Defer terminal output decode
+- Skip duplicate persist snapshots
+- Skip duplicate viewport updates
+- Skip duplicate viewport sends
+- Skip clamped zoom no-ops
+- Defer websocket message parsing
+- Skip inactive websocket trace work
+- Share terminal output flush scheduling
+- Budget terminal output frame writes
+- Budget terminal output frame text
+- Budget terminal fit fanout
+- Budget terminal viewport refreshes
+- Defer hidden terminal output writes
+- Quiesce hidden terminal output scheduling
+- Avoid terminal output queue shifts
+- Coalesce maximized viewport sync
+- Skip unchanged server viewport writes
+- Reuse per-window render keys
+- Skip closed window list keys
+- Cache board workspace ids
+- Reduce workspace window key allocation
+- Reuse workspace visibility id sets
+- Reduce project tabs key allocation
+- Reduce static project chrome hot path
+- Reduce per-window key allocation
+- Reduce runtime status key allocation
+- Reduce window list key allocation
+- Reduce telemetry key allocation
+- Reduce window list row allocation
+- Reduce project tabs renderer allocation
+- Start Workウィザードを即時表示する
+- Throttle memory reminder to stop per-turn UserPromptSubmit injection (#2987)
+- Codex の PreToolUse/PostToolUse hook が毎回 exit code 1 になる問題を解消
+- Improve attachment progress and unicode filenames
+- **workspace:** Repo-local Work パスを現在の worktree toplevel に解決する (SPEC-2359 W-12)
+- **gui:** Resolve Branches/Work Resume from disk-fresh sessions (#2995)
+- Update codex model catalog
+- Harden project index CPU diagnostics
+- **gui:** Paused Workspace の active_work 行に Work の Session 一覧を載せる
+- エージェント起動中の状態表示を Not Started から Starting に変更
+- **launch-wizard:** Claude 既定 effort を Claude Code model defaults に追従
+- **board:** Board-remote-roots の同時 append 破損を単一 write で防止
+- **board:** Teams reply に entry title を描画し Slack と情報パリティ回復
+
+### Documentation
+
+- Add memory — Codex managed hook は session_id 欠落で fail-closed にしない
+- SPEC-2359 W-12 の Workspace→Work 統合 technical debt と Work 概念モデルを memory に記録
+- Develop マージの再発防止知見を memory に記録 (test-file マージ戦略 / browser-check session seed schema)
+- Record async timing test lesson
+- Record workspace projection env race lesson
+- Work/Branches 統合サーフェスの設計方針を AGENTS.md に記載
+
+### Features
+
+- Launch Wizard を4入口+3ステップに再設計しナビゲーションを一貫化
+- **core:** Work agent-session lifecycle 導出関数を追加 (SPEC-2359 W-12)
+- **workspace:** Work identity を agent session 単位に転換 (SPEC-2359 W-12)
+- **workspace:** Work lifecycle_state を protocol/projection に接続 (SPEC-2359 W-12)
+- **gui:** サイドバー Active Works を撤去し Work surface に lifecycle/close を集約 (SPEC-2359 W-12)
+- **workspace:** 停止 agent の Work を Paused として永続化 (SPEC-2359 W-12)
+- **workspace:** Work close (Done/Discard) handler と worktree-only cleanup (SPEC-2359 W-12)
+- **workspace:** Work 永続コアを repo-local 追跡し .gwt/work/ を除外からカーブアウト (SPEC-2359 W-12)
+- **workspace:** Project memory/discussions を tracked な .gwt/work/ に移設 (SPEC-2359 W-12)
+- **gui:** Operator chrome を整理し Add Window を Surface Deck に再設計 (SPEC-2356)
+- **gui:** Surface Deck を横長の重み付きデッキに再設計し見切れを解消 (SPEC-2356)
+- Add tray menu copy url
+- **gui:** Work と Branches を単一の branch 背骨統合ビューに集約 (SPEC-2359 W-13/US-67)
+- **gui:** Work の無いブランチは背骨でヘッダーのみ表示 (SPEC-2359 US-67 #3)
+- **gui:** Work 主導の統合ビュー Work→Agent→Session に再設計 (SPEC-2359 W-13/US-67)
+- **gui:** Work 配下のセッションを focus 主役のフラット表示に (SPEC-2359 US-67 Option A)
+- **gui:** Work surface を branch=場所で集約し W-12 backend に頑健化 (SPEC-2359 US-67 Option A)
+- **gui:** Workspace surface のタブを撤去し単一融合ビューに (SPEC-2359)
+- **agent:** Session に forward-only な agent session 履歴を追加
+- **gui:** Workspace history view の各 Work に Session 一覧を付与
+- **gui:** Workspace 詳細を Session 主体表示にし Work 見出しを複数時のみ出す
+- **gui:** Workspace surface の top-level naming 統一と Resume の per-Work 化
+- **gui:** Work to Session 表示を Agent グループ化し Session ラベルを明確化
+- **gui:** Resume を各 Session 行（リスト要素単位）に配置し特定の会話を resume
+- **gui:** Session 行に Current/Past ラベルと resume 可否ガードを追加し resume の silent failure を解消
+- **launch-wizard:** Claude モデル候補に Fable 5 を追加
+- **board:** Slack/Teams を Workspace 単位スレッド化（root カード get-or-create+更新・General thread・git 追跡 mapping）
+- **board:** Remote 投稿に author/kind/origin メタ行を付与し誰が何の種別で投稿したか分かるようにする
+- **board:** Remote 投稿の meta 行に audience/mention を付与
+
+### Miscellaneous Tasks
+
+- Worktree 列挙は main_worktree_root を先に解決する lesson を追記
+- Record host launch fallback runner-resolution lesson in tasks/memory.md
+- Claude Code 使用量調査の lesson を tasks/memory.md に追記
+- Record spec section edit lesson
+- Record fresh browser verification lesson
+- Record fresh claude verification lesson
+- Gitignore .playwright-mcp test artifacts
+- Record Workspace persistent-model lesson in memory
+- Merge origin/develop
+
+### Performance
+
+- **gui:** Resolve branch Resume from off-thread refreshed cache (#2995)
+
+### Refactor
+
+- **skills:** Agent guidance の current-state 概念名を Workspace から Work に統一
+
+### Testing
+
+- Align index status visual coverage
+- Add browser responsiveness gate
+- Add browser budget gate
+- Update launch wizard confirmation contract
+- **core:** Repo-local work path テストの git commit に identity を固定し CI Linux 失敗を解消
+- Stabilize persist dispatcher pending duplicate test
+- Isolate workspace projection env reads
+- **gui:** Workspace → Work → Session 表示の Playwright E2E を追加
+
 ## [9.53.0] - 2026-06-03
 
 ### Bug Fixes

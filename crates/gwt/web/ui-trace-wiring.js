@@ -72,6 +72,13 @@ export function createUiTraceWiring({
     return profiler.measure(kind, fields, callback);
   }
 
+  function isTracing() {
+    if (typeof profiler.isActive !== "function") {
+      return false;
+    }
+    return Boolean(profiler.isActive());
+  }
+
   function start() {
     const trace = profiler.start();
     log(`[ui-trace] started ${trace.session_id}`);
@@ -105,6 +112,7 @@ export function createUiTraceWiring({
   }
 
   return {
+    isTracing,
     registerPalette,
     start,
     stop,

@@ -308,6 +308,41 @@ fn find_package_runner_in_path(
     None
 }
 
+/// Platform priority list of `npx` fallback executables consulted when the host
+/// `bunx` package-runner probe fails (Issue #2981). On Windows the `.cmd`
+/// variant comes first so `CreateProcess` can spawn it; the bare `npx` POSIX
+/// shim is not directly spawnable there (SPEC-1921 FR-080). Other platforms use
+/// the bare canonical name.
+fn npx_fallback_candidates() -> &'static [(&'static str, bool)] {
+    #[cfg(windows)]
+    {
+        &[("npx.cmd", true), ("npx", true)]
+    }
+    #[cfg(not(windows))]
+    {
+        &[("npx", true)]
+    }
+}
+
+/// Resolve the host `npx` fallback executable used when the `bunx`
+/// package-runner probe fails during launch.
+///
+/// Resolution flows through the same Windows-aware `find_package_runner_in_path`
+/// machinery as the primary runner, so on Windows the spawnable `npx.cmd` is
+/// preferred over the bare `npx` shim (Issue #2981). Falls back to the canonical
+/// bare `"npx"` name when no candidate resolves on the launch `PATH`, preserving
+/// the prior behavior for environments without a resolvable npx.
+pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    find_package_runner_in_path(
+        npx_fallback_candidates(),
+        env.get("PATH").map(String::as_str),
+        &cwd,
+    )
+    .map(|(executable, _needs_yes)| executable)
+    .unwrap_or_else(|| "npx".to_string())
+}
+
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -1977,6 +2012,72 @@ mod tests {
 
         assert_eq!(PathBuf::from(runner.executable), bunx);
         assert_eq!(runner.base_args, vec!["@openai/codex@latest".to_string()]);
+    }
+
+    // Issue #2981: the host `bunx`→`npx` fallback must resolve a Windows-spawnable
+    // executable. `find_package_runner_in_path` is the shared resolver, so given
+    // an npx-only candidate list it must prefer the `.cmd` variant ahead of the
+    // bare POSIX shim when both are present on PATH (SPEC-1921 FR-080).
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn npx_fallback_resolution_prefers_cmd_variant_when_both_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_runner(&temp.path().join("npx.cmd"));
+        write_test_runner(&temp.path().join("npx"));
+        let path = temp.path().display().to_string();
+        let cwd = std::env::current_dir().expect("cwd");
+        let candidates: &'static [(&'static str, bool)] = &[("npx.cmd", true), ("npx", true)];
+
+        let (executable, needs_yes) =
+            find_package_runner_in_path(candidates, Some(path.as_str()), &cwd).expect("npx runner");
+
+        assert_eq!(PathBuf::from(&executable), temp.path().join("npx.cmd"));
+        assert!(needs_yes);
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn resolve_host_npx_fallback_executable_resolves_npx_on_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_runner(&temp.path().join("npx"));
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let resolved = resolve_host_npx_fallback_executable(&env);
+
+        assert_eq!(PathBuf::from(resolved), temp.path().join("npx"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_host_npx_fallback_executable_defaults_to_bare_npx_when_absent() {
+        // Empty PATH dir: no npx anywhere → canonical bare name is preserved so
+        // the launch PTY can still resolve it at spawn time (prior behavior).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let resolved = resolve_host_npx_fallback_executable(&env);
+
+        assert_eq!(resolved, "npx");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_host_npx_fallback_executable_prefers_cmd_on_windows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("npx.cmd"), "@echo off\r\n").expect("write npx.cmd");
+        std::fs::write(temp.path().join("npx"), "#!/bin/sh\n").expect("write npx shim");
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let resolved = resolve_host_npx_fallback_executable(&env);
+
+        assert!(
+            Path::new(&resolved)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.eq_ignore_ascii_case("npx.cmd"))
+                .unwrap_or(false),
+            "expected npx.cmd, got {resolved}"
+        );
     }
 
     #[test]

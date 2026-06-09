@@ -24,7 +24,7 @@ use gwt::{save_session_state, save_workspace_state};
 use super::BlockingTaskSpawner;
 
 /// Snapshot of state that the persist worker should flush to disk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PersistSnapshot {
     pub(crate) session_path: PathBuf,
     pub(crate) session: gwt::PersistedSessionState,
@@ -42,6 +42,7 @@ struct DispatcherState {
     shutdown: bool,
     enqueued: u64,
     completed: u64,
+    last_successful_snapshot: Option<PersistSnapshot>,
     last_error: Option<String>,
 }
 
@@ -144,6 +145,12 @@ impl PersistDispatcher {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if state.latest.as_ref() == Some(&snapshot)
+            || (state.latest.is_none()
+                && state.last_successful_snapshot.as_ref() == Some(&snapshot))
+        {
+            return;
+        }
         state.enqueued = state.enqueued.saturating_add(1);
         state.latest = Some(snapshot);
         state.latest_updated_at = Some(Instant::now());
@@ -189,6 +196,24 @@ impl PersistDispatcher {
             .last_error
             .clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn enqueued_count(&self) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .enqueued
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_count(&self) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .completed
+    }
 }
 
 fn worker_loop(inner: Arc<DispatcherInner>) {
@@ -233,17 +258,23 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
             (state.latest.take(), state.enqueued)
         };
 
-        let outcome = if let Some(snap) = snapshot {
-            write_snapshot(&snap)
-        } else {
-            Ok(())
+        let (outcome, successful_snapshot) = match snapshot {
+            Some(snap) => {
+                let outcome = write_snapshot(&snap);
+                let successful_snapshot = if outcome.is_ok() { Some(snap) } else { None };
+                (outcome, successful_snapshot)
+            }
+            None => (Ok(()), None),
         };
 
         let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
         if covered > state.completed {
             state.completed = covered;
         }
-        if let Err(error) = outcome {
+        if let Some(snap) = successful_snapshot {
+            state.last_successful_snapshot = Some(snap);
+            state.last_error = None;
+        } else if let Err(error) = outcome {
             tracing::warn!(error = %error, "persist dispatcher failed to write snapshot");
             state.last_error = Some(error.to_string());
         }
@@ -279,6 +310,31 @@ mod tests {
             tabs: Vec::new(),
             active_tab_id: None,
             recent_projects: Vec::new(),
+        }
+    }
+
+    fn sample_session(active_tab_id: &str) -> gwt::PersistedSessionState {
+        gwt::PersistedSessionState {
+            tabs: Vec::new(),
+            active_tab_id: Some(active_tab_id.to_string()),
+            recent_projects: Vec::new(),
+        }
+    }
+
+    fn sample_snapshot(session_path: PathBuf, active_tab_id: &str) -> PersistSnapshot {
+        PersistSnapshot {
+            session_path,
+            session: sample_session(active_tab_id),
+            workspaces: Vec::new(),
+        }
+    }
+
+    fn unstarted_dispatcher() -> PersistDispatcher {
+        PersistDispatcher {
+            inner: Arc::new(DispatcherInner {
+                state: Mutex::new(DispatcherState::default()),
+                cond: Condvar::new(),
+            }),
         }
     }
 
@@ -391,6 +447,114 @@ mod tests {
             elapsed >= Duration::from_millis(50),
             "writer should respect the 50ms coalesce window from the most recent enqueue (elapsed = {elapsed:?})",
         );
+    }
+
+    #[test]
+    fn suppresses_identical_snapshot_after_successful_write() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session-state.json");
+        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
+        let snapshot = sample_snapshot(path.clone(), "stable");
+
+        dispatcher.enqueue(snapshot.clone());
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+        assert_eq!(dispatcher.completed_count(), 1);
+
+        for _ in 0..25 {
+            dispatcher.enqueue(snapshot.clone());
+        }
+        assert!(dispatcher.wait_idle(Duration::from_millis(100)));
+
+        assert_eq!(
+            dispatcher.enqueued_count(),
+            1,
+            "identical snapshots that already persisted should not enqueue new disk work",
+        );
+        assert_eq!(
+            dispatcher.completed_count(),
+            1,
+            "identical snapshots that already persisted should not complete extra writes",
+        );
+
+        dispatcher.enqueue(sample_snapshot(path.clone(), "changed"));
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+        let on_disk = load_session_state(&path).expect("load persisted session");
+        assert_eq!(
+            on_disk.active_tab_id.as_deref(),
+            Some("changed"),
+            "changed snapshots must still persist after duplicate suppression",
+        );
+        assert_eq!(dispatcher.completed_count(), 2);
+    }
+
+    #[test]
+    fn suppresses_identical_snapshot_while_pending() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session-state.json");
+        let dispatcher = unstarted_dispatcher();
+        let snapshot = sample_snapshot(path.clone(), "pending");
+
+        dispatcher.enqueue(snapshot.clone());
+        let first_updated_at = dispatcher
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .latest_updated_at
+            .expect("first enqueue should create pending timestamp");
+        std::thread::sleep(Duration::from_millis(20));
+        dispatcher.enqueue(snapshot);
+
+        let mut state = dispatcher
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            state.enqueued, 1,
+            "identical pending snapshots should not increment enqueue count",
+        );
+        assert_eq!(
+            state.latest_updated_at,
+            Some(first_updated_at),
+            "identical pending enqueue should not restart the coalesce window",
+        );
+        assert_eq!(
+            state.latest.as_ref(),
+            Some(&sample_snapshot(path, "pending")),
+            "original pending snapshot should remain queued",
+        );
+        state.completed = state.enqueued;
+    }
+
+    #[test]
+    fn failed_write_does_not_suppress_later_retry() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session-state.json");
+        std::fs::create_dir(&path).expect("create blocking directory");
+        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
+        let snapshot = sample_snapshot(path.clone(), "retryable");
+
+        dispatcher.enqueue(snapshot.clone());
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+        assert_eq!(dispatcher.completed_count(), 1);
+        assert!(
+            dispatcher.last_error().is_some(),
+            "first write should fail so the snapshot must not enter the successful duplicate cache",
+        );
+
+        std::fs::remove_dir(&path).expect("remove blocking directory");
+        dispatcher.enqueue(snapshot);
+        assert!(dispatcher.wait_idle(Duration::from_secs(5)));
+
+        let on_disk = load_session_state(&path).expect("load persisted session");
+        assert_eq!(on_disk.active_tab_id.as_deref(), Some("retryable"));
+        assert_eq!(
+            dispatcher.completed_count(),
+            2,
+            "identical snapshot after a failed write must retry instead of being suppressed",
+        );
+        assert!(dispatcher.last_error().is_none());
     }
 
     #[test]

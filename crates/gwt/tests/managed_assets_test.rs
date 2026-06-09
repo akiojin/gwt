@@ -101,8 +101,12 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let exclude_path = dir.path().join(".git/info/exclude");
     let exclude = std::fs::read_to_string(&exclude_path).expect("read exclude");
     assert!(
-        exclude.contains("\n.gwt/\n"),
-        ".gwt/drop-files/ must stay covered by the broad project-local .gwt/ exclude"
+        exclude.contains("\n.gwt/*\n"),
+        ".gwt/drop-files/ must stay covered by the broad project-local .gwt/* exclude"
+    );
+    assert!(
+        exclude.contains("\n!.gwt/work/\n"),
+        "the tracked .gwt/work/ directory must be carved out of the broad exclude"
     );
     assert!(exclude.contains(".claude/skills/gwt-*"));
     assert!(exclude.contains(".claude/commands/gwt-*"));
@@ -186,9 +190,10 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
 
     let exclude =
         std::fs::read_to_string(dir.path().join(".git/info/exclude")).expect("read exclude");
-    // .gwt/hermes/ is subsumed by the broad project-local .gwt/ exclude
-    // emitted for any managed target.
-    assert!(exclude.contains("\n.gwt/\n"));
+    // .gwt/hermes/ is subsumed by the broad project-local .gwt/* exclude
+    // emitted for any managed target, while .gwt/work/ stays carved out.
+    assert!(exclude.contains("\n.gwt/*\n"));
+    assert!(exclude.contains("\n!.gwt/work/\n"));
     assert!(!exclude.contains(".gwt/hermes/"));
     assert!(!exclude.contains(".claude/skills/gwt-*"));
     assert!(!exclude.contains(".codex/skills/gwt-*"));

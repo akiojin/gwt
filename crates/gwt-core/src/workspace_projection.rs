@@ -13,9 +13,10 @@ use crate::{
     coordination::{BoardEntry, BoardEntryKind},
     error::{GwtError, Result},
     paths::{
-        gwt_project_dir_for_repo_path, gwt_workspace_journal_path_for_repo_path,
-        gwt_workspace_projection_path_for_repo_path, gwt_workspace_work_events_path_for_repo_path,
-        gwt_workspace_work_items_path_for_repo_path, project_scope_hash,
+        gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
+        gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
+        gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
+        project_scope_hash, resolve_current_worktree_root,
     },
 };
 
@@ -211,6 +212,100 @@ pub fn recompute_lifecycle_stage(
         | WorkspaceStatusCategory::Idle => WorkspaceLifecycleStage::Active,
         WorkspaceStatusCategory::Done => WorkspaceLifecycleStage::Done,
         WorkspaceStatusCategory::Unknown => WorkspaceLifecycleStage::Planning,
+    }
+}
+
+/// SPEC-2359 Phase W-12 (FR-349): the agent-session-centric Work lifecycle.
+///
+/// Distinct from [`WorkspaceLifecycleStage`] (the U-6 status-derived chip with
+/// Planning/InReview/Archived). This 4-state model treats a Work as one agent
+/// session: it is `Active` while the agent runs, `Paused` once the agent stops
+/// but the user has not closed it, and `Done` / `Discarded` only on an explicit
+/// user close. Agent stop alone never closes a Work (FR-350).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkActiveLifecycleState {
+    #[default]
+    Active,
+    Paused,
+    Done,
+    Discarded,
+}
+
+/// Live runtime state of the agent session that owns a Work, used as the
+/// driver for [`recompute_work_active_lifecycle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkAgentRuntime {
+    /// The owning agent session has a live window / running process.
+    Running,
+    /// The owning agent session exists but is stopped / exited.
+    Stopped,
+    /// No live agent session is associated (e.g. resumed-later Work).
+    None,
+}
+
+/// Explicit close recorded when the user closes a Work from the Work surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCloseKind {
+    Done,
+    Discarded,
+}
+
+/// SPEC-2359 Phase W-12 (FR-349/FR-350): derive the agent-session Work
+/// lifecycle. An explicit user close wins; otherwise the live agent runtime
+/// decides: `Running` → `Active`, `Stopped` / `None` → `Paused`. Agent stop
+/// alone must never yield `Done` / `Discarded` (FR-350) — only a user close does.
+pub fn recompute_work_active_lifecycle(
+    agent_runtime: WorkAgentRuntime,
+    closed: Option<WorkCloseKind>,
+) -> WorkActiveLifecycleState {
+    match closed {
+        Some(WorkCloseKind::Done) => WorkActiveLifecycleState::Done,
+        Some(WorkCloseKind::Discarded) => WorkActiveLifecycleState::Discarded,
+        None => match agent_runtime {
+            WorkAgentRuntime::Running => WorkActiveLifecycleState::Active,
+            WorkAgentRuntime::Stopped | WorkAgentRuntime::None => WorkActiveLifecycleState::Paused,
+        },
+    }
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): the outcome of deciding how to handle
+/// a user-initiated Work close. Kept as a pure value so the block / cleanup /
+/// record-only decision can be unit-tested without touching git or the
+/// filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkCloseDecision {
+    /// A live agent session still owns this Work — block the close and do not
+    /// touch the worktree (FR-352). The owning session must be stopped first.
+    BlockedLiveAgent,
+    /// No live agent and a worktree path is known — remove the worktree only
+    /// (branch / PR are retained) and record the terminal close.
+    CleanupWorktree { worktree_path: PathBuf },
+    /// No live agent and no resolvable worktree path — record the terminal
+    /// close in the work history but perform no filesystem cleanup.
+    RecordOnly,
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): decide how to handle a Work close.
+///
+/// Decision order:
+/// 1. If a live agent session owns this Work (`live_agent` is `true`), block the
+///    close — the worktree must never be removed while an agent is running.
+/// 2. Otherwise, if a worktree path is known, request worktree-only cleanup.
+/// 3. Otherwise, record the close without any filesystem side effect.
+///
+/// Pure: takes only resolved inputs and returns a value, so it is exercised
+/// directly by unit tests while the git removal itself is verified separately.
+pub fn decide_work_close(live_agent: bool, worktree_path: Option<PathBuf>) -> WorkCloseDecision {
+    if live_agent {
+        return WorkCloseDecision::BlockedLiveAgent;
+    }
+    match worktree_path {
+        Some(path) if !path.as_os_str().is_empty() => WorkCloseDecision::CleanupWorktree {
+            worktree_path: path,
+        },
+        _ => WorkCloseDecision::RecordOnly,
     }
 }
 
@@ -809,7 +904,16 @@ pub enum WorkspaceWorkEventKind {
     Split,
     Merge,
     Pr,
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): the owning agent session stopped
+    /// without an explicit user close. The Work is retained as Paused (not Done)
+    /// so it stays on the Work surface until the user closes it.
+    Pause,
     Done,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the user explicitly discarded the
+    /// Work from the Work surface. This is a terminal close distinct from Done:
+    /// the Work leaves the active surface but its provenance is retained as
+    /// discarded (not completed). Agent stop alone never yields Discard.
+    Discard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -896,11 +1000,26 @@ pub struct WorkspaceWorkItem {
     pub related_work_item_ids: Vec<String>,
     #[serde(default)]
     pub events: Vec<WorkspaceWorkEvent>,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal discarded close. A
+    /// discarded Work is removed from the active Work surface but kept in the
+    /// history with its provenance. Distinct from `status_category == Done`
+    /// (which marks completion); `discarded` marks an explicit user discard.
+    /// Back-compat default is `false` for projections written before W-12.
+    #[serde(default)]
+    pub discarded: bool,
 }
 
 impl WorkspaceWorkItem {
+    /// A Work is incomplete while it is neither completed (Done) nor discarded.
+    /// Both Done and Discarded are terminal closes (FR-352).
     pub fn is_incomplete(&self) -> bool {
-        self.status_category != WorkspaceStatusCategory::Done
+        self.status_category != WorkspaceStatusCategory::Done && !self.discarded
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when the Work has reached a
+    /// terminal close — either completed (Done) or explicitly discarded.
+    pub fn is_terminal(&self) -> bool {
+        self.status_category == WorkspaceStatusCategory::Done || self.discarded
     }
 }
 
@@ -944,6 +1063,7 @@ impl WorkspaceWorkItemsProjection {
                     board_refs: Vec::new(),
                     related_work_item_ids: Vec::new(),
                     events: Vec::new(),
+                    discarded: false,
                 });
                 self.work_items.len() - 1
             });
@@ -965,11 +1085,20 @@ impl WorkspaceWorkItemsProjection {
         // (kind=Update with status_category=None) emitted after a Done event
         // must not regress the WorkItem to Active/Idle. Only events that
         // carry an explicit `status_category` may transition out of Done.
+        //
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is likewise terminal.
+        // Once a Work is discarded, subsequent events (heartbeat updates without
+        // an explicit status_category) must not regress its runtime status; the
+        // `discarded` flag is monotonic and never reset.
         let new_status = workspace_work_event_status(&event);
-        let preserve_done = item.status_category == WorkspaceStatusCategory::Done
+        let preserve_terminal = (item.status_category == WorkspaceStatusCategory::Done
+            || item.discarded)
             && event.status_category.is_none();
-        if !preserve_done {
+        if !preserve_terminal {
             item.status_category = new_status;
+        }
+        if event.kind == WorkspaceWorkEventKind::Discard {
+            item.discarded = true;
         }
         if item.status_category == WorkspaceStatusCategory::Done {
             // Preserve the first Done timestamp so idempotent Done re-applies
@@ -1068,6 +1197,77 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
         fs::create_dir_all(parent)?;
     }
     fs::copy(legacy_path, canonical_path)?;
+    Ok(())
+}
+
+/// SPEC-2359 Phase W-12 Slice 5b (FR-355): the gitattributes line that joins
+/// the append-only Work event log across branch divergence via git's union
+/// merge driver. The glob matches the repo-local event log regardless of the
+/// directory it is checked out under.
+const WORK_EVENTS_GITATTRIBUTES_LINE: &str = "**/.gwt/work/events.jsonl merge=union";
+
+/// SPEC-2359 Phase W-12 Slice 5b (FR-353/FR-358): resolve the repo-local Work
+/// event log path (`<repo_root>/.gwt/work/events.jsonl`), running the one-time
+/// migration from the home (untracked) sources and ensuring the union-merge
+/// gitattribute exists. Returns the repo-local path so every record/read entry
+/// point shares one resolution + migration.
+///
+/// Migration (FR-358) is guarded by existence: when the repo-local event log
+/// is absent, the home Project State event log (and its older Workspace path)
+/// are copied into it exactly once. Once the repo-local file exists, the home
+/// sources are never read again. The copy is idempotent across restarts and
+/// across linked worktrees because they all resolve to the same main worktree
+/// root.
+fn repo_local_work_events_path_with_migration(repo_path: &Path) -> Result<PathBuf> {
+    let events_path = gwt_repo_local_work_events_path(repo_path);
+    if !events_path.exists() {
+        // Primary migration source: the home Project State event log.
+        copy_legacy_workspace_file_if_needed(
+            &gwt_workspace_work_events_path_for_repo_path(repo_path),
+            &events_path,
+        )?;
+        // Fallback migration source: the older home Workspace event log. Only
+        // consulted when neither the repo-local nor the Project State file
+        // exists, so the most recent home log always wins.
+        copy_legacy_workspace_file_if_needed(
+            &legacy_workspace_work_events_path_for_repo_path(repo_path),
+            &events_path,
+        )?;
+    }
+    ensure_work_events_gitattributes(repo_path)?;
+    Ok(events_path)
+}
+
+/// SPEC-2359 Phase W-12 Slice 5b (FR-355): ensure the repo's `.gitattributes`
+/// carries the union-merge line for the repo-local Work event log. The entry
+/// is appended at most once (idempotent): an existing line — regardless of
+/// surrounding whitespace — is left untouched. The file is created when
+/// absent. Failures to write are swallowed for non-repository / read-only
+/// roots so recording a Work event never fails on the gitattributes side.
+fn ensure_work_events_gitattributes(repo_path: &Path) -> Result<()> {
+    let root = resolve_current_worktree_root(repo_path);
+    // Defensive: a bare repository has no checked-out `.gitattributes`, so it
+    // cannot drive the merge driver. `resolve_current_worktree_root` returns
+    // the working tree, so this guard is normally inert, but stays as a guard.
+    if root.join("HEAD").is_file() && root.join("objects").is_dir() && !root.join(".git").exists() {
+        return Ok(());
+    }
+    let attributes_path = root.join(".gitattributes");
+    let existing = fs::read_to_string(&attributes_path).unwrap_or_default();
+    if existing
+        .lines()
+        .any(|line| line.trim() == WORK_EVENTS_GITATTRIBUTES_LINE)
+    {
+        return Ok(());
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(WORK_EVENTS_GITATTRIBUTES_LINE);
+    next.push('\n');
+    // Best-effort: a read-only or non-repo root must not fail event recording.
+    let _ = fs::write(&attributes_path, next);
     Ok(())
 }
 
@@ -1306,12 +1506,8 @@ pub fn save_workspace_work_items_projection_to_path(
 
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkspaceWorkEvent) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     record_workspace_work_event_paths(&work_items_path, &events_path, event)
 }
 
@@ -1326,6 +1522,80 @@ pub fn record_workspace_work_event_paths(
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     append_workspace_work_event_to_path(events_path, &event)?;
     Ok(())
+}
+
+/// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a `Pause` work event so a
+/// Work whose owning agent session stopped is retained in the work history
+/// (and on the Work surface) until the user explicitly closes it. `work_item_id`
+/// is the session-derived canonical Work id (`work-session-<session_id>`), which
+/// matches the live-agent grouping id so a later resume dedupes to one row.
+/// Idempotent for already-closed (Done) Work: the `apply_event` Done-preservation
+/// keeps a terminal Work terminal because the Pause event carries no explicit
+/// `status_category`.
+#[allow(clippy::too_many_arguments)]
+pub fn record_workspace_work_paused_event_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_item_id: &str,
+    title: Option<&str>,
+    summary: Option<&str>,
+    owner: Option<&str>,
+    board_refs: &[String],
+    execution_container: Option<WorkspaceExecutionContainerRef>,
+    agent_session_id: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut event =
+        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Pause, work_item_id, updated_at);
+    event.title = non_empty_clone(title);
+    event.summary = non_empty_clone(summary);
+    event.owner = non_empty_clone(owner);
+    event.agent_session_id = non_empty_clone(agent_session_id);
+    event.execution_container = execution_container;
+    // Pause must not regress a terminal Work, so leave status_category implicit;
+    // record the board refs (if any) so the retained row keeps its provenance.
+    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    for board_ref in board_refs {
+        if let Some(board_ref) = non_empty_clone(Some(board_ref.as_str())) {
+            let mut ref_event =
+                WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, updated_at);
+            ref_event.board_entry_id = Some(board_ref);
+            record_workspace_work_event_paths(work_items_path, events_path, ref_event)?;
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-2359 Phase W-12 Slice 5a (FR-350): convenience wrapper resolving the
+/// project-scoped work_items and work_events paths from `repo_path` and
+/// invoking [`record_workspace_work_paused_event_paths`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_workspace_work_paused_event(
+    repo_path: &Path,
+    work_item_id: &str,
+    title: Option<&str>,
+    summary: Option<&str>,
+    owner: Option<&str>,
+    board_refs: &[String],
+    execution_container: Option<WorkspaceExecutionContainerRef>,
+    agent_session_id: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    record_workspace_work_paused_event_paths(
+        &work_items_path,
+        &events_path,
+        work_item_id,
+        title,
+        summary,
+        owner,
+        board_refs,
+        execution_container,
+        agent_session_id,
+        updated_at,
+    )
 }
 
 /// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkspaceWorkEvent`
@@ -1359,7 +1629,7 @@ pub fn emit_workspace_done_event_if_absent(
 ) -> Result<bool> {
     emit_workspace_done_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
         work_item_id,
         updated_at,
     )
@@ -1381,6 +1651,56 @@ fn work_item_has_done_event_in_projection(
                 .iter()
                 .any(|event| event.kind == WorkspaceWorkEventKind::Done)
         }))
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): Emit a single Discard
+/// `WorkspaceWorkEvent` for `work_item_id` iff the Work is not already
+/// terminal (Done or already Discarded). This is the canonical write path for a
+/// user-initiated Discard close from the Work surface. Returns `Ok(true)` when
+/// a new Discard event was appended, `Ok(false)` when the Work was already
+/// terminal (idempotent noop so a re-close does nothing).
+pub fn emit_workspace_discard_event_if_absent_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    if work_item_is_terminal_in_projection(work_items_path, work_item_id)? {
+        return Ok(false);
+    }
+    let event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, updated_at);
+    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    Ok(true)
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): Convenience wrapper resolving the
+/// project-scoped work_items and work_events paths from `repo_path` and
+/// invoking [`emit_workspace_discard_event_if_absent_paths`].
+pub fn emit_workspace_discard_event_if_absent(
+    repo_path: &Path,
+    work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    emit_workspace_discard_event_if_absent_paths(
+        &gwt_workspace_work_items_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
+        work_item_id,
+        updated_at,
+    )
+}
+
+/// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when `work_item_id` is already
+/// in a terminal close state (Done or discarded) in the saved projection. Used
+/// to make Done / Discard close emission idempotent.
+fn work_item_is_terminal_in_projection(work_items_path: &Path, work_item_id: &str) -> Result<bool> {
+    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(false);
+    };
+    Ok(projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == work_item_id)
+        .any(|item| item.is_terminal()))
 }
 
 /// SPEC-2359 US-37 / FR-119: Scan WorkItems and the current Workspace
@@ -1521,12 +1841,8 @@ pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
 ) -> Result<WorkspaceWorkItemsRebuildOutcome> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     let marker_path = work_items_path
         .parent()
         .map(|dir| dir.join("work_items.migration.json"))
@@ -1654,13 +1970,9 @@ pub fn reset_legacy_agent_identity_for_repo(repo_path: &Path) -> Result<bool> {
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
-    let events_path = gwt_workspace_work_events_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_work_events_path_for_repo_path(repo_path),
-        &events_path,
-    )?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
     retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
 
@@ -1732,7 +2044,7 @@ pub fn emit_workspace_done_event_for_branch(
     emit_workspace_done_event_for_branch_paths(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &gwt_workspace_work_events_path_for_repo_path(repo_path),
+        &repo_local_work_events_path_with_migration(repo_path)?,
         branch,
         now,
     )
@@ -1964,6 +2276,7 @@ fn synthesize_workspace_work_item_from_legacy(
             .unwrap_or_default(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        discarded: false,
     };
     if let Some(projection) = projection {
         item.agents.extend(
@@ -2123,6 +2436,13 @@ fn workspace_work_event_status(event: &WorkspaceWorkEvent) -> WorkspaceStatusCat
     event.status_category.unwrap_or(match event.kind {
         WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
         WorkspaceWorkEventKind::Blocked => WorkspaceStatusCategory::Blocked,
+        // Pause keeps the Work incomplete (non-Done) while the agent is stopped;
+        // the Idle status preserves the retained-but-not-running semantics.
+        WorkspaceWorkEventKind::Pause => WorkspaceStatusCategory::Idle,
+        // Discard does not complete the Work (status stays non-Done); the
+        // terminal close is carried by the `discarded` flag (FR-352). Idle
+        // mirrors the retained-but-not-running runtime status.
+        WorkspaceWorkEventKind::Discard => WorkspaceStatusCategory::Idle,
         WorkspaceWorkEventKind::Start
         | WorkspaceWorkEventKind::Claim
         | WorkspaceWorkEventKind::Update
@@ -3585,8 +3905,15 @@ mod tests {
         a
     }
 
+    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn resolve_workspace_id_for_session_returns_assigned_workspace_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3602,6 +3929,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_session_returns_none_for_unassigned_agent() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-B", "codex"));
@@ -3612,6 +3940,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_session_returns_none_when_session_missing() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let projection = WorkspaceProjection::default_for_project(dir.path());
         save_workspace_projection(dir.path(), &projection).unwrap();
@@ -3624,6 +3953,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_session_matches_session_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3639,6 +3969,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_agent_matches_display_or_agent_id() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -3659,6 +3990,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_returns_none_for_unassigned_target() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-E", "codex"));
@@ -3676,6 +4008,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_id_for_mention_user_or_branch_kind_returns_none() {
+        let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
@@ -4603,6 +4936,159 @@ mod tests {
     }
 
     #[test]
+    fn apply_event_discard_marks_work_terminal_discarded() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
+        // terminal-discarded (not Done) and removes it from the incomplete set.
+        let work_item_id = "test-item-discard";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        start.title = Some("Discardable work".to_string());
+        projection.apply_event(start);
+
+        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t2);
+        projection.apply_event(discard);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(item.discarded, "Discard event must mark the Work discarded");
+        assert!(item.is_terminal(), "discarded Work is terminal");
+        assert!(!item.is_incomplete(), "discarded Work is not incomplete");
+        assert_ne!(
+            item.status_category,
+            WorkspaceStatusCategory::Done,
+            "Discard is distinct from Done"
+        );
+        assert_eq!(
+            item.completed_at, None,
+            "discarded Work is not completed, so completed_at stays None"
+        );
+    }
+
+    #[test]
+    fn apply_event_preserves_discarded_against_subsequent_heartbeat() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is terminal — a later
+        // heartbeat update (no explicit status_category) must not un-discard.
+        let work_item_id = "test-item-discard-preserve";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t1);
+        projection.apply_event(discard);
+        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        projection.apply_event(update);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(
+            item.discarded,
+            "heartbeat update must not clear the discarded terminal flag"
+        );
+        assert!(!item.is_incomplete());
+    }
+
+    #[test]
+    fn emit_workspace_discard_event_if_absent_is_idempotent_for_terminal_work() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a re-close of an already
+        // discarded (or already Done) Work is a noop.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("work_items.json");
+        let events_path = temp.path().join("work_events.jsonl");
+        let work_item_id = "wi-discard-idem";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("record start");
+
+        assert!(
+            emit_workspace_discard_event_if_absent_paths(
+                &work_items_path,
+                &events_path,
+                work_item_id,
+                t2
+            )
+            .expect("first discard"),
+            "first discard appends a new event"
+        );
+        assert!(
+            !emit_workspace_discard_event_if_absent_paths(
+                &work_items_path,
+                &events_path,
+                work_item_id,
+                t2
+            )
+            .expect("second discard"),
+            "re-discarding a terminal Work is a noop"
+        );
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load")
+            .expect("present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(item.discarded);
+        let discard_events = item
+            .events
+            .iter()
+            .filter(|e| e.kind == WorkspaceWorkEventKind::Discard)
+            .count();
+        assert_eq!(discard_events, 1, "only one Discard event is recorded");
+    }
+
+    #[test]
+    fn decide_work_close_blocks_when_live_agent_present() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a live agent blocks the close
+        // and never requests worktree cleanup.
+        assert_eq!(
+            decide_work_close(true, Some(PathBuf::from("/repo/work/live"))),
+            WorkCloseDecision::BlockedLiveAgent
+        );
+        assert_eq!(
+            decide_work_close(true, None),
+            WorkCloseDecision::BlockedLiveAgent
+        );
+    }
+
+    #[test]
+    fn decide_work_close_cleans_worktree_when_paused_with_path() {
+        assert_eq!(
+            decide_work_close(false, Some(PathBuf::from("/repo/work/paused"))),
+            WorkCloseDecision::CleanupWorktree {
+                worktree_path: PathBuf::from("/repo/work/paused")
+            }
+        );
+    }
+
+    #[test]
+    fn decide_work_close_records_only_without_worktree_path() {
+        assert_eq!(
+            decide_work_close(false, None),
+            WorkCloseDecision::RecordOnly
+        );
+        assert_eq!(
+            decide_work_close(false, Some(PathBuf::new())),
+            WorkCloseDecision::RecordOnly,
+            "an empty worktree path is treated as unresolved"
+        );
+    }
+
+    #[test]
     fn apply_event_idempotent_done_keeps_first_timestamp() {
         let work_item_id = "test-item-idempotent";
         let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
@@ -4675,5 +5161,369 @@ mod tests {
 
         assert_eq!(local, remote);
         assert_eq!(local, ref_remote);
+    }
+
+    #[test]
+    fn work_active_lifecycle_runs_active_when_agent_running() {
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Running, None),
+            WorkActiveLifecycleState::Active
+        );
+    }
+
+    #[test]
+    fn work_active_lifecycle_pauses_when_agent_stopped_or_absent_and_not_closed() {
+        // FR-350: agent stop alone never closes a Work; it becomes Paused.
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Stopped, None),
+            WorkActiveLifecycleState::Paused
+        );
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::None, None),
+            WorkActiveLifecycleState::Paused
+        );
+    }
+
+    #[test]
+    fn work_active_lifecycle_respects_explicit_user_close() {
+        // Explicit user close wins over runtime, even while the agent is running.
+        assert_eq!(
+            recompute_work_active_lifecycle(WorkAgentRuntime::Running, Some(WorkCloseKind::Done)),
+            WorkActiveLifecycleState::Done
+        );
+        assert_eq!(
+            recompute_work_active_lifecycle(
+                WorkAgentRuntime::Stopped,
+                Some(WorkCloseKind::Discarded)
+            ),
+            WorkActiveLifecycleState::Discarded
+        );
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): recording a Pause event persists
+    /// the Work in the history as a non-Done (incomplete) item keyed by the
+    /// session-derived id, carrying the branch / worktree execution container so
+    /// the Work surface can render the retained Paused row.
+    #[test]
+    fn record_workspace_work_paused_event_retains_incomplete_history_item() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let events_path = temp.path().join("work-events.jsonl");
+        let container = WorkspaceExecutionContainerRef {
+            branch: Some("work/paused".to_string()),
+            worktree_path: Some(temp.path().join("work/paused")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+
+        super::record_workspace_work_paused_event_paths(
+            &work_items_path,
+            &events_path,
+            "work-session-session-paused",
+            Some("Paused persistence"),
+            Some("agent stopped"),
+            Some("SPEC-2359"),
+            &["board-1".to_string()],
+            Some(container),
+            Some("session-paused"),
+            Utc::now(),
+        )
+        .expect("record paused event");
+
+        let projection = super::load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-session-paused")
+            .expect("paused work item");
+        assert!(item.is_incomplete(), "paused Work must stay non-Done");
+        assert_ne!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.completed_at, None);
+        assert_eq!(item.title, "Paused persistence");
+        assert_eq!(item.execution_containers.len(), 1);
+        assert_eq!(
+            item.execution_containers[0].branch.as_deref(),
+            Some("work/paused")
+        );
+        assert!(item.board_refs.iter().any(|value| value == "board-1"));
+        assert!(item
+            .events
+            .iter()
+            .any(|event| event.kind == WorkspaceWorkEventKind::Pause));
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a Pause event carries no explicit
+    /// status, so the Done-preservation in `apply_event` keeps an already-closed
+    /// (Done) Work terminal — agent stop must never reopen a closed Work.
+    #[test]
+    fn record_workspace_work_paused_event_does_not_reopen_done_work() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let events_path = temp.path().join("work-events.jsonl");
+        let now = Utc::now();
+        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "work-session-x", now);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        super::record_workspace_work_event_paths(&work_items_path, &events_path, done)
+            .expect("record done");
+
+        super::record_workspace_work_paused_event_paths(
+            &work_items_path,
+            &events_path,
+            "work-session-x",
+            Some("Closed Work"),
+            None,
+            None,
+            &[],
+            None,
+            Some("session-x"),
+            now + chrono::Duration::seconds(1),
+        )
+        .expect("record paused event");
+
+        let projection = super::load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-session-x")
+            .expect("work item");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert!(item.completed_at.is_some());
+    }
+
+    // ---------------------------------------------------------------------
+    // SPEC-2359 Phase W-12 Slice 5b (FR-353 / FR-355 / FR-358): the Work
+    // event log persistent core is repo-local and git-tracked.
+    // ---------------------------------------------------------------------
+
+    /// Override `HOME` for the duration of a test so the home-side projection
+    /// writes (works.json, project-state) and the legacy migration sources
+    /// resolve under an isolated temp directory. Restores the previous value
+    /// on drop.
+    struct ScopedHome {
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedHome {
+        fn set(path: &Path) -> Self {
+            let previous_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous_home }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            match self.previous_home.as_ref() {
+                Some(previous) => std::env::set_var("HOME", previous),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn init_test_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("create repo dir");
+        let output = crate::process::hidden_command("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+        for args in [
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "Test User"],
+        ] {
+            let mut cmd = crate::process::hidden_command("git");
+            cmd.args(args).current_dir(path);
+            crate::process::scrub_git_env(&mut cmd);
+            assert!(cmd.output().expect("git config").status.success());
+        }
+    }
+
+    fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkspaceWorkEvent {
+        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, at);
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        event.title = Some("Repo-local work".to_string());
+        event
+    }
+
+    #[test]
+    fn record_workspace_work_event_writes_to_repo_local_events_log() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-repo-local", t1)).expect("record event");
+
+        // The event must land in the repo-local, git-tracked event log.
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(
+            repo_local.is_file(),
+            "event must be written to repo-local .gwt/work/events.jsonl"
+        );
+        let body = std::fs::read_to_string(&repo_local).expect("read events");
+        assert!(body.contains("wi-repo-local"), "event payload present");
+
+        // The home Project State event log must NOT be written for new events.
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        assert!(
+            !home_events.exists(),
+            "home project-state event log must not receive new events"
+        );
+    }
+
+    #[test]
+    fn record_workspace_work_event_adds_union_merge_gitattribute_idempotently() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+        // Seed a pre-existing .gitattributes to confirm we append, not clobber.
+        std::fs::write(repo.join(".gitattributes"), "*.sh text eol=lf\n")
+            .expect("seed gitattributes");
+
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-attr", t1)).expect("record 1");
+        record_workspace_work_event(
+            &repo,
+            start_event("wi-attr-2", t1 + chrono::Duration::seconds(1)),
+        )
+        .expect("record 2");
+
+        let attributes =
+            std::fs::read_to_string(repo.join(".gitattributes")).expect("read gitattributes");
+        let union_lines = attributes
+            .lines()
+            .filter(|line| line.trim() == "**/.gwt/work/events.jsonl merge=union")
+            .count();
+        assert_eq!(
+            union_lines, 1,
+            "union-merge entry must be added exactly once"
+        );
+        assert!(
+            attributes.contains("*.sh text eol=lf"),
+            "pre-existing gitattributes content must be preserved"
+        );
+    }
+
+    #[test]
+    fn migrates_home_events_into_repo_local_once_then_skips() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        // Seed the home Project State event log with a historical event so the
+        // one-time migration has something to copy.
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+        append_workspace_work_event_to_path(&home_events, &start_event("wi-historical", t0))
+            .expect("seed home events");
+
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(!repo_local.exists(), "precondition: repo-local absent");
+
+        // First record triggers migration: the historical event is copied in,
+        // then the new event is appended.
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 5, 10, 0, 0).unwrap();
+        record_workspace_work_event(&repo, start_event("wi-new", t1)).expect("record new");
+
+        let body = std::fs::read_to_string(&repo_local).expect("read repo-local");
+        assert!(
+            body.contains("wi-historical"),
+            "migration must copy the home historical event into the repo-local log"
+        );
+        assert!(
+            body.contains("wi-new"),
+            "the new event is appended after migration"
+        );
+
+        // Mutate the home log AFTER migration. Because the repo-local file now
+        // exists, the home source must never be read again (idempotent skip).
+        append_workspace_work_event_to_path(
+            &home_events,
+            &start_event("wi-home-after-migration", t1 + chrono::Duration::seconds(5)),
+        )
+        .expect("append post-migration home event");
+
+        record_workspace_work_event(
+            &repo,
+            start_event("wi-second", t1 + chrono::Duration::seconds(10)),
+        )
+        .expect("record second");
+
+        let body2 = std::fs::read_to_string(&repo_local).expect("read repo-local again");
+        assert!(
+            !body2.contains("wi-home-after-migration"),
+            "once repo-local exists the home source must not be migrated again"
+        );
+        assert!(body2.contains("wi-second"), "second new event appended");
+    }
+
+    #[test]
+    fn rebuild_work_items_uses_repo_local_events_after_migration() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let workspace = tempfile::tempdir().expect("workspace");
+        let repo = workspace.path().join("repo");
+        init_test_git_repo(&repo);
+
+        // A Done then later Update in the home log; rebuild must replay through
+        // the repo-local log and recover the terminal Done state (regression
+        // coverage that the repo-local path drives the existing rebuild).
+        let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 1, 11, 0, 0).unwrap();
+        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "wi-rebuild", t1);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        append_workspace_work_event_to_path(&home_events, &done).expect("seed done");
+        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "wi-rebuild", t2);
+        append_workspace_work_event_to_path(&home_events, &update).expect("seed update");
+
+        let outcome = rebuild_work_items_from_events_for_repo(&repo).expect("rebuild");
+        assert_eq!(outcome, WorkspaceWorkItemsRebuildOutcome::Applied);
+
+        // The rebuild must have migrated and replayed the repo-local log.
+        let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
+        assert!(
+            repo_local.is_file(),
+            "rebuild migrates events into repo-local log"
+        );
+
+        let projection = load_workspace_work_items_from_path(
+            &gwt_workspace_work_items_path_for_repo_path(&repo),
+        )
+        .expect("load")
+        .expect("present");
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == "wi-rebuild")
+            .expect("rebuilt item");
+        assert_eq!(
+            item.status_category,
+            WorkspaceStatusCategory::Done,
+            "Done terminal state recovered via repo-local replay"
+        );
     }
 }

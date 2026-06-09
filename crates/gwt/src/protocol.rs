@@ -178,6 +178,16 @@ pub enum FileAttachment {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentProgressPhase {
+    Queued,
+    Staging,
+    Injecting,
+    Attached,
+    Failed,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -273,6 +283,8 @@ pub enum FrontendEvent {
     },
     PasteImageUploaded {
         id: String,
+        #[serde(default)]
+        operation_id: Option<String>,
         upload_id: String,
         mime_type: String,
         filename: Option<String>,
@@ -280,6 +292,8 @@ pub enum FrontendEvent {
     },
     AttachFiles {
         id: String,
+        #[serde(default)]
+        operation_id: Option<String>,
         files: Vec<FileAttachment>,
     },
     LoadFileTree {
@@ -502,11 +516,17 @@ pub enum FrontendEvent {
     /// SPEC-2359 US-42: spawn a single previously-assigned agent in the
     /// current Workspace without opening the Launch Wizard. The
     /// `session_id` matches one of the entries returned by
-    /// [`BackendEvent::WorkspaceResumableAgents`]. `bounds` carries the
-    /// frontend's current viewport so the spawned agent window appears at
-    /// a sensible position inside the visible canvas.
+    /// [`BackendEvent::WorkspaceResumableAgents`] and identifies the Work
+    /// (the gwt launch / Session TOML). `agent_session_id`, when present,
+    /// names a specific Session (a conversation UUID under that Work) so a
+    /// single Session row can be resumed directly; when absent the Work's
+    /// latest conversation is resumed. `bounds` carries the frontend's
+    /// current viewport so the spawned agent window appears at a sensible
+    /// position inside the visible canvas.
     ResumeWorkspaceAgent {
         session_id: String,
+        #[serde(default)]
+        agent_session_id: Option<String>,
         bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
@@ -749,6 +769,17 @@ pub enum FrontendEvent {
     ApplyUpdateToVersion {
         version: String,
     },
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the user closed a Work from the
+    /// Work surface. `work_id` is the Work item id (`work-session-<session_id>`
+    /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
+    /// Done records a terminal completion, Discarded a terminal discard; both
+    /// remove the Work from the active surface. The backend blocks the close
+    /// when the owning agent session is still live (the worktree is only
+    /// removed for Paused Works that have no running agent).
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -916,6 +947,11 @@ pub struct ActiveWorkAgentView {
     pub last_board_entry_kind: Option<String>,
     pub coordination_scope: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Drives the Session-centric detail rendering; empty when no
+    /// Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -933,12 +969,40 @@ pub struct WorkspaceJournalEntryView {
     pub agent_title_summary: Option<String>,
 }
 
+/// One agent-tool conversation session (the Session level of Workspace → Work →
+/// Session) shown under a Work. `agent_session_id` is the agent tool's
+/// conversation UUID and is distinct from the parent Work's `session_id` (the
+/// gwt session / launch id). A single Work (launch) can hold several of these
+/// because Claude Code / Codex split conversations on `/clear`, context limit,
+/// or resume fork.
+fn default_resumable_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistorySessionView {
+    pub agent_session_id: String,
+    pub started_at: String,
+    /// True for the Work's current (latest) conversation session.
+    pub is_active: bool,
+    /// SPEC-2359: whether this conversation can be handed to the agent CLI as a
+    /// `--resume` target. When false the surface renders the Session as
+    /// history-only (no Resume control) so a button that would silently fail is
+    /// never shown. Defaults to true for forward compatibility.
+    #[serde(default = "default_resumable_true")]
+    pub resumable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistoryAgentView {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub display_name: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Empty when no Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
@@ -1000,6 +1064,14 @@ pub struct ActiveWorkCleanupCandidateView {
     pub remote_delete_available: bool,
 }
 
+/// SPEC-2359 Phase W-12 (FR-349): default wire value for
+/// [`ActiveWorkItemView::lifecycle_state`] when deserializing payloads that
+/// predate the field. Legacy active Work entries are always live (a group of
+/// an assigned, running agent), so the back-compat default is `"active"`.
+fn default_work_lifecycle_state() -> String {
+    "active".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkItemView {
     pub id: String,
@@ -1018,6 +1090,15 @@ pub struct ActiveWorkItemView {
     pub pr_state: Option<String>,
     pub board_refs: Vec<String>,
     pub agents: Vec<ActiveWorkAgentView>,
+    /// SPEC-2359 Phase W-12 (FR-349): agent-session Work lifecycle state
+    /// (active / paused / done / discarded). Distinct from `status_category`
+    /// which tracks runtime agent activity. Back-compat default is `"active"`.
+    #[serde(default = "default_work_lifecycle_state")]
+    pub lifecycle_state: String,
+    /// SPEC-2359 Phase W-12 (FR-349): RFC3339 timestamp of the explicit user
+    /// close (Done / Discarded). None while the Work is active / paused.
+    #[serde(default)]
+    pub closed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1083,6 +1164,17 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+    },
+    AttachmentProgress {
+        id: String,
+        operation_id: String,
+        phase: AttachmentProgressPhase,
+        file_index: Option<usize>,
+        file_count: usize,
+        filename: Option<String>,
+        bytes_done: Option<u64>,
+        bytes_total: Option<u64>,
+        message: Option<String>,
     },
     WindowState {
         window_id: String,
@@ -1689,6 +1781,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "attachment_progress",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "window_state",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2077,6 +2174,7 @@ impl BackendEvent {
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
             BackendEvent::FileTreeError { .. } => "file_tree_error",
@@ -2219,10 +2317,11 @@ mod tests {
     };
 
     use super::{
-        backend_event_policy, BackendEvent, BackendEventBackpressurePolicy,
-        BackendEventDeliveryClass, BranchEntriesPhase, FrontendEvent, IndexSearchMatchMode,
-        IndexSearchResult, IndexSearchScope, IndexSearchTarget, ProfileEntryView,
-        ProfileEnvEntryView, ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        backend_event_policy, AttachmentProgressPhase, BackendEvent,
+        BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
+        FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
+        IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+        UiTracePayload, BACKEND_EVENT_POLICIES,
     };
 
     #[test]
@@ -2595,6 +2694,8 @@ mod tests {
                     pr_state: Some("OPEN".to_string()),
                     board_refs: vec!["board-1".to_string()],
                     agents: Vec::new(),
+                    lifecycle_state: "active".to_string(),
+                    closed_at: None,
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
@@ -2612,6 +2713,7 @@ mod tests {
                     last_board_entry_kind: Some("handoff".to_string()),
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
+                    sessions: Vec::new(),
                 }],
                 unassigned_agents: Vec::new(),
             }),
@@ -2993,6 +3095,7 @@ mod tests {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "paste_image_uploaded",
             "id": "tab-1::agent-1",
+            "operation_id": "attachment-op-1",
             "upload_id": "upload-1",
             "mime_type": "image/png",
             "filename": "screenshot.png",
@@ -3005,17 +3108,43 @@ mod tests {
                 event,
                 FrontendEvent::PasteImageUploaded {
                     id,
+                    operation_id: Some(operation_id),
                     upload_id,
                     mime_type,
                     filename: Some(filename),
                     size,
                 } if id == "tab-1::agent-1"
+                    && operation_id == "attachment-op-1"
                     && upload_id == "upload-1"
                     && mime_type == "image/png"
                     && filename == "screenshot.png"
                     && size == 12
             ),
-            "uploaded image paste must expose upload id and image metadata"
+            "uploaded image paste must expose operation id, upload id, and image metadata"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_uploaded_terminal_image_paste_without_operation_id() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": "tab-1::agent-1",
+            "upload_id": "upload-1",
+            "mime_type": "image/png",
+            "filename": "screenshot.png",
+            "size": 12
+        }))
+        .expect("deserialize legacy uploaded image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImageUploaded {
+                    operation_id: None,
+                    ..
+                }
+            ),
+            "legacy uploaded image paste events must remain accepted"
         );
     }
 
@@ -3036,7 +3165,7 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles { id, files, .. }
                     if id == "tab-1::agent-1"
                         && matches!(
                             files.as_slice(),
@@ -3068,7 +3197,7 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles { id, files, .. }
                     if id == "tab-1::agent-1"
                         && matches!(
                             files.as_slice(),
@@ -3092,6 +3221,7 @@ mod tests {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "attach_files",
             "id": "tab-1::agent-1",
+            "operation_id": "attachment-op-2",
             "files": [
                 {
                     "source": "uploaded",
@@ -3107,8 +3237,13 @@ mod tests {
         assert!(
             matches!(
                 event,
-                FrontendEvent::AttachFiles { id, files }
+                FrontendEvent::AttachFiles {
+                    id,
+                    operation_id: Some(operation_id),
+                    files,
+                }
                     if id == "tab-1::agent-1"
+                        && operation_id == "attachment-op-2"
                         && matches!(
                             files.as_slice(),
                             [super::FileAttachment::Uploaded {
@@ -3123,6 +3258,69 @@ mod tests {
                         )
             ),
             "browser streaming uploads must expose upload id and metadata"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_file_attachments_without_operation_id() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "attach_files",
+            "id": "tab-1::agent-1",
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": "/Users/me/report.pdf"
+                }
+            ]
+        }))
+        .expect("deserialize legacy file attachment event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::AttachFiles {
+                    operation_id: None,
+                    ..
+                }
+            ),
+            "legacy file attachment events must remain accepted"
+        );
+    }
+
+    #[test]
+    fn backend_event_serializes_attachment_progress_contract() {
+        let event = BackendEvent::AttachmentProgress {
+            id: "tab-1::agent-1".to_string(),
+            operation_id: "attachment-op-3".to_string(),
+            phase: AttachmentProgressPhase::Staging,
+            file_index: Some(0),
+            file_count: 2,
+            filename: Some("資料 日本語.txt".to_string()),
+            bytes_done: Some(64),
+            bytes_total: Some(128),
+            message: None,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize attachment progress");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "attachment_progress",
+                "id": "tab-1::agent-1",
+                "operation_id": "attachment-op-3",
+                "phase": "staging",
+                "file_index": 0,
+                "file_count": 2,
+                "filename": "資料 日本語.txt",
+                "bytes_done": 64,
+                "bytes_total": 128,
+                "message": null
+            })
+        );
+        assert_eq!(
+            event.delivery_policy().kind,
+            "attachment_progress",
+            "attachment progress must be registered in the backend event policy catalog"
         );
     }
 
@@ -3496,6 +3694,31 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn frontend_event_launch_wizard_goto_step_round_trips() {
+        // SPEC-2014 FR-128 / SC-084: progress rail クリックの goto_step action。
+        use crate::launch_wizard::{LaunchWizardAction, WizardPhase};
+        let payload =
+            r#"{"kind":"launch_wizard_action","action":{"kind":"goto_step","phase":"runtime"}}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize launch_wizard goto_step");
+        match event {
+            FrontendEvent::LaunchWizardAction { action, .. } => match action {
+                LaunchWizardAction::GotoStep { phase } => {
+                    assert_eq!(phase, WizardPhase::Runtime);
+                }
+                other => panic!("unexpected action: {other:?}"),
+            },
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let action = LaunchWizardAction::GotoStep {
+            phase: WizardPhase::Confirm,
+        };
+        let value = serde_json::to_value(&action).expect("serialize goto_step");
+        assert_eq!(value["kind"], "goto_step");
+        assert_eq!(value["phase"], "confirm");
     }
 
     #[test]

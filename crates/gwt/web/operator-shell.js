@@ -7,7 +7,6 @@ import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
 import { createHotkeyManager } from "/hotkey.js";
 import { wireThemeToggle as wireSegmentedThemeToggle } from "/theme-toggle.js";
 
-const SIDEBAR_KEY = "gwt:ui:sidebar";
 const BRIEFING_KEY = "gwt:ui:briefing";
 
 // SPEC-2356 Phase 9 (FR-031): hover-reveal state machine close delay window.
@@ -35,7 +34,7 @@ export function initOperatorShell(deps = {}) {
     markDegraded,
     null,
   );
-  safeWire("sidebar layers", () => wireSidebarLayers({ doc, win }), markDegraded);
+  safeWire("sidebar commands", () => wireSidebarCommands({ doc }), markDegraded);
   safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
@@ -94,15 +93,19 @@ function hideMissionBriefingImmediately(doc) {
 }
 
 // ------------------------------------------------------------
-// Chrome visibility — hover-reveal state machine (SPEC-2356 Phase 9)
+// Chrome visibility — sidebar hover-reveal state machine (SPEC-2356 Phase 9)
 // ------------------------------------------------------------
-// FR-021/FR-022: Sidebar と Window controls を auto-hide にし、画面端の peek 帯
-// (`.op-sidebar-peek` / `.op-window-controls-peek`) への pointer hover /
-// keyboard focus / pointer tap で overlay 展開、panel + peek 領域から離れて
-// 200〜400ms 経過後に収納する hover-reveal state machine。
+// FR-021: Sidebar を auto-hide にし、画面左端の peek 帯 (`.op-sidebar-peek`)
+// への pointer hover / keyboard focus / pointer tap で overlay 展開、panel +
+// peek 領域から離れて 200〜400ms 経過後に収納する hover-reveal state machine。
 // FR-031: prefers-reduced-motion: reduce で close delay 0ms に縮退。
 // FR-032: 起動時に旧 localStorage キー (`gwt:ui:sidebar-collapsed` /
 // `gwt:ui:window-controls`) を `removeItem` で 1 回だけ migration する。
+//
+// SPEC-2356 operator chrome cleanup: window controls (Tile / Stack / Align /
+// Windows / Add) と Command Palette / Update CTA を sidebar に集約したため、
+// 旧来の独立した window-controls peek 帯 / hover-reveal controller は撤去し、
+// sidebar の hover-reveal のみを管理する。
 
 function wireChromeVisibility({ doc, win }) {
   removeLegacyChromeKeys(win);
@@ -122,29 +125,26 @@ function wireChromeVisibility({ doc, win }) {
     closeDelayFor,
   });
 
-  const windowControls = createHoverRevealController({
-    doc,
-    win,
-    peek: doc.querySelector(".op-window-controls-peek"),
-    panel: doc.getElementById("floating-window-controls-actions"),
-    revealedAttr: "opWindowControls",
-    eventName: "op:window-controls-changed",
-    eventDetail: () => ({ visible: windowControlsRevealed() }),
-    closeDelayFor,
-  });
-
   function sidebarRevealed() {
     return root.dataset.opSidebar === "revealed";
   }
-  function windowControlsRevealed() {
-    return root.dataset.opWindowControls === "revealed";
-  }
+
+  // SPEC-2356 operator chrome cleanup: the Update CTA lives in the sidebar
+  // Update section, which is auto-hidden. When an update becomes available the
+  // CTA dispatches `op:update-available` so we briefly peek the sidebar (and
+  // mark it with a badge attribute) — the user notices without hovering.
+  doc.addEventListener("op:update-available", () => {
+    root.dataset.opSidebarUpdate = "available";
+    sidebar.open();
+    sidebar.requestClose(closeDelayFor());
+  });
+  doc.addEventListener("op:update-dismissed", () => {
+    delete root.dataset.opSidebarUpdate;
+  });
 
   return {
     isSidebarRevealed: sidebarRevealed,
-    isWindowControlsRevealed: windowControlsRevealed,
     closeSidebar: () => sidebar.requestClose(0),
-    closeWindowControls: () => windowControls.requestClose(0),
   };
 }
 
@@ -262,31 +262,17 @@ function wireThemeToggle(opts) {
 }
 
 // ------------------------------------------------------------
-// Sidebar Layers — persist toggle state
+// Sidebar command rows
 // ------------------------------------------------------------
+// SPEC-2356 operator chrome cleanup: the dead Layers section (Agents / Git /
+// Hooks toggles + counters) is removed — toggling only set dataset.opLayer*
+// which no CSS ever read, so it was a no-op. The sidebar now carries only
+// actionable rows; this wiring dispatches the `data-cmd` rows (Start Work /
+// Board / Logs etc.) onto the operator command bus.
 
-function wireSidebarLayers({ doc, win }) {
-  const layers = doc.querySelectorAll(".op-layer[data-layer]");
-  if (!layers.length) return;
-
-  let state = readJson(win, SIDEBAR_KEY, { agents: true, git: true, hooks: true });
-
-  layers.forEach((el) => {
-    const key = el.dataset.layer;
-    const enabled = state[key] !== false;
-    el.setAttribute("aria-pressed", enabled ? "true" : "false");
-    el.addEventListener("click", () => {
-      const next = el.getAttribute("aria-pressed") !== "true";
-      el.setAttribute("aria-pressed", next ? "true" : "false");
-      state = { ...state, [key]: next };
-      writeJson(win, SIDEBAR_KEY, state);
-      doc.documentElement.dataset[`opLayer${capitalize(key)}`] = next ? "on" : "off";
-    });
-    doc.documentElement.dataset[`opLayer${capitalize(key)}`] = enabled ? "on" : "off";
-  });
-
-  const cmdLayers = doc.querySelectorAll(".op-layer[data-cmd]");
-  cmdLayers.forEach((el) => {
+function wireSidebarCommands({ doc }) {
+  const cmdRows = doc.querySelectorAll(".op-sidebar .op-layer[data-cmd]");
+  cmdRows.forEach((el) => {
     el.addEventListener("click", () => {
       doc.dispatchEvent(new CustomEvent("op:command", { detail: { id: el.dataset.cmd } }));
     });
@@ -346,17 +332,6 @@ export function applyTelemetryCounts(doc, counts = {}) {
     const el = doc.getElementById(id);
     if (el) el.textContent = String(v);
   };
-  // SPEC-2356 — paint a Sidebar Layer's status hint based on whether the
-  // resource is "live" (active > 0). This lets the agents/git rows light up
-  // even when the user is not looking at the Status Strip.
-  const markLive = (layer, isLive) => {
-    const row = doc.querySelector(`.op-layer[data-layer="${layer}"]`);
-    if (!row) return;
-    if (isLive) row.dataset.live = "true";
-    else delete row.dataset.live;
-  };
-  if ("active" in counts) markLive("agents", (counts.active ?? 0) > 0);
-  if ("branches" in counts) markLive("git", (counts.branches ?? 0) > 0);
   // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
   // anything actually needs attention, and stays still otherwise.
   if ("blocked" in counts) {
@@ -366,14 +341,13 @@ export function applyTelemetryCounts(doc, counts = {}) {
       else blockedCell.classList.remove("op-status-strip__cell--alert");
     }
   }
+  // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
+  // per-layer counters are removed; telemetry now lives solely in the Status
+  // Strip cells below.
   setText("op-strip-active", counts.active ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
-  if ("agents" in counts) setText("op-layer-count-agents", counts.agents ?? 0);
-  if ("git" in counts) setText("op-layer-count-git", counts.git ?? 0);
-  if ("hooks" in counts) setText("op-layer-count-hooks", counts.hooks ?? 0);
-  if ("layers" in counts) setText("op-sidebar-count", counts.layers ?? 0);
 }
 
 // ------------------------------------------------------------
@@ -803,29 +777,10 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
 // helpers
 // ------------------------------------------------------------
 
-function readJson(win, key, fallback) {
-  try {
-    const raw = win.localStorage.getItem(key);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    return { ...fallback, ...parsed };
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJson(win, key, value) {
-  try { win.localStorage.setItem(key, JSON.stringify(value)); } catch { /* no-op */ }
-}
-
 function matchReduced(doc) {
   return (doc.defaultView ?? window).matchMedia("(prefers-reduced-motion: reduce)");
 }
 
 function pad2(n) {
   return String(n).padStart(2, "0");
-}
-
-function capitalize(s) {
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }

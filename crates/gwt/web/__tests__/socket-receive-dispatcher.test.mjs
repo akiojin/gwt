@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_COALESCE_KINDS,
+  DEFAULT_MAX_STREAMED_BEFORE_STATE,
   coalesceEvents,
   createSocketReceiveDispatcher,
 } from "../socket-receive-dispatcher.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const dispatcherSource = readFileSync(resolve(here, "../socket-receive-dispatcher.js"), "utf8");
 
 function manualScheduler() {
   const pending = [];
@@ -188,6 +195,73 @@ test("handle() accepts both WebSocket message events and pre-parsed payloads", (
   ]);
 });
 
+test("handle() defers string WebSocket JSON.parse until scheduled flush", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const originalParse = JSON.parse;
+  let parseCalls = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  JSON.parse = (source, reviver) => {
+    parseCalls += 1;
+    return originalParse.call(JSON, source, reviver);
+  };
+  try {
+    dispatcher.handle({
+      data: JSON.stringify({ kind: "terminal_output", id: "shell", data: "0" }),
+    });
+
+    assert.equal(parseCalls, 0, "string handle() must not parse synchronously");
+    assert.equal(received.length, 0, "receive remains deferred until flush");
+    assert.equal(scheduler.pendingCount(), 1, "one frame is scheduled");
+
+    scheduler.runOnce();
+
+    assert.equal(parseCalls, 1, "flush parses the raw payload before receive()");
+    assert.deepEqual(received, [
+      { kind: "terminal_output", id: "shell", data: "0" },
+    ]);
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
+test("string idempotent events coalesce before full JSON.parse", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const originalParse = JSON.parse;
+  let parseCalls = 0;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+  });
+
+  JSON.parse = (source, reviver) => {
+    parseCalls += 1;
+    return originalParse.call(JSON, source, reviver);
+  };
+  try {
+    for (let i = 0; i < 25; i += 1) {
+      dispatcher.handle({
+        data: JSON.stringify({ kind: "workspace_state", revision: i }),
+      });
+    }
+
+    assert.equal(parseCalls, 0, "queued raw strings must not parse during handle()");
+    scheduler.runOnce();
+
+    assert.equal(parseCalls, 1, "only the latest coalesced state is parsed");
+    assert.deepEqual(received, [{ kind: "workspace_state", revision: 24 }]);
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
 test("flushNow synchronously drains pending events without waiting for the scheduler", () => {
   const received = [];
   const scheduler = manualScheduler();
@@ -247,6 +321,84 @@ test("multiple streamed events maintain relative order, then idempotent follows"
   ]);
 });
 
+test("idempotent state is delivered after a bounded streamed chunk during heavy backlog", () => {
+  const queue = [];
+  for (let i = 0; i < 500; i += 1) {
+    queue.push({ kind: "terminal_output", id: "shell", data: String(i) });
+  }
+  queue.push({ kind: "workspace_state", revision: 7 });
+
+  const coalesced = coalesceEvents(queue, DEFAULT_COALESCE_KINDS, {
+    maxStreamedBeforeState: DEFAULT_MAX_STREAMED_BEFORE_STATE,
+  });
+  const stateIndex = coalesced.findIndex(
+    (event) => event.kind === "workspace_state",
+  );
+  const streamed = coalesced.filter((event) => event.kind === "terminal_output");
+
+  assert.equal(stateIndex, DEFAULT_MAX_STREAMED_BEFORE_STATE);
+  assert.ok(500 / stateIndex >= 10);
+  assert.equal(streamed.length, 500);
+  assert.equal(streamed[0].data, "0");
+  assert.equal(streamed[499].data, "499");
+});
+
+test("small streamed bursts still flush before idempotent state", () => {
+  const queue = [];
+  for (let i = 0; i < 4; i += 1) {
+    queue.push({ kind: "terminal_output", id: "shell", data: String(i) });
+  }
+  queue.push({ kind: "workspace_state", revision: 1 });
+
+  const coalesced = coalesceEvents(queue, DEFAULT_COALESCE_KINDS, {
+    maxStreamedBeforeState: DEFAULT_MAX_STREAMED_BEFORE_STATE,
+  });
+
+  assert.deepEqual(
+    coalesced.map((event) => event.kind),
+    [
+      "terminal_output",
+      "terminal_output",
+      "terminal_output",
+      "terminal_output",
+      "workspace_state",
+    ],
+  );
+});
+
+test("dispatcher threads streamed chunk budget into receive order", () => {
+  const received = [];
+  const scheduler = manualScheduler();
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    maxStreamedBeforeState: 2,
+  });
+
+  for (let i = 0; i < 5; i += 1) {
+    dispatcher.enqueue({
+      kind: "terminal_output",
+      id: "shell",
+      data: String(i),
+    });
+  }
+  dispatcher.enqueue({ kind: "workspace_state", revision: 1 });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    received.map((event) => `${event.kind}:${event.data ?? event.revision}`),
+    [
+      "terminal_output:0",
+      "terminal_output:1",
+      "workspace_state:1",
+      "terminal_output:2",
+      "terminal_output:3",
+      "terminal_output:4",
+    ],
+  );
+});
+
 test("dispatcher delivers terminal_output ahead of pending workspace_state in the same flush", () => {
   const received = [];
   const scheduler = manualScheduler();
@@ -295,4 +447,49 @@ test("dispatcher emits sanitized trace metadata for parse and receive timing", (
   assert.equal(traces[2].event_kind, "terminal_output");
   assert.equal(traces[2].duration_ms, 4);
   assert.equal(JSON.stringify(traces).includes("must-not-leak"), false);
+});
+
+test("dispatcher builds trace metadata lazily", () => {
+  assert.match(dispatcherSource, /function\s+trace\(\s*kind,\s*fieldsFactory/);
+  assert.doesNotMatch(
+    dispatcherSource,
+    /trace\(\s*["']ws_[^"']+["']\s*,\s*\{/,
+    "trace call sites must pass factories so inactive tracing skips field allocation",
+  );
+});
+
+test("dispatcher skips trace callbacks while shouldTrace is false", () => {
+  const traces = [];
+  const received = [];
+  const scheduler = manualScheduler();
+  let shouldTrace = false;
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onTrace: (kind, fields) => traces.push({ kind, ...fields }),
+    shouldTrace: () => shouldTrace,
+  });
+
+  for (let i = 0; i < 25; i += 1) {
+    dispatcher.handle({
+      data: JSON.stringify({ kind: "terminal_output", id: "shell", data: String(i) }),
+    });
+  }
+  scheduler.runOnce();
+
+  assert.equal(received.length, 25);
+  assert.deepEqual(traces, [], "inactive tracing must not call onTrace");
+
+  shouldTrace = true;
+  dispatcher.handle({
+    data: JSON.stringify({ kind: "terminal_output", id: "shell", data: "active" }),
+  });
+  scheduler.runOnce();
+
+  assert.deepEqual(
+    traces.map((trace) => trace.kind),
+    ["ws_message", "ws_flush_start", "ws_receive", "ws_flush_end"],
+    "trace events must resume once shouldTrace returns true",
+  );
 });

@@ -32,7 +32,7 @@ INDEX_PATH_POLICY_FILE = "index_path_policy.json"
 FALLBACK_INDEX_PATH_POLICY = {
     "schema_version": 1,
     "max_file_size": 1_048_576,
-    "allow_paths": ["tasks/memory.md", "tasks/discussions.md"],
+    "allow_paths": [".gwt/work/memory.md", ".gwt/work/discussions.md"],
     "deny_root_prefixes": [
         ".git",
         ".claude",
@@ -1956,6 +1956,28 @@ def _issue_cache_root(repo_hash: str) -> Path:
     return home / ".gwt" / "cache" / "issues" / repo_hash
 
 
+def _issue_cache_is_populated(repo_hash: str) -> bool:
+    """Return True when the GitHub Issue cache holds at least one cached issue.
+
+    Both the issues and specs scopes build their search corpus from
+    ``~/.gwt/cache/issues/<repo_hash>/`` (one-directional GitHub -> cache -> UI
+    flow, SPEC-12). An absent or entry-less cache root means the cache was never
+    synced for this repo-hash (or the repo-hash does not match the populated
+    cache), which is distinct from a repository that genuinely has no Issues.
+    """
+    root = _issue_cache_root(repo_hash)
+    if not root.is_dir():
+        return False
+    try:
+        entries = root.iterdir()
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.is_dir() and entry.name.isdigit() and (entry / "meta.json").is_file():
+            return True
+    return False
+
+
 def _normalize_labels(labels: Any) -> List[str]:
     if isinstance(labels, str):
         return [labels]
@@ -2165,7 +2187,7 @@ def _parse_memory_heading(heading: str) -> tuple[str, str]:
 def _load_memory_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/tasks/memory.md`` and chunk it into memory units.
+    """Load ``<project_root>/.gwt/work/memory.md`` and chunk it into memory units.
 
     Returns a tuple ``(memory, manifest_entries)`` where ``manifest_entries``
     contains at most one entry describing the source file's mtime/size.
@@ -2173,7 +2195,7 @@ def _load_memory_documents(
     entry so that the runner can still detect future content additions.
     """
     root = Path(project_root)
-    source_path = root / "tasks" / "memory.md"
+    source_path = root / ".gwt" / "work" / "memory.md"
     if not source_path.is_file():
         return [], []
 
@@ -2188,7 +2210,7 @@ def _load_memory_documents(
         return [], []
     manifest_entries = [
         {
-            "path": "tasks/memory.md",
+            "path": ".gwt/work/memory.md",
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2268,7 +2290,7 @@ def action_index_memory_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``tasks/memory.md`` into the repo-scoped memory Chroma store.
+    """Index ``.gwt/work/memory.md`` into the repo-scoped memory Chroma store.
 
     `worktree_hash` is accepted for symmetry with the other v2 actions but is
     ignored — memory is repo-scoped. Manifest diff degenerates to a single
@@ -2391,9 +2413,9 @@ def _parse_related_specs(value: str) -> List[str]:
 def _load_discussion_documents(
     project_root: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/tasks/discussions.md`` into discussion chunks."""
+    """Load ``<project_root>/.gwt/work/discussions.md`` into discussion chunks."""
     root = Path(project_root)
-    source_path = root / "tasks" / "discussions.md"
+    source_path = root / ".gwt" / "work" / "discussions.md"
     if not source_path.is_file():
         return [], []
 
@@ -2408,7 +2430,7 @@ def _load_discussion_documents(
         return [], []
     manifest_entries = [
         {
-            "path": "tasks/discussions.md",
+            "path": ".gwt/work/discussions.md",
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2501,7 +2523,7 @@ def action_index_discussions_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``tasks/discussions.md`` into the repo-scoped discussions store."""
+    """Index ``.gwt/work/discussions.md`` into the repo-scoped discussions store."""
     del worktree_hash
     db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
     discussions, new_entries = _load_discussion_documents(project_root)
@@ -3537,6 +3559,36 @@ def _format_scope_results(
     return _format_issue_results(items)[:n_results]
 
 
+def _empty_corpus_diagnostic(scope: str, repo_hash: str) -> dict:
+    """Build the non-OK payload for an unpopulated issues/specs search corpus.
+
+    Returned by :func:`action_search_v2` when an auto-build search finds an
+    empty index that the issue cache cannot explain (Issue #2979). The message
+    is agent-facing: it states the empty result is a tooling failure, points at
+    the cache directory, and tells the caller to refresh rather than treat the
+    empty list as "no existing SPEC/Issue".
+    """
+    cache_dir = _issue_cache_root(repo_hash)
+    noun = "SPECs" if scope == "specs" else "Issues"
+    return {
+        "ok": False,
+        "error_code": "EMPTY_CORPUS",
+        "scope": scope,
+        "indexed": 0,
+        "issue_cache_dir": str(cache_dir),
+        "issue_cache_populated": False,
+        "error": (
+            f"{scope} search corpus is empty: the GitHub Issue cache at "
+            f"{cache_dir} holds no cached issues for repo-hash {repo_hash}. "
+            "This is a tooling failure (the cache was never synced for this "
+            "repository, or the repo-hash does not match the populated cache), "
+            f"not proof that the repository has no {noun}. Refresh the cache "
+            "(open the project in the gwt GUI to sync, or run a gwtd issue "
+            "sync) and retry the search before concluding no owner exists."
+        ),
+    }
+
+
 def action_search_v2(
     action: str,
     repo_hash: str,
@@ -3645,10 +3697,29 @@ def action_search_v2(
     with acquire_lock(db_path, exclusive=False):
         client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
         try:
+            collection_count = _safe_collection_count(collection)
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
             items = _search_collection_v2(collection, query, fetch_n)
         finally:
             _close_chroma_client(client)
+
+    # Issue #2979: an issues/specs search whose corpus is empty *because the
+    # source issue cache was never populated for this repo-hash* must not
+    # silently report `ok: true` with no results — agents read that empty list
+    # as proof that no SPEC/Issue owner exists and create duplicates. Surface a
+    # diagnostic so the failure is visible. This is gated to the agent
+    # auto-build preflight (no_auto_build is False); the interactive GUI search
+    # (search-multi, no_auto_build=True) keeps returning empty results so one
+    # empty scope never fails the whole multi-scope search. A populated cache
+    # that simply has no matching SPECs is a legitimate empty result and is left
+    # untouched.
+    if (
+        scope in ("issues", "specs")
+        and not no_auto_build
+        and collection_count == 0
+        and not _issue_cache_is_populated(repo_hash)
+    ):
+        return _empty_corpus_diagnostic(scope, repo_hash)
 
     strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
     payload = {

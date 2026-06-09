@@ -1,8 +1,188 @@
 // SPEC-2008 Phase 24 — operation-shape primitives for host resize and tab
 // visibility transitions. Pure module so __tests__ can drive the
-// behavior with linkedom + stubs (`tasks/memory.md` 2026-05-07 memory —
+// behavior with linkedom + stubs (`.gwt/work/memory.md` 2026-05-07 memory —
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
+
+export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+export const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
+
+function defaultScheduleFrame(callback) {
+  if (typeof requestAnimationFrame === "function") {
+    return requestAnimationFrame(callback);
+  }
+  return setTimeout(callback, 0);
+}
+
+function normalizeMaxTerminalFitsPerFrame(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_TERMINAL_FITS_PER_FRAME;
+  }
+  return Math.floor(value);
+}
+
+function normalizeMaxTerminalRefreshesPerFrame(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME;
+  }
+  return Math.floor(value);
+}
+
+/**
+ * Coalesce terminal viewport fit requests through one bounded frame queue.
+ *
+ * Fitting an xterm terminal can force render/measure work and optionally
+ * persist PTY geometry. Render and resize paths can request many fits before
+ * the next paint; this scheduler keeps those fits ordered while preventing one
+ * frame from draining every terminal in a large workspace.
+ */
+export function createTerminalFitScheduler({
+  schedule = defaultScheduleFrame,
+  fitTerminal,
+  maxFitsPerFrame = DEFAULT_MAX_TERMINAL_FITS_PER_FRAME,
+} = {}) {
+  if (typeof fitTerminal !== "function") {
+    throw new TypeError("createTerminalFitScheduler requires a fitTerminal callback");
+  }
+  const scheduleImpl = typeof schedule === "function" ? schedule : defaultScheduleFrame;
+  const fitsPerFrame = normalizeMaxTerminalFitsPerFrame(maxFitsPerFrame);
+  const pending = new Map();
+  let scheduled = false;
+
+  function scheduleFlush() {
+    if (scheduled) {
+      return;
+    }
+    scheduled = true;
+    scheduleImpl(flushPending);
+  }
+
+  function enqueue(windowId, { persist = false } = {}) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    const id = String(windowId);
+    const existing = pending.get(id);
+    pending.set(id, { persist: Boolean(existing?.persist || persist) });
+    scheduleFlush();
+    return true;
+  }
+
+  function flushPending() {
+    scheduled = false;
+    let flushed = 0;
+    for (const [windowId, state] of Array.from(pending.entries())) {
+      if (flushed >= fitsPerFrame) {
+        break;
+      }
+      if (!pending.has(windowId)) {
+        continue;
+      }
+      pending.delete(windowId);
+      fitTerminal(windowId, state.persist);
+      flushed += 1;
+    }
+    if (pending.size > 0) {
+      scheduleFlush();
+    }
+    return flushed;
+  }
+
+  function pendingCount() {
+    return pending.size;
+  }
+
+  return {
+    enqueue,
+    flushPending,
+    pendingCount,
+  };
+}
+
+/**
+ * Coalesce terminal viewport refresh requests through one bounded frame queue.
+ *
+ * xterm refresh is render work. Terminal output, scroll, and visibility paths
+ * can request refreshes for many terminals before paint; this scheduler keeps
+ * each window refreshed at most once per burst while limiting how many refresh
+ * calls run in one frame.
+ */
+export function createTerminalViewportRefreshScheduler({
+  schedule = defaultScheduleFrame,
+  canRefresh,
+  refresh,
+  markPending,
+  maxRefreshesPerFrame = DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME,
+} = {}) {
+  if (typeof refresh !== "function") {
+    throw new TypeError("createTerminalViewportRefreshScheduler requires a refresh callback");
+  }
+  const scheduleImpl = typeof schedule === "function" ? schedule : defaultScheduleFrame;
+  const canRefreshImpl = typeof canRefresh === "function" ? canRefresh : () => true;
+  const markPendingImpl = typeof markPending === "function" ? markPending : () => {};
+  const refreshesPerFrame = normalizeMaxTerminalRefreshesPerFrame(maxRefreshesPerFrame);
+  const pending = new Set();
+  let scheduled = false;
+
+  function scheduleFlush() {
+    if (scheduled) {
+      return;
+    }
+    scheduled = true;
+    scheduleImpl(flushPending);
+  }
+
+  function enqueue(windowId) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    pending.add(String(windowId));
+    scheduleFlush();
+    return true;
+  }
+
+  function clear(windowId) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    return pending.delete(String(windowId));
+  }
+
+  function flushPending() {
+    scheduled = false;
+    let refreshed = 0;
+    for (const windowId of Array.from(pending.values())) {
+      if (refreshed >= refreshesPerFrame) {
+        break;
+      }
+      if (!pending.has(windowId)) {
+        continue;
+      }
+      pending.delete(windowId);
+      if (!canRefreshImpl(windowId)) {
+        markPendingImpl(windowId);
+        continue;
+      }
+      refresh(windowId);
+      refreshed += 1;
+    }
+    if (pending.size > 0) {
+      scheduleFlush();
+    }
+    return refreshed;
+  }
+
+  function pendingCount() {
+    return pending.size;
+  }
+
+  return {
+    enqueue,
+    clear,
+    flushPending,
+    pendingCount,
+  };
+}
 
 /**
  * Attach a host `window.resize` listener that refreshes every visible
@@ -159,6 +339,13 @@ function idSet(values) {
   return set;
 }
 
+function providedIdSet(value) {
+  if (!value || typeof value.has !== "function" || typeof value[Symbol.iterator] !== "function") {
+    return null;
+  }
+  return value;
+}
+
 /**
  * Classify mounted workspace windows during a project-tab render.
  *
@@ -170,11 +357,13 @@ function idSet(values) {
  */
 export function classifyProjectWindowVisibility({
   activeWindowIds,
+  activeWindowIdSet,
   allProjectWindowIds,
+  allProjectWindowIdSet,
   mountedWindowIds,
 }) {
-  const active = idSet(activeWindowIds);
-  const all = idSet(allProjectWindowIds);
+  const active = providedIdSet(activeWindowIdSet) || idSet(activeWindowIds);
+  const all = providedIdSet(allProjectWindowIdSet) || idSet(allProjectWindowIds);
   const visible = Array.from(active);
   const hidden = [];
   const removed = [];

@@ -1,8 +1,8 @@
 //! SPEC #2920 FR-004 — Tray menu skeleton.
 //!
-//! The minimal tray menu is `[Open in browser] / [About GWT] / [Quit]` (Q5 chosen during
-//! `gwt-discussion`). Settings, autostart toggle, Copy URL, Logs, and
-//! Update controls live in the browser UI Settings page (Phase 8 / FR-007).
+//! The minimal tray menu is `[Open in browser] / [Copy URL] / [About GWT] / [Quit]`.
+//! Settings, autostart toggle, Logs, and Update controls live in the browser UI
+//! Settings page (Phase 8 / FR-007).
 //!
 //! Phase 1 only declares the menu-item identifier surface that the Phase 4
 //! event loop will hook into. The actual `tray-icon::Menu` construction
@@ -13,6 +13,7 @@
 /// stringly-typed allocations.
 pub mod ids {
     pub const OPEN: &str = "gwt.tray.open";
+    pub const COPY_URL: &str = "gwt.tray.copy_url";
     pub const QUIT: &str = "gwt.tray.quit";
     /// `About GWT` opens the browser About / Version surface.
     pub const ABOUT: &str = "gwt.tray.about";
@@ -22,6 +23,7 @@ pub mod ids {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     Open,
+    CopyUrl,
     Quit,
     About,
 }
@@ -31,6 +33,7 @@ impl MenuAction {
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
             ids::OPEN => Some(Self::Open),
+            ids::COPY_URL => Some(Self::CopyUrl),
             ids::QUIT => Some(Self::Quit),
             ids::ABOUT => Some(Self::About),
             _ => None,
@@ -54,6 +57,10 @@ mod tests {
     #[test]
     fn menu_action_round_trip_through_ids() {
         assert_eq!(MenuAction::from_id(ids::OPEN), Some(MenuAction::Open));
+        assert_eq!(
+            MenuAction::from_id(ids::COPY_URL),
+            Some(MenuAction::CopyUrl)
+        );
         assert_eq!(MenuAction::from_id(ids::QUIT), Some(MenuAction::Quit));
         assert_eq!(MenuAction::from_id(ids::ABOUT), Some(MenuAction::About));
         assert_eq!(MenuAction::from_id("unknown"), None);
@@ -65,6 +72,7 @@ mod tests {
         // entries; a rename would silently break click dispatch. Pin the
         // exact strings so future edits surface as test failures.
         assert_eq!(ids::OPEN, "gwt.tray.open");
+        assert_eq!(ids::COPY_URL, "gwt.tray.copy_url");
         assert_eq!(ids::QUIT, "gwt.tray.quit");
         assert_eq!(ids::ABOUT, "gwt.tray.about");
     }

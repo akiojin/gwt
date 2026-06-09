@@ -143,8 +143,12 @@ impl WorkspaceState {
         true
     }
 
-    pub fn update_viewport(&mut self, viewport: CanvasViewport) {
+    pub fn update_viewport(&mut self, viewport: CanvasViewport) -> bool {
+        if self.persisted.viewport == viewport {
+            return false;
+        }
         self.persisted.viewport = viewport;
+        true
     }
 
     pub fn arrange_windows(&mut self, mode: ArrangeMode, bounds: WindowGeometry) -> bool {
@@ -1089,11 +1093,12 @@ mod tests {
     #[test]
     fn updating_viewport_replaces_canvas_transform_state() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.update_viewport(CanvasViewport {
+        let viewport = CanvasViewport {
             x: 180.0,
             y: -90.0,
             zoom: 1.35,
-        });
+        };
+        assert!(workspace.update_viewport(viewport.clone()));
         assert_eq!(
             workspace.persisted().viewport,
             CanvasViewport {
@@ -1101,6 +1106,10 @@ mod tests {
                 y: -90.0,
                 zoom: 1.35
             }
+        );
+        assert!(
+            !workspace.update_viewport(viewport),
+            "same viewport should report no mutation"
         );
     }
 

@@ -51,6 +51,8 @@
         attachContainerResizeReflow,
         attachHostResizeReflow,
         classifyProjectWindowVisibility,
+        createTerminalFitScheduler,
+        createTerminalViewportRefreshScheduler,
         elementHasLayoutBox,
         gateTerminalInputForReadiness,
         rearmRefreshOnVisible,
@@ -70,6 +72,7 @@
         workspaceGeometryRevision,
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
+      import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
@@ -143,10 +146,6 @@
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const worldGrid = document.getElementById("canvas-world-grid");
-      const activeWorkSection = document.getElementById("op-active-work");
-      const activeWorkCount = document.getElementById("op-active-work-count");
-      const activeWorkSummary = document.getElementById("op-active-work-summary");
-      const activeWorkAgents = document.getElementById("op-active-work-agents");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
@@ -183,7 +182,33 @@
       const detailMap = new Map();
       const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
+      let terminalFitScheduler = null;
+      let terminalViewportRefreshScheduler = null;
+      const terminalOutputBatcher = createTerminalOutputBatcher({
+        mergeChunks: (chunks, windowId) => {
+          const decoder = decoderMap.get(windowId);
+          if (!decoder) {
+            return "";
+          }
+          return chunks
+            .map((chunk) => decoder.decode(decodeBase64(chunk), { stream: true }))
+            .join("");
+        },
+        write: (windowId, text, onWritten) => {
+          const runtime = terminalMap.get(windowId);
+          if (!runtime) {
+            return;
+          }
+          runtime.terminal.write(text, onWritten);
+        },
+        canWrite: canRefreshTerminalViewport,
+        onFlush: (windowId) => {
+          scheduleTerminalViewportRefresh(windowId);
+        },
+      });
       const windowMap = new Map();
+      const renderedWindowElementKeys = new Map();
+      const renderedRuntimeStatusKeys = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const profileStateMap = new Map();
@@ -349,8 +374,10 @@
         idleMs: 300,
       });
       let viewportRasterTimer = null;
+      let viewportDomApplied = false;
       let launchWizard = null;
       let launchWizardOpenError = null;
+      let launchWizardOpening = null;
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
@@ -372,12 +399,14 @@
           }
           if (deferred.kind === "launch_wizard_state") {
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             if (deferred.wizard) {
               launchWizardOpenError = null;
             }
             launchWizard = deferred.wizard;
           } else if (deferred.kind === "launch_wizard_open_error") {
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             launchWizard = null;
             launchWizardOpenError = {
               title: deferred.title || "Launch Agent",
@@ -471,6 +500,357 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let renderedProjectTabsKey = "";
+      let renderedRecentProjectsKey = "";
+      let renderedRecentProjectsMenuKey = "";
+      let renderedWorkspaceWindowsKey = "";
+      let renderedWindowListKey = "";
+      let renderedAppVersionLabel = null;
+      let renderedProjectPickerKey = "";
+      let renderedProjectOnboardingKey = "";
+      let renderedActionAvailabilityKey = "";
+      let renderedOperatorTelemetryKey = "";
+      let maximizedViewportSyncFrame = null;
+
+      function projectTabsRenderKey(state) {
+        const tabs = state?.tabs || [];
+        const parts = [];
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, state?.active_tab_id || null);
+        appendRenderKeyPart(parts, "tabs");
+        appendRenderKeyPart(parts, tabs.length);
+        for (const tab of tabs) {
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, tab?.id || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, tab?.title || "");
+          appendRenderKeyPart(parts, "project_root");
+          appendRenderKeyPart(parts, tab?.project_root || "");
+        }
+        return parts.join("");
+      }
+
+      function recentProjectsRenderKey(state) {
+        return JSON.stringify(
+          (state?.recent_projects || []).map((project) => ({
+            title: project?.title || "",
+            kind: project?.kind || "",
+            path: project?.path || "",
+          })),
+        );
+      }
+
+      function appendRenderKeyPart(parts, value) {
+        const text = String(value ?? "");
+        parts.push(String(text.length), ":", text, "\u001f");
+      }
+
+      function workspaceWindowsRenderKey(workspace) {
+        const windows = workspace?.windows || [];
+        const parts = [];
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, appState?.active_tab_id || null);
+        appendRenderKeyPart(parts, "active_window_ids");
+        appendRenderKeyPart(parts, windows.length);
+        for (const windowData of windows) {
+          appendRenderKeyPart(parts, windowData?.id || "");
+        }
+        appendRenderKeyPart(parts, "all_project_window_ids");
+        for (const windowId of allProjectWindowIds()) {
+          appendRenderKeyPart(parts, windowId);
+        }
+        appendRenderKeyPart(parts, "windows");
+        appendRenderKeyPart(parts, windows.length);
+        for (const windowData of windows) {
+          const geometry = windowData?.geometry || {};
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, windowData?.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, windowData?.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, windowData?.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, windowData?.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, windowData?.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, windowData?.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, windowData?.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, windowData?.status || "");
+          appendRenderKeyPart(parts, "geometry");
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, geometry.x ?? 0);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, geometry.y ?? 0);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, geometry.width ?? 0);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, geometry.height ?? 0);
+          appendRenderKeyPart(parts, "minimized");
+          appendRenderKeyPart(parts, Boolean(windowData?.minimized));
+          appendRenderKeyPart(parts, "maximized");
+          appendRenderKeyPart(parts, Boolean(windowData?.maximized));
+          appendRenderKeyPart(parts, "z_index");
+          appendRenderKeyPart(parts, windowData?.z_index ?? 0);
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, windowData?.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(windowData?.tab_group_active));
+        }
+        return parts.join("");
+      }
+
+      function windowListRenderKey() {
+        const workspace = activeWorkspace();
+        const workspaceWindows = workspace.windows || [];
+        const workspaceWindowMap = new Map();
+        for (const windowData of workspaceWindows) {
+          workspaceWindowMap.set(windowData.id, windowData);
+        }
+        const appendEntryKey = (parts, entry) => {
+          const geometry = entry?.geometry || {};
+          const runtimeState = runtimeStateForWindow(entry);
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, entry?.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, entry?.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, entry?.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, entry?.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, entry?.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, entry?.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, entry?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, entry?.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, entry?.status || "");
+          appendRenderKeyPart(parts, "runtime_state");
+          appendRenderKeyPart(parts, runtimeState);
+          appendRenderKeyPart(parts, "runtime_label");
+          appendRenderKeyPart(parts, windowRuntimeLabel(runtimeState));
+          appendRenderKeyPart(parts, "role_badge");
+          appendRenderKeyPart(parts, windowRoleBadgeLabel(entry) || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(entry));
+          appendRenderKeyPart(parts, "title_tooltip");
+          appendRenderKeyPart(parts, windowTitleTooltip(entry));
+          appendRenderKeyPart(parts, "geometry");
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, geometry.x ?? 0);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, geometry.y ?? 0);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, geometry.width ?? 0);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, geometry.height ?? 0);
+          appendRenderKeyPart(parts, "geometry_label");
+          appendRenderKeyPart(parts, windowGeometryLabel(entry));
+          appendRenderKeyPart(parts, "minimized");
+          appendRenderKeyPart(parts, Boolean(entry?.minimized));
+          appendRenderKeyPart(parts, "maximized");
+          appendRenderKeyPart(parts, Boolean(entry?.maximized));
+          appendRenderKeyPart(parts, "z_index");
+          appendRenderKeyPart(parts, entry?.z_index ?? 0);
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, entry?.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(entry?.tab_group_active));
+        };
+        const parts = [];
+        appendRenderKeyPart(parts, "open");
+        appendRenderKeyPart(parts, Boolean(windowListOpen));
+        appendRenderKeyPart(parts, "active_tab_id");
+        appendRenderKeyPart(parts, appState?.active_tab_id || null);
+        appendRenderKeyPart(parts, "window_list_entries");
+        appendRenderKeyPart(parts, windowListEntries.length);
+        for (const entry of windowListEntries) {
+          appendEntryKey(parts, entry);
+        }
+        appendRenderKeyPart(parts, "active_window_ids");
+        appendRenderKeyPart(parts, workspaceWindows.length);
+        for (const windowData of workspaceWindows) {
+          appendRenderKeyPart(parts, windowData?.id || "");
+        }
+        appendRenderKeyPart(parts, "rows");
+        if (windowListEntries.length > 0) {
+          let rowCount = 0;
+          for (const entry of windowListEntries) {
+            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
+              rowCount += 1;
+            }
+          }
+          appendRenderKeyPart(parts, rowCount);
+          for (const entry of windowListEntries) {
+            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
+              appendEntryKey(parts, workspaceWindowMap.get(entry.id) || entry);
+            }
+          }
+        } else {
+          appendRenderKeyPart(parts, workspaceWindows.length);
+          for (const entry of workspaceWindows) {
+            appendEntryKey(parts, entry);
+          }
+        }
+        return parts.join("");
+      }
+
+      function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
+        const parts = [];
+        appendRenderKeyPart(parts, "id");
+        appendRenderKeyPart(parts, windowId || "");
+        appendRenderKeyPart(parts, "mounted");
+        appendRenderKeyPart(parts, windowMap.has(windowId));
+        appendRenderKeyPart(parts, "runtime_state");
+        appendRenderKeyPart(parts, runtimeState || "");
+        appendRenderKeyPart(parts, "detail");
+        appendRenderKeyPart(parts, effectiveDetail || "");
+        appendRenderKeyPart(parts, "preset");
+        appendRenderKeyPart(parts, windowData?.preset || "");
+        appendRenderKeyPart(parts, "runtime_visible");
+        appendRenderKeyPart(parts, shouldShowRuntimeStatus(windowData));
+        appendRenderKeyPart(parts, "agent_state");
+        appendRenderKeyPart(parts, mapAgentTelemetryState(runtimeState));
+        return parts.join("");
+      }
+
+      function windowElementRenderKey(windowData) {
+        const geometry = windowData.geometry || {};
+        const maximizedFill =
+          windowData.maximized && !windowData.minimized
+            ? maximizedGeometry(visibleBounds(), viewport.zoom)
+            : null;
+        const tabGroupId = windowGroupId(windowData);
+        const parts = [];
+        appendRenderKeyPart(parts, "id");
+        appendRenderKeyPart(parts, windowData.id || "");
+        appendRenderKeyPart(parts, "preset");
+        appendRenderKeyPart(parts, windowData.preset || "");
+        appendRenderKeyPart(parts, "title");
+        appendRenderKeyPart(parts, windowData.title || "");
+        appendRenderKeyPart(parts, "dynamic_title");
+        appendRenderKeyPart(parts, windowData.dynamic_title || "");
+        appendRenderKeyPart(parts, "dynamic_title_detail");
+        appendRenderKeyPart(parts, windowData.dynamic_title_detail || "");
+        appendRenderKeyPart(parts, "purpose_title");
+        appendRenderKeyPart(parts, windowData.purpose_title || "");
+        appendRenderKeyPart(parts, "agent_id");
+        appendRenderKeyPart(parts, windowData.agent_id || "");
+        appendRenderKeyPart(parts, "agent_color");
+        appendRenderKeyPart(parts, windowData.agent_color || "");
+        appendRenderKeyPart(parts, "status");
+        appendRenderKeyPart(parts, windowData.status || "");
+        appendRenderKeyPart(parts, "runtime_state");
+        appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+        appendRenderKeyPart(parts, "detail");
+        appendRenderKeyPart(parts, detailMap.get(windowData.id) || "");
+        appendRenderKeyPart(parts, "display_title");
+        appendRenderKeyPart(parts, windowDisplayTitle(windowData));
+        appendRenderKeyPart(parts, "title_tooltip");
+        appendRenderKeyPart(parts, windowTitleTooltip(windowData));
+        appendRenderKeyPart(parts, "role_badge");
+        appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
+        appendRenderKeyPart(parts, "geometry_revision");
+        appendRenderKeyPart(parts, workspaceGeometryRevision(windowData));
+        appendRenderKeyPart(parts, "geometry");
+        appendRenderKeyPart(parts, "x");
+        appendRenderKeyPart(parts, geometry.x ?? "");
+        appendRenderKeyPart(parts, "y");
+        appendRenderKeyPart(parts, geometry.y ?? "");
+        appendRenderKeyPart(parts, "width");
+        appendRenderKeyPart(parts, geometry.width ?? "");
+        appendRenderKeyPart(parts, "height");
+        appendRenderKeyPart(parts, geometry.height ?? "");
+        appendRenderKeyPart(parts, "minimized");
+        appendRenderKeyPart(parts, Boolean(windowData.minimized));
+        appendRenderKeyPart(parts, "maximized");
+        appendRenderKeyPart(parts, Boolean(windowData.maximized));
+        appendRenderKeyPart(parts, "z_index");
+        appendRenderKeyPart(parts, windowData.z_index ?? "");
+        appendRenderKeyPart(parts, "tab_group_id");
+        appendRenderKeyPart(parts, windowData.tab_group_id || "");
+        appendRenderKeyPart(parts, "tab_group_active");
+        appendRenderKeyPart(parts, Boolean(windowData.tab_group_active));
+        appendRenderKeyPart(parts, "maximized_fill");
+        appendRenderKeyPart(parts, Boolean(maximizedFill));
+        if (maximizedFill) {
+          appendRenderKeyPart(parts, "x");
+          appendRenderKeyPart(parts, maximizedFill.x);
+          appendRenderKeyPart(parts, "y");
+          appendRenderKeyPart(parts, maximizedFill.y);
+          appendRenderKeyPart(parts, "width");
+          appendRenderKeyPart(parts, maximizedFill.width);
+          appendRenderKeyPart(parts, "height");
+          appendRenderKeyPart(parts, maximizedFill.height);
+        }
+        appendRenderKeyPart(parts, "tabs");
+        for (const tab of activeWorkspace().windows || []) {
+          if (windowGroupId(tab) !== tabGroupId) {
+            continue;
+          }
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, tab.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, tab.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, tab.title || "");
+          appendRenderKeyPart(parts, "dynamic_title");
+          appendRenderKeyPart(parts, tab.dynamic_title || "");
+          appendRenderKeyPart(parts, "dynamic_title_detail");
+          appendRenderKeyPart(parts, tab.dynamic_title_detail || "");
+          appendRenderKeyPart(parts, "purpose_title");
+          appendRenderKeyPart(parts, tab.purpose_title || "");
+          appendRenderKeyPart(parts, "agent_id");
+          appendRenderKeyPart(parts, tab.agent_id || "");
+          appendRenderKeyPart(parts, "agent_color");
+          appendRenderKeyPart(parts, tab.agent_color || "");
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, tab.status || "");
+          appendRenderKeyPart(parts, "tab_group_id");
+          appendRenderKeyPart(parts, tab.tab_group_id || "");
+          appendRenderKeyPart(parts, "tab_group_active");
+          appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
+        }
+        return parts.join("");
+      }
+
+      function projectPickerRenderKey(activeTab = activeProjectTab()) {
+        const shouldShow = !activeTab;
+        const parts = [];
+        appendRenderKeyPart(parts, "visible");
+        appendRenderKeyPart(parts, shouldShow);
+        appendRenderKeyPart(parts, "error");
+        appendRenderKeyPart(parts, projectError || "");
+        appendRenderKeyPart(parts, "recent_projects");
+        appendRenderKeyPart(
+          parts,
+          shouldShow ? recentProjectsRenderKey(appState) : "",
+        );
+        return parts.join("");
+      }
+
+      function projectOnboardingRenderKey(tab) {
+        const visible = Boolean(tab && tab.kind !== "git");
+        const parts = [];
+        appendRenderKeyPart(parts, "visible");
+        appendRenderKeyPart(parts, visible);
+        appendRenderKeyPart(parts, "kind");
+        appendRenderKeyPart(parts, visible ? tab.kind || "" : "");
+        appendRenderKeyPart(parts, "project_root");
+        appendRenderKeyPart(parts, visible ? tab.project_root || "" : "");
+        return parts.join("");
+      }
+
+      function actionAvailabilityRenderKey(activeTab = activeProjectTab()) {
+        return activeTab ? "active" : "empty";
+      }
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
@@ -543,6 +923,10 @@
 
       function renderAppVersion() {
         const label = formatVersionLabel();
+        if (renderedAppVersionLabel === label) {
+          return;
+        }
+        renderedAppVersionLabel = label;
         appVersionLabel.hidden = !label;
         appVersionLabel.textContent = label;
         appVersionLabel.title = label;
@@ -1315,6 +1699,7 @@
           onTrace: (kind, fields) => {
             traceUi(kind, fields);
           },
+          shouldTrace: uiTraceWiring.isTracing,
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
@@ -1428,8 +1813,30 @@
         return ids;
       }
 
+      function allProjectWindowIdSet() {
+        const ids = new Set();
+        for (const tab of appState?.tabs || []) {
+          for (const windowData of tab.workspace?.windows || []) {
+            ids.add(windowData.id);
+          }
+        }
+        return ids;
+      }
+
+      function workspaceWindowIdSet(workspace) {
+        const ids = new Set();
+        for (const windowData of workspace?.windows || []) {
+          ids.add(windowData.id);
+        }
+        return ids;
+      }
+
       function workspaceWindowById(windowId) {
         return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
+      }
+
+      function workspaceWindowElement(windowId) {
+        return windowMap.get(windowId) || null;
       }
 
       function windowGroupId(windowData) {
@@ -1634,8 +2041,13 @@
         });
       }
 
-      function updateActionAvailability() {
-        const hasActiveTab = Boolean(activeProjectTab());
+      function updateActionAvailability(activeTab = activeProjectTab()) {
+        const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);
+        if (renderedActionAvailabilityKey === nextActionAvailabilityKey) {
+          return;
+        }
+        renderedActionAvailabilityKey = nextActionAvailabilityKey;
+        const hasActiveTab = nextActionAvailabilityKey === "active";
         addButton.disabled = !hasActiveTab;
         tileButton.disabled = !hasActiveTab;
         stackButton.disabled = !hasActiveTab;
@@ -1752,17 +2164,19 @@
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
-        not_started: "Not Started",
+        starting: "Starting",
         idle: "Idle",
         waiting: "Waiting",
         stopped: "Stopped",
         error: "Error",
       });
 
+      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
+      // spellings (and the older `starting`→running conflation) normalize to it.
       const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        starting: "running",
-        notstarted: "not_started",
-        "not-started": "not_started",
+        not_started: "starting",
+        notstarted: "starting",
+        "not-started": "starting",
         ready: "idle",
         exited: "stopped",
       });
@@ -1845,18 +2259,29 @@
         windowListPanel.hidden = !windowListOpen;
         windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
         if (!windowListOpen) {
+          renderedWindowListKey = "__closed__";
           return;
         }
+        const nextWindowListKey = windowListRenderKey();
+        if (renderedWindowListKey === nextWindowListKey) {
+          return;
+        }
+        renderedWindowListKey = nextWindowListKey;
         const workspaceWindows = activeWorkspace().windows || [];
-        const workspaceWindowMap = new Map(
-          workspaceWindows.map((windowData) => [windowData.id, windowData]),
-        );
-        const entries =
-          windowListEntries.length > 0
-            ? windowListEntries
-                .map((entry) => workspaceWindowMap.get(entry.id) || entry)
-                .filter((entry) => workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id))
-            : workspaceWindows;
+        let entries = workspaceWindows;
+        if (windowListEntries.length > 0) {
+          const workspaceWindowMap = new Map();
+          for (const windowData of workspaceWindows) {
+            workspaceWindowMap.set(windowData.id, windowData);
+          }
+          entries = [];
+          for (const entry of windowListEntries) {
+            const workspaceEntry = workspaceWindowMap.get(entry.id);
+            if (workspaceWindowMap.size === 0 || workspaceEntry) {
+              entries.push(workspaceEntry || entry);
+            }
+          }
+        }
         windowListPanel.innerHTML = "";
         if (entries.length === 0) {
           const empty = document.createElement("div");
@@ -1915,6 +2340,7 @@
         }
         windowListOpen = !windowListOpen;
         windowListEntries = [];
+        renderedWindowListKey = "";
         renderWindowList();
         if (windowListOpen) {
           requestWindowList();
@@ -1962,9 +2388,28 @@
           if (presetSurface(windowData.preset) === "terminal") {
             // Visual re-fit only (persist=false): never round-trip geometry from
             // the sync path, so this client cannot churn the shared state.
-            requestAnimationFrame(() => fitTerminal(windowData.id, false));
+            scheduleTerminalFit(windowData.id, false);
           }
         }
+      }
+
+      function scheduleMaximizedWindowsToViewportSync() {
+        if (maximizedViewportSyncFrame !== null) {
+          return;
+        }
+        maximizedViewportSyncFrame = requestAnimationFrame(() => {
+          maximizedViewportSyncFrame = null;
+          syncMaximizedWindowsToViewport();
+        });
+      }
+
+      function workspaceHasVisibleMaximizedWindow(workspace) {
+        return (workspace?.windows || []).some(
+          (windowData) =>
+            Boolean(windowData?.maximized) &&
+            !windowData?.minimized &&
+            visibleWindowData(windowData),
+        );
       }
 
       function renderProjectTabs() {
@@ -2068,7 +2513,12 @@
         }
       }
 
-      function renderRecentProjects() {
+      function renderRecentProjects({ force = false } = {}) {
+        const nextKey = recentProjectsRenderKey(appState);
+        if (!force && renderedRecentProjectsKey === nextKey) {
+          return;
+        }
+        renderedRecentProjectsKey = nextKey;
         recentProjectList.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
@@ -2097,16 +2547,19 @@
             recentProjectList.appendChild(row);
           }
         }
-
-        renderRecentProjectsIntoMenu();
       }
 
       // Issue #2684 — mirror Recent projects inside the split-button dropdown
       // so users can reach them without first closing every project tab.
-      function renderRecentProjectsIntoMenu() {
+      function renderRecentProjectsIntoMenu({ force = false } = {}) {
         if (!openProjectMenuRecent) {
           return;
         }
+        const nextKey = recentProjectsRenderKey(appState);
+        if (!force && renderedRecentProjectsMenuKey === nextKey) {
+          return;
+        }
+        renderedRecentProjectsMenuKey = nextKey;
         openProjectMenuRecent.replaceChildren();
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
@@ -2157,7 +2610,7 @@
         if (!openProjectMenu || isOpenProjectMenuOpen()) {
           return;
         }
-        renderRecentProjectsIntoMenu();
+        renderRecentProjectsIntoMenu({ force: true });
         openProjectMenu.classList.add("open");
         openProjectMenu.setAttribute("aria-hidden", "false");
         openProjectMenuButton.setAttribute("aria-expanded", "true");
@@ -2240,15 +2693,27 @@
         focusOpenProjectMenuItemAt(nextIndex);
       }
 
-      function renderProjectPicker() {
-        const shouldShow = !activeProjectTab();
+      function renderProjectPicker(activeTab = activeProjectTab()) {
+        const nextProjectPickerKey = projectPickerRenderKey(activeTab);
+        if (renderedProjectPickerKey === nextProjectPickerKey) {
+          return;
+        }
+        renderedProjectPickerKey = nextProjectPickerKey;
+        const shouldShow = !activeTab;
         projectPicker.classList.toggle("visible", shouldShow);
         projectPickerError.hidden = !projectError;
         projectPickerError.textContent = projectError;
-        renderRecentProjects();
+        if (shouldShow) {
+          renderRecentProjects();
+        }
       }
 
       function renderProjectOnboarding(tab) {
+        const nextProjectOnboardingKey = projectOnboardingRenderKey(tab);
+        if (renderedProjectOnboardingKey === nextProjectOnboardingKey) {
+          return;
+        }
+        renderedProjectOnboardingKey = nextProjectOnboardingKey;
         if (!tab || tab.kind === "git") {
           projectOnboarding.classList.remove("visible");
           return;
@@ -2275,25 +2740,109 @@
               recent_projects: [],
             };
             setVersionState(appState.app_version, versionState.latest);
-            renderProjectTabs();
-            renderProjectPicker();
-            updateActionAvailability();
+            const nextProjectTabsKey = projectTabsRenderKey(appState);
+            if (renderedProjectTabsKey !== nextProjectTabsKey) {
+              renderedProjectTabsKey = nextProjectTabsKey;
+              renderProjectTabs();
+            }
             const tab = activeProjectTab();
+            renderProjectPicker(tab);
+            updateActionAvailability(tab);
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
-            const nextWorkspaceId = deriveCurrentProjectWorkspaceIds(tab?.workspace || {});
-            if (JSON.stringify(nextWorkspaceId) !== JSON.stringify(currentProjectWorkspaceId)) {
-              currentProjectWorkspaceId = nextWorkspaceId;
-              refreshBoardCurrentWorkspaceId();
-            }
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
+            );
             renderWindowList();
-            renderActiveWorkOverview();
           },
         );
       }
 
       let presetModalFocusReturn = null;
       let presetModalFocusTrapRelease = null;
+      // SPEC-2356 "Surface Deck" — arrow-key roving across the 2-column
+      // preset grid. Buttons are walked in document order; ←→ step within a
+      // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
+      // currently-focused tile so the keyboard glow tracks the cursor.
+      // SPEC-2356 landscape weighted deck — roving is geometry direction-nearest
+      // (not a fixed column-count jump) so the 45/33/22 weighted columns and the
+      // uneven per-column row counts navigate intuitively. The handler reads real
+      // tile geometry; a too-diagonal candidate (>~63°) is rejected so pressing
+      // Down at the bottom of a short column clamps instead of leaping columns.
+      function findGeometryNeighbor(buttons, current, key) {
+        const src = buttons[current].getBoundingClientRect();
+        const sx = src.left + src.width / 2;
+        const sy = src.top + src.height / 2;
+        const AXIS_BIAS = 2.5;
+        let best = -1;
+        let bestScore = Infinity;
+        buttons.forEach((btn, i) => {
+          if (i === current) return;
+          const r = btn.getBoundingClientRect();
+          const dx = r.left + r.width / 2 - sx;
+          const dy = r.top + r.height / 2 - sy;
+          const inDirection =
+            (key === "ArrowRight" && dx > 1) ||
+            (key === "ArrowLeft" && dx < -1) ||
+            (key === "ArrowDown" && dy > 1) ||
+            (key === "ArrowUp" && dy < -1);
+          if (!inDirection) return;
+          const horizontal = key === "ArrowRight" || key === "ArrowLeft";
+          const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
+          const secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
+          if (secondary > primary * 2) return;
+          const score = primary + secondary * AXIS_BIAS;
+          if (score < bestScore) {
+            bestScore = score;
+            best = i;
+          }
+        });
+        return best;
+      }
+      function presetRovingButtons() {
+        return [...modal.querySelectorAll(".preset-button")];
+      }
+      function setActivePresetButton(buttons, index) {
+        if (!buttons.length) return;
+        const clamped = Math.max(0, Math.min(index, buttons.length - 1));
+        buttons.forEach((button, i) => {
+          button.classList.toggle("is-active", i === clamped);
+        });
+        const target = buttons[clamped];
+        if (target && typeof target.focus === "function") {
+          try { target.focus({ preventScroll: true }); }
+          catch { target.focus(); }
+        }
+      }
+      function handlePresetRovingKeydown(event) {
+        const key = event.key;
+        if (
+          key !== "ArrowRight" &&
+          key !== "ArrowLeft" &&
+          key !== "ArrowUp" &&
+          key !== "ArrowDown" &&
+          key !== "Enter"
+        ) {
+          return;
+        }
+        const buttons = presetRovingButtons();
+        if (!buttons.length) return;
+        let current = buttons.indexOf(document.activeElement);
+        if (current < 0) {
+          current = buttons.findIndex((button) =>
+            button.classList.contains("is-active"),
+          );
+          if (current < 0) current = 0;
+        }
+        if (key === "Enter") {
+          event.preventDefault();
+          buttons[current].click();
+          return;
+        }
+        event.preventDefault();
+        const next = findGeometryNeighbor(buttons, current, key);
+        if (next >= 0) setActivePresetButton(buttons, next);
+      }
       function openModal() {
         // SPEC-2356 — capture trigger BEFORE adding .open so we can
         // restore focus on close. The preset modal is invoked via the
@@ -2311,6 +2860,12 @@
         if (presetShell) {
           presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
         }
+        // SPEC-2356 "Surface Deck" — drop focus onto the first preset tile so
+        // arrow-key roving works immediately without a stray Tab.
+        const buttons = presetRovingButtons();
+        if (buttons.length) {
+          setActivePresetButton(buttons, 0);
+        }
       }
 
       function closeModal() {
@@ -2327,6 +2882,10 @@
             catch { presetModalFocusReturn.focus(); }
           }
           presetModalFocusReturn = null;
+          // SPEC-2356 — clear the roving highlight so a re-open starts clean.
+          for (const button of presetRovingButtons()) {
+            button.classList.remove("is-active");
+          }
         }
       }
 
@@ -2546,6 +3105,7 @@
           y: viewport.y,
           zoom: viewport.zoom,
         });
+        viewportDomApplied = true;
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -2589,6 +3149,14 @@
         });
       }
 
+      function sameViewportValues(left, right) {
+        return left
+          && right
+          && left.x === right.x
+          && left.y === right.y
+          && left.zoom === right.zoom;
+      }
+
       function canvasCenterAnchor() {
         const rect = canvas.getBoundingClientRect();
         return {
@@ -2601,9 +3169,15 @@
         const clampedZoom = clampRange(nextZoom, 0.6, 2.4);
         const worldX = (anchorX - viewport.x) / viewport.zoom;
         const worldY = (anchorY - viewport.y) / viewport.zoom;
-        viewport.x = anchorX - worldX * clampedZoom;
-        viewport.y = anchorY - worldY * clampedZoom;
-        viewport.zoom = clampedZoom;
+        const nextViewport = {
+          x: anchorX - worldX * clampedZoom,
+          y: anchorY - worldY * clampedZoom,
+          zoom: clampedZoom,
+        };
+        if (sameViewportValues(viewport, nextViewport)) {
+          return;
+        }
+        viewport = nextViewport;
         recordLocalViewportEdit();
         applyViewport();
         persistViewport();
@@ -2763,6 +3337,16 @@
           }
         );
       }
+
+      function scheduleTerminalFit(windowId, persist = false) {
+        if (!terminalFitScheduler) {
+          requestAnimationFrame(() => fitTerminal(windowId, persist));
+          return false;
+        }
+        return terminalFitScheduler.enqueue(windowId, { persist });
+      }
+
+      terminalFitScheduler = createTerminalFitScheduler({ fitTerminal });
 
       function scheduleTerminalResizeFit(windowId) {
         if (!terminalMap.has(windowId)) {
@@ -2938,24 +3522,28 @@
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
-          return;
+          return false;
         }
         if (!canRefreshTerminalViewport(windowId)) {
-          runtime.viewportRefreshPending = true;
-          return;
+          markTerminalViewportRefreshPending(windowId);
+          return false;
         }
-        if (runtime.viewportRefreshFrame !== null) {
-          return;
+        if (!terminalViewportRefreshScheduler) {
+          requestAnimationFrame(() => {
+            if (!canRefreshTerminalViewport(windowId)) {
+              markTerminalViewportRefreshPending(windowId);
+              return;
+            }
+            const activeRuntime = terminalMap.get(windowId);
+            if (!activeRuntime) {
+              return;
+            }
+            activeRuntime.viewportRefreshPending = false;
+            refreshTerminalViewport(windowId);
+          });
+          return false;
         }
-        runtime.viewportRefreshFrame = requestAnimationFrame(() => {
-          runtime.viewportRefreshFrame = null;
-          if (!canRefreshTerminalViewport(windowId)) {
-            runtime.viewportRefreshPending = true;
-            return;
-          }
-          runtime.viewportRefreshPending = false;
-          refreshTerminalViewport(windowId);
-        });
+        return terminalViewportRefreshScheduler.enqueue(windowId);
       }
 
       function refreshTerminalViewport(windowId) {
@@ -2965,6 +3553,26 @@
         }
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
+
+      function markTerminalViewportRefreshPending(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (runtime) {
+          runtime.viewportRefreshPending = true;
+        }
+      }
+
+      terminalViewportRefreshScheduler = createTerminalViewportRefreshScheduler({
+        canRefresh: canRefreshTerminalViewport,
+        refresh: (windowId) => {
+          const runtime = terminalMap.get(windowId);
+          if (!runtime) {
+            return;
+          }
+          runtime.viewportRefreshPending = false;
+          refreshTerminalViewport(windowId);
+        },
+        markPending: markTerminalViewportRefreshPending,
+      });
 
       function forceTerminalViewportRefresh(windowId, { shouldPersistGeometry = true } = {}) {
         const runtime = terminalMap.get(windowId);
@@ -3096,8 +3704,8 @@
           // Schedule one more viewport refresh on the next frame so the
           // post-fit cols/rows are reflected in the rendered buffer even
           // when xterm coalesces internal redraws. This keeps the prior
-          // `viewportRefreshFrame` re-arm path active for repeated
-          // activations.
+          // refresh re-arm behavior active for repeated activations while
+          // routing routine refresh work through the shared scheduler.
           scheduleTerminalViewportRefresh(windowId);
         });
       }
@@ -3140,6 +3748,43 @@
       // Aggregates `data-agent-state` across all open windows and pushes the
       // counts into the bottom strip. We also expose agent count to the
       // sidebar layer for the "Quick" section's hint.
+      function operatorTelemetryRenderKey(counts) {
+        const parts = [];
+        appendRenderKeyPart(parts, "active");
+        appendRenderKeyPart(parts, counts?.active ?? null);
+        appendRenderKeyPart(parts, "idle");
+        appendRenderKeyPart(parts, counts?.idle ?? null);
+        appendRenderKeyPart(parts, "blocked");
+        appendRenderKeyPart(parts, counts?.blocked ?? null);
+        appendRenderKeyPart(parts, "done");
+        appendRenderKeyPart(parts, counts?.done ?? null);
+        appendRenderKeyPart(parts, "agents");
+        appendRenderKeyPart(parts, counts?.agents ?? null);
+        appendRenderKeyPart(parts, "branches");
+        appendRenderKeyPart(parts, counts?.branches ?? null);
+        appendRenderKeyPart(parts, "git");
+        appendRenderKeyPart(parts, counts?.git ?? null);
+        appendRenderKeyPart(parts, "hooks");
+        appendRenderKeyPart(parts, counts?.hooks ?? null);
+        appendRenderKeyPart(parts, "layers");
+        appendRenderKeyPart(parts, counts?.layers ?? null);
+        return parts.join("");
+      }
+
+      function applyOperatorTelemetryCounts(counts) {
+        if (!window.__operatorShell?.applyTelemetryCounts) return;
+        const nextOperatorTelemetryKey = operatorTelemetryRenderKey(counts);
+        if (renderedOperatorTelemetryKey === nextOperatorTelemetryKey) {
+          return;
+        }
+        try {
+          window.__operatorShell.applyTelemetryCounts(counts);
+          renderedOperatorTelemetryKey = nextOperatorTelemetryKey;
+        } catch (e) {
+          console.warn("operator telemetry update failed", e);
+        }
+      }
+
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
@@ -3186,11 +3831,7 @@
             counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
           }
         }
-        try {
-          window.__operatorShell.applyTelemetryCounts(counts);
-        } catch (e) {
-          console.warn("operator telemetry update failed", e);
-        }
+        applyOperatorTelemetryCounts(counts);
       }
 
       // ---- Provider usage & rate limits (SPEC-2970) ----
@@ -3249,10 +3890,12 @@
         }
         // Re-render regardless of session count: when a snapshot drops back to
         // sessions:[] (agent stopped, rollout/transcript unreadable, settings
-        // change) the Active Work footer must clear its stale token/context
-        // instead of keeping the previous poll's values.
+        // change) the Work surface must clear its stale token/context instead
+        // of keeping the previous poll's values. SPEC-2359 Phase W-12 Slice 3
+        // (FR-351): the sidebar Active Works overview is gone, so usage now
+        // refreshes through the Workspace Overview (Kanban) Work surface.
         try {
-          renderActiveWorkOverview();
+          workspaceOverviewSurface.renderWindows();
         } catch {
           /* no-op */
         }
@@ -3673,142 +4316,6 @@
         return [{ ...activeWorkProjection, agents }];
       }
 
-      function activeWorkDisplayTitle(projection, agents) {
-        const agentTitle = (Array.isArray(agents) ? agents : [])
-          .find((agent) => agent && String(agent.title_summary || "").trim())
-          ?.title_summary;
-        const candidates = [
-          agentTitle,
-          projection?.summary,
-          projection?.owner,
-          projection?.title,
-        ];
-        for (const value of candidates) {
-          const title = String(value || "").trim();
-          if (!title || title === "Start Work") continue;
-          return title;
-        }
-        return "Active Work";
-      }
-
-      function renderActiveWorkAgentCard(agent) {
-        const state = String(agent.status_category || "unknown").toLowerCase();
-        const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
-        const coordinationLabel = coordinationKindLabel(coordinationKind);
-        const card = createNode("article", "op-agent-card");
-        card.dataset.state = state;
-        if (coordinationKind) card.dataset.kind = coordinationKind;
-        if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
-
-        const head = createNode("div", "op-agent-head");
-        head.appendChild(
-          createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
-        );
-        const chips = createNode("div", "op-agent-chips");
-        if (coordinationLabel) {
-          chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
-        }
-        chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
-        head.appendChild(chips);
-        card.appendChild(head);
-
-        const agentMeta = createNode("div", "op-agent-meta");
-        appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
-        card.appendChild(agentMeta);
-
-        if (agent.coordination_scope) {
-          card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
-        }
-
-        const agentFocusText = agent.title_summary || agent.current_focus;
-        if (agentFocusText) {
-          const focusText = coordinationLabel
-            ? `${coordinationLabel}: ${agentFocusText}`
-            : agentFocusText;
-          const agentFocus = createNode("div", "op-agent-focus", focusText);
-          if (agent.current_focus && agent.current_focus !== agentFocusText) {
-            agentFocus.title = agent.current_focus;
-          }
-          card.appendChild(agentFocus);
-        }
-
-        // SPEC-2970 FR-019/FR-020 — per-session usage footer (enhanced CLI
-        // footer): model · tokens · context-left + this provider's account badge.
-        const sessionUsage = usageForSession(agent.session_id);
-        if (sessionUsage) {
-          const footer = createNode("div", "op-agent-usage");
-          if (sessionUsage.model) {
-            footer.appendChild(createNode("span", "op-agent-usage__model", sessionUsage.model));
-          }
-          footer.appendChild(
-            createNode("span", "op-agent-usage__tok", `${usageFmtTokens(sessionUsage.total_tokens)} tok`),
-          );
-          const eligible = sessionUsage.eligible !== false;
-          if (eligible && sessionUsage.context_left_pct != null) {
-            footer.appendChild(
-              createNode("span", "op-agent-usage__ctx", `ctx ${Math.round(sessionUsage.context_left_pct)}%`),
-            );
-          }
-          if (eligible) {
-            const acct = (latestProviderUsage.accounts || []).find(
-              (a) => a.provider === sessionUsage.provider,
-            );
-            const five = acct && (acct.windows || []).find((w) => w.kind === "five_hour");
-            const wk = acct && (acct.windows || []).find((w) => w.kind === "weekly");
-            const parts = [];
-            if (five) parts.push(`5h ${Math.round(five.used_percent)}%`);
-            if (wk) parts.push(`wk ${Math.round(wk.used_percent)}%`);
-            if (parts.length) {
-              footer.appendChild(createNode("span", "op-agent-usage__acct", parts.join(" · ")));
-            }
-          }
-          if (sessionUsage.limit_reached) {
-            footer.appendChild(createNode("span", "op-agent-usage__limit", "limit reached"));
-          }
-          card.appendChild(footer);
-        }
-
-        const agentActions = createNode("div", "op-agent-actions");
-        const focusButton = createNode("button", "op-agent-action", "Focus");
-        focusButton.type = "button";
-        focusButton.addEventListener("click", () => {
-          focusActiveWorkAgentWindow(agent);
-        });
-        agentActions.appendChild(focusButton);
-        if (agent.last_board_entry_id) {
-          const boardButton = createNode("button", "op-agent-action", "Open Entry");
-          boardButton.type = "button";
-          boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
-          agentActions.appendChild(boardButton);
-        }
-        if (agentActions.childNodes.length > 0) {
-          card.appendChild(agentActions);
-        }
-
-        return card;
-      }
-
-      // SPEC-2359 Phase U-7 (FR-148): human-readable label for the Phase
-      // U-6 `WorkspaceLifecycleStage` enum on the Active Work card. Mirror
-      // of `formatLifecycleStageLabel` in workspace-kanban-surface.js so
-      // both surfaces show identical strings.
-      function formatActiveWorkLifecycleLabel(stage) {
-        switch (String(stage || "").toLowerCase()) {
-          case "planning":
-            return "Planning";
-          case "active":
-            return "Active";
-          case "in_review":
-            return "In Review";
-          case "done":
-            return "Done";
-          case "archived":
-            return "Archived";
-          default:
-            return "";
-        }
-      }
-
       function agentStatusLabel(state) {
         switch (String(state || "").toLowerCase()) {
           case "active":
@@ -3822,37 +4329,6 @@
           default:
             return "Unknown";
         }
-      }
-
-      function agentRuntimeStatusLabel(agent) {
-        const windowData = workspaceWindowById(agent.window_id);
-        if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
-          const runtimeState = runtimeStateForWindow(windowData);
-          return windowRuntimeLabel(runtimeState);
-        }
-        return agentStatusLabel(agent.status_category);
-      }
-
-      function focusActiveWorkAgentWindow(agent) {
-        if (!agent?.window_id) return;
-        const windowData = workspaceWindowById(agent.window_id);
-        if (!windowData) return;
-        if (windowData.minimized) {
-          send({ kind: "restore_window", id: agent.window_id });
-        }
-        focusWindowRemotely(agent.window_id, { center: true });
-      }
-
-      function setActiveWorkSectionVisible(visible) {
-        if (activeWorkSection) {
-          activeWorkSection.hidden = !visible;
-        }
-      }
-
-      function projectionIssueNumber(projection) {
-        const owner = String(projection?.owner || "");
-        const match = owner.match(/^Issue\s+#(\d+)$/i);
-        return match ? Number(match[1]) : null;
       }
 
       function compactPathLabel(value) {
@@ -3884,25 +4360,6 @@
         return item;
       }
 
-      function coordinationKindLabel(kind) {
-        switch (String(kind || "").toLowerCase()) {
-          case "blocked":
-            return "Blocked";
-          case "handoff":
-            return "Handoff";
-          case "next":
-            return "Next";
-          case "claim":
-            return "Claim";
-          case "decision":
-            return "Decision";
-          case "status":
-            return "Status";
-          default:
-            return "";
-        }
-      }
-
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
           .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
@@ -3932,151 +4389,15 @@
         focusOrSpawnPreset("board");
       }
 
-      function renderActiveWorkOverview() {
-        if (!activeWorkSummary || !activeWorkAgents) return;
-        activeWorkSummary.innerHTML = "";
-        activeWorkAgents.innerHTML = "";
-
-        if (!activeWorkProjection) {
-          if (activeWorkCount) activeWorkCount.textContent = "0";
-          setActiveWorkSectionVisible(false);
-          return;
-        }
-
-        const works = activeWorkItemsFromProjection();
-        const workCount = works.length;
-        const agentCount = works.reduce((total, work) => total + work.agents.length, 0);
-        if (activeWorkCount) activeWorkCount.textContent = String(workCount);
-
-        if (workCount === 0) {
-          setActiveWorkSectionVisible(false);
-          return;
-        }
-
-        setActiveWorkSectionVisible(true);
-
-        activeWorkSummary.appendChild(
-          createNode(
-            "div",
-            "op-work-title",
-            `${workCount} Active Work${workCount === 1 ? "" : "s"}`,
-          ),
-        );
-        const meta = createNode("div", "op-work-meta");
-        appendMeta(meta, `${agentCount} assigned Agent${agentCount === 1 ? "" : "s"}`);
-        const activePr = createWorkspacePrMeta(activeWorkProjection);
-        if (activePr) meta.appendChild(activePr);
-        // SPEC-2359 Phase U-7 (FR-148, FR-149): render the Phase U-6
-        // `lifecycle_stage` in the Active Work meta so user can spot at a
-        // glance whether the work is Planning / Active / InReview / Done /
-        // Archived without opening the Workspace Detail pane. Falls back
-        // silently when the field is absent (legacy daemon payload).
-        const lifecycleStage = activeWorkProjection.lifecycle_stage;
-        if (lifecycleStage) {
-          const chip = createNode(
-            "span",
-            `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
-            formatActiveWorkLifecycleLabel(lifecycleStage),
-          );
-          meta.appendChild(chip);
-        }
-        activeWorkSummary.appendChild(meta);
-        // SPEC-2359 Phase U-7 (FR-141, FR-149): when `blocked_reason` is
-        // populated, surface it directly in the Active Work status line
-        // instead of letting it hide behind `next_action` / `status_text`.
-        // This mirrors the Detail pane Blocked Reason section so the user
-        // sees consistent "what is blocking" copy across surfaces.
-        const blockedReason =
-          typeof activeWorkProjection.blocked_reason === "string"
-            ? activeWorkProjection.blocked_reason.trim()
-            : "";
-        const statusBody =
-          blockedReason ||
-          activeWorkProjection.next_action ||
-          activeWorkProjection.status_text ||
-          "Work is active";
-        const statusNode = createNode("div", "op-work-status", statusBody);
-        if (blockedReason) {
-          statusNode.classList.add("op-work-status--blocked");
-        }
-        activeWorkSummary.appendChild(statusNode);
-
-        for (const work of works) {
-          const state = String(work.status_category || "unknown").toLowerCase();
-          const card = createNode("article", "op-work-card");
-          card.dataset.state = state;
-          card.appendChild(
-            createNode("div", "op-work-title", activeWorkDisplayTitle(work, work.agents)),
-          );
-
-          const workMeta = createNode("div", "op-work-meta");
-          appendMeta(workMeta, work.owner);
-          appendMeta(workMeta, `${work.agents.length} Agent${work.agents.length === 1 ? "" : "s"}`);
-          const workPr = createWorkspacePrMeta(work);
-          if (workPr) workMeta.appendChild(workPr);
-          const lifecycleStage = work.lifecycle_stage;
-          if (lifecycleStage) {
-            const chip = createNode(
-              "span",
-              `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
-              formatActiveWorkLifecycleLabel(lifecycleStage),
-            );
-            workMeta.appendChild(chip);
-          }
-          card.appendChild(workMeta);
-
-          const workBlockedReason =
-            typeof work.blocked_reason === "string" ? work.blocked_reason.trim() : "";
-          const workStatusBody =
-            workBlockedReason || work.next_action || work.status_text || work.summary || "Work is active";
-          const workStatus = createNode("div", "op-work-status", workStatusBody);
-          if (workBlockedReason) workStatus.classList.add("op-work-status--blocked");
-          card.appendChild(workStatus);
-
-          const actions = createNode("div", "op-work-actions");
-          if (work.branch) {
-            const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
-            addAgent.type = "button";
-            addAgent.addEventListener("click", () => {
-              send({
-                kind: "open_active_work_launch_wizard",
-                branch_name: work.branch,
-                linked_issue_number: projectionIssueNumber(work),
-              });
-            });
-            actions.appendChild(addAgent);
-          }
-          const boardRefs = work.board_refs || [];
-          const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
-          if (latestBoardRef) {
-            const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
-            openBoard.type = "button";
-            openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
-            actions.appendChild(openBoard);
-          }
-          if (actions.childNodes.length > 0) {
-            card.appendChild(actions);
-          }
-
-          const agentList = createNode("div", "op-agent-list");
-          for (const agent of work.agents) {
-            agentList.appendChild(renderActiveWorkAgentCard(agent));
-          }
-          card.appendChild(agentList);
-          activeWorkAgents.appendChild(card);
-        }
-      }
-
       // SPEC-2356 — translate legacy runtime state vocabulary to Living
       // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
       // intentionally narrow so future runtime states surface as
       // `idle` until the design language explicitly handles them.
       function mapAgentTelemetryState(runtimeState) {
         switch (runtimeState) {
-          case "starting":
           case "running":
             return "active";
-          case "not_started":
+          case "starting":
             return "not_started";
           case "ready":
           case "idle":
@@ -4104,12 +4425,23 @@
               detailMap.set(windowId, detail);
             } else if (
               runtimeState === "running" ||
-              runtimeState === "not_started" ||
+              runtimeState === "starting" ||
               runtimeState === "idle" ||
               runtimeState === "waiting"
             ) {
               detailMap.delete(windowId);
             }
+            const effectiveDetail = detailMap.get(windowId) || "";
+            const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
+              windowId,
+              runtimeState,
+              effectiveDetail,
+              windowData,
+            );
+            if (renderedRuntimeStatusKeys.get(windowId) === nextRuntimeStatusKey) {
+              return;
+            }
+            renderedRuntimeStatusKeys.set(windowId, nextRuntimeStatusKey);
             const element = windowMap.get(windowId);
             if (!element) {
               renderWindowList();
@@ -4138,7 +4470,6 @@
             element.dataset.agentState = mapAgentTelemetryState(runtimeState);
             recomputeOperatorTelemetry();
             label.textContent = windowRuntimeLabel(runtimeState);
-            const effectiveDetail = detailMap.get(windowId);
             const statusTitle = effectiveDetail
               ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
               : windowRuntimeLabel(runtimeState);
@@ -4203,9 +4534,18 @@
       }
 
       function focusWindowLocally(windowId) {
+        const targetElement = windowMap.get(windowId);
+        if (focusedId === windowId && targetElement?.classList.contains("focused")) {
+          return;
+        }
+        const previousFocusedId = focusedId;
         focusedId = windowId;
-        for (const [id, element] of windowMap.entries()) {
-          element.classList.toggle("focused", id === windowId);
+        if (previousFocusedId && previousFocusedId !== windowId) {
+          const previousElement = windowMap.get(previousFocusedId);
+          previousElement?.classList.remove("focused");
+        }
+        if (targetElement) {
+          targetElement.classList.add("focused");
         }
       }
 
@@ -4424,12 +4764,29 @@
         return files.reduce((total, file) => total + (file.size || 0), 0);
       }
 
+      function displayAttachmentBasename(filename) {
+        const value = String(filename || "").trim();
+        const parts = value.split(/[\\/]+/).filter(Boolean);
+        return parts.at(-1) || "file";
+      }
+
       function attachmentFileCountLabel(count) {
         return `${count} ${count === 1 ? "file" : "files"}`;
       }
 
-      function ensureAttachmentProgressSurface() {
-        let surface = document.querySelector(".attachment-progress");
+      function createAttachmentOperationId() {
+        const random =
+          typeof globalThis.crypto?.randomUUID === "function"
+            ? globalThis.crypto.randomUUID()
+            : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        return `attachment-${random}`;
+      }
+
+      const attachmentProgressControllers = new Map();
+
+      function ensureAttachmentProgressSurface(windowId) {
+        const host = workspaceWindowElement(windowId) || document.body;
+        let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;
         }
@@ -4441,27 +4798,43 @@
         surface.innerHTML = `
           <div class="attachment-progress__row">
             <span class="attachment-progress__label"></span>
-            <button class="attachment-progress__cancel" type="button" title="Cancel upload">Cancel</button>
           </div>
           <div class="attachment-progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div class="attachment-progress__bar"></div>
           </div>
         `;
-        document.body.appendChild(surface);
+        host.appendChild(surface);
         return surface;
       }
 
-      function createAttachmentProgressController(files) {
-        const surface = ensureAttachmentProgressSurface();
+      function attachmentPhaseLabel(phase, fallback = "") {
+        switch (phase) {
+          case "queued":
+            return "Queued";
+          case "staging":
+            return "Staging";
+          case "injecting":
+            return "Injecting";
+          case "attached":
+            return "Attached";
+          case "failed":
+            return fallback || "Could not attach";
+          default:
+            return fallback || "Uploading";
+        }
+      }
+
+      function createAttachmentProgressController(windowId, files, operationId = createAttachmentOperationId()) {
+        const surface = ensureAttachmentProgressSurface(windowId);
         const label = surface.querySelector(".attachment-progress__label");
         const track = surface.querySelector(".attachment-progress__track");
         const bar = surface.querySelector(".attachment-progress__bar");
-        const cancel = surface.querySelector(".attachment-progress__cancel");
         const abortController = new AbortController();
-        const totalBytes = totalFileBytes(files);
         const fileCount = files.length;
         const state = {
           phase: "Uploading",
+          filename: fileCount === 1 ? displayAttachmentBasename(files[0]?.name) : "",
+          totalBytes: totalFileBytes(files),
           loadedBytes: 0,
           failed: false,
           done: false,
@@ -4469,12 +4842,12 @@
         };
 
         function percent() {
-          if (totalBytes <= 0) {
+          if (state.totalBytes <= 0) {
             return state.done ? 100 : 0;
           }
           return Math.max(
             0,
-            Math.min(100, Math.round((state.loadedBytes / totalBytes) * 100)),
+            Math.min(100, Math.round((state.loadedBytes / state.totalBytes) * 100)),
           );
         }
 
@@ -4483,13 +4856,13 @@
             return;
           }
           const value = percent();
-          const suffix = totalBytes > 0 ? ` · ${value}%` : "";
+          const filename = state.filename ? ` · ${state.filename}` : "";
+          const suffix = state.totalBytes > 0 ? ` · ${value}%` : "";
           surface.hidden = false;
           surface.dataset.state = state.failed ? "error" : state.done ? "done" : "active";
-          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${suffix}`;
+          label.textContent = `${state.phase} ${attachmentFileCountLabel(fileCount)}${filename}${suffix}`;
           track.setAttribute("aria-valuenow", String(value));
           bar.style.width = `${value}%`;
-          cancel.hidden = state.done || state.failed;
         }
 
         function showNow() {
@@ -4498,17 +4871,16 @@
         }
 
         render();
-        cancel.onclick = () => {
-          abortController.abort();
-          fail("Upload cancelled.");
-        };
 
         function setPhase(phase) {
           state.phase = phase;
           render();
         }
 
-        function setUploadProgress(loadedBytes) {
+        function setUploadProgress(loadedBytes, totalBytes = null) {
+          if (Number.isFinite(totalBytes) && totalBytes >= 0) {
+            state.totalBytes = totalBytes;
+          }
           state.loadedBytes = Math.max(0, loadedBytes || 0);
           render();
         }
@@ -4516,11 +4888,13 @@
         function succeed() {
           state.done = true;
           state.phase = "Attached";
+          state.loadedBytes = state.totalBytes;
           if (state.visible) {
             render();
             setTimeout(() => {
               if (surface.dataset.state === "done") {
                 surface.hidden = true;
+                attachmentProgressControllers.delete(operationId);
               }
             }, 700);
           }
@@ -4532,13 +4906,66 @@
           showNow();
         }
 
-        return {
+        function applyBackendProgress(event) {
+          if (event.filename) {
+            state.filename = displayAttachmentBasename(event.filename);
+          }
+          if (Number.isFinite(event.bytes_total)) {
+            state.totalBytes = event.bytes_total;
+          }
+          if (Number.isFinite(event.bytes_done)) {
+            state.loadedBytes = event.bytes_done;
+          }
+          if (event.phase === "failed") {
+            fail(event.message || "Could not attach");
+            return;
+          }
+          if (event.phase === "attached") {
+            succeed();
+            return;
+          }
+          setPhase(attachmentPhaseLabel(event.phase));
+        }
+
+        const controller = {
+          operationId,
           signal: abortController.signal,
           setPhase,
           setUploadProgress,
           succeed,
           fail,
+          applyBackendProgress,
         };
+        attachmentProgressControllers.set(operationId, controller);
+        return controller;
+      }
+
+      function handleAttachmentProgress(event) {
+        const operationId = event?.operation_id || "";
+        if (!operationId) {
+          return;
+        }
+        let controller = attachmentProgressControllers.get(operationId);
+        if (!controller) {
+          controller = createAttachmentProgressController(
+            event.id,
+            [
+              {
+                name: event.filename || "file",
+                size: event.bytes_total || 0,
+              },
+            ],
+            operationId,
+          );
+        }
+        controller.applyBackendProgress(event);
+      }
+
+      function attachmentFilesFromNativePaths(paths) {
+        return paths.map((path) => ({
+          name: displayAttachmentBasename(path),
+          size: 0,
+        }));
       }
 
       let attachmentUploadTokenPromise = null;
@@ -4613,11 +5040,14 @@
           const uploaded = await uploadAttachmentFile(file, {
             signal: progress.signal,
             onProgress: ({ loaded }) => {
-              progress.setUploadProgress(completedBytes + (loaded || 0));
+              progress.setUploadProgress(completedBytes + (loaded || 0), totalBytes);
             },
           });
           completedBytes += file.size || uploaded?.size || 0;
-          progress.setUploadProgress(totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0);
+          progress.setUploadProgress(
+            totalBytes > 0 ? Math.min(completedBytes, totalBytes) : 0,
+            totalBytes,
+          );
           attachments.push({
             source: "uploaded",
             upload_id: uploaded.upload_id,
@@ -4631,22 +5061,22 @@
 
       async function uploadPastedImage(windowId, blob, { mimeType, filename } = {}) {
         const file = uploadFileFromImageBlob(blob, mimeType, filename);
-        const progress = createAttachmentProgressController([file]);
+        const progress = createAttachmentProgressController(windowId, [file]);
         try {
           const uploaded = await uploadAttachmentFile(file, {
             signal: progress.signal,
-            onProgress: ({ loaded }) => progress.setUploadProgress(loaded || 0),
+            onProgress: ({ loaded, total }) => progress.setUploadProgress(loaded || 0, total),
           });
-          progress.setPhase("Attaching");
+          progress.setPhase("Queued");
           send({
             kind: "paste_image_uploaded",
             id: windowId,
+            operation_id: progress.operationId,
             upload_id: uploaded.upload_id,
             mime_type: uploaded.mime_type ?? file.type ?? mimeType ?? "",
             filename: uploaded.filename || file.name || filename || null,
             size: uploaded.size ?? file.size ?? 0,
           });
-          progress.succeed();
         } catch (_error) {
           progress.fail(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
           showFileDropAlert(IMAGE_PASTE_UPLOAD_FAILURE_MESSAGE);
@@ -4987,16 +5417,16 @@
           return;
         }
 
-        const progress = createAttachmentProgressController(files);
+        const progress = createAttachmentProgressController(windowId, files);
         try {
           const attachments = await uploadFilesAsAttachments(files, progress);
-          progress.setPhase("Attaching");
+          progress.setPhase("Queued");
           send({
             kind: "attach_files",
             id: windowId,
+            operation_id: progress.operationId,
             files: attachments,
           });
-          progress.succeed();
         } catch (_error) {
           progress.fail(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
           showFileDropAlert(FILE_DROP_UPLOAD_FAILURE_MESSAGE);
@@ -5054,9 +5484,15 @@
           if (!windowId) {
             return;
           }
+          const progress = createAttachmentProgressController(
+            windowId,
+            attachmentFilesFromNativePaths(paths),
+          );
+          progress.setPhase("Queued");
           send({
             kind: "attach_files",
             id: windowId,
+            operation_id: progress.operationId,
             files: paths.map((path) => ({
               source: "native_path",
               path,
@@ -5212,7 +5648,6 @@
           terminal,
           fitAddon,
           cleanup,
-          viewportRefreshFrame: null,
           viewportRefreshPending: false,
           activationFrame: null,
           // SPEC-2008 Phase 26.A / FR-057: initial fit handshake state.
@@ -5351,10 +5786,7 @@
               runtime.deferredWrites.push(base64);
               return;
             }
-            const decoder = decoderMap.get(windowId);
-            runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
-              scheduleTerminalViewportRefresh(windowId);
-            });
+            terminalOutputBatcher.enqueue(windowId, base64);
           },
         );
       }
@@ -5377,6 +5809,7 @@
           pendingSnapshotMap.set(windowId, base64);
           return;
         }
+        terminalOutputBatcher.clear(windowId);
         const decoder = decoderMap.get(windowId);
         runtime.terminal.reset();
         runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
@@ -6612,7 +7045,10 @@
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
       // the Board Work filter. Broadcast entries remain visible everywhere;
       // scoped entries match when their audience includes any active Work id.
+      const WORK_ID_KEY_SEPARATOR = "\u001f";
       let currentProjectWorkspaceId = [];
+      let currentProjectWorkspaceKey = "";
+      let activeWorkProjectionWorkspaceIds = [];
       function uniqueWorkIds(values) {
         const ids = [];
         for (const value of values || []) {
@@ -6621,12 +7057,19 @@
         }
         return ids;
       }
+      function workIdsKey(ids) {
+        return (ids || []).join(WORK_ID_KEY_SEPARATOR);
+      }
+      function cacheActiveWorkProjectionWorkspaceIds(projection) {
+        activeWorkProjectionWorkspaceIds = uniqueWorkIds(
+          Array.isArray(projection?.active_works)
+            ? projection.active_works.map((work) => work?.id)
+            : [],
+        );
+      }
       function deriveCurrentProjectWorkspaceIds(workspaceState) {
-        const activeWorkIds = Array.isArray(activeWorkProjection?.active_works)
-          ? activeWorkProjection.active_works.map((work) => work?.id)
-          : [];
-        if (activeWorkIds.length > 0) {
-          return uniqueWorkIds(activeWorkIds);
+        if (activeWorkProjectionWorkspaceIds.length > 0) {
+          return activeWorkProjectionWorkspaceIds;
         }
         const agents = workspaceState?.workspace?.agents
           || workspaceState?.agents
@@ -6641,6 +7084,17 @@
             )
             .map((agent) => agent.workspace_id),
         );
+      }
+      function syncCurrentProjectWorkspaceIds(nextIds) {
+        const ids = Array.isArray(nextIds) ? nextIds : [];
+        const nextKey = workIdsKey(ids);
+        if (nextKey === currentProjectWorkspaceKey) {
+          return false;
+        }
+        currentProjectWorkspaceId = ids;
+        currentProjectWorkspaceKey = nextKey;
+        refreshBoardCurrentWorkspaceId();
+        return true;
       }
       function refreshBoardCurrentWorkspaceId() {
         for (const state of boardStateMap.values()) {
@@ -7005,6 +7459,7 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        getResumeBounds: () => visibleBounds(),
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -8773,12 +9228,59 @@
         }
       }
 
+      // SPEC-2014 FR-128: progress rail step key → wizard phase. Clicking a
+      // reachable step dispatches goto_step with the mapped phase so the
+      // backend can jump the ManualSetup (Setup 3-step) wizard between
+      // Path / Settings / Runtime / Confirm without re-walking each step.
+      const WIZARD_RAIL_STEP_PHASE = Object.freeze({
+        path: "path",
+        setup: "settings",
+        runtime: "runtime",
+        start: "confirm",
+      });
+
+      function gotoWizardStep(phase) {
+        if (
+          !releaseWizardInteractionGuardForChromeAction()
+          || launchWizardOpenError
+          || launchWizardPendingAction
+        ) {
+          return;
+        }
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        sendWizardAction({ kind: "goto_step", phase });
+      }
+
       function renderWizardProgressRail() {
         const rail = createNode("aside", "wizard-progress-rail");
         rail.setAttribute("aria-label", "Launch progress");
         for (const step of launchWizard.progress_steps || []) {
           const item = createNode("div", "wizard-progress-step");
-          item.dataset.state = step.state || "pending";
+          const state = step.state || "pending";
+          item.dataset.state = state;
+          // SPEC-2014 FR-128 — only reached steps (active/done) are
+          // navigable; pending steps stay inert. A null phase mapping
+          // (unknown key) also stays inert.
+          const targetPhase = WIZARD_RAIL_STEP_PHASE[step.key];
+          const isClickable =
+            Boolean(targetPhase) && (state === "active" || state === "done");
+          if (isClickable) {
+            item.dataset.clickable = "true";
+            item.setAttribute("role", "button");
+            item.setAttribute("tabindex", "0");
+            item.setAttribute(
+              "aria-label",
+              `Go to ${step.label} step`,
+            );
+            const jump = () => gotoWizardStep(targetPhase);
+            item.addEventListener("click", jump);
+            item.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                event.preventDefault();
+                jump();
+              }
+            });
+          }
           item.appendChild(createNode("span", "wizard-progress-marker"));
           const copy = createNode("span", "wizard-progress-copy");
           copy.appendChild(createNode("span", "wizard-progress-label", step.label));
@@ -8796,6 +9298,7 @@
 
       function closeLaunchWizardLocal() {
         clearLaunchWizardPendingAction();
+        clearLaunchWizardOpening();
         launchWizard = null;
         launchWizardOpenError = null;
         // Issue #2698 PR 1 (B7) — local close wins over any pending
@@ -8819,6 +9322,22 @@
 
       function clearLaunchWizardPendingAction() {
         launchWizardPendingAction = null;
+      }
+
+      function openStartWorkPendingWizard() {
+        clearLaunchWizardPendingAction();
+        launchWizard = null;
+        launchWizardOpenError = null;
+        launchWizardOpening = {
+          title: "Start Work",
+          meta: "Work launch",
+          message: "Preparing Start Work...",
+        };
+        renderLaunchWizard();
+      }
+
+      function clearLaunchWizardOpening() {
+        launchWizardOpening = null;
       }
 
       function syncLaunchWizardPendingChrome(isPending) {
@@ -8859,7 +9378,7 @@
       }
 
       function renderLaunchWizard() {
-        if (!launchWizard && !launchWizardOpenError) {
+        if (!launchWizard && !launchWizardOpenError && !launchWizardOpening) {
           clearLaunchWizardPendingAction();
           syncLaunchWizardPendingChrome(false);
           const wasOpenBeforeClose = wizardModal.classList.contains("open");
@@ -8899,8 +9418,9 @@
         syncWizardDraftState();
         closeModal();
         const isLaunchActionPending = Boolean(launchWizardPendingAction);
+        const isLaunchOpeningPending = Boolean(launchWizardOpening);
         const isLaunchSubmitPending = launchWizardPendingAction?.kind === "submit";
-        syncLaunchWizardPendingChrome(isLaunchActionPending);
+        syncLaunchWizardPendingChrome(isLaunchActionPending || isLaunchOpeningPending);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
           // Capture trigger BEFORE flipping .open so render-driven focus
@@ -8919,6 +9439,33 @@
           // SPEC-2356 — trap Tab inside the wizard while it's open so
           // keyboard users can't escape into background content.
           wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
+        }
+
+        if (launchWizardOpening) {
+          if (wizardTitle) {
+            wizardTitle.textContent = launchWizardOpening.title || "Start Work";
+          }
+          wizardMeta.textContent = launchWizardOpening.meta || "Work launch";
+          wizardBackButton.hidden = true;
+          wizardBackButton.disabled = true;
+          wizardSubmitButton.hidden = true;
+          wizardSubmitButton.disabled = true;
+          wizardCancelButton.textContent = "Cancel";
+          wizardCancelButton.disabled = true;
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          const openingPanel = createNode("div", "launch-panel wizard-disabled");
+          openingPanel.appendChild(
+            createNode(
+              "div",
+              "launch-note launch-pending-note",
+              launchWizardOpening.message || "Preparing Start Work...",
+            ),
+          );
+          wizardBody.appendChild(openingPanel);
+          return;
         }
 
         if (launchWizardOpenError) {
@@ -8987,14 +9534,29 @@
         }
 
         renderWizardSummary();
-        const showManualSetup = launchWizard.show_manual_setup !== false;
+        // SPEC-2014 FR-126/FR-127 — the backend now drives four mutually
+        // exclusive wizard phases through dedicated flags:
+        //   show_manual_setup       → Settings form
+        //   show_runtime_confirmation→ Runtime step
+        //   show_confirm             → Confirm (read-only summary + Launch)
+        //   show_start_methods       → entry (start method picker)
+        // The backend already strictly clears show_manual_setup during
+        // Runtime / Confirm, but we re-derive exclusive locals here so the
+        // renderer never paints two phases at once.
+        const showConfirm = Boolean(launchWizard.show_confirm);
         const isRuntimeConfirmation = Boolean(
           launchWizard.runtime_context_resolved
           && launchWizard.show_runtime_confirmation
+          && !showConfirm
         );
+        const showManualSetup =
+          launchWizard.show_manual_setup !== false
+          && !isRuntimeConfirmation
+          && !showConfirm;
         const showStartMethods = Boolean(
           launchWizard.show_start_methods
             && !isRuntimeConfirmation
+            && !showConfirm
             && !launchWizard.runtime_resolution_pending
             && (launchWizard.start_methods || []).length > 0,
         );
@@ -9035,6 +9597,26 @@
               "Creating agent window...",
             ),
           );
+        }
+
+        // SPEC-2014 FR-127 — Confirm step: a read-only review of the
+        // resolved launch configuration plus the footer Launch button.
+        // No editable controls are rendered here; the user revisits an
+        // earlier phase (via the progress rail or Back) to change anything.
+        if (showConfirm) {
+          const section = createLaunchSection(
+            "Confirm",
+            "Review the launch configuration. Use the steps above or Back to change anything.",
+          );
+          const summaryList = createNode("div", "wizard-confirm-summary");
+          for (const item of launchWizard.launch_summary || []) {
+            const card = createNode("div", "wizard-summary-item");
+            card.appendChild(createNode("div", "wizard-summary-label", item.label));
+            card.appendChild(createNode("div", "wizard-summary-value", item.value));
+            summaryList.appendChild(card);
+          }
+          section.appendChild(summaryList);
+          panel.appendChild(section);
         }
 
         if (showStartMethods) {
@@ -9383,6 +9965,7 @@
             (launchWizard.docker_lifecycle_options || []).length > 0);
         if (
           launchWizard.show_runtime_confirmation &&
+          !showConfirm &&
           (hasRuntimeControls || isRuntimeConfirmation || !showManualSetup)
         ) {
           const section = createLaunchSection(
@@ -12883,6 +13466,11 @@
           mountWindowBody(windowData, element);
         }
 
+        const nextWindowElementKey = windowElementRenderKey(windowData);
+        if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey) {
+          return;
+        }
+
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
@@ -12936,14 +13524,13 @@
         element.querySelector(".resize-handle").hidden =
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (
           (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
           presetSurface(windowData.preset) === "terminal" &&
           !windowData.minimized
         ) {
-          requestAnimationFrame(() =>
-            fitTerminal(windowData.id, shouldPersistTerminalGeometry),
-          );
+          scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry);
         }
       }
 
@@ -12952,16 +13539,28 @@
           UI_TRACE_EVENT.renderWorkspace,
           { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
           () => {
-            viewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+            const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
               scopeKey: activeViewportScopeKey(),
             });
-            applyViewport();
+            const viewportChanged = !sameViewportValues(viewport, nextViewport);
+            viewport = nextViewport;
+            if (!viewportDomApplied || viewportChanged) {
+              applyViewport();
+            }
 
-            const activeWindowIds = workspace.windows.map((windowData) => windowData.id);
-            const ids = new Set(activeWindowIds);
+            const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
+            if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
+              if (workspaceHasVisibleMaximizedWindow(workspace)) {
+                scheduleMaximizedWindowsToViewportSync();
+              }
+              return;
+            }
+            renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
+
+            const activeWindowIdSet = workspaceWindowIdSet(workspace);
             const visibility = classifyProjectWindowVisibility({
-              activeWindowIds,
-              allProjectWindowIds: allProjectWindowIds(),
+              activeWindowIdSet,
+              allProjectWindowIdSet: allProjectWindowIdSet(),
               mountedWindowIds: windowMap.keys(),
             });
             for (const windowId of visibility.hidden) {
@@ -12971,6 +13570,7 @@
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
                 onReveal: () => {
+                  terminalOutputBatcher.schedulePending(windowId);
                   rearmPendingTerminalViewportRefresh(windowId);
                   scheduleTerminalFocusActivation(windowId);
                 },
@@ -12980,20 +13580,21 @@
               const element = windowMap.get(windowId);
               if (!element) continue;
               const runtime = terminalMap.get(windowId);
-              if (runtime && runtime.viewportRefreshFrame !== null) {
-                cancelAnimationFrame(runtime.viewportRefreshFrame);
-              }
               if (runtime && runtime.activationFrame !== null) {
                 cancelAnimationFrame(runtime.activationFrame);
               }
+              terminalViewportRefreshScheduler?.clear(windowId);
               runtime?.cleanup?.();
               runtime?.terminal.dispose();
               terminalMap.delete(windowId);
               decoderMap.delete(windowId);
               detailMap.delete(windowId);
               windowRuntimeStateMap.delete(windowId);
+              renderedWindowElementKeys.delete(windowId);
+              renderedRuntimeStatusKeys.delete(windowId);
               pendingOutputMap.delete(windowId);
               pendingSnapshotMap.delete(windowId);
+              terminalOutputBatcher.clear(windowId);
               const profileState = profileStateMap.get(windowId);
               if (profileState) {
                 clearProfileSaveTimer(profileState);
@@ -13032,16 +13633,17 @@
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
                 onReveal: () => {
+                  terminalOutputBatcher.schedulePending(windowData.id);
                   rearmPendingTerminalViewportRefresh(windowData.id);
                   scheduleTerminalFocusActivation(windowData.id);
                 },
               });
             }
 
-            requestAnimationFrame(syncMaximizedWindowsToViewport);
+            scheduleMaximizedWindowsToViewportSync();
 
             const topmostId = topmostWindowId(workspace);
-            if (topmostId && ids.has(topmostId)) {
+            if (topmostId && activeWindowIdSet.has(topmostId)) {
               focusWindowLocally(topmostId);
               scheduleTerminalFocusActivation(topmostId, {
                 shouldPersistGeometry: false,
@@ -13236,11 +13838,15 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
-            currentProjectWorkspaceId = deriveCurrentProjectWorkspaceIds(
-              activeWorkspace() || {},
+            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+            syncCurrentProjectWorkspaceIds(
+              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
             );
             refreshBoardCurrentWorkspaceId();
-            renderActiveWorkOverview();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
             workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
             break;
@@ -13267,6 +13873,9 @@
               event.status,
               event.detail,
             );
+            break;
+          case "attachment_progress":
+            handleAttachmentProgress(event);
             break;
           case "window_state":
             frontendUnits.terminalHost.applyStatus(event.window_id, event.state);
@@ -13512,16 +14121,14 @@
             state.notice = "";
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            // SPEC-2356 — feed git layer count into the Operator Status Strip.
-            try {
-              const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
-              window.__operatorShell?.applyTelemetryCounts?.({
-                branches: branchesCount,
-                git: branchesCount,
-              });
-            } catch (e) {
-              console.warn("operator branch telemetry failed", e);
-            }
+            // SPEC-2356 — feed branch count into the Operator Status Strip WK
+            // cell via develop's guarded telemetry helper. The dead Sidebar
+            // Layers `git` counter was removed in the operator chrome cleanup,
+            // so only `branches` is forwarded now.
+            const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
+            applyOperatorTelemetryCounts({
+              branches: branchesCount,
+            });
             break;
           }
           case "profile_snapshot": {
@@ -14046,6 +14653,7 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             launchWizard = null;
             launchWizardOpenError = {
               title: event.title || "Launch Agent",
@@ -14071,6 +14679,7 @@
               break;
             }
             clearLaunchWizardPendingAction();
+            clearLaunchWizardOpening();
             if (event.wizard) {
               launchWizardOpenError = null;
             }
@@ -15125,7 +15734,7 @@
         window,
         terminalIds: () => terminalMap.keys(),
         canRefreshViewport: canRefreshTerminalViewport,
-        fitTerminal,
+        fitTerminal: scheduleTerminalFit,
         beforeFan: () => {
           frontendUnits.projectWorkspaceShell.renderWindowList();
           syncMaximizedWindowsToViewport();
@@ -15161,6 +15770,11 @@
           closeModal();
         });
       }
+
+      // SPEC-2356 "Surface Deck" — arrow-key roving + Enter-to-deploy. Esc is
+      // already handled by the global modal close handler, so the roving
+      // listener only needs the directional keys and Enter.
+      modal.addEventListener("keydown", handlePresetRovingKeydown);
 
       // SPEC-2356 — bridge Command Palette + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
@@ -15223,6 +15837,7 @@
             return;
           case "start-work":
           case "spawn-agent":
+            openStartWorkPendingWizard();
             frontendUnits.socketTransport.send({
               kind: "open_start_work",
             });
@@ -15305,5 +15920,4 @@
 
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       installPlaywrightTestBridge();
-      renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();

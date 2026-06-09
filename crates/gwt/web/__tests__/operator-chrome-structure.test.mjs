@@ -42,6 +42,43 @@ function terminalOptionNumber(name) {
   return Number(match[1]);
 }
 
+// merged from origin/develop (SPEC-1939): extract a named function's body by
+// brace-depth tracking so the perf hot-path assertions can scan its source.
+function extractFunctionBody(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `expected function ${name} in source`);
+  const paramsOpen = source.indexOf("(", start);
+  assert.notEqual(paramsOpen, -1, `expected function ${name} parameters`);
+  let parenDepth = 0;
+  let paramsClose = -1;
+  for (let i = paramsOpen; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "(") parenDepth += 1;
+    if (char === ")") {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        paramsClose = i;
+        break;
+      }
+    }
+  }
+  assert.notEqual(paramsClose, -1, `expected function ${name} parameter close`);
+  const open = source.indexOf("{", paramsClose);
+  assert.notEqual(open, -1, `expected function ${name} body`);
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(open + 1, i);
+      }
+    }
+  }
+  assert.fail(`unterminated function ${name}`);
+}
+
 // SPEC-2356 — extract every @media block matching the supplied condition,
 // using brace-depth tracking so nested rules don't truncate the body.
 function extractMediaBlocks(css, condition) {
@@ -121,11 +158,28 @@ test("index.html declares Operator chrome scaffold", () => {
   }
 });
 
-test("project bar exposes a Layers column with three layers", () => {
-  const layers = document.querySelectorAll(".op-sidebar__section .op-layer[data-layer]");
-  assert.equal(layers.length, 3, "expected three sidebar layers");
-  const labels = Array.from(layers).map((el) => el.dataset.layer);
-  assert.deepEqual(labels.sort(), ["agents", "git", "hooks"]);
+test("SPEC-2356 operator chrome cleanup retires the dead Layers section", () => {
+  // The Layers toggles (Agents / Git / Hooks) only set dataset.opLayer* on the
+  // document element; no CSS ever reads those, so toggling was a no-op. The
+  // section + its counters are removed so the sidebar only carries actionable
+  // controls. Telemetry counts now live solely in the Status Strip.
+  assert.equal(
+    document.querySelectorAll(".op-sidebar .op-layer[data-layer]").length,
+    0,
+    "Layers toggle buttons must be removed from the sidebar",
+  );
+  for (const id of [
+    "op-layer-count-agents",
+    "op-layer-count-git",
+    "op-layer-count-hooks",
+    "op-sidebar-count",
+  ]) {
+    assert.equal(document.getElementById(id), null, `${id} counter must be removed`);
+  }
+  const headings = Array.from(document.querySelectorAll(".op-sidebar__heading span")).map((el) =>
+    el.textContent?.trim(),
+  );
+  assert.ok(!headings.includes("Layers"), "Layers heading must be removed");
 });
 
 test("project bar and command palette expose Start Work outside the Branches surface", () => {
@@ -162,12 +216,12 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
+test("Status Strip ACTIVE counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
   // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
-  // the Sidebar Layers "Agents" row showed e.g. 4 when only 2 agent panes
-  // were live. The DOM walk must scope to presets that represent agent panes.
+  // the Status Strip ACTIVE cell showed e.g. 4 when only 2 agent panes were
+  // live. The DOM walk must scope to presets that represent agent panes.
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -184,45 +238,175 @@ test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
   assert.match(
     body,
     /presetSupportsWaitingStatus/,
-    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Sidebar Agents counter",
+    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Status Strip ACTIVE counter",
   );
 });
 
-test("Workspace sidebar exposes active work and per-agent overview", () => {
-  assert.ok(
+test("Sidebar retires the Active Works overview in favor of the Work surface (SPEC-2359 W-12 FR-351)", () => {
+  // Slice 3 aggregates Work lifecycle into the Work surface (Workspace
+  // Overview / Kanban). The sidebar no longer renders an Active Works region
+  // or its per-agent cards.
+  assert.equal(
     document.querySelector("#op-active-work"),
-    "expected Workspace shell to expose an Active Works overview region",
+    null,
+    "sidebar Active Works overview must be removed",
   );
-  assert.ok(
+  assert.equal(
     document.querySelector("#op-active-work-agents"),
-    "expected Workspace shell to expose a per-Work list region",
+    null,
+    "sidebar per-Work agent list must be removed",
   );
+  assert.doesNotMatch(
+    appSource,
+    /function\s+renderActiveWorkOverview\b/,
+    "sidebar renderActiveWorkOverview must be removed",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /function\s+renderActiveWorkAgentCard\b/,
+    "sidebar renderActiveWorkAgentCard must be removed",
+  );
+  // The Work projection still feeds Operator telemetry through the plural
+  // active_works data even though the sidebar overview is gone.
   assert.match(
     appSource,
     /function\s+activeWorkItemsFromProjection\(\)[\s\S]+active_works/,
-    "expected frontend to render plural active_works data, not only a single aggregate projection",
-  );
-  assert.match(
-    appSource,
-    /op-work-card[\s\S]+renderActiveWorkAgentCard\(agent\)/,
-    "expected Active Works rows to render their live Agent cards",
-  );
-  assert.match(
-    appSource,
-    /function\s+renderActiveWorkAgentCard\(agent\)[\s\S]+op-agent-card[\s\S]+last_board_entry_id/,
-    "expected Active Works rows to preserve agent board linkage for handoff/debugging",
+    "telemetry must still derive from plural active_works data",
   );
 });
 
-test("Workspace sidebar keeps Quick before the expanding active work list", () => {
+test("Sidebar groups actionable controls into Quick / Windows / Palette / Update (SPEC-2356)", () => {
+  // SPEC-2356 operator chrome cleanup: the right-bottom floating controls and
+  // the dead Layers section are gone. The sidebar is the single home for the
+  // Command Palette, window operations (Tile / Stack / Align / Windows / Add),
+  // and the Update CTA — in that order, after the Quick navigation block.
   const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
   const headings = sections.map((section) =>
     section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
   );
   assert.deepEqual(
-    headings.slice(0, 3),
-    ["Layers", "Quick", "Active Works"],
-    "Quick must stay above Active Works so Work cards do not push it off-screen",
+    headings,
+    ["Quick", "Windows", "Palette", "Update"],
+    "Sidebar order must be Quick → Windows → Palette → Update with no Layers section",
+  );
+  assert.ok(
+    !headings.includes("Active Works"),
+    "Active Works heading must be removed from the sidebar",
+  );
+  assert.ok(
+    !headings.includes("Layers"),
+    "dead Layers heading must be removed from the sidebar",
+  );
+});
+
+test("Sidebar Windows section carries the flat window-operation controls (SPEC-2356)", () => {
+  // Window operations move out of the right-bottom floating toolbar into a flat
+  // Windows section in the sidebar. The hover-reveal peek 帯 nesting is gone;
+  // the controls sit directly inside the section so the whole sidebar reveal
+  // exposes them.
+  const windowsSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Windows",
+  );
+  assert.ok(windowsSection, "expected a Windows section in the sidebar");
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(
+      windowsSection.contains(control),
+      `${id} must live inside the sidebar Windows section`,
+    );
+  }
+  // The window-list dropdown panel rides along with its trigger.
+  assert.ok(
+    windowsSection.querySelector("#window-list-panel"),
+    "window-list-panel must move into the Windows section with its trigger",
+  );
+});
+
+test("Sidebar Palette section hosts the Command Palette trigger (SPEC-2356)", () => {
+  const paletteSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Palette",
+  );
+  assert.ok(paletteSection, "expected a Palette section in the sidebar");
+  const trigger = document.getElementById("op-palette-button");
+  assert.ok(trigger, "expected op-palette-button");
+  assert.ok(paletteSection.contains(trigger), "Command Palette trigger must live in the sidebar");
+});
+
+test("Right-bottom floating controls are removed; the canvas corner is empty (SPEC-2356)", () => {
+  // The whole `.floating-actions` / `#floating-window-controls` toolbar and the
+  // window-controls peek 帯 are gone. Nothing floats over the bottom-right of
+  // the canvas anymore.
+  assert.equal(
+    document.querySelector(".floating-actions"),
+    null,
+    ".floating-actions toolbar must be removed",
+  );
+  assert.equal(
+    document.getElementById("floating-window-controls"),
+    null,
+    "#floating-window-controls root must be removed",
+  );
+  assert.equal(
+    document.getElementById("floating-window-controls-actions"),
+    null,
+    "floating-window-controls-actions group must be removed",
+  );
+  assert.equal(
+    document.querySelector(".op-window-controls-peek"),
+    null,
+    "window controls peek 帯 must be removed — the sidebar peek reveals the controls now",
+  );
+});
+
+test("Status Strip hosts the zoom controls so canvas zoom is always reachable (SPEC-2356)", () => {
+  const strip = document.getElementById("op-status-strip");
+  assert.ok(strip, "expected op-status-strip");
+  for (const id of ["zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(strip.contains(control), `${id} must live in the Status Strip`);
+  }
+  // Labels are preserved so the existing app.js zoom handlers stay wired by id.
+  assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
+});
+
+test("Sidebar Update section provides the mount anchor for the Update CTA (SPEC-2356)", () => {
+  // SPEC-2356 chrome cleanup: the Update CTA moves out of the fixed bottom-right
+  // corner into a dedicated sidebar Update section. update-cta.js mounts the
+  // shell into this anchor instead of document.body.
+  const updateSection = Array.from(
+    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
+  ).find(
+    (section) =>
+      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Update",
+  );
+  assert.ok(updateSection, "expected an Update section in the sidebar");
+  const anchor = updateSection.querySelector("#update-cta-anchor");
+  assert.ok(anchor, "expected #update-cta-anchor inside the Update section");
+});
+
+test("update-cta.js mounts into the sidebar anchor and peeks the sidebar when an update arrives (SPEC-2356)", () => {
+  const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
+  // The shell must prefer the sidebar anchor over document.body so the CTA
+  // lives inside the sidebar Update section.
+  assert.match(
+    updateCtaSource,
+    /update-cta-anchor/,
+    "update-cta.js must mount into the sidebar #update-cta-anchor",
+  );
+  // When an update becomes available, the sidebar must peek/badge so the user
+  // notices even though the sidebar is auto-hidden (hover not required).
+  assert.match(
+    updateCtaSource,
+    /op:update-available/,
+    "update-cta.js must signal update availability so the sidebar can peek/badge",
   );
 });
 
@@ -391,22 +575,10 @@ test("canvas world grid is synchronized from viewport state", () => {
   );
 });
 
-test("Workspace active work overview behaves like a command center", () => {
-  assert.match(
-    appSource,
-    /Add Agent to This Work/,
-    "expected Workspace-origin launch copy to make same-work agent addition explicit",
-  );
-  assert.match(
-    appSource,
-    /last_board_entry_kind/,
-    "expected agent cards to expose the latest coordination milestone kind",
-  );
-  assert.match(
-    appSource,
-    /coordination_scope/,
-    "expected agent cards to expose owner/topic scope for each agent",
-  );
+test("Board deep-linking survives the Active Works sidebar retirement (SPEC-2359 W-12 FR-351)", () => {
+  // The sidebar Active Works command-center is removed; Board deep-linking and
+  // the addressable Board timeline entries it relied on remain so the Work
+  // surface and Board can still cross-reference coordination entries.
   assert.match(
     appSource,
     /function\s+focusBoardEntry\(/,
@@ -417,76 +589,45 @@ test("Workspace active work overview behaves like a command center", () => {
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
   );
-});
-
-test("Active Work title prefers concrete work context over Start Work workflow label", () => {
-  assert.match(
+  // The retired sidebar copy and per-agent card helpers must be gone.
+  assert.doesNotMatch(
     appSource,
-    /function\s+activeWorkDisplayTitle\(projection,\s*agents\)[\s\S]+agent\.title_summary[\s\S]+projection\?\.summary[\s\S]+projection\?\.owner[\s\S]+projection\?\.title[\s\S]+Start Work[\s\S]+Active Work/,
-    "expected Active Work title resolution to prefer Agent/Workspace work context and treat Start Work as a fallback-only workflow label",
-  );
-  assert.match(
-    appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(work,\s*work\.agents\)\)/,
-    "expected Active Work summary title to use the display-title helper",
+    /Add Agent to This Work/,
+    "sidebar Active Works launch copy must be removed",
   );
   assert.doesNotMatch(
     appSource,
-    /createNode\("div",\s*"op-work-title",\s*activeWorkProjection\.title\s*\|\|\s*"Active Work"\)/,
-    "Active Work must not render the saved Start Work workflow title directly",
+    /function\s+renderActiveWorkAgentCard\b/,
+    "sidebar per-agent card renderer must be removed",
   );
 });
 
-test("Active Work sidebar only renders while live Agent windows are focusable", () => {
+test("Active Work sidebar title + visibility helpers are retired (SPEC-2359 W-12 FR-351)", () => {
+  // Slice 3 removes the sidebar-only Active Works render path. The display
+  // title, section-visibility, and focus helpers it owned must be gone; the
+  // Work surface (Kanban) is now the single home for Work cards.
+  for (const removed of [
+    /function\s+activeWorkDisplayTitle\b/,
+    /function\s+setActiveWorkSectionVisible\b/,
+    /function\s+focusActiveWorkAgentWindow\b/,
+    /function\s+agentRuntimeStatusLabel\b/,
+    /function\s+renderActiveWorkOverview\b/,
+    /getElementById\("op-active-work"\)/,
+  ]) {
+    assert.doesNotMatch(appSource, removed, `sidebar Active Works code must be removed: ${removed}`);
+  }
+  // The focusable-agent filter survives because telemetry still derives from
+  // live agent windows.
   assert.match(
     appSource,
     /function\s+activeWorkFocusableAgents\(work\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
-    "expected Active Work cards to be filtered against live workspace windows",
+    "telemetry must still filter Works against live workspace windows",
   );
-  assert.match(
-    appSource,
-    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
-    "expected Active Work visibility to be controlled at the section level",
-  );
-  assert.match(
-    appSource,
-    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
-    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
-  );
-  assert.match(
-    appSource,
-    /if\s*\(workCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
-    "expected no focusable Agent windows to remove the Active Work sidebar section",
-  );
-  assert.match(
-    appSource,
-    /function\s+focusActiveWorkAgentWindow\(agent\)[\s\S]+restore_window[\s\S]+focusWindowRemotely\(agent\.window_id,\s*\{\s*center:\s*true\s*\}\)/,
-    "expected Focus to restore minimized Agent windows before focusing them",
-  );
+  // agentStatusLabel is exported to the Work surface, so it must remain.
   assert.match(
     appSource,
     /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
-    "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
-  );
-  assert.match(
-    appSource,
-    /function\s+agentRuntimeStatusLabel\(agent\)[\s\S]+runtimeStateForWindow\(windowData\)[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+agentStatusLabel\(agent\.status_category\)/,
-    "expected Active Work agent cards to derive their visible runtime label from the live window state before falling back to workspace category",
-  );
-  assert.match(
-    appSource,
-    /createNode\("div",\s*"op-agent-state",\s*agentRuntimeStatusLabel\(agent\)\)/,
-    "Active Work must render Waiting from WindowState even when workspace status_category remains active",
-  );
-  assert.doesNotMatch(
-    appSource,
-    /createNode\("div",\s*"op-agent-state",\s*state\)/,
-    "Active Work must not render raw status wire values such as ACTIVE",
-  );
-  assert.match(
-    appSource,
-    /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
-    "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
+    "shared agentStatusLabel must remain for the Work surface",
   );
 });
 
@@ -616,7 +757,7 @@ test("no surface presets auto-maximize — uniform 720×420 floating windows", (
   );
 });
 
-test("Active Work and Workspace Overview render PR metadata as links", () => {
+test("Work surface renders PR metadata as links via the shared renderer (SPEC-2359 W-12 FR-351)", () => {
   assert.match(
     appSource,
     /function\s+createWorkspacePrMeta\(/,
@@ -625,12 +766,7 @@ test("Active Work and Workspace Overview render PR metadata as links", () => {
   assert.match(
     workspaceOverviewSource,
     /createWorkspacePrMeta\?\.\(item\)/,
-    "expected Workspace Overview to render the saved PR link/state from the projection",
-  );
-  assert.match(
-    appSource,
-    /createWorkspacePrMeta\(activeWorkProjection\)/,
-    "expected Active Work sidebar to render the live PR link/state from the projection",
+    "expected the Work surface to render the saved PR link/state from the projection",
   );
   assert.match(
     appSource,
@@ -925,10 +1061,12 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () => {
+test("chrome visibility uses the sidebar peek 帯 hover-reveal instead of click chips", () => {
   // SPEC-2356 Phase 9 (FR-021/FR-022): the chip-style toggles and Project Bar
-  // text toggles are removed; auto-hide chrome is summoned via the peek 帯
-  // (`.op-sidebar-peek` / `.op-window-controls-peek`).
+  // text toggles are removed; the auto-hide sidebar is summoned via the peek 帯
+  // (`.op-sidebar-peek`). SPEC-2356 chrome cleanup additionally folds the
+  // window controls into that sidebar, so the separate window-controls peek is
+  // retired entirely.
   assert.equal(
     document.getElementById("op-sidebar-toggle"),
     null,
@@ -951,87 +1089,16 @@ test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () =
   );
 
   const sidebarPeek = document.querySelector(".op-sidebar-peek");
-  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
   assert.ok(sidebarPeek, "expected .op-sidebar-peek hover trigger");
-  assert.ok(windowControlsPeek, "expected .op-window-controls-peek hover trigger");
+  assert.equal(
+    document.querySelector(".op-window-controls-peek"),
+    null,
+    "window controls peek 帯 is retired — window operations live in the sidebar",
+  );
   assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
-  assert.equal(
-    windowControlsPeek.getAttribute("aria-controls"),
-    "floating-window-controls-actions",
-  );
   assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
-  assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
   assert.equal(sidebarPeek.getAttribute("tabindex"), "0", "sidebar peek 帯 must be keyboard-focusable");
-  assert.equal(
-    windowControlsPeek.getAttribute("tabindex"),
-    "0",
-    "window controls peek 帯 must be keyboard-focusable",
-  );
   assert.equal(sidebarPeek.getAttribute("role"), "button");
-  assert.equal(windowControlsPeek.getAttribute("role"), "button");
-});
-
-test("window controls peek 帯 targets only collapsible control groups", () => {
-  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
-  assert.ok(windowControlsPeek, "expected window controls peek 帯");
-
-  const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
-    .split(/\s+/)
-    .filter(Boolean);
-  assert.deepEqual(controlledIds, ["floating-window-controls-actions"]);
-  assert.ok(!controlledIds.includes("floating-window-controls"));
-
-  const actionsGroup = document.getElementById("floating-window-controls-actions");
-  const primaryGroup = document.getElementById("floating-window-controls-primary");
-  const addGroup = document.getElementById("floating-window-controls-add");
-  assert.ok(actionsGroup, "expected continuous window controls actions group");
-  assert.ok(primaryGroup, "expected primary window controls group");
-  assert.ok(addGroup, "expected add-window control group");
-
-  const floatingControls = document.getElementById("floating-window-controls");
-  assert.ok(floatingControls, "expected floating window controls root");
-  const toolbarChildren = Array.from(floatingControls.children);
-  assert.ok(
-    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
-    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
-  );
-
-  assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
-  assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
-
-  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.ok(actionsGroup.contains(control), `${id} must be inside the continuous actions group`);
-  }
-
-  const addButton = document.getElementById("add-button");
-  assert.ok(addButton, "expected add-button");
-  assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
-  assert.ok(actionsGroup.contains(addButton), "add-button must be reachable through the continuous actions group");
-
-  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.equal(
-      actionsGroup.contains(control),
-      false,
-      `${id} must remain outside collapsible window controls groups`,
-    );
-  }
-});
-
-test("floating window controls mark only window operations as hideable", () => {
-  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
-    const button = document.getElementById(id);
-    assert.ok(button, `expected ${id}`);
-    assert.equal(button.dataset.windowControl, "true", `${id} should be hidden by the window controls toggle`);
-  }
-  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
-    const button = document.getElementById(id);
-    assert.ok(button, `expected ${id}`);
-    assert.notEqual(button.dataset.windowControl, "true", `${id} should remain visible when window controls are hidden`);
-  }
 });
 
 test("workspace windows expose draggable tab docking affordances", () => {
@@ -1229,26 +1296,20 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
   );
 });
 
-test("components.css hover-reveals only the marked floating window control groups", () => {
-  // SPEC-2356 Phase 9 (FR-022): the continuous actions group auto-hides by default and
-  // are revealed only when [data-op-window-controls="revealed"] is set.
-  // Palette and Zoom controls remain in the toolbar regardless.
+test("components.css retires the floating window controls toolbar CSS (SPEC-2356)", () => {
+  // SPEC-2356 chrome cleanup: window operations live in the sidebar, so the
+  // separate floating-window-controls toolbar, its hover-reveal state, and the
+  // window-controls peek 帯 styling are all removed. The sidebar peek 帯 is the
+  // only auto-hide affordance left.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
-  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
-  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
-  assert.match(
-    css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
-  );
-  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\]/);
-  assert.match(css, /\.op-window-controls-peek\s*\{/);
+  assert.doesNotMatch(css, /#floating-window-controls-actions/);
+  assert.doesNotMatch(css, /\.op-window-controls-peek/);
+  assert.doesNotMatch(css, /\[data-op-window-controls/);
+  assert.doesNotMatch(css, /\.floating-actions/);
   assert.match(css, /\.op-sidebar-peek\s*\{/);
 });
 
-test("floating actions expose Align without resizing windows", () => {
+test("Windows section exposes Align without resizing windows", () => {
   const button = document.getElementById("align-button");
   assert.ok(button, "expected Align button");
   assert.equal(button.textContent.trim(), "Align");
@@ -1259,10 +1320,12 @@ test("floating actions expose Align without resizing windows", () => {
   );
 });
 
-test("operator-shell migrates legacy chrome keys and wires hover-reveal independently", () => {
+test("operator-shell migrates legacy chrome keys and wires the sidebar hover-reveal", () => {
   // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
   // and the chip-style toggles (and their Project Bar text counterparts) must
-  // not be referenced anywhere in operator-shell.
+  // not be referenced anywhere in operator-shell. SPEC-2356 chrome cleanup
+  // folds window controls into the sidebar, so the separate window-controls
+  // hover-reveal controller / peek 帯 are gone.
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
   assert.doesNotMatch(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
   assert.doesNotMatch(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
@@ -1270,19 +1333,20 @@ test("operator-shell migrates legacy chrome keys and wires hover-reveal independ
   assert.doesNotMatch(operatorShell, /op-window-controls-edge-toggle/);
   assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
   assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-peek/);
+  assert.doesNotMatch(operatorShell, /op:window-controls-changed/);
   assert.match(operatorShell, /removeItem\("gwt:ui:sidebar-collapsed"\)/);
   assert.match(operatorShell, /removeItem\("gwt:ui:window-controls"\)/);
   assert.match(operatorShell, /op:chrome-visibility-changed/);
-  assert.match(operatorShell, /op:window-controls-changed/);
   assert.match(operatorShell, /\.op-sidebar-peek/);
-  assert.match(operatorShell, /\.op-window-controls-peek/);
 });
 
-test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
+test("components.css declares Status Strip BLOCKED pulse", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // PR #2414 introduced the pulse animation; PR #2404 the layer live dot.
+  // PR #2414 introduced the pulse animation. SPEC-2356 chrome cleanup retires
+  // the Layers `data-live` row indicator together with the Layers section.
   assert.match(css, /op-status-strip-blocked-pulse/);
-  assert.match(css, /\.op-layer\[data-live="true"\] \.op-layer__label::before/);
+  assert.doesNotMatch(css, /\.op-layer\[data-live="true"\]/);
 });
 
 test("components.css declares Operator scrollbar + tinted text selection", () => {
@@ -1802,13 +1866,13 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
     appSource,
-    /const showManualSetup = launchWizard\.show_manual_setup !== false;[\s\S]*?const isRuntimeConfirmation = Boolean\([\s\S]*?const showStartMethods = Boolean\([\s\S]*?launchWizard\.show_start_methods[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
-    "expected showManualSetup to be initialized before Runtime confirmation setup gating",
+    /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
+    "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
     appSource,
-    /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*\);/,
-    "expected renderer to derive a dedicated Runtime confirmation state",
+    /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);/,
+    "expected renderer to derive a dedicated Runtime confirmation state outside Confirm",
   );
   assert.match(
     appSource,
@@ -2486,17 +2550,33 @@ test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
 });
 
-test("agent cards style all four Living Telemetry states (active / blocked / idle / done)", () => {
+test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // Each of the four states must have a distinct visual treatment so operators
-  // can scan card boundaries at a glance — not just the high-priority pair.
-  assert.match(css, /\.op-agent-card\[data-state="active"\]\s*\{[^}]*--color-state-active/);
-  assert.match(css, /\.op-agent-card\[data-state="blocked"\]\s*\{[^}]*--color-state-blocked/);
-  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\{[^}]*--color-state-idle/);
-  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\{[^}]*--color-state-done/);
-  // The chip labels also need the matching foreground tint per state.
-  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
-  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
+  // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now
+  // carries the agent-session lifecycle badge with a distinct treatment per
+  // state so operators can scan Work lifecycle at a glance.
+  assert.doesNotMatch(
+    css,
+    /\.op-agent-card/,
+    "retired sidebar agent-card CSS must be removed",
+  );
+  assert.match(css, /\.workspace-overview-lifecycle\s*\{/);
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="active"\]\s*\{[^}]*--color-state-active/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="paused"\]\s*\{[^}]*--color-state-idle/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="done"\]\s*\{[^}]*--color-state-done/,
+  );
+  assert.match(
+    css,
+    /\.workspace-overview-lifecycle\[data-lifecycle="discarded"\]\s*\{/,
+  );
 });
 
 test("terminal surface body stays on the dark Operator canvas across themes (FR-013)", () => {
@@ -2713,11 +2793,12 @@ test("every readable non-terminal surface participates in the opaque window chro
   }
 });
 
-test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+test("Sidebar row buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
   // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
-  // default は border + grey background を出す。`.op-layer` は indicator
-  // dot + label color + token-driven focus ring のみで状態を表現するため、
-  // base rule で UA chrome を解除する必要がある。
+  // default は border + grey background を出す。`.op-layer` (sidebar row 共通
+  // クラス、Quick / Windows / Palette / Update が利用) は indicator dot +
+  // label color + token-driven focus ring のみで状態を表現するため、base rule
+  // で UA chrome を解除する必要がある。
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
   assert.ok(layerRule, "expected base .op-layer rule in components.css");
@@ -2778,3 +2859,1408 @@ function cssBlockContaining(css, selector) {
   assert.ok(match, `missing CSS rule containing selector: ${selector}`);
   return match[2];
 }
+
+
+// === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
+
+test("Start Work command opens a pending wizard before backend state arrives", () => {
+  const commandCase = appSource.match(
+    /case\s+"start-work":[\s\S]*?case\s+"theme-cycle"/,
+  );
+  assert.ok(commandCase, "expected Start Work command case");
+  assert.match(
+    commandCase[0],
+    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_start_work"/,
+    "expected Start Work to render a local pending wizard before sending open_start_work",
+  );
+  assert.match(
+    appSource,
+    /let\s+launchWizardOpening\s*=\s*null/,
+    "expected local pending wizard state",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
+    "renderLaunchWizard must keep the modal open for local pending Start Work state",
+  );
+});
+
+test("Start Work pending wizard clears when backend state, error, or local close wins", () => {
+  assert.match(
+    appSource,
+    /function\s+clearLaunchWizardOpening\(\)\s*\{[\s\S]{0,120}?launchWizardOpening\s*=\s*null/,
+    "expected a helper that clears pending open state",
+  );
+  assert.match(
+    appSource,
+    /function\s+closeLaunchWizardLocal\(\)[\s\S]{0,260}?clearLaunchWizardOpening\(\)/,
+    "local wizard close must clear pending open state",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,240}?launchWizardOpenError\s*=/,
+    "backend open errors must replace pending open state",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,260}?launchWizard\s*=\s*event\.wizard/,
+    "backend wizard state must replace pending open state",
+  );
+});
+
+test("Board workspace id sync avoids stringify and reuses active Work id cache", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    appSource,
+    /let\s+currentProjectWorkspaceKey\s*=/,
+    "app.js must track a stable key for the current Board workspace id set",
+  );
+  assert.match(
+    appSource,
+    /let\s+activeWorkProjectionWorkspaceIds\s*=/,
+    "app.js must cache active Work projection workspace ids",
+  );
+  assert.match(
+    appSource,
+    /function\s+syncCurrentProjectWorkspaceIds\s*\(/,
+    "app.js must centralize Board workspace id synchronization",
+  );
+  assert.doesNotMatch(
+    renderAppStateBody,
+    /JSON\.stringify\s*\(/,
+    "workspace_state renderAppState must not serialize workspace id arrays for Board sync",
+  );
+  assert.match(
+    renderAppStateBody,
+    /syncCurrentProjectWorkspaceIds\s*\(\s*deriveCurrentProjectWorkspaceIds\s*\(\s*tab\?\.workspace\s*\|\|\s*\{\}\s*\)\s*,?\s*\)/,
+    "renderAppState must route Board workspace id updates through the shared sync helper",
+  );
+
+  const deriveBody = extractFunctionBody(appSource, "deriveCurrentProjectWorkspaceIds");
+  const cachedProjectionIndex = deriveBody.indexOf("activeWorkProjectionWorkspaceIds");
+  const workspaceAgentsIndex = deriveBody.indexOf("workspaceState?.workspace?.agents");
+  assert.ok(
+    cachedProjectionIndex >= 0,
+    "deriveCurrentProjectWorkspaceIds must read cached active Work projection ids",
+  );
+  assert.ok(
+    workspaceAgentsIndex >= 0,
+    "deriveCurrentProjectWorkspaceIds must keep the workspace-agent fallback",
+  );
+  assert.ok(
+    cachedProjectionIndex < workspaceAgentsIndex,
+    "cached active Work projection ids must be used before walking workspace agents",
+  );
+  assert.doesNotMatch(
+    deriveBody,
+    /activeWorkProjection\.active_works\.map/,
+    "workspace_state id derivation must not remap active_work_projection on every render",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const activeProjectionCase = receiveBody.match(
+    /case\s+"active_work_projection":[\s\S]*?break;/,
+  );
+  assert.ok(activeProjectionCase, "expected active_work_projection receive case");
+  const cacheIndex = activeProjectionCase[0].indexOf(
+    "cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection)",
+  );
+  const syncIndex = activeProjectionCase[0].indexOf("syncCurrentProjectWorkspaceIds(");
+  assert.ok(
+    cacheIndex >= 0,
+    "active_work_projection must update the cached active Work id set",
+  );
+  assert.ok(
+    syncIndex > cacheIndex,
+    "active_work_projection must sync Board ids after refreshing the cache",
+  );
+  assert.doesNotMatch(
+    activeProjectionCase[0],
+    /currentProjectWorkspaceId\s*=\s*deriveCurrentProjectWorkspaceIds/,
+    "active_work_projection must not bypass the shared sync helper",
+  );
+
+  const syncBody = extractFunctionBody(appSource, "syncCurrentProjectWorkspaceIds");
+  assert.match(
+    syncBody,
+    /workIdsKey\s*\(/,
+    "sync helper must compare stable Board workspace id keys",
+  );
+  assert.match(
+    syncBody,
+    /refreshBoardCurrentWorkspaceId\s*\(\s*\)/,
+    "sync helper must still refresh Board states when the id set changes",
+  );
+});
+
+test("workspace_state hot path gates Project Tabs redraw by tab shell key", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    appSource,
+    /let\s+renderedProjectTabsKey\s*=/,
+    "app.js must track the last rendered Project Tabs shell key",
+  );
+  assert.match(
+    appSource,
+    /function\s+projectTabsRenderKey\s*\(/,
+    "app.js must define a Project Tabs shell key helper",
+  );
+  assert.match(
+    renderAppStateBody,
+    /projectTabsRenderKey\s*\(\s*appState\s*\)/,
+    "renderAppState must derive the next Project Tabs shell key from appState",
+  );
+  assert.match(
+    renderAppStateBody,
+    /renderedProjectTabsKey[\s\S]*!==[\s\S]*nextProjectTabsKey[\s\S]*renderProjectTabs\(\)/,
+    "renderAppState must redraw Project Tabs only when the shell key changes",
+  );
+});
+
+test("Project Tabs shell key ignores workspace geometry but includes tab identity", () => {
+  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Project Tabs shell key must include active_tab_id",
+  );
+  for (const field of ["id", "title", "project_root"]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Project Tabs shell key must include tab ${field}`,
+    );
+  }
+  for (const workspaceField of ["workspace", "windows", "geometry", "viewport"]) {
+    assert.doesNotMatch(
+      keyBody,
+      new RegExp(`\\b${workspaceField}\\b`),
+      `Project Tabs shell key must ignore ${workspaceField}`,
+    );
+  }
+});
+
+test("Project Tabs shell key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "projectTabsRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Project Tabs shell key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Project Tabs shell key must not serialize an object graph on every workspace_state",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\.map\s*\(/,
+    "Project Tabs shell key must not allocate a mapped tab array",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+tab\s+of\s+tabs\s*\)/,
+    "Project Tabs shell key must iterate tabs directly",
+  );
+});
+
+test("Project Tabs renderer avoids mapped selector snapshots on tab switches", () => {
+  const renderBody = extractFunctionBody(projectTabsRendererSource, "renderProjectTabs");
+  assert.doesNotMatch(
+    renderBody,
+    /nextTabs\.map\s*\(/,
+    "Project Tabs renderer must not allocate a mapped tab id source",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /querySelectorAll\s*\(/,
+    "Project Tabs renderer hot path must walk existing child buttons directly",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /Array\.from\s*\(/,
+    "Project Tabs renderer must not snapshot child buttons into an array",
+  );
+  assert.doesNotMatch(
+    renderBody,
+    /nextTabs\.forEach\s*\(/,
+    "Project Tabs renderer must not allocate a per-render callback for tab ordering",
+  );
+  assert.match(
+    renderBody,
+    /for\s*\(\s*let\s+index\s*=\s*0;\s*index\s*<\s*nextTabs\.length;\s*index\s*\+=\s*1\s*\)/,
+    "Project Tabs renderer must update tabs with an indexed direct loop",
+  );
+  assert.match(
+    renderBody,
+    /projectTabs\.children/,
+    "Project Tabs renderer must reuse the live child collection for stale cleanup and ordering",
+  );
+});
+
+test("hidden project picker does not rebuild Recent Projects on workspace_state", () => {
+  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  assert.match(
+    appSource,
+    /let\s+renderedRecentProjectsKey\s*=/,
+    "app.js must track the visible picker Recent Projects render key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedRecentProjectsMenuKey\s*=/,
+    "app.js must track the split-menu Recent Projects render key separately",
+  );
+  assert.match(
+    appSource,
+    /function\s+recentProjectsRenderKey\s*\(/,
+    "app.js must define a Recent Projects render key helper",
+  );
+  assert.match(
+    renderProjectPickerBody,
+    /if\s*\(\s*shouldShow\s*\)[\s\S]*renderRecentProjects\(\)/,
+    "renderProjectPicker must render Recent Projects only when the picker is visible",
+  );
+  assert.doesNotMatch(
+    renderProjectPickerBody.replace(/if\s*\(\s*shouldShow\s*\)[\s\S]*?renderRecentProjects\(\)\s*;?/, ""),
+    /renderRecentProjects\(\)/,
+    "renderProjectPicker must not also call renderRecentProjects unconditionally",
+  );
+});
+
+test("Recent Projects render key ignores workspace state and split menu refreshes on open", () => {
+  const keyBody = extractFunctionBody(appSource, "recentProjectsRenderKey");
+  for (const field of ["title", "kind", "path"]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Recent Projects key must include ${field}`,
+    );
+  }
+  for (const workspaceField of ["workspace", "windows", "geometry", "viewport"]) {
+    assert.doesNotMatch(
+      keyBody,
+      new RegExp(`\\b${workspaceField}\\b`),
+      `Recent Projects key must ignore ${workspaceField}`,
+    );
+  }
+  const openMenuBody = extractFunctionBody(appSource, "openOpenProjectMenu");
+  assert.match(
+    openMenuBody,
+    /renderRecentProjectsIntoMenu\s*\(\s*\{\s*force:\s*true\s*\}\s*\)/,
+    "Open Project split menu must force-refresh Recent Projects from current appState when opened",
+  );
+});
+
+test("viewport-only workspace_state skips unchanged window reconciliation", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    appSource,
+    /let\s+renderedWorkspaceWindowsKey\s*=/,
+    "app.js must track the last reconciled Workspace Windows shell key",
+  );
+  assert.match(
+    appSource,
+    /function\s+workspaceWindowsRenderKey\s*\(/,
+    "app.js must define a Workspace Windows render key helper",
+  );
+  assert.match(
+    appSource,
+    /let\s+viewportDomApplied\s*=\s*false\s*;/,
+    "app.js must track whether the viewport DOM has been initialized",
+  );
+
+  const nextViewportIndex = renderWorkspaceBody.indexOf(
+    "const nextViewport = viewportSyncState.applyServerViewport",
+  );
+  const viewportChangedIndex = renderWorkspaceBody.indexOf(
+    "const viewportChanged = !sameViewportValues(viewport, nextViewport);",
+  );
+  const assignViewportIndex = renderWorkspaceBody.indexOf("viewport = nextViewport;");
+  const applyViewportIndex = renderWorkspaceBody.indexOf("applyViewport();");
+  const keyIndex = renderWorkspaceBody.indexOf(
+    "const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);",
+  );
+  const guardIndex = renderWorkspaceBody.indexOf(
+    "if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey)",
+  );
+  const classifyIndex = renderWorkspaceBody.indexOf(
+    "classifyProjectWindowVisibility",
+  );
+  const ensureIndex = renderWorkspaceBody.indexOf("ensureWindow(windowData)");
+  const focusIndex = renderWorkspaceBody.indexOf("focusWindowLocally(topmostId)");
+  const applyCalls = [...renderWorkspaceBody.matchAll(/applyViewport\(\);/g)];
+
+  assert.notEqual(
+    nextViewportIndex,
+    -1,
+    "renderWorkspace must store the applied server viewport before DOM writes",
+  );
+  assert.ok(
+    viewportChangedIndex > nextViewportIndex,
+    "renderWorkspace must compare the current viewport with the applied server viewport",
+  );
+  assert.ok(
+    assignViewportIndex > viewportChangedIndex,
+    "renderWorkspace must compare before replacing the current viewport reference",
+  );
+  assert.equal(
+    applyCalls.length,
+    1,
+    "renderWorkspace must keep server viewport DOM writes behind one guarded apply call",
+  );
+  assert.ok(
+    applyViewportIndex > assignViewportIndex,
+    "changed server viewport must assign the new viewport before applying DOM writes",
+  );
+  assert.match(
+    renderWorkspaceBody.slice(assignViewportIndex, keyIndex),
+    /if\s*\(\s*!viewportDomApplied\s*\|\|\s*viewportChanged\s*\)\s*\{\s*applyViewport\(\);\s*\}/,
+    "unchanged server viewport must skip applyViewport only after the first DOM apply",
+  );
+  assert.ok(keyIndex > applyViewportIndex, "window key guard must run after viewport");
+  assert.ok(guardIndex > keyIndex, "renderWorkspace must guard on the window key");
+  assert.ok(
+    guardIndex < classifyIndex && guardIndex < ensureIndex && guardIndex < focusIndex,
+    "unchanged window key must return before reconciliation and focus activation",
+  );
+  assert.match(
+    renderWorkspaceBody.slice(guardIndex, classifyIndex),
+    /return\s*;/,
+    "unchanged window key guard must return before reconciliation",
+  );
+});
+
+test("maximized viewport sync is coalesced across unchanged workspace_state events", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const schedulerBody = extractFunctionBody(
+    appSource,
+    "scheduleMaximizedWindowsToViewportSync",
+  );
+
+  assert.match(
+    appSource,
+    /let\s+maximizedViewportSyncFrame\s*=\s*null\s*;/,
+    "app.js must track a pending maximized viewport sync frame",
+  );
+  assert.match(
+    schedulerBody,
+    /if\s*\(\s*maximizedViewportSyncFrame\s*!==\s*null\s*\)[\s\S]*?return\s*;/,
+    "maximized viewport sync scheduler must coalesce duplicate pending requests",
+  );
+  assert.match(
+    schedulerBody,
+    /maximizedViewportSyncFrame\s*=\s*requestAnimationFrame\s*\(\s*\(\s*\)\s*=>\s*\{/,
+    "maximized viewport sync scheduler must own the animation-frame reservation",
+  );
+  assert.match(
+    schedulerBody,
+    /maximizedViewportSyncFrame\s*=\s*null\s*;[\s\S]*?syncMaximizedWindowsToViewport\s*\(\s*\)/,
+    "maximized viewport sync scheduler must clear the pending handle before running the existing sync body",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /scheduleMaximizedWindowsToViewportSync\s*\(\s*\)/,
+    "renderWorkspace must route maximized sync through the coalesced scheduler",
+  );
+  assert.doesNotMatch(
+    renderWorkspaceBody,
+    /requestAnimationFrame\s*\(\s*syncMaximizedWindowsToViewport\s*\)/,
+    "renderWorkspace must not schedule raw maximized sync frames per workspace_state",
+  );
+});
+
+test("clamped no-op zoom returns before local viewport apply and persist work", () => {
+  const zoomBody = extractFunctionBody(appSource, "zoomCanvasAt");
+  assert.match(
+    appSource,
+    /function\s+sameViewportValues\s*\(/,
+    "app.js must define a semantic viewport equality helper",
+  );
+  const nextViewportIndex = zoomBody.indexOf("const nextViewport = {");
+  const guardIndex = zoomBody.indexOf("if (sameViewportValues(viewport, nextViewport))");
+  const assignIndex = zoomBody.indexOf("viewport = nextViewport;");
+  const recordIndex = zoomBody.indexOf("recordLocalViewportEdit();");
+  const applyIndex = zoomBody.indexOf("applyViewport();");
+  const persistIndex = zoomBody.indexOf("persistViewport();");
+
+  assert.notEqual(nextViewportIndex, -1, "zoomCanvasAt must compute next viewport first");
+  assert.ok(guardIndex > nextViewportIndex, "no-op guard must inspect the computed viewport");
+  assert.ok(
+    guardIndex < assignIndex
+      && guardIndex < recordIndex
+      && guardIndex < applyIndex
+      && guardIndex < persistIndex,
+    "clamped no-op zoom must return before assignment, local edit tracking, viewport writes, and persist scheduling",
+  );
+  assert.match(
+    zoomBody.slice(guardIndex, assignIndex),
+    /return\s*;/,
+    "same viewport guard must return before changed-zoom apply/persist sequence",
+  );
+  assert.ok(
+    assignIndex < recordIndex && recordIndex < applyIndex && applyIndex < persistIndex,
+    "changed zoom must still assign next viewport before the existing apply/persist sequence",
+  );
+});
+
+test("Workspace Windows render key ignores viewport and includes window shell fields", () => {
+  const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Workspace Windows key must include active tab identity",
+  );
+  assert.match(
+    keyBody,
+    /allProjectWindowIds\s*\(\s*\)/,
+    "Workspace Windows key must include all project window ids for stale mounted window cleanup",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Workspace Windows key must include ${field}`,
+    );
+  }
+  assert.doesNotMatch(
+    keyBody,
+    /\bviewport\b/,
+    "Workspace Windows key must ignore viewport-only state",
+  );
+});
+
+test("Workspace Windows render key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "workspaceWindowsRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must provide a primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Workspace Windows key must append primitive key parts directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Workspace Windows key must not serialize a nested object graph",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\bwindows\.map\s*\(/,
+    "Workspace Windows key must not allocate per-window map results",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+windowData\s+of\s+windows\s*\)/,
+    "Workspace Windows key must walk windows with a direct loop",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+windowId\s+of\s+allProjectWindowIds\s*\(\s*\)\s*\)/,
+    "Workspace Windows key must include mounted project window ids with a direct loop",
+  );
+});
+
+test("Window List skips unchanged row rebuilds after updating open state", () => {
+  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
+  assert.match(
+    appSource,
+    /let\s+renderedWindowListKey\s*=/,
+    "app.js must track the last rendered Window List row key",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowListRenderKey\s*\(/,
+    "app.js must define a Window List render key helper",
+  );
+
+  const hiddenIndex = renderWindowListBody.indexOf("windowListPanel.hidden");
+  const ariaIndex = renderWindowListBody.indexOf("aria-expanded");
+  const keyIndex = renderWindowListBody.indexOf(
+    "const nextWindowListKey = windowListRenderKey();",
+  );
+  const closedGuardIndex = renderWindowListBody.indexOf("if (!windowListOpen)");
+  const closedSentinelIndex = renderWindowListBody.indexOf(
+    'renderedWindowListKey = "__closed__";',
+  );
+  const guardIndex = renderWindowListBody.indexOf(
+    "if (renderedWindowListKey === nextWindowListKey)",
+  );
+  const clearIndex = renderWindowListBody.indexOf("windowListPanel.innerHTML = \"\";");
+
+  assert.notEqual(hiddenIndex, -1, "renderWindowList must update panel hidden state");
+  assert.notEqual(ariaIndex, -1, "renderWindowList must update trigger aria-expanded");
+  assert.notEqual(closedGuardIndex, -1, "renderWindowList must have a closed fast path");
+  assert.notEqual(
+    closedSentinelIndex,
+    -1,
+    "closed Window List fast path must store a stable sentinel key",
+  );
+  assert.ok(
+    closedGuardIndex > hiddenIndex && closedGuardIndex > ariaIndex,
+    "closed Window List fast path must run after chrome hidden/expanded updates",
+  );
+  assert.ok(
+    closedGuardIndex < keyIndex,
+    "closed Window List fast path must return before key generation",
+  );
+  assert.ok(
+    closedSentinelIndex > closedGuardIndex && closedSentinelIndex < keyIndex,
+    "closed Window List fast path must store the sentinel before any key generation",
+  );
+  assert.match(
+    renderWindowListBody.slice(closedGuardIndex, keyIndex),
+    /return\s*;/,
+    "closed Window List fast path must return before windowListRenderKey()",
+  );
+  assert.ok(
+    keyIndex > hiddenIndex && keyIndex > ariaIndex,
+    "open Window List key must run after open state updates",
+  );
+  assert.ok(guardIndex > keyIndex, "renderWindowList must guard on the Window List key");
+  assert.ok(
+    guardIndex < clearIndex,
+    "unchanged Window List key must return before row clearing/rebuild",
+  );
+  assert.match(
+    renderWindowListBody.slice(guardIndex, clearIndex),
+    /return\s*;/,
+    "unchanged Window List key guard must return before clearing rows",
+  );
+
+  const toggleWindowListBody = extractFunctionBody(appSource, "toggleWindowList");
+  const invalidateIndex = toggleWindowListBody.indexOf("renderedWindowListKey = \"\";");
+  const renderIndex = toggleWindowListBody.indexOf("renderWindowList();");
+  const requestIndex = toggleWindowListBody.indexOf("requestWindowList();");
+  assert.notEqual(invalidateIndex, -1, "toggleWindowList must invalidate the Window List key");
+  assert.ok(
+    invalidateIndex < renderIndex && renderIndex < requestIndex,
+    "opening Window List must render current rows before requesting backend entries",
+  );
+});
+
+test("Window List row source rebuild avoids mapped intermediate arrays", () => {
+  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /workspaceWindows\.map\s*\(/,
+    "Window List row rebuild must not allocate a mapped workspace-window lookup source",
+  );
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /windowListEntries[\s\S]*?\.map\s*\(/,
+    "Window List row rebuild must not map backend entries before filtering",
+  );
+  assert.doesNotMatch(
+    renderWindowListBody,
+    /\.filter\s*\(/,
+    "Window List row rebuild must avoid chained filter allocation",
+  );
+  assert.match(
+    renderWindowListBody,
+    /for\s*\(\s*const\s+windowData\s+of\s+workspaceWindows\s*\)/,
+    "Window List row rebuild must build workspace lookups with a direct loop",
+  );
+  assert.match(
+    renderWindowListBody,
+    /for\s*\(\s*const\s+entry\s+of\s+windowListEntries\s*\)/,
+    "Window List row rebuild must derive server-backed entries with a direct loop",
+  );
+});
+
+test("Window List render key ignores viewport and includes row shell fields", () => {
+  const keyBody = extractFunctionBody(appSource, "windowListRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Window List key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Window List key must not serialize an object graph while open",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\.map\s*\(/,
+    "Window List key must not allocate mapped arrays while open",
+  );
+  assert.match(
+    keyBody,
+    /active_tab_id/,
+    "Window List key must include active tab identity",
+  );
+  assert.match(
+    keyBody,
+    /windowListEntries/,
+    "Window List key must include server-provided window_list entries",
+  );
+  assert.match(
+    keyBody,
+    /activeWorkspace\s*\(\s*\)/,
+    "Window List key must include active workspace window identity/order",
+  );
+  assert.match(
+    keyBody,
+    /runtimeStateForWindow\s*\(/,
+    "Window List key must include runtime state used by status chips",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Window List key must include ${field}`,
+    );
+  }
+  assert.doesNotMatch(
+    keyBody,
+    /\bviewport\b/,
+    "Window List key must ignore viewport-only state",
+  );
+});
+
+test("Static project chrome renderers guard unchanged DOM writes", () => {
+  assert.match(
+    appSource,
+    /let\s+renderedAppVersionLabel\s*=/,
+    "app.js must track the last rendered app version label",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedProjectPickerKey\s*=/,
+    "app.js must track the last rendered Project Picker key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedProjectOnboardingKey\s*=/,
+    "app.js must track the last rendered Project Onboarding key",
+  );
+  assert.match(
+    appSource,
+    /let\s+renderedActionAvailabilityKey\s*=/,
+    "app.js must track the last rendered action availability key",
+  );
+
+  const renderAppVersionBody = extractFunctionBody(appSource, "renderAppVersion");
+  const versionGuardIndex = renderAppVersionBody.indexOf(
+    "if (renderedAppVersionLabel === label)",
+  );
+  const versionHiddenIndex = renderAppVersionBody.indexOf("appVersionLabel.hidden");
+  assert.ok(
+    versionGuardIndex !== -1 && versionGuardIndex < versionHiddenIndex,
+    "renderAppVersion must return before unchanged label DOM writes",
+  );
+
+  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  const pickerKeyIndex = renderProjectPickerBody.indexOf(
+    "const nextProjectPickerKey = projectPickerRenderKey(activeTab);",
+  );
+  const pickerGuardIndex = renderProjectPickerBody.indexOf(
+    "if (renderedProjectPickerKey === nextProjectPickerKey)",
+  );
+  const pickerClassIndex = renderProjectPickerBody.indexOf(
+    "projectPicker.classList.toggle",
+  );
+  assert.ok(
+    pickerKeyIndex !== -1 &&
+      pickerGuardIndex > pickerKeyIndex &&
+      pickerGuardIndex < pickerClassIndex,
+    "renderProjectPicker must return before unchanged picker DOM writes",
+  );
+
+  const renderProjectOnboardingBody = extractFunctionBody(appSource, "renderProjectOnboarding");
+  const onboardingKeyIndex = renderProjectOnboardingBody.indexOf(
+    "const nextProjectOnboardingKey = projectOnboardingRenderKey(tab);",
+  );
+  const onboardingGuardIndex = renderProjectOnboardingBody.indexOf(
+    "if (renderedProjectOnboardingKey === nextProjectOnboardingKey)",
+  );
+  const onboardingClassIndex = renderProjectOnboardingBody.indexOf(
+    "projectOnboarding.classList",
+  );
+  assert.ok(
+    onboardingKeyIndex !== -1 &&
+      onboardingGuardIndex > onboardingKeyIndex &&
+      onboardingGuardIndex < onboardingClassIndex,
+    "renderProjectOnboarding must return before unchanged onboarding DOM writes",
+  );
+
+  const updateActionAvailabilityBody = extractFunctionBody(appSource, "updateActionAvailability");
+  const actionKeyIndex = updateActionAvailabilityBody.indexOf(
+    "const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);",
+  );
+  const actionGuardIndex = updateActionAvailabilityBody.indexOf(
+    "if (renderedActionAvailabilityKey === nextActionAvailabilityKey)",
+  );
+  const disabledIndex = updateActionAvailabilityBody.indexOf("addButton.disabled");
+  assert.ok(
+    actionKeyIndex !== -1 &&
+      actionGuardIndex > actionKeyIndex &&
+      actionGuardIndex < disabledIndex,
+    "updateActionAvailability must return before unchanged disabled-state DOM writes",
+  );
+});
+
+test("Static project chrome keys ignore workspace geometry and include visible transition state", () => {
+  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
+  assert.match(
+    pickerKeyBody,
+    /activeTab/,
+    "Project Picker key must include visible active-tab state",
+  );
+  assert.match(
+    pickerKeyBody,
+    /projectError/,
+    "Project Picker key must include picker error text",
+  );
+  assert.match(
+    pickerKeyBody,
+    /recentProjectsRenderKey\s*\(/,
+    "Project Picker key must include Recent Projects only when visible",
+  );
+
+  const onboardingKeyBody = extractFunctionBody(appSource, "projectOnboardingRenderKey");
+  for (const field of ["kind", "project_root"]) {
+    assert.match(
+      onboardingKeyBody,
+      new RegExp(`\\b${field}\\b`),
+      `Project Onboarding key must include ${field}`,
+    );
+  }
+
+  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  assert.match(
+    actionKeyBody,
+    /activeTab/,
+    "Action Availability key must include active-tab availability",
+  );
+
+  for (const keyBody of [pickerKeyBody, onboardingKeyBody, actionKeyBody]) {
+    for (const workspaceField of ["viewport", "windows", "geometry"]) {
+      assert.doesNotMatch(
+        keyBody,
+        new RegExp(`\\b${workspaceField}\\b`),
+        `Static project chrome keys must ignore ${workspaceField}`,
+      );
+    }
+  }
+});
+
+test("Static project chrome keys avoid JSON stringify allocation", () => {
+  for (const name of ["projectPickerRenderKey", "projectOnboardingRenderKey"]) {
+    const keyBody = extractFunctionBody(appSource, name);
+    assert.match(
+      keyBody,
+      /appendRenderKeyPart\s*\(/,
+      `${name} must append primitive fields directly`,
+    );
+    assert.doesNotMatch(
+      keyBody,
+      /JSON\.stringify\s*\(/,
+      `${name} must not serialize an object graph on every workspace_state`,
+    );
+  }
+});
+
+test("Static project chrome reuses the renderAppState active tab lookup", () => {
+  const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
+  const tabLookupIndex = renderAppStateBody.indexOf("const tab = activeProjectTab();");
+  const pickerCallIndex = renderAppStateBody.indexOf("renderProjectPicker(tab);");
+  const actionCallIndex = renderAppStateBody.indexOf("updateActionAvailability(tab);");
+  const onboardingCallIndex = renderAppStateBody.indexOf("renderProjectOnboarding(tab);");
+  const workspaceCallIndex = renderAppStateBody.indexOf(
+    "renderWorkspace(tab?.workspace || emptyWorkspace());",
+  );
+  assert.ok(
+    tabLookupIndex >= 0 &&
+      pickerCallIndex > tabLookupIndex &&
+      actionCallIndex > tabLookupIndex &&
+      onboardingCallIndex > tabLookupIndex &&
+      workspaceCallIndex > tabLookupIndex,
+    "renderAppState must resolve the active tab once and pass it through static chrome and workspace renderers",
+  );
+
+  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
+  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  for (const keyBody of [pickerKeyBody, actionKeyBody]) {
+    assert.doesNotMatch(
+      keyBody,
+      /activeProjectTab\s*\(\s*\)/,
+      "static chrome key helpers must not rescan activeProjectTab on the workspace_state hot path",
+    );
+  }
+});
+
+test("Per-window renderer guards unchanged DOM writes after mount and preset sync", () => {
+  assert.match(
+    appSource,
+    /const\s+renderedWindowElementKeys\s*=\s*new\s+Map\s*\(/,
+    "app.js must track per-window element render keys",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowElementRenderKey\s*\(/,
+    "app.js must define a per-window element render key helper",
+  );
+
+  const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
+  const mountIndex = ensureWindowBody.indexOf("mountWindowBody(windowData, element);");
+  const keyIndex = ensureWindowBody.indexOf(
+    "const nextWindowElementKey = windowElementRenderKey(windowData);",
+  );
+  const guardIndex = ensureWindowBody.indexOf(
+    "if (renderedWindowElementKeys.get(windowData.id) === nextWindowElementKey)",
+  );
+  const storeIndex = ensureWindowBody.indexOf(
+    "renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);",
+  );
+  const renderKeyCalls = [
+    ...ensureWindowBody.matchAll(/windowElementRenderKey\(windowData\)/g),
+  ];
+  const titleIndex = ensureWindowBody.indexOf(".title-text");
+  const roleBadgeIndex = ensureWindowBody.indexOf("setWindowRoleBadge");
+  const tabsIndex = ensureWindowBody.indexOf("renderWindowTabs");
+  const agentColorIndex = ensureWindowBody.indexOf("agentColor");
+  const classIndex = ensureWindowBody.indexOf('classList.toggle("minimized"');
+  const styleIndex = ensureWindowBody.indexOf("element.style.zIndex");
+  const statusIndex = ensureWindowBody.indexOf("applyStatus");
+  const fitIndex = ensureWindowBody.indexOf("scheduleTerminalFit");
+
+  assert.notEqual(mountIndex, -1, "ensureWindow must keep preset/body mount logic");
+  assert.ok(keyIndex > mountIndex, "per-window key must run after preset/body mounting");
+  assert.ok(guardIndex > keyIndex, "ensureWindow must guard on the per-window key");
+  assert.equal(
+    renderKeyCalls.length,
+    1,
+    "ensureWindow must reuse the computed per-window key instead of recomputing it",
+  );
+  for (const [label, index] of [
+    ["title", titleIndex],
+    ["role badge", roleBadgeIndex],
+    ["tab strip", tabsIndex],
+    ["agent color", agentColorIndex],
+    ["class", classIndex],
+    ["style", styleIndex],
+    ["status", statusIndex],
+    ["terminal fit", fitIndex],
+  ]) {
+    assert.notEqual(index, -1, `ensureWindow must still contain ${label} writes`);
+    assert.ok(
+      guardIndex < index,
+      `unchanged per-window key must return before ${label} writes`,
+    );
+  }
+  assert.notEqual(
+    storeIndex,
+    -1,
+    "ensureWindow must store the previously computed per-window key",
+  );
+  assert.ok(
+    statusIndex < storeIndex,
+    "ensureWindow must store changed keys after status/detail normalization",
+  );
+  assert.match(
+    ensureWindowBody.slice(guardIndex, titleIndex),
+    /return\s*;/,
+    "unchanged per-window key guard must return before window DOM writes",
+  );
+});
+
+test("Per-window render key covers DOM shell fields and removal cleanup", () => {
+  const keyBody = extractFunctionBody(appSource, "windowElementRenderKey");
+  assert.match(
+    keyBody,
+    /windowDisplayTitle\s*\(/,
+    "per-window key must include displayed title",
+  );
+  assert.match(
+    keyBody,
+    /windowTitleTooltip\s*\(/,
+    "per-window key must include title tooltip",
+  );
+  assert.match(
+    keyBody,
+    /windowGroupId\s*\(\s*windowData\s*\)/,
+    "per-window key must derive the tab group for tab strip inputs",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "per-window key must append primitive key fields directly",
+  );
+  assert.match(
+    keyBody,
+    /detailMap\.get\s*\(\s*windowData\.id\s*\)/,
+    "per-window key must include status detail text",
+  );
+  assert.match(
+    keyBody,
+    /maximizedGeometry\s*\(\s*visibleBounds\s*\(\s*\)\s*,\s*viewport\.zoom\s*\)/,
+    "per-window key must include viewport-relative maximized fill",
+  );
+  for (const field of [
+    "id",
+    "preset",
+    "title",
+    "dynamic_title",
+    "dynamic_title_detail",
+    "purpose_title",
+    "agent_id",
+    "agent_color",
+    "status",
+    "geometry",
+    "x",
+    "y",
+    "width",
+    "height",
+    "minimized",
+    "maximized",
+    "z_index",
+    "tab_group_id",
+    "tab_group_active",
+    "maximized_fill",
+    "tabs",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `per-window key must include ${field}`,
+    );
+  }
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const cleanupIndex = renderWorkspaceBody.indexOf("renderedWindowElementKeys.delete(windowId);");
+  const removeIndex = renderWorkspaceBody.indexOf("element.remove();");
+  assert.notEqual(cleanupIndex, -1, "window removal must clear per-window render key");
+  assert.ok(
+    cleanupIndex < removeIndex,
+    "per-window render key cleanup must happen before element removal",
+  );
+});
+
+test("Per-window render key avoids JSON stringify and mapped tab allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "windowElementRenderKey");
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "per-window key must not serialize an object graph for each changed window",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /windowTabsFor\s*\(\s*windowData\s*\)\.map\s*\(/,
+    "per-window key must not allocate a mapped tab shell array",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /windowTabsFor\s*\(\s*windowData\s*\)/,
+    "per-window key must avoid allocating a filtered tab array",
+  );
+  assert.match(
+    keyBody,
+    /for\s*\(\s*const\s+tab\s+of\s+activeWorkspace\s*\(\s*\)\.windows\s*\|\|\s*\[\]\s*\)/,
+    "per-window key must iterate workspace tab candidates directly",
+  );
+  assert.match(
+    keyBody,
+    /windowGroupId\s*\(\s*tab\s*\)\s*!==\s*tabGroupId[\s\S]+continue\s*;/,
+    "per-window key must keep only tabs in the same group",
+  );
+  for (const field of [
+    "runtime_state",
+    "detail",
+    "display_title",
+    "title_tooltip",
+    "role_badge",
+    "geometry_revision",
+    "maximized_fill",
+    "tabs",
+    "tab_group_id",
+    "tab_group_active",
+  ]) {
+    assert.match(
+      keyBody,
+      new RegExp(`\\b${field}\\b`),
+      `per-window primitive key must keep ${field}`,
+    );
+  }
+});
+
+test("Focus class updates skip unchanged focus and avoid all-window scans", () => {
+  const focusBody = extractFunctionBody(appSource, "focusWindowLocally");
+  assert.match(
+    focusBody,
+    /const\s+targetElement\s*=\s*windowMap\.get\s*\(\s*windowId\s*\)/,
+    "focusWindowLocally must resolve the requested window directly",
+  );
+  assert.match(
+    focusBody,
+    /focusedId\s*===\s*windowId[\s\S]+targetElement\?\.classList\.contains\s*\(\s*"focused"\s*\)[\s\S]+return\s*;/,
+    "focusWindowLocally must return when focus is unchanged and the class is already applied",
+  );
+  assert.doesNotMatch(
+    focusBody,
+    /windowMap\.entries\s*\(/,
+    "focusWindowLocally must not scan every mounted window",
+  );
+});
+
+test("Focus class updates touch previous/current elements and keep no-topmost reset", () => {
+  const focusBody = extractFunctionBody(appSource, "focusWindowLocally");
+  assert.match(
+    focusBody,
+    /const\s+previousFocusedId\s*=\s*focusedId/,
+    "focusWindowLocally must remember the previous focused window",
+  );
+  assert.match(
+    focusBody,
+    /focusedId\s*=\s*windowId/,
+    "focusWindowLocally must update focusedId to the requested window",
+  );
+  assert.match(
+    focusBody,
+    /previousFocusedId\s*!==\s*windowId[\s\S]+previousElement\?\.classList\.remove\s*\(\s*"focused"\s*\)/,
+    "focusWindowLocally must remove focus from the previous element only",
+  );
+  assert.match(
+    focusBody,
+    /targetElement\.classList\.add\s*\(\s*"focused"\s*\)/,
+    "focusWindowLocally must add focus to the requested element",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    renderWorkspaceBody,
+    /focusedId\s*=\s*null\s*;/,
+    "renderWorkspace must still clear focusedId when no topmost active window exists",
+  );
+});
+
+test("Workspace visibility classification reuses direct id sets", () => {
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    appSource,
+    /function\s+workspaceWindowIdSet\s*\(/,
+    "app.js must provide a direct-loop active window id set helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+allProjectWindowIdSet\s*\(/,
+    "app.js must provide a direct-loop all-project window id set helper",
+  );
+  assert.doesNotMatch(
+    renderWorkspaceBody,
+    /workspace\.windows\.map\s*\(\s*\(?\s*windowData\s*\)?\s*=>\s*windowData\.id\s*\)/,
+    "renderWorkspace must not allocate an active window id array before classification",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /const\s+activeWindowIdSet\s*=\s*workspaceWindowIdSet\s*\(\s*workspace\s*\)/,
+    "renderWorkspace must derive active window ids as a Set once",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /activeWindowIdSet\s*,[\s\S]*allProjectWindowIdSet:\s*allProjectWindowIdSet\s*\(\s*\)/,
+    "renderWorkspace must pass id sets to classifyProjectWindowVisibility",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /topmostId\s*&&\s*activeWindowIdSet\.has\s*\(\s*topmostId\s*\)/,
+    "renderWorkspace must reuse the active id set for topmost focus membership",
+  );
+});
+
+test("Runtime status updates skip unchanged DOM and dependent surface writes", () => {
+  assert.match(
+    appSource,
+    /const\s+renderedRuntimeStatusKeys\s*=\s*new\s+Map\s*\(/,
+    "app.js must track per-window runtime status render keys",
+  );
+  assert.match(
+    appSource,
+    /function\s+windowRuntimeStatusRenderKey\s*\(/,
+    "app.js must define a runtime status render key helper",
+  );
+
+  const statusBody = extractFunctionBody(appSource, "applyStatus");
+  const keyIndex = statusBody.indexOf(
+    "const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(",
+  );
+  const guardIndex = statusBody.indexOf(
+    "renderedRuntimeStatusKeys.get(windowId) === nextRuntimeStatusKey",
+  );
+  const chipIndex = statusBody.indexOf("chip.classList.remove(");
+  const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
+  const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
+  const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
+  const dotsIndex = statusBody.indexOf("refreshProjectTabDots()");
+
+  assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
+  assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
+  for (const [label, index] of [
+    ["status chip class writes", chipIndex],
+    ["overlay lookup/writes", overlayIndex],
+    ["telemetry recompute", telemetryIndex],
+    ["Window List refresh", windowListIndex],
+    ["project tab dot refresh", dotsIndex],
+  ]) {
+    assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
+    assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
+  }
+  assert.match(
+    statusBody.slice(guardIndex, chipIndex),
+    /return\s*;/,
+    "unchanged runtime status guard must return before DOM/dependent-surface writes",
+  );
+});
+
+test("Runtime status key covers state detail preset visibility and cleanup", () => {
+  const keyBody = extractFunctionBody(appSource, "windowRuntimeStatusRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "Runtime status key must append primitive fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "Runtime status key must not serialize an object on every window_status event",
+  );
+  for (const pattern of [
+    /windowId/,
+    /windowMap\.has\s*\(\s*windowId\s*\)/,
+    /runtimeState/,
+    /effectiveDetail/,
+    /windowData\?\.preset/,
+    /shouldShowRuntimeStatus\s*\(/,
+    /mapAgentTelemetryState\s*\(/,
+  ]) {
+    assert.match(keyBody, pattern, `runtime status key must include ${pattern}`);
+  }
+
+  const statusBody = extractFunctionBody(appSource, "applyStatus");
+  const stateMapIndex = statusBody.indexOf("windowRuntimeStateMap.set(windowId, runtimeState);");
+  const effectiveDetailIndex = statusBody.indexOf("const effectiveDetail = detailMap.get(windowId)");
+  const keyIndex = statusBody.indexOf(
+    "const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(",
+  );
+  assert.ok(
+    stateMapIndex !== -1 && stateMapIndex < keyIndex,
+    "applyStatus must update runtime state before computing the status key",
+  );
+  assert.ok(
+    effectiveDetailIndex !== -1 && effectiveDetailIndex < keyIndex,
+    "applyStatus must compute effective detail before the status key",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  const cleanupIndex = renderWorkspaceBody.indexOf("renderedRuntimeStatusKeys.delete(windowId);");
+  const removeIndex = renderWorkspaceBody.indexOf("element.remove();");
+  assert.notEqual(cleanupIndex, -1, "window removal must clear runtime status render key");
+  assert.ok(
+    cleanupIndex < removeIndex,
+    "runtime status render key cleanup must happen before element removal",
+  );
+});
+
+test("Terminal output decode is deferred out of the receive path", () => {
+  const batcherConfig = appSource.match(
+    /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
+  );
+  assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
+  assert.match(
+    batcherConfig[1],
+    /mergeChunks:\s*\(\s*chunks\s*,\s*windowId\s*\)/,
+    "terminal output batcher must merge encoded chunks during scheduled flush",
+  );
+  assert.match(
+    batcherConfig[1],
+    /decoderMap\.get\s*\(\s*windowId\s*\)/,
+    "flush merge must use the per-window TextDecoder",
+  );
+  assert.match(
+    batcherConfig[1],
+    /chunks\s*\.\s*map[\s\S]*decodeBase64\s*\(\s*chunk\s*\)/,
+    "flush merge must decode each encoded chunk in order",
+  );
+
+  const writeOutputBody = extractFunctionBody(appSource, "writeOutput");
+  assert.match(
+    writeOutputBody,
+    /terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\)/,
+    "ready terminal output must enqueue encoded chunks without eager decode",
+  );
+  const readyEnqueueIndex = writeOutputBody.indexOf(
+    "terminalOutputBatcher.enqueue(",
+  );
+  const readyPath = writeOutputBody.slice(readyEnqueueIndex);
+  assert.doesNotMatch(
+    readyPath,
+    /decoder\.decode\s*\(|decodeBase64\s*\(/,
+    "writeOutput ready path must not decode before the scheduled flush",
+  );
+});
+
+test("Terminal output writes are gated while windows are hidden", () => {
+  const batcherConfig = appSource.match(
+    /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
+  );
+  assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
+  assert.match(
+    batcherConfig[1],
+    /canWrite:\s*canRefreshTerminalViewport/,
+    "terminal output batcher must reuse the terminal visibility predicate before decode/write",
+  );
+
+  const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowId\)[\s\S]*?scheduleTerminalFocusActivation\(windowId\)/,
+    "hidden project-tab reveal must re-arm pending output before viewport/focus activation",
+  );
+  assert.match(
+    renderWorkspaceBody,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowData\.id\)[\s\S]*?scheduleTerminalFocusActivation\(windowData\.id\)/,
+    "hidden window-tab reveal must re-arm pending output before viewport/focus activation",
+  );
+});
+
+test("Operator telemetry skips unchanged counts before DOM writes", () => {
+  assert.match(
+    appSource,
+    /let\s+renderedOperatorTelemetryKey\s*=\s*""/,
+    "app.js must track the last rendered telemetry counts key",
+  );
+  assert.match(
+    appSource,
+    /function\s+operatorTelemetryRenderKey\s*\(/,
+    "app.js must define a telemetry counts key helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyOperatorTelemetryCounts\s*\(/,
+    "app.js must route telemetry DOM writes through a guarded helper",
+  );
+
+  const helperBody = extractFunctionBody(appSource, "applyOperatorTelemetryCounts");
+  const keyIndex = helperBody.indexOf("const nextOperatorTelemetryKey = operatorTelemetryRenderKey(counts);");
+  const guardIndex = helperBody.indexOf(
+    "renderedOperatorTelemetryKey === nextOperatorTelemetryKey",
+  );
+  const applyIndex = helperBody.indexOf("window.__operatorShell.applyTelemetryCounts(counts)");
+  const storeIndex = helperBody.indexOf("renderedOperatorTelemetryKey = nextOperatorTelemetryKey");
+
+  assert.notEqual(keyIndex, -1, "telemetry helper must compute a stable key");
+  assert.ok(guardIndex > keyIndex, "telemetry helper must guard after key computation");
+  assert.ok(
+    guardIndex < applyIndex,
+    "unchanged telemetry counts must return before applyTelemetryCounts DOM writes",
+  );
+  assert.ok(
+    applyIndex < storeIndex,
+    "telemetry key should be stored after applyTelemetryCounts succeeds",
+  );
+  assert.match(
+    helperBody.slice(guardIndex, applyIndex),
+    /return\s*;/,
+    "unchanged telemetry guard must return before DOM writes",
+  );
+});
+
+test("Operator telemetry key avoids JSON stringify allocation", () => {
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.match(
+    appSource,
+    /function\s+appendRenderKeyPart\s*\(/,
+    "app.js must expose the primitive render-key append helper",
+  );
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\s*\(/,
+    "telemetry key must append primitive count fields directly",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /JSON\.stringify\s*\(/,
+    "telemetry key must not serialize a counts object graph",
+  );
+});
+
+// SPEC-2356 — branch telemetry forwards only `branches` through the guarded
+// applyOperatorTelemetryCounts helper; the dead Sidebar Layers `git` counter is
+// retired (replaces develop's git-coupled branch telemetry assertion).
+test("branch_entries telemetry uses the guarded helper without the retired git layer (SPEC-2356)", () => {
+  const branchCase = appSource.match(/case\s+"branch_entries":[\s\S]*?break;/);
+  assert.ok(branchCase, "expected branch_entries receive case");
+  assert.match(
+    branchCase[0],
+    /applyOperatorTelemetryCounts\(\{\s*branches:\s*branchesCount,\s*\}\)/,
+    "branch telemetry must route through the guarded applyOperatorTelemetryCounts helper",
+  );
+  assert.doesNotMatch(
+    branchCase[0],
+    /git:\s*branchesCount/,
+    "the dead Sidebar Layers git counter must no longer be forwarded",
+  );
+  assert.doesNotMatch(
+    branchCase[0],
+    /window\.__operatorShell\?\.applyTelemetryCounts/,
+    "branch telemetry must not call applyTelemetryCounts directly",
+  );
+});

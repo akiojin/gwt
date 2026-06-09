@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -18,6 +18,7 @@ pub enum ProjectIndexBootstrapRequest {
 }
 
 const FULL_STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
+const FULL_STATUS_COOLDOWN: Duration = Duration::from_secs(10);
 
 type BootstrapFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync + 'static;
 type StatusProbeFn = dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static;
@@ -52,9 +53,27 @@ pub enum IndexInFlightKey {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ProjectIndexBootstrapService {
     in_flight: Arc<Mutex<HashSet<IndexInFlightKey>>>,
+    last_full_status: Arc<Mutex<HashMap<PathBuf, FullStatusCacheEntry>>>,
+    full_status_cooldown: Duration,
+}
+
+#[derive(Clone)]
+struct FullStatusCacheEntry {
+    refreshed_at: Instant,
+    status: gwt::ProjectIndexStatusView,
+}
+
+impl Default for ProjectIndexBootstrapService {
+    fn default() -> Self {
+        Self {
+            in_flight: Arc::default(),
+            last_full_status: Arc::default(),
+            full_status_cooldown: FULL_STATUS_COOLDOWN,
+        }
+    }
 }
 
 impl ProjectIndexBootstrapService {
@@ -66,6 +85,14 @@ impl ProjectIndexBootstrapService {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_full_status_cooldown(full_status_cooldown: Duration) -> Self {
+        Self {
+            full_status_cooldown,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn spawn(
@@ -154,6 +181,9 @@ impl ProjectIndexBootstrapService {
             );
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
+        if self.full_status_cached_recently(&project_key, &project_root_label) {
+            return ProjectIndexBootstrapRequest::AlreadyRunning;
+        }
         let key = IndexInFlightKey::FullStatus {
             project_root: project_key.clone(),
         };
@@ -198,10 +228,12 @@ impl ProjectIndexBootstrapService {
                         );
                         let kick_orchestrator =
                             status.state == gwt::ProjectIndexStatusState::RepairRequired;
-                        proxy.send(UserEvent::ProjectIndexStatus {
-                            project_root: project_root_label.clone(),
-                            status: status.clone(),
-                        });
+                        service_for_thread.emit_full_status_if_changed(
+                            &proxy,
+                            &project_key,
+                            &project_root_label,
+                            status.clone(),
+                        );
                         if kick_orchestrator {
                             trigger_auto_repair_for_project(
                                 service_for_thread,
@@ -220,15 +252,18 @@ impl ProjectIndexBootstrapService {
                             error = %error,
                             "project index full status refresh bootstrap failed"
                         );
-                        proxy.send(UserEvent::ProjectIndexStatus {
-                            project_root: project_root_label,
-                            status: gwt::ProjectIndexStatusView::new(
-                                gwt::ProjectIndexStatusState::Error,
-                                format!(
-                                    "Project index full status refresh failed after {elapsed_ms} ms: {error}"
-                                ),
+                        let status = gwt::ProjectIndexStatusView::new(
+                            gwt::ProjectIndexStatusState::Error,
+                            format!(
+                                "Project index full status refresh failed after {elapsed_ms} ms: {error}"
                             ),
-                        });
+                        );
+                        service_for_thread.emit_full_status_if_changed(
+                            &proxy,
+                            &project_key,
+                            &project_root_label,
+                            status,
+                        );
                     }
                 }
             });
@@ -315,6 +350,92 @@ impl ProjectIndexBootstrapService {
                 ProjectIndexBootstrapRequest::SpawnFailed
             }
         }
+    }
+
+    fn emit_full_status_if_changed(
+        &self,
+        proxy: &AppEventProxy,
+        project_key: &Path,
+        project_root_label: &str,
+        status: gwt::ProjectIndexStatusView,
+    ) -> bool {
+        let key = normalize_project_root(project_key);
+        let mut changed = true;
+        if let Ok(mut last) = self.last_full_status.lock() {
+            if last.get(&key).map(|entry| &entry.status) == Some(&status) {
+                tracing::debug!(
+                    target: "gwt::index",
+                    worktree = %project_root_label,
+                    state = %status.state,
+                    "skipping unchanged project index full status broadcast"
+                );
+                changed = false;
+            }
+            last.insert(
+                key,
+                FullStatusCacheEntry {
+                    refreshed_at: Instant::now(),
+                    status: status.clone(),
+                },
+            );
+        }
+        if !changed {
+            return false;
+        }
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label.to_string(),
+            status,
+        });
+        true
+    }
+
+    fn full_status_cached_recently(&self, project_key: &Path, project_root_label: &str) -> bool {
+        if self.full_status_cooldown.is_zero() {
+            return false;
+        }
+        let key = normalize_project_root(project_key);
+        let Ok(last) = self.last_full_status.lock() else {
+            return false;
+        };
+        let Some(entry) = last.get(&key) else {
+            return false;
+        };
+        let elapsed = entry.refreshed_at.elapsed();
+        if elapsed >= self.full_status_cooldown {
+            return false;
+        }
+        tracing::debug!(
+            target: "gwt::index",
+            worktree = %project_root_label,
+            elapsed_ms = elapsed.as_millis() as u64,
+            cooldown_ms = self.full_status_cooldown.as_millis() as u64,
+            "skipping fresh project index full status refresh"
+        );
+        true
+    }
+
+    fn invalidate_full_status(&self, project_root: &Path) {
+        let key = normalize_project_root(project_root);
+        if let Ok(mut last) = self.last_full_status.lock() {
+            last.remove(&key);
+        }
+    }
+
+    #[cfg(test)]
+    fn invalidate_full_status_for_test(&self, project_root: &Path) {
+        self.invalidate_full_status(project_root);
+    }
+
+    #[cfg(test)]
+    fn full_status_is_idle_for_test(&self, project_root: &Path) -> bool {
+        let project_key = normalize_project_root(project_root);
+        let full_status_key = IndexInFlightKey::FullStatus {
+            project_root: project_key.clone(),
+        };
+        let retry_key = IndexInFlightKey::FullStatusRetry {
+            project_root: project_key,
+        };
+        !self.is_reserved(&full_status_key) && !self.is_reserved(&retry_key)
     }
 
     pub(crate) fn spawn_with<B, S>(
@@ -444,7 +565,7 @@ impl ProjectIndexBootstrapService {
         let project_key = normalize_project_root(&project_root);
         let project_root_label = project_key.display().to_string();
         let key = IndexInFlightKey::Rebuild {
-            project_root: project_key,
+            project_root: project_key.clone(),
             scope,
             worktree_hash: worktree_hash.clone(),
         };
@@ -458,9 +579,12 @@ impl ProjectIndexBootstrapService {
             );
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
+        self.invalidate_full_status(&project_key);
 
         let in_flight = self.in_flight.clone();
         let key_for_thread = key.clone();
+        let service_for_thread = self.clone();
+        let project_key_for_thread = project_key.clone();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-rebuild".to_string())
             .spawn(move || {
@@ -469,6 +593,7 @@ impl ProjectIndexBootstrapService {
                     key: key_for_thread,
                 };
                 rebuild();
+                service_for_thread.invalidate_full_status(&project_key_for_thread);
             });
 
         match spawn_result {
@@ -513,6 +638,7 @@ impl ProjectIndexBootstrapService {
             ));
         }
         let result = body();
+        self.invalidate_full_status(project_root);
         self.release(&key);
         result
     }
@@ -646,6 +772,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
                 }),
                 scopes: gwt::ProjectIndexScopes::default(),
                 worktrees: std::collections::BTreeMap::new(),
+                coverage: None,
             },
         });
 
@@ -1007,6 +1134,120 @@ mod tests {
             full_probe_calls.load(Ordering::SeqCst),
             1,
             "duplicate Settings.Index refresh requests must collapse into the in-flight full refresh"
+        );
+    }
+
+    #[test]
+    fn repeated_full_status_refresh_inside_cooldown_reuses_cached_status_probe() {
+        let service = super::ProjectIndexBootstrapService::new_for_test_with_full_status_cooldown(
+            Duration::from_secs(60),
+        );
+        let temp = tempdir().expect("tempdir");
+        let expected_project_root = dunce::canonicalize(temp.path())
+            .unwrap_or_else(|_| temp.path().to_path_buf())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+        let status_probe_calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let status_probe_calls_for_closure = status_probe_calls.clone();
+            let request = service.spawn_full_status_refresh_with_retry(
+                proxy.clone(),
+                temp.path().to_path_buf(),
+                Arc::new(|_project_root: &Path| Ok(())),
+                Arc::new(move |_project_root: &Path| {
+                    status_probe_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                    gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "unchanged full table",
+                    )
+                }),
+                Duration::from_millis(5),
+            );
+            let expected_request = if status_probe_calls.load(Ordering::SeqCst) == 0 {
+                super::ProjectIndexBootstrapRequest::Spawned
+            } else {
+                super::ProjectIndexBootstrapRequest::AlreadyRunning
+            };
+            assert_eq!(request, expected_request);
+            wait_for_project_status_detail(&events, &expected_project_root, "unchanged full table");
+            for _ in 0..100 {
+                if service.full_status_is_idle_for_test(temp.path()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        assert_eq!(
+            status_probe_calls.load(Ordering::SeqCst),
+            1,
+            "a repeated full-status refresh inside the cooldown must not start another aggregate status probe"
+        );
+        let recorded = events.lock().expect("events");
+        let full_status_events = recorded
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::ProjectIndexStatus { project_root, status }
+                        if project_root == &expected_project_root
+                            && status.detail == "unchanged full table"
+                )
+            })
+            .count();
+        assert_eq!(
+            full_status_events, 1,
+            "unchanged full status payload should not be re-broadcast"
+        );
+    }
+
+    #[test]
+    fn invalidating_full_status_cache_allows_next_refresh_after_rebuild() {
+        let service = super::ProjectIndexBootstrapService::new_for_test_with_full_status_cooldown(
+            Duration::from_secs(60),
+        );
+        let temp = tempdir().expect("tempdir");
+        let expected_project_root = dunce::canonicalize(temp.path())
+            .unwrap_or_else(|_| temp.path().to_path_buf())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+        let status_probe_calls = Arc::new(AtomicUsize::new(0));
+
+        for detail in ["first full table", "second full table"] {
+            let calls = status_probe_calls.clone();
+            let detail = detail.to_string();
+            let detail_for_probe = detail.clone();
+            let request = service.spawn_full_status_refresh_with_retry(
+                proxy.clone(),
+                temp.path().to_path_buf(),
+                Arc::new(|_project_root: &Path| Ok(())),
+                Arc::new(move |_project_root: &Path| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        &detail_for_probe,
+                    )
+                }),
+                Duration::from_millis(5),
+            );
+            assert_eq!(request, super::ProjectIndexBootstrapRequest::Spawned);
+            wait_for_project_status_detail(&events, &expected_project_root, &detail);
+            for _ in 0..100 {
+                if service.full_status_is_idle_for_test(temp.path()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            service.invalidate_full_status_for_test(temp.path());
+        }
+
+        assert_eq!(
+            status_probe_calls.load(Ordering::SeqCst),
+            2,
+            "rebuild/repair invalidation must let the next full-status refresh probe again"
         );
     }
 
