@@ -41,7 +41,7 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue, "unassigned agents should have a dedicated queue");
   assert.match(queue.textContent, /Unassigned Agents/);
-  assert.match(queue.textContent, /No Work selected/);
+  assert.match(queue.textContent, /No Workspace selected/);
   assert.match(queue.textContent, /Codex/);
   assert.equal(
     queue.querySelectorAll(".workspace-overview-agent-row").length,
@@ -102,11 +102,11 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
     sendFocus() {},
   });
 
-  assert.match(fixture.body.textContent, /Active Works/);
+  assert.match(fixture.body.textContent, /Workspaces/);
   assert.match(fixture.body.textContent, /Unassigned Agents/);
   assert.match(
     fixture.body.querySelector(".workspace-overview-status-line").textContent,
-    /2 Active Works · 1 Unassigned Agents/,
+    /2 Workspaces · 1 Unassigned Agents/,
   );
   const rows = Array.from(
     fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
@@ -120,7 +120,7 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue);
   assert.equal(queue.querySelectorAll(".workspace-overview-agent-row").length, 1);
-  assert.match(queue.textContent, /No Work selected/);
+  assert.match(queue.textContent, /No Workspace selected/);
 });
 
 test("Workspace detail renders structured body sections without preformatted dumps", () => {
@@ -142,7 +142,7 @@ test("Workspace detail renders structured body sections without preformatted dum
   );
   assert.deepEqual(sectionTitles, [
     "Summary",
-    "Agents",
+    "Work",
     "Lifecycle",
     "Work Context",
     "Coordination",
@@ -154,6 +154,87 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /work\/20260521-0234/);
   assert.match(text, /repo\/work\/20260521-0234/);
   assert.match(text, /board-claim-1/);
+});
+
+test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A single Work (launch) whose conversation split into two Sessions; the
+  // latest is active.
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-aaaa1111", started_at: "2026-05-21T03:20:00Z", is_active: false },
+    { agent_session_id: "conv-bbbb2222", started_at: "2026-05-21T04:00:00Z", is_active: true },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const sessions = Array.from(fixture.body.querySelectorAll(".workspace-detail-session"));
+  assert.equal(sessions.length, 2, "one row per conversation Session");
+  const active = sessions.filter((row) => row.dataset.active === "true");
+  assert.equal(active.length, 1, "exactly one active Session");
+  // The active row carries the latest conversation's (truncated) id and a clear
+  // "Current" badge; past rows are badged "Past".
+  assert.match(active[0].textContent, /conv-bbb/);
+  const activeBadge = active[0].querySelector(".workspace-detail-session-badge");
+  assert.equal(activeBadge.textContent, "Current");
+  assert.equal(activeBadge.dataset.sessionState, "current");
+  const pastRow = sessions.find((row) => row.dataset.active !== "true");
+  const pastBadge = pastRow.querySelector(".workspace-detail-session-badge");
+  assert.equal(pastBadge.textContent, "Past");
+  assert.equal(pastBadge.dataset.sessionState, "past");
+  // The full conversation id is available on hover even though the visible id is
+  // truncated.
+  assert.equal(
+    active[0].querySelector(".workspace-detail-session-id").title,
+    "conv-bbbb2222",
+  );
+  // Each Work renders exactly one Agent header (the agent/tool name), always
+  // shown, so two Sessions of one Work never look like two Agents. The Session
+  // rows are labelled "Session ...", not with the agent name.
+  const headings = fixture.body.querySelectorAll(".workspace-detail-work-heading");
+  assert.equal(headings.length, 1, "one Agent header per Work");
+  assert.match(headings[0].textContent, /Codex/);
+  assert.match(sessions[0].textContent, /Session/);
+  // Persistent data renders, never the stale "No assigned agents" placeholder.
+  assert.doesNotMatch(fixture.body.textContent, /No assigned agents/);
+});
+
+test("Workspace detail shows a Work heading per launch when a Workspace has multiple Works", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents = [
+    {
+      session_id: "launch-1",
+      agent_id: "codex",
+      display_name: "Codex",
+      sessions: [
+        { agent_session_id: "conv-1", started_at: "2026-05-21T03:20:00Z", is_active: true },
+      ],
+    },
+    {
+      session_id: "launch-2",
+      agent_id: "claude-code",
+      display_name: "Claude Code",
+      sessions: [
+        { agent_session_id: "conv-2", started_at: "2026-05-21T05:00:00Z", is_active: false },
+      ],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const headings = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-work-heading"),
+    (node) => node.textContent,
+  );
+  assert.deepEqual(headings, ["Codex", "Claude Code"]);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
 });
 
 test("Workspace list selection updates the detail pane", () => {
@@ -181,11 +262,16 @@ test("Workspace list selection updates the detail pane", () => {
   assert.match(detailText, /Already merged/);
 });
 
-test("Workspace resume action asks backend for resumable agents", () => {
+test("Per-Work Resume resumes that Work's own session directly (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused (resumable) Work — the active/running Work has nothing to resume.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
   const fixture = createFixture();
   const sent = [];
-  const surface = createSurface(fixture, sampleProjection(), {
+  const surface = createSurface(fixture, projection, {
     send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
   });
 
   surface.mount(fixture.body, fixture.windowData, {
@@ -193,15 +279,112 @@ test("Workspace resume action asks backend for resumable agents", () => {
     sendFocus() {},
   });
 
-  const resume = fixture.body.querySelector("[data-action='resume-workspace']");
-  assert.ok(resume, "selected workspace should expose a resume action");
+  // Resume lives on the list elements, not on the Workspace header. A Work with
+  // no recorded conversation still exposes Resume on its placeholder row.
+  assert.equal(
+    fixture.body.querySelector("[data-action='resume-workspace']"),
+    null,
+    "Workspace header no longer carries a Resume button",
+  );
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  assert.ok(resume, "a session-less Work still exposes a Resume action");
+  assert.equal(resume.dataset.sessionId, "work-launch-1");
   resume.click();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "list_resumable_agents");
-  assert.equal(sent[0].workspace_id, "workspace-current");
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
-test("Tab switcher remains visible after switching to Git Branches", () => {
+test("Each Session row carries its own Resume that resumes that conversation (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused (resumable) Work whose conversation split into two Sessions. Each
+  // Session row is a list element, so each gets its own Resume control.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-older1111", started_at: "2026-05-21T03:20:00Z", is_active: false },
+    { agent_session_id: "conv-latest2222", started_at: "2026-05-21T04:00:00Z", is_active: true },
+  ];
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // One Resume per Session row (list element), not one per Work and not on the
+  // Workspace header.
+  assert.equal(fixture.body.querySelector("[data-action='resume-workspace']"), null);
+  assert.equal(fixture.body.querySelector("[data-action='resume-work']"), null);
+  const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
+  assert.equal(resumes.length, 2, "one Resume per conversation Session");
+  // Every Resume targets the same Work (gwt session id) but a distinct
+  // conversation (agent_session_id).
+  assert.deepEqual(
+    resumes.map((node) => node.dataset.sessionId),
+    ["work-launch-1", "work-launch-1"],
+  );
+  assert.deepEqual(
+    resumes.map((node) => node.dataset.agentSessionId),
+    ["conv-older1111", "conv-latest2222"],
+  );
+
+  // Resuming the older Session resumes that exact conversation, not the latest.
+  resumes[0].click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  assert.equal(sent[0].agent_session_id, "conv-older1111");
+  assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
+});
+
+test("Non-resumable Sessions are history-only; a Start Fresh control keeps the Work launchable (SPEC-2359)", () => {
+  const projection = sampleProjection();
+  // A Paused Work whose only conversations cannot be resumed here (e.g. pruned
+  // or placeholder handles). Each Session row must render without a Resume, and
+  // the Work must still expose a way to launch a fresh conversation.
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  projection.works[0].agents[0].sessions = [
+    { agent_session_id: "conv-old", started_at: "2026-05-21T03:20:00Z", is_active: false, resumable: false },
+    { agent_session_id: "conv-new", started_at: "2026-05-21T04:00:00Z", is_active: true, resumable: false },
+  ];
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // Both Session rows render (history is visible) but carry no Resume control.
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
+
+  // A single Start Fresh fallback launches a new conversation on the Work.
+  const fresh = fixture.body.querySelector(".workspace-detail-session-fresh [data-action='resume-work']");
+  assert.ok(fresh, "Start Fresh control appears when no Session is resumable");
+  assert.equal(fresh.textContent, "Start Fresh");
+  assert.equal(fresh.dataset.sessionId, "work-launch-1");
+  fresh.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "resume_workspace_agent");
+  assert.equal(sent[0].session_id, "work-launch-1");
+  // Start Fresh carries no specific conversation → backend resolves latest/fresh.
+  assert.equal(sent[0].agent_session_id, undefined);
+});
+
+test("Workspace surface is a single fused view with no Work/Git Branches tab toggle (SPEC-2359)", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
 
@@ -210,30 +393,20 @@ test("Tab switcher remains visible after switching to Git Branches", () => {
     sendFocus() {},
   });
 
-  const tabs = fixture.body.querySelectorAll("[data-work-tab]");
-  assert.equal(tabs.length, 2, "should have Work and Git Branches tabs");
+  // The Work / Git Branches tab toggle and the separate branches section are gone.
+  assert.equal(
+    fixture.body.querySelectorAll("[data-work-tab]").length,
+    0,
+    "the Work/Git Branches tab toggle must be removed",
+  );
+  assert.equal(fixture.body.querySelector(".workspace-tab-group"), null);
+  assert.equal(fixture.body.querySelector("[data-work-section='branches']"), null);
+  assert.equal(fixture.body.querySelector(".workspace-branches-shell"), null);
 
-  const branchTab = fixture.body.querySelector("[data-work-tab='branches']");
-  branchTab.click();
-
-  const workSection = fixture.body.querySelector("[data-work-section='work']");
-  const branchSection = fixture.body.querySelector("[data-work-section='branches']");
-  assert.equal(workSection.hidden, true, "work section should be hidden");
-  assert.equal(branchSection.hidden, false, "branches section should be visible");
-
-  const tabGroupAfter = fixture.body.querySelector(".workspace-tab-group");
-  assert.ok(tabGroupAfter, "tab group should still exist in DOM");
-  assert.equal(tabGroupAfter.hidden, false, "tab group should not be hidden");
-
-  const workTabAfter = fixture.body.querySelector("[data-work-tab='work']");
-  assert.ok(workTabAfter, "Work tab should remain accessible");
-  assert.equal(workTabAfter.classList.contains("is-active"), false);
-  assert.equal(branchTab.classList.contains("is-active"), true);
-
-  workTabAfter.click();
-  assert.equal(workSection.hidden, false, "work section should reappear");
-  assert.equal(branchSection.hidden, true, "branches section should hide");
-  assert.equal(workTabAfter.classList.contains("is-active"), true);
+  // The single fused surface keeps the Workspace List + Detail.
+  assert.ok(fixture.body.querySelector(".workspace-overview-root"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-list-pane"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
 });
 
 test("Workspace refresh action rerenders locally without inventing a protocol event", () => {

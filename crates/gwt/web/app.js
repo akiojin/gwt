@@ -7458,6 +7458,7 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        getResumeBounds: () => visibleBounds(),
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
