@@ -43,7 +43,7 @@ pub struct RuntimeState {
 pub fn status_for_event(event: &str) -> Option<&'static str> {
     match window_state_for_hook_event(event)? {
         crate::persistence::WindowState::Running => Some("Running"),
-        crate::persistence::WindowState::NotStarted => Some("NotStarted"),
+        crate::persistence::WindowState::Starting => Some("Starting"),
         crate::persistence::WindowState::Idle => Some("Idle"),
         crate::persistence::WindowState::Waiting => Some("Waiting"),
         crate::persistence::WindowState::Stopped => Some("Stopped"),
