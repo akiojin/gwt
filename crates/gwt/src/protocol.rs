@@ -516,11 +516,17 @@ pub enum FrontendEvent {
     /// SPEC-2359 US-42: spawn a single previously-assigned agent in the
     /// current Workspace without opening the Launch Wizard. The
     /// `session_id` matches one of the entries returned by
-    /// [`BackendEvent::WorkspaceResumableAgents`]. `bounds` carries the
-    /// frontend's current viewport so the spawned agent window appears at
-    /// a sensible position inside the visible canvas.
+    /// [`BackendEvent::WorkspaceResumableAgents`] and identifies the Work
+    /// (the gwt launch / Session TOML). `agent_session_id`, when present,
+    /// names a specific Session (a conversation UUID under that Work) so a
+    /// single Session row can be resumed directly; when absent the Work's
+    /// latest conversation is resumed. `bounds` carries the frontend's
+    /// current viewport so the spawned agent window appears at a sensible
+    /// position inside the visible canvas.
     ResumeWorkspaceAgent {
         session_id: String,
+        #[serde(default)]
+        agent_session_id: Option<String>,
         bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
@@ -941,6 +947,11 @@ pub struct ActiveWorkAgentView {
     pub last_board_entry_kind: Option<String>,
     pub coordination_scope: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Drives the Session-centric detail rendering; empty when no
+    /// Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -958,12 +969,40 @@ pub struct WorkspaceJournalEntryView {
     pub agent_title_summary: Option<String>,
 }
 
+/// One agent-tool conversation session (the Session level of Workspace → Work →
+/// Session) shown under a Work. `agent_session_id` is the agent tool's
+/// conversation UUID and is distinct from the parent Work's `session_id` (the
+/// gwt session / launch id). A single Work (launch) can hold several of these
+/// because Claude Code / Codex split conversations on `/clear`, context limit,
+/// or resume fork.
+fn default_resumable_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistorySessionView {
+    pub agent_session_id: String,
+    pub started_at: String,
+    /// True for the Work's current (latest) conversation session.
+    pub is_active: bool,
+    /// SPEC-2359: whether this conversation can be handed to the agent CLI as a
+    /// `--resume` target. When false the surface renders the Session as
+    /// history-only (no Resume control) so a button that would silently fail is
+    /// never shown. Defaults to true for forward compatibility.
+    #[serde(default = "default_resumable_true")]
+    pub resumable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistoryAgentView {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub display_name: Option<String>,
     pub updated_at: String,
+    /// Sessions (agent-tool conversation UUIDs) observed under this Work, in
+    /// arrival order. Empty when no Session history was recorded yet.
+    #[serde(default)]
+    pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
 pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
@@ -2674,6 +2713,7 @@ mod tests {
                     last_board_entry_kind: Some("handoff".to_string()),
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
+                    sessions: Vec::new(),
                 }],
                 unassigned_agents: Vec::new(),
             }),

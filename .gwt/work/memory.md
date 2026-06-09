@@ -6761,6 +6761,27 @@ Context: Issue #2995: Branches/Work からの Resume が「ときどき」でき
 Learning: 真因は launch_wizard_cache.sessions（起動時1回ロード、spawn 時のみ per-window 部分更新、sessions_dir watcher 無し）の陳腐化。hook CLI (cli/hook/runtime_state.rs → persist_agent_session_id) が agent 起動後に書く agent_session_id を GUI cache が観測しないため、同一プロセス内で launch→stop したセッションが Branches から resume 不可になる。Work picker は projection+disk 都度ロードのため影響が小さく「Branches が多い」と一致。gwt は daemon/tray 常駐（SPEC-2077/2920）でプロセスが生き続けるため window 再起動では cache が再ロードされず「再起動でも直らない」とも一致。修正は availability(spawn_branch_load_async) と resolution(latest_resumable_branch_session) を sessions_dir から disk-fresh に読むだけ（既存の正しい QuickStartRepoScope を再利用）。
 Future Action: 「resume できない」系バグでは matching を疑う前に (1) どの関数が実ゲートか call graph を確定（wrapper が後段 scope をバイパスしていないか）、(2) 実データ・実 git レイアウトで matching が本当に false になるか empirical に検証、(3) データソースの鮮度（in-memory cache vs disk、watcher 有無、常駐プロセス寿命）を疑う。推測で大改修に入る前に再現を取る。
 
+## 2026-06-08 — 概念変更要望では SPEC 末尾の最新 Phase を実読してから設計判断する
+
+Type: lesson
+Context: gwt-discussion で『Work と Branches を統合/分離』要望を受けた。explore agent の要約と user の『Work=Branch』前提だけに従うと、SPEC-2359 を Work=branch identity に差し戻す方向（option A・大規模）に進みかけた。
+Learning: SPEC-2359 の spec section 末尾（4日前の Phase W-12 / US-60〜66）を実読すると、Work=agent session(1 agent:1 Work, FR-348) へ意図的に再設計済みで Work=branch(W-8/US-54) は supersede 済みだった。この矛盾を user に提示した結果、判断が option A → option B（presentation のみ統合・W-12 identity 維持）に変わり、4日前確定の設計を覆さずに要望を満たせた。
+Future Action: 既存概念の変更要望では、対象 SPEC section の『最新/末尾の Update Phase / Supersede note』を必ず実読し、user 前提や explore 要約と現行正本が食い違わないか確認してから設計判断する。recent supersede note を見落とさない。
+
+## 2026-06-08 — SPEC テキストと実装の drift: Work は code 上 branch 由来 multi-agent (W-8) で W-12(1:1) は未実装
+
+Type: lesson
+Context: SPEC-2359 W-13 実装で、SPEC 最新セクション W-12 (2026-06-04, FR-348 '1 agent:1 Work') を維持する前提で branch 背骨 UI を作ったが、ユーザーが視覚チェックで『Work を主導に・Work に複数 agent』と指摘。
+Learning: 実コード active_work_items_from_projection (mod.rs:2186) は active_work_agent_work_id→canonical_work_id(branch 由来) で agent を grouping し、1 Work に複数 agent を持たせる W-8 モデルを実装している。ActiveWorkItemView.agents は Vec。W-12 の '1 agent:1 Work' は SPEC テキストのみで未実装のドリフト。SPEC の最新 Update セクションを読んでも実装の真実とは限らない。
+Future Action: UI 設計前に SPEC のモデル記述だけで判断せず、対応する projection 構築コード（active_work_items_from_projection / canonical_work_id 等）を読んで実装の実態を確認する。SPEC text と code が食い違う場合は実装を真実とし、drift を明示してユーザーに確認する。
+
+## 2026-06-08 — Work/Workspace 一覧の土台はライブ active_work_projection ではなく永続 WorkspaceWorkItem(W-12)
+
+Type: lesson
+Context: 「Work surface 作り直し」で、ユーザーの『Work』をライブ active_work_projection(稼働中 agent から導出・停止で消える非永続)と誤解し、agent 一覧を spine にして何度も方向を外した(branch 背骨→Active Works→Option A→…と4回以上やり直し)。
+Learning: ユーザーの Work(=Workspace)は永続概念: 1 Start Work 単位、branch と 1:1 だがローカル branch 消失でも永続、own id、.gwt/work/events.jsonl で git 追跡、lifecycle Active/Paused/Done/Discarded、複数 session を順番に束ね(active は 1 つ)、linked SPEC/Issue/PR、Board スレッドを内包。= develop の WorkspaceWorkItem(W-12)。一覧は is_incomplete(Active+Paused)。ライブ projection は agent が無いと空で、ユーザー視覚検証も不能になる。
+Future Action: Work/Workspace 一覧 UI は最初に『永続 WorkspaceWorkItem store(load_workspace_work_items / .gwt/work/events.jsonl, develop W-12)』を土台にする。Work は agent/branch の有無に依存しない永続概念だと最初に確認。SPEC の最新フェーズ(W-12)を実装の正本とし、UI を projection ではなく永続 store に接続する。
+
 ## 2026-06-09 — Avoid wall-clock upper bounds for async coalesce tests
 
 Type: failure-pattern
