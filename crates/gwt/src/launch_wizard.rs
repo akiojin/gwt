@@ -3755,14 +3755,14 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Deeper reasoning for complex work",
-        is_default: false,
+        description: "Balances tokens and intelligence (Fable 5 / Opus 4.8 default)",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "xHigh",
         stored_value: "xhigh",
-        description: "Best results for most coding tasks (Opus 4.8 default)",
-        is_default: true,
+        description: "Deeper reasoning at higher token spend",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Max",
@@ -3795,13 +3795,13 @@ const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
         label: "Medium",
         stored_value: "medium",
         description: "Balanced reasoning for everyday work",
-        is_default: true,
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Deeper reasoning for complex work",
-        is_default: false,
+        description: "Deeper reasoning for complex work (Sonnet 4.6 default)",
+        is_default: true,
     },
 ];
 
@@ -8518,7 +8518,7 @@ mod tests {
             .expect("opus options must contain ultracode");
         assert!(
             !ultra.is_default,
-            "ultracode must be opt-in; xhigh stays the Opus default"
+            "ultracode must be opt-in; high stays the Opus-tier default"
         );
     }
 
@@ -8537,12 +8537,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_opus_reasoning_default_is_xhigh() {
+    fn claude_opus_reasoning_default_is_high() {
+        // Claude Code model-config docs: default effort is `high` on
+        // Fable 5 / Opus 4.8 (`xhigh` was the Opus 4.7 default).
         let default = super::CLAUDE_OPUS_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Opus reasoning options must have a default row");
-        assert_eq!(default.stored_value, "xhigh");
+        assert_eq!(default.stored_value, "high");
     }
 
     fn claude_state(model: &str, ultracode_supported: bool) -> LaunchWizardState {
@@ -8591,7 +8593,7 @@ mod tests {
     }
 
     #[test]
-    fn fable_reasoning_matches_opus_ladder_with_xhigh_default() {
+    fn fable_reasoning_matches_opus_ladder_with_high_default() {
         let values = claude_reasoning_values(&claude_state("fable", true));
         assert_eq!(
             values,
@@ -8603,7 +8605,7 @@ mod tests {
             .iter()
             .find(|option| option.is_default)
             .map(|option| option.stored_value);
-        assert_eq!(default, Some("xhigh"));
+        assert_eq!(default, Some("high"));
     }
 
     #[test]
@@ -8633,12 +8635,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_reasoning_default_is_medium() {
+    fn claude_sonnet_reasoning_default_is_high() {
+        // Claude Code model-config docs: default effort is `high` on
+        // Sonnet 4.6.
         let default = super::CLAUDE_SONNET_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Sonnet reasoning options must have a default row");
-        assert_eq!(default.stored_value, "medium");
+        assert_eq!(default.stored_value, "high");
     }
 
     #[test]
