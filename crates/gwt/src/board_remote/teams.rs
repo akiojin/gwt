@@ -111,6 +111,113 @@ impl TeamsProvider {
             },
         }
     }
+
+    /// Post a channel message (root, when `reply_to` is None) or a reply, and
+    /// return the created message id. `subject` is only valid on roots.
+    fn post_graph_message(
+        &self,
+        team: &str,
+        chan: &str,
+        title: Option<&str>,
+        body_markdown: &str,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let url = match reply_to {
+            Some(parent) => {
+                format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages/{parent}/replies")
+            }
+            None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
+        };
+        let content = markdown::markdown_to_teams_html(body_markdown);
+        let mut payload =
+            serde_json::json!({ "body": { "contentType": "html", "content": content } });
+        if reply_to.is_none() {
+            if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+                payload["subject"] = serde_json::Value::String(title.to_string());
+            }
+        }
+        let payload = payload.to_string();
+        let response = self
+            .http
+            .post_json(&url, &self.token, &payload)
+            .map_err(GwtError::Other)?;
+        check_status(&response, "post message")?;
+        let created: GraphMessage = serde_json::from_str(&response.body)
+            .map_err(|err| GwtError::Other(format!("teams post parse: {err}")))?;
+        if created.id.trim().is_empty() {
+            return Err(GwtError::Other(
+                "teams post returned no message id".to_string(),
+            ));
+        }
+        Ok(created.id)
+    }
+
+    /// Best-effort update of a Workspace root summary card via Graph PATCH.
+    /// Graph restricts channel-message edits, so failures are swallowed: the
+    /// root card may stay stale, but a refresh never blocks posting (SPEC-2963).
+    fn update_graph_message(&self, team: &str, chan: &str, id: &str, body_markdown: &str) {
+        let url = format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages/{id}");
+        let content = markdown::markdown_to_teams_html(body_markdown);
+        let payload = serde_json::json!({ "body": { "contentType": "html", "content": content } })
+            .to_string();
+        if let Ok(response) = self.http.patch_json(&url, &self.token, &payload) {
+            let _ = check_status(&response, "update message");
+        }
+    }
+
+    /// SPEC-2963: get-or-create (and best-effort refresh) the Workspace/General
+    /// thread root for an entry. Returns the root message id to reply under.
+    fn ensure_thread_root(
+        &self,
+        worktree_root: &Path,
+        team: &str,
+        chan: &str,
+        channel: &str,
+        entry: &BoardEntry,
+    ) -> Result<String> {
+        let key = mapping::thread_key_for_entry(entry);
+        let item =
+            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(worktree_root)
+                .ok()
+                .and_then(|proj| proj.work_items.into_iter().find(|work| work.id == key));
+        let (card_title, card_body) =
+            mapping::workspace_summary_card(&key, item.as_ref(), entry.origin_branch.as_deref());
+        let hash = mapping::card_hash(&card_title, &card_body);
+
+        if let Some(existing) =
+            gwt_core::board_remote_roots::find_root_mapping(worktree_root, "teams", channel, &key)
+        {
+            if existing.card_hash != hash {
+                self.update_graph_message(team, chan, &existing.root_id, &card_body);
+                let _ = gwt_core::board_remote_roots::append_root_mapping(
+                    worktree_root,
+                    &gwt_core::board_remote_roots::RootMapping {
+                        key,
+                        provider: "teams".to_string(),
+                        channel: channel.to_string(),
+                        root_id: existing.root_id.clone(),
+                        card_hash: hash,
+                        updated_at: Utc::now(),
+                    },
+                );
+            }
+            return Ok(existing.root_id);
+        }
+
+        let root_id = self.post_graph_message(team, chan, Some(&card_title), &card_body, None)?;
+        let _ = gwt_core::board_remote_roots::append_root_mapping(
+            worktree_root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key,
+                provider: "teams".to_string(),
+                channel: channel.to_string(),
+                root_id: root_id.clone(),
+                card_hash: hash,
+                updated_at: Utc::now(),
+            },
+        );
+        Ok(root_id)
+    }
 }
 
 fn split_channel(channel: &str) -> Result<(String, String)> {
@@ -282,35 +389,12 @@ impl BoardProvider for TeamsProvider {
                     GwtError::Other("teams: no channel resolved for post".to_string())
                 })?;
         let (team, chan) = split_channel(&channel)?;
-        let url = match entry.parent_id.as_deref() {
-            Some(parent) => {
-                format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages/{parent}/replies")
-            }
-            None => format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages"),
-        };
-        // Body is authored in Markdown and rendered to the HTML subset Teams
-        // displays (SPEC-2963); headings degrade to bold+<br>.
-        let content = markdown::markdown_to_teams_html(&entry.body);
-        let mut payload =
-            serde_json::json!({ "body": { "contentType": "html", "content": content } });
-        // `subject` is only valid on root channel messages; Graph rejects it on
-        // replies, so set it only when this is not a threaded reply.
-        if entry.parent_id.is_none() {
-            if let Some(title) = entry
-                .title
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-            {
-                payload["subject"] = serde_json::Value::String(title.to_string());
-            }
-        }
-        let payload = payload.to_string();
-        let response = self
-            .http
-            .post_json(&url, &self.token, &payload)
-            .map_err(GwtError::Other)?;
-        check_status(&response, "post message")?;
+        // SPEC-2963 Workspace threading: every post is a reply under the
+        // Workspace (or General) thread root — a summary card created once and
+        // refreshed when the Workspace changes. `entry.parent_id` collapses into
+        // the single Workspace thread (Teams channel replies are one level deep).
+        let root_id = self.ensure_thread_root(worktree_root, &team, &chan, &channel, &entry)?;
+        self.post_graph_message(&team, &chan, None, &entry.body, Some(&root_id))?;
         self.cache.invalidate();
         self.load_snapshot(worktree_root)
     }
@@ -469,8 +553,99 @@ mod tests {
         }
     }
 
+    /// Unique throwaway repo root per call so the SPEC-2963 root mapping is
+    /// isolated from the real working tree (mirrors the Slack tests).
     fn root() -> PathBuf {
-        PathBuf::from(".")
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gwt-board-roots-teams-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    }
+
+    /// Records every post_json / patch_json (url + body) and returns an
+    /// incrementing message id so root get-or-create works in tests.
+    struct RecordingGraph {
+        posts: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+        patches: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+        id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl RecordingGraph {
+        fn new() -> Self {
+            Self {
+                posts: std::sync::Arc::new(Mutex::new(Vec::new())),
+                patches: std::sync::Arc::new(Mutex::new(Vec::new())),
+                id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            }
+        }
+        fn posts(&self) -> std::sync::Arc<Mutex<Vec<(String, String)>>> {
+            self.posts.clone()
+        }
+        fn patches(&self) -> std::sync::Arc<Mutex<Vec<(String, String)>>> {
+            self.patches.clone()
+        }
+    }
+
+    impl HttpClient for RecordingGraph {
+        fn get(
+            &self,
+            _u: &str,
+            _b: &str,
+            _q: &[(&str, &str)],
+        ) -> std::result::Result<HttpResponse, String> {
+            Ok(HttpResponse {
+                status: 200,
+                body: r#"{"value":[]}"#.to_string(),
+                retry_after: None,
+            })
+        }
+        fn post_form(
+            &self,
+            _u: &str,
+            _b: &str,
+            _p: &[(&str, &str)],
+        ) -> std::result::Result<HttpResponse, String> {
+            Err("teams uses post_json".to_string())
+        }
+        fn post_json(
+            &self,
+            url: &str,
+            _b: &str,
+            body: &str,
+        ) -> std::result::Result<HttpResponse, String> {
+            self.posts
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_string()));
+            let n = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            Ok(HttpResponse {
+                status: 201,
+                body: format!(r#"{{"id":"m-{n}"}}"#),
+                retry_after: None,
+            })
+        }
+        fn patch_json(
+            &self,
+            url: &str,
+            _b: &str,
+            body: &str,
+        ) -> std::result::Result<HttpResponse, String> {
+            self.patches
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.to_string()));
+            Ok(HttpResponse {
+                status: 200,
+                body: r#"{"id":"patched"}"#.to_string(),
+                retry_after: None,
+            })
+        }
     }
 
     fn entry(body: &str) -> BoardEntry {
@@ -505,22 +680,30 @@ mod tests {
     }
 
     #[test]
-    fn post_entry_uses_replies_endpoint_for_threaded_post() {
-        let recorded = std::sync::Arc::new(MockGraph::default());
-        let prov = TeamsProvider::new(
-            "tok",
-            "team-1/chan-1",
-            BTreeMap::new(),
-            Box::new(MockGraphShared(recorded.clone())),
-            60,
-        );
-        let mut e = entry("threaded");
-        e.parent_id = Some("m-parent".to_string());
-        prov.post_entry(&root(), e).unwrap();
-        let url = recorded.last_post_url.lock().unwrap().clone();
-        assert!(url.contains("/teams/team-1/channels/chan-1/messages/m-parent/replies"));
-        let body = recorded.last_post_body.lock().unwrap().clone();
-        assert!(body.contains("threaded"));
+    fn post_entry_creates_root_then_replies_under_it() {
+        // SPEC-2963: the entry threads under the Workspace root, not under a raw
+        // parent_id. First a top-level channel message (root), then a reply to
+        // that root's message id.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(
+            &root,
+            entry("threaded").with_audience(vec!["ws-a".to_string()]),
+        )
+        .unwrap();
+        let calls = posts.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "root create + reply");
+        assert!(calls[0]
+            .0
+            .ends_with("/teams/team-1/channels/chan-1/messages"));
+        assert!(calls[1]
+            .0
+            .contains("/teams/team-1/channels/chan-1/messages/m-1/replies"));
+        assert!(calls[1].1.contains("threaded"));
     }
 
     // Share one MockGraph between the provider and the test assertions.
@@ -611,33 +794,103 @@ mod tests {
     }
 
     #[test]
-    fn post_body_renders_html_with_subject() {
-        let recorded = std::sync::Arc::new(MockGraph::default());
-        let prov = TeamsProvider::new(
-            "tok",
-            "team-1/chan-1",
-            BTreeMap::new(),
-            Box::new(MockGraphShared(recorded.clone())),
-            60,
+    fn root_card_carries_subject_and_reply_renders_html_without_subject() {
+        // SPEC-2963: the Workspace root card carries the subject + html content;
+        // the entry reply carries html body and no subject (Graph rejects it).
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        let mut e = entry("**bold** and _italic_").with_audience(vec!["ws-a".to_string()]);
+        e.origin_branch = Some("feature/x".to_string());
+        prov.post_entry(&root, e).unwrap();
+        let calls = posts.lock().unwrap().clone();
+        // Root card.
+        assert!(calls[0].1.contains("\"contentType\":\"html\""));
+        assert!(
+            calls[0].1.contains("\"subject\""),
+            "root card carries a subject: {}",
+            calls[0].1
         );
-        prov.post_entry(
-            &root(),
-            entry("**bold** and _italic_").with_title("Release notes"),
+        // Reply.
+        assert!(
+            calls[1].1.contains("<strong>bold</strong>"),
+            "markdown bold must render to <strong>: {}",
+            calls[1].1
+        );
+        assert!(
+            !calls[1].1.contains("\"subject\""),
+            "replies must not carry a subject: {}",
+            calls[1].1
+        );
+    }
+
+    #[test]
+    fn second_post_reuses_root_and_general_for_broadcast() {
+        // get-or-create: same Workspace reuses its root; broadcast uses General.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(&root, entry("one").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+        prov.post_entry(&root, entry("two").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+        // 1 root + 2 replies = 3 posts (root reused).
+        assert_eq!(posts.lock().unwrap().len(), 3);
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        assert_eq!(
+            mappings.keys().filter(|(_, _, key)| key == "ws-a").count(),
+            1
+        );
+
+        // A broadcast post (no audience) opens a distinct General root.
+        prov.post_entry(&root, entry("broadcast")).unwrap();
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        assert!(mappings.keys().any(|(_, _, key)| key == "general"));
+    }
+
+    #[test]
+    fn changed_card_triggers_graph_patch() {
+        // SPEC-2963 root refresh: a stale stored hash triggers a PATCH against
+        // the existing root before the reply is threaded under it.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let patches = mock.patches();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        gwt_core::board_remote_roots::append_root_mapping(
+            &root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key: "ws-a".to_string(),
+                provider: "teams".to_string(),
+                channel: "team-1/chan-1".to_string(),
+                root_id: "OLD".to_string(),
+                card_hash: "stale".to_string(),
+                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            },
         )
         .unwrap();
-        let body = recorded.last_post_body.lock().unwrap().clone();
-        assert!(
-            body.contains("\"contentType\":\"html\""),
-            "post body must use contentType=html: {body}"
-        );
-        assert!(
-            body.contains("<strong>bold</strong>"),
-            "markdown bold must render to <strong>: {body}"
-        );
-        assert!(
-            body.contains("\"subject\":\"Release notes\""),
-            "title must map to the Teams subject: {body}"
-        );
+        prov.post_entry(&root, entry("x").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+
+        // One PATCH against the existing root, and only the reply is posted.
+        let patches = patches.lock().unwrap().clone();
+        assert_eq!(patches.len(), 1, "stale root patched once");
+        assert!(patches[0]
+            .0
+            .contains("/teams/team-1/channels/chan-1/messages/OLD"));
+        let posts = posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "no new root created");
+        assert!(posts[0]
+            .0
+            .contains("/teams/team-1/channels/chan-1/messages/OLD/replies"));
     }
 
     #[test]

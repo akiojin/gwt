@@ -113,6 +113,30 @@ impl HttpClient for ReqwestHttpClient {
             retry_after,
         })
     }
+
+    fn patch_json(
+        &self,
+        url: &str,
+        bearer: &str,
+        body: &str,
+    ) -> std::result::Result<HttpResponse, String> {
+        let response = self
+            .client
+            .patch(url)
+            .bearer_auth(bearer)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .map_err(|err| err.to_string())?;
+        let status = response.status().as_u16();
+        let retry_after = retry_after_seconds(&response);
+        let body = response.text().map_err(|err| err.to_string())?;
+        Ok(HttpResponse {
+            status,
+            body,
+            retry_after,
+        })
+    }
 }
 
 impl FormPoster for ReqwestHttpClient {

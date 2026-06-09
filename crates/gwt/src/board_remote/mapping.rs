@@ -4,9 +4,12 @@
 //! renders (id, author, body, created_at, parent_id, audience).
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, TimeZone, Utc};
+use gwt_core::board_remote_roots::GENERAL_THREAD_KEY;
 use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+use gwt_core::workspace_projection::{WorkspaceStatusCategory, WorkspaceWorkItem};
 
 /// Parse a Slack message timestamp (`"1700000000.123456"`) into UTC.
 pub fn slack_ts_to_datetime(ts: &str) -> Option<DateTime<Utc>> {
@@ -40,6 +43,90 @@ pub fn resolve_channel(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// SPEC-2963 Workspace threading: the thread root key for an entry — its first
+/// non-empty Workspace audience, or the General thread for broadcast /
+/// non-Workspace posts.
+pub fn thread_key_for_entry(entry: &BoardEntry) -> String {
+    entry
+        .audience
+        .iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| GENERAL_THREAD_KEY.to_string())
+}
+
+fn status_label(status: WorkspaceStatusCategory) -> &'static str {
+    match status {
+        WorkspaceStatusCategory::Active => "Active",
+        WorkspaceStatusCategory::Idle => "Paused",
+        WorkspaceStatusCategory::Blocked => "Blocked",
+        WorkspaceStatusCategory::Done => "Done",
+        WorkspaceStatusCategory::Unknown => "Unknown",
+    }
+}
+
+/// Build the Workspace summary card (title + markdown body) used as the thread
+/// root. The General thread gets a fixed header. When the Workspace item is not
+/// yet known, the `branch_fallback` (or key) titles the card and fields show
+/// "—" so a placeholder root can be created and refined later (SPEC-2963).
+pub fn workspace_summary_card(
+    key: &str,
+    item: Option<&WorkspaceWorkItem>,
+    branch_fallback: Option<&str>,
+) -> (String, String) {
+    if key == GENERAL_THREAD_KEY {
+        return (
+            "General".to_string(),
+            "Broadcast / non-Workspace coordination.".to_string(),
+        );
+    }
+    let branch_fallback = branch_fallback
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(item) = item else {
+        let title = branch_fallback
+            .map(str::to_string)
+            .unwrap_or_else(|| key.to_string());
+        return (title, "Branch: —\nSPEC: —\nPR: —".to_string());
+    };
+    let container = item.execution_containers.first();
+    let branch = container
+        .and_then(|c| c.branch.clone())
+        .or_else(|| branch_fallback.map(str::to_string));
+    let title = if item.title.trim().is_empty() {
+        branch.clone().unwrap_or_else(|| key.to_string())
+    } else {
+        item.title.clone()
+    };
+    let mut lines = Vec::new();
+    lines.push(format!("Branch: {}", branch.as_deref().unwrap_or("—")));
+    lines.push(format!("SPEC: {}", item.owner.as_deref().unwrap_or("—")));
+    match container.and_then(|c| c.pr_number) {
+        Some(pr) => {
+            let state = container
+                .and_then(|c| c.pr_state.clone())
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
+            lines.push(format!("PR: #{pr}{state}"));
+        }
+        None => lines.push("PR: —".to_string()),
+    }
+    lines.push(format!("Lifecycle: {}", status_label(item.status_category)));
+    (title, lines.join("\n"))
+}
+
+/// Stable hash of a rendered root card (title + body), used to detect when the
+/// Workspace summary changed so the root message is updated. Deterministic
+/// across runs (fixed-seed `DefaultHasher`).
+pub fn card_hash(title: &str, body: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    title.hash(&mut hasher);
+    "\u{0}".hash(&mut hasher);
+    body.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Minimal shape of a Slack message read from `conversations.history`/`replies`.

@@ -62,6 +62,16 @@ pub trait HttpClient: Send + Sync {
     ) -> std::result::Result<HttpResponse, String> {
         Err("post_json is not supported by this HTTP client".to_string())
     }
+    /// PATCH a raw JSON `body` with a bearer token (used by the Microsoft Graph
+    /// Teams provider to update a Workspace root summary card; SPEC-2963).
+    fn patch_json(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        _body: &str,
+    ) -> std::result::Result<HttpResponse, String> {
+        Err("patch_json is not supported by this HTTP client".to_string())
+    }
 }
 
 /// Slack-backed Board provider.
@@ -156,6 +166,159 @@ impl SlackProvider {
             },
         }
     }
+
+    /// Build Block Kit blocks (optional header + body section) and a plain-text
+    /// fallback for a title/body pair. Empty blocks serialize to `"[]"`.
+    fn build_blocks(title: Option<&str>, body_markdown: &str) -> (String, String) {
+        let title = title.map(str::trim).filter(|t| !t.is_empty());
+        let mrkdwn = markdown::markdown_to_slack_mrkdwn(body_markdown);
+        let mut blocks: Vec<serde_json::Value> = Vec::new();
+        if let Some(title) = title {
+            let header_text: String = title.chars().take(150).collect();
+            blocks.push(serde_json::json!({
+                "type": "header",
+                "text": { "type": "plain_text", "text": header_text, "emoji": true }
+            }));
+        }
+        if !mrkdwn.trim().is_empty() {
+            let section_text: String = mrkdwn.chars().take(3000).collect();
+            blocks.push(serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": section_text }
+            }));
+        }
+        let blocks_json = serde_json::Value::Array(blocks).to_string();
+        let fallback = match title {
+            Some(title) => format!("{title}\n{body_markdown}"),
+            None => body_markdown.to_string(),
+        };
+        (blocks_json, fallback)
+    }
+
+    /// Post a message (optionally as a reply under `thread_ts`). Returns the new
+    /// message ts (the thread root id for a root post).
+    fn post_message(
+        &self,
+        channel: &str,
+        title: Option<&str>,
+        body_markdown: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<String> {
+        let (blocks_json, fallback) = Self::build_blocks(title, body_markdown);
+        let mut params: Vec<(&str, &str)> = vec![("channel", channel), ("text", &fallback)];
+        if blocks_json != "[]" {
+            params.push(("blocks", &blocks_json));
+        }
+        if let Some(thread_ts) = thread_ts {
+            params.push(("thread_ts", thread_ts));
+        }
+        let response = self
+            .http
+            .post_form(
+                &format!("{SLACK_API}/chat.postMessage"),
+                &self.token,
+                &params,
+            )
+            .map_err(GwtError::Other)?;
+        check_status(&response, "chat.postMessage")?;
+        let parsed: SlackPostResponse = serde_json::from_str(&response.body)
+            .map_err(|err| GwtError::Other(format!("slack post parse: {err}")))?;
+        if !parsed.ok {
+            return Err(GwtError::Other(format!(
+                "slack chat.postMessage error: {}",
+                parsed.error.unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        parsed
+            .ts
+            .filter(|ts| !ts.is_empty())
+            .ok_or_else(|| GwtError::Other("slack chat.postMessage returned no ts".to_string()))
+    }
+
+    /// Update an existing message (the Workspace root summary card; SPEC-2963).
+    fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        title: Option<&str>,
+        body_markdown: &str,
+    ) -> Result<()> {
+        let (blocks_json, fallback) = Self::build_blocks(title, body_markdown);
+        let mut params: Vec<(&str, &str)> =
+            vec![("channel", channel), ("ts", ts), ("text", &fallback)];
+        if blocks_json != "[]" {
+            params.push(("blocks", &blocks_json));
+        }
+        let response = self
+            .http
+            .post_form(&format!("{SLACK_API}/chat.update"), &self.token, &params)
+            .map_err(GwtError::Other)?;
+        check_status(&response, "chat.update")?;
+        let parsed: SlackPostResponse = serde_json::from_str(&response.body)
+            .map_err(|err| GwtError::Other(format!("slack update parse: {err}")))?;
+        if !parsed.ok {
+            return Err(GwtError::Other(format!(
+                "slack chat.update error: {}",
+                parsed.error.unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        Ok(())
+    }
+
+    /// SPEC-2963: get-or-create (and refresh on change) the Workspace/General
+    /// thread root for an entry. Returns the root ts to thread the reply under.
+    fn ensure_thread_root(
+        &self,
+        worktree_root: &Path,
+        channel: &str,
+        entry: &BoardEntry,
+    ) -> Result<String> {
+        let key = mapping::thread_key_for_entry(entry);
+        let item =
+            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(worktree_root)
+                .ok()
+                .and_then(|proj| proj.work_items.into_iter().find(|work| work.id == key));
+        let (card_title, card_body) =
+            mapping::workspace_summary_card(&key, item.as_ref(), entry.origin_branch.as_deref());
+        let hash = mapping::card_hash(&card_title, &card_body);
+
+        if let Some(existing) =
+            gwt_core::board_remote_roots::find_root_mapping(worktree_root, "slack", channel, &key)
+        {
+            if existing.card_hash != hash {
+                // Best-effort: a root-card refresh failure must not block the
+                // post itself (the reply still lands in the thread).
+                let _ =
+                    self.update_message(channel, &existing.root_id, Some(&card_title), &card_body);
+                let _ = gwt_core::board_remote_roots::append_root_mapping(
+                    worktree_root,
+                    &gwt_core::board_remote_roots::RootMapping {
+                        key,
+                        provider: "slack".to_string(),
+                        channel: channel.to_string(),
+                        root_id: existing.root_id.clone(),
+                        card_hash: hash,
+                        updated_at: Utc::now(),
+                    },
+                );
+            }
+            return Ok(existing.root_id);
+        }
+
+        let root_ts = self.post_message(channel, Some(&card_title), &card_body, None)?;
+        let _ = gwt_core::board_remote_roots::append_root_mapping(
+            worktree_root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key,
+                provider: "slack".to_string(),
+                channel: channel.to_string(),
+                root_id: root_ts.clone(),
+                card_hash: hash,
+                updated_at: Utc::now(),
+            },
+        );
+        Ok(root_ts)
+    }
 }
 
 fn check_status(response: &HttpResponse, op: &str) -> Result<()> {
@@ -217,6 +380,10 @@ struct SlackPostResponse {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
+    /// Posted message timestamp — the thread root id for Workspace threading
+    /// (SPEC-2963). `chat.postMessage` returns it; `chat.update` echoes it.
+    #[serde(default)]
+    ts: Option<String>,
 }
 
 impl BoardProvider for SlackProvider {
@@ -226,66 +393,18 @@ impl BoardProvider for SlackProvider {
                 .ok_or_else(|| {
                     GwtError::Other("slack: no channel resolved for post".to_string())
                 })?;
-        // Build Block Kit: an optional `header` block for the title (plain_text,
-        // Slack caps it at 150 chars) + a `section` block with the body rendered
-        // to mrkdwn (SPEC-2963). `text` stays as the notification/accessibility
-        // fallback (Slack recommends it whenever `blocks` is used).
-        let title = entry
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
-        let mrkdwn = markdown::markdown_to_slack_mrkdwn(&entry.body);
-
-        let mut blocks: Vec<serde_json::Value> = Vec::new();
-        if let Some(title) = title {
-            let header_text: String = title.chars().take(150).collect();
-            blocks.push(serde_json::json!({
-                "type": "header",
-                "text": { "type": "plain_text", "text": header_text, "emoji": true }
-            }));
-        }
-        if !mrkdwn.trim().is_empty() {
-            // A single section's text field is capped at 3000 chars.
-            let section_text: String = mrkdwn.chars().take(3000).collect();
-            blocks.push(serde_json::json!({
-                "type": "section",
-                "text": { "type": "mrkdwn", "text": section_text }
-            }));
-        }
-        let has_blocks = !blocks.is_empty();
-        let blocks_json = serde_json::Value::Array(blocks).to_string();
-
-        let body_text = mapping::board_entry_to_slack_text(&entry);
-        let fallback = match title {
-            Some(title) => format!("{title}\n{body_text}"),
-            None => body_text,
-        };
-
-        let mut params: Vec<(&str, &str)> = vec![("channel", &channel), ("text", &fallback)];
-        if has_blocks {
-            params.push(("blocks", &blocks_json));
-        }
-        if let Some(parent) = entry.parent_id.as_deref() {
-            params.push(("thread_ts", parent));
-        }
-        let response = self
-            .http
-            .post_form(
-                &format!("{SLACK_API}/chat.postMessage"),
-                &self.token,
-                &params,
-            )
-            .map_err(GwtError::Other)?;
-        check_status(&response, "chat.postMessage")?;
-        let parsed: SlackPostResponse = serde_json::from_str(&response.body)
-            .map_err(|err| GwtError::Other(format!("slack post parse: {err}")))?;
-        if !parsed.ok {
-            return Err(GwtError::Other(format!(
-                "slack chat.postMessage error: {}",
-                parsed.error.unwrap_or_else(|| "unknown".to_string())
-            )));
-        }
+        // SPEC-2963 Workspace threading: every post is a reply under the
+        // Workspace (or General) thread root — a summary card created once and
+        // refreshed when the Workspace changes. `entry.parent_id` (a reply to a
+        // specific Board entry) collapses into the single Workspace thread since
+        // Slack threads are one level deep.
+        let root_ts = self.ensure_thread_root(worktree_root, &channel, &entry)?;
+        self.post_message(
+            &channel,
+            entry.title.as_deref(),
+            &entry.body,
+            Some(&root_ts),
+        )?;
         // The post invalidates the read cache so the next load reflects it.
         self.cache.invalidate();
         self.load_snapshot(worktree_root)
@@ -442,8 +561,94 @@ mod tests {
         SlackProvider::new("xoxb-token", "CH-DEFAULT", map, Box::new(mock), 60)
     }
 
+    /// A unique throwaway repo root per call so the SPEC-2963 root-mapping
+    /// JSONL (`.gwt/work/board-remote-roots.jsonl`) and `.gitattributes` are
+    /// written under an isolated temp dir, never the real working tree. Multi-
+    /// post tests bind one root and reuse it.
     fn root() -> PathBuf {
-        PathBuf::from(".")
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gwt-board-roots-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    }
+
+    /// Captured post calls: `(url, params)` per post_form invocation.
+    type CallLog = std::sync::Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
+    /// Recording mock that captures every post (url + params) and returns an
+    /// incrementing `ts` so root-thread get-or-create works in tests.
+    struct RecordingPosts {
+        calls: CallLog,
+        history_body: String,
+        ts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl RecordingPosts {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+                history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+                ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            }
+        }
+        fn handle(&self) -> CallLog {
+            self.calls.clone()
+        }
+    }
+
+    impl HttpClient for RecordingPosts {
+        fn get(
+            &self,
+            _u: &str,
+            _b: &str,
+            _q: &[(&str, &str)],
+        ) -> std::result::Result<HttpResponse, String> {
+            Ok(HttpResponse {
+                status: 200,
+                body: self.history_body.clone(),
+                retry_after: None,
+            })
+        }
+        fn post_form(
+            &self,
+            url: &str,
+            _b: &str,
+            params: &[(&str, &str)],
+        ) -> std::result::Result<HttpResponse, String> {
+            self.calls.lock().unwrap().push((
+                url.to_string(),
+                params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            let n = self.ts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            Ok(HttpResponse {
+                status: 200,
+                body: format!(r#"{{"ok":true,"ts":"ts-{n}"}}"#),
+                retry_after: None,
+            })
+        }
+    }
+
+    fn post_calls(calls: &CallLog, endpoint: &str) -> Vec<Vec<(String, String)>> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(url, _)| url.contains(endpoint))
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    fn has_param(params: &[(String, String)], key: &str, value: &str) -> bool {
+        params.iter().any(|(k, v)| k == key && v == value)
     }
 
     fn entry(body: &str) -> BoardEntry {
@@ -481,111 +686,45 @@ mod tests {
     }
 
     #[test]
-    fn post_entry_routes_to_mapped_channel_and_threads() {
-        // Use a recording client to capture the exact post params.
+    fn post_entry_creates_workspace_root_then_threads_reply() {
+        // SPEC-2963: first post to a Workspace creates the summary-card root in
+        // the mapped channel; the entry itself is a reply threaded under it.
         let mut map = BTreeMap::new();
         map.insert("ws-a".to_string(), "CH-A".to_string());
-        let recorded = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-        struct RecordingHttp {
-            recorded: std::sync::Arc<Mutex<Vec<(String, String)>>>,
-            post_body: String,
-            history_body: String,
-        }
-        impl HttpClient for RecordingHttp {
-            fn get(
-                &self,
-                _u: &str,
-                _b: &str,
-                _q: &[(&str, &str)],
-            ) -> std::result::Result<HttpResponse, String> {
-                Ok(HttpResponse {
-                    status: 200,
-                    body: self.history_body.clone(),
-                    retry_after: None,
-                })
-            }
-            fn post_form(
-                &self,
-                _u: &str,
-                _b: &str,
-                params: &[(&str, &str)],
-            ) -> std::result::Result<HttpResponse, String> {
-                *self.recorded.lock().unwrap() = params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                Ok(HttpResponse {
-                    status: 200,
-                    body: self.post_body.clone(),
-                    retry_after: None,
-                })
-            }
-        }
-        let http = RecordingHttp {
-            recorded: recorded.clone(),
-            post_body: r#"{"ok":true}"#.to_string(),
-            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
-        };
-        let prov = SlackProvider::new("t", "CH-DEFAULT", map, Box::new(http), 60);
-        let mut e = entry("threaded");
-        e.parent_id = Some("1700000000.000100".to_string());
-        e = e.with_audience(vec!["ws-a".to_string()]);
-        prov.post_entry(&root(), e).unwrap();
-        let params = recorded.lock().unwrap().clone();
-        assert!(params.contains(&("channel".to_string(), "CH-A".to_string())));
-        assert!(params.contains(&("text".to_string(), "threaded".to_string())));
-        assert!(params.contains(&("thread_ts".to_string(), "1700000000.000100".to_string())));
+        let mock = RecordingPosts::new();
+        let calls = mock.handle();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", map, Box::new(mock), 60);
+        let root = root();
+        let e = entry("threaded").with_audience(vec!["ws-a".to_string()]);
+        prov.post_entry(&root, e).unwrap();
+
+        let posts = post_calls(&calls, "chat.postMessage");
+        assert_eq!(
+            posts.len(),
+            2,
+            "first post creates the Workspace root, second is the reply"
+        );
+        // Root card: mapped channel, posted at top level (no thread_ts).
+        assert!(has_param(&posts[0], "channel", "CH-A"));
+        assert!(!posts[0].iter().any(|(k, _)| k == "thread_ts"));
+        // Reply: same channel, threads under the root ts (ts-1), carries body.
+        assert!(has_param(&posts[1], "channel", "CH-A"));
+        assert!(has_param(&posts[1], "text", "threaded"));
+        assert!(has_param(&posts[1], "thread_ts", "ts-1"));
     }
 
     #[test]
     fn post_entry_builds_block_kit_for_title_and_markdown() {
-        let recorded = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-        struct RecordingHttp {
-            recorded: std::sync::Arc<Mutex<Vec<(String, String)>>>,
-        }
-        impl HttpClient for RecordingHttp {
-            fn get(
-                &self,
-                _u: &str,
-                _b: &str,
-                _q: &[(&str, &str)],
-            ) -> std::result::Result<HttpResponse, String> {
-                Ok(HttpResponse {
-                    status: 200,
-                    body: r#"{"ok":true,"messages":[]}"#.to_string(),
-                    retry_after: None,
-                })
-            }
-            fn post_form(
-                &self,
-                _u: &str,
-                _b: &str,
-                params: &[(&str, &str)],
-            ) -> std::result::Result<HttpResponse, String> {
-                *self.recorded.lock().unwrap() = params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                Ok(HttpResponse {
-                    status: 200,
-                    body: r#"{"ok":true}"#.to_string(),
-                    retry_after: None,
-                })
-            }
-        }
-        let prov = SlackProvider::new(
-            "t",
-            "CH-DEFAULT",
-            BTreeMap::new(),
-            Box::new(RecordingHttp {
-                recorded: recorded.clone(),
-            }),
-            60,
-        );
+        let mock = RecordingPosts::new();
+        let calls = mock.handle();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", BTreeMap::new(), Box::new(mock), 60);
         prov.post_entry(&root(), entry("**bold** text").with_title("Release notes"))
             .unwrap();
-        let params = recorded.lock().unwrap().clone();
-        let blocks = params
+        // No audience -> General thread: posts[0] is the General root card, and
+        // posts[1] is the entry reply carrying its own Block Kit blocks.
+        let posts = post_calls(&calls, "chat.postMessage");
+        let reply = &posts[1];
+        let blocks = reply
             .iter()
             .find(|(k, _)| k == "blocks")
             .map(|(_, v)| v.clone())
@@ -603,7 +742,7 @@ mod tests {
             "body must become an mrkdwn section: {blocks}"
         );
         // Accessibility/notification fallback still carries title + body.
-        assert!(params
+        assert!(reply
             .iter()
             .any(|(k, v)| k == "text" && v.contains("Release notes")));
     }
@@ -651,7 +790,7 @@ mod tests {
                 {"ts":"300.0003","text":"c","username":"U"}
             ]}"#
             .to_string(),
-            post_body: r#"{"ok":true}"#.to_string(),
+            post_body: r#"{"ok":true,"ts":"root-ts"}"#.to_string(),
             ..Default::default()
         }
     }
@@ -755,5 +894,120 @@ mod tests {
         // The Slack mock does not override post_json, so it hits the trait
         // default which reports the operation as unsupported.
         assert!(MockHttp::default().post_json("u", "b", "{}").is_err());
+    }
+
+    #[test]
+    fn patch_json_default_is_unsupported() {
+        assert!(MockHttp::default().patch_json("u", "b", "{}").is_err());
+    }
+
+    #[test]
+    fn second_post_to_same_workspace_reuses_root() {
+        // SPEC-2963 get-or-create: the Workspace root is created once; the
+        // second post for the same Workspace reuses it (no duplicate root).
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "CH-A".to_string());
+        let mock = RecordingPosts::new();
+        let calls = mock.handle();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(&root, entry("one").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+        prov.post_entry(&root, entry("two").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+
+        // 1 root create + 2 replies = 3 postMessage calls (no second root).
+        let posts = post_calls(&calls, "chat.postMessage");
+        assert_eq!(posts.len(), 3, "root created once, then two replies");
+        // Exactly one persisted root for ws-a.
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        assert_eq!(
+            mappings.keys().filter(|(_, _, key)| key == "ws-a").count(),
+            1
+        );
+        // Both replies thread under the same root ts (ts-1).
+        assert!(has_param(&posts[1], "thread_ts", "ts-1"));
+        assert!(has_param(&posts[2], "thread_ts", "ts-1"));
+    }
+
+    #[test]
+    fn two_workspaces_get_distinct_roots() {
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "CH-A".to_string());
+        map.insert("ws-b".to_string(), "CH-B".to_string());
+        let mock = RecordingPosts::new();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(&root, entry("a").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+        prov.post_entry(&root, entry("b").with_audience(vec!["ws-b".to_string()]))
+            .unwrap();
+
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        assert!(mappings
+            .keys()
+            .any(|(prov, ch, key)| prov == "slack" && ch == "CH-A" && key == "ws-a"));
+        assert!(mappings
+            .keys()
+            .any(|(prov, ch, key)| prov == "slack" && ch == "CH-B" && key == "ws-b"));
+    }
+
+    #[test]
+    fn broadcast_post_uses_general_thread() {
+        // Empty audience -> the General thread root (key "general").
+        let mock = RecordingPosts::new();
+        let calls = mock.handle();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", BTreeMap::new(), Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(&root, entry("hello")).unwrap();
+
+        let posts = post_calls(&calls, "chat.postMessage");
+        // Root card carries the "General" header.
+        let root_blocks = posts[0]
+            .iter()
+            .find(|(k, _)| k == "blocks")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert!(root_blocks.contains("General"), "root is the General card");
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        assert!(mappings.keys().any(|(_, _, key)| key == "general"));
+    }
+
+    #[test]
+    fn changed_workspace_card_triggers_chat_update() {
+        // SPEC-2963 root refresh: a pre-existing root whose stored card hash is
+        // stale gets a chat.update before the reply is threaded under it.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "CH-A".to_string());
+        let mock = RecordingPosts::new();
+        let calls = mock.handle();
+        let prov = SlackProvider::new("t", "CH-DEFAULT", map, Box::new(mock), 60);
+        let root = root();
+        // Seed an existing root with a deliberately stale hash so the next post
+        // recomputes a different card and updates the root.
+        gwt_core::board_remote_roots::append_root_mapping(
+            &root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key: "ws-a".to_string(),
+                provider: "slack".to_string(),
+                channel: "CH-A".to_string(),
+                root_id: "OLD-ROOT".to_string(),
+                card_hash: "stale".to_string(),
+                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+
+        prov.post_entry(&root, entry("x").with_audience(vec!["ws-a".to_string()]))
+            .unwrap();
+
+        // chat.update was called against the existing root.
+        let updates = post_calls(&calls, "chat.update");
+        assert_eq!(updates.len(), 1, "stale root card is refreshed once");
+        assert!(has_param(&updates[0], "ts", "OLD-ROOT"));
+        // The reply threads under the (reused) existing root, not a new one.
+        let posts = post_calls(&calls, "chat.postMessage");
+        assert_eq!(posts.len(), 1, "no new root created");
+        assert!(has_param(&posts[0], "thread_ts", "OLD-ROOT"));
     }
 }

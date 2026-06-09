@@ -325,6 +325,18 @@ pub fn gwt_repo_local_discussions_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("discussions.md")
 }
 
+/// Return the repo-local remote-Board root-thread mapping path
+/// (`<repo_root>/.gwt/work/board-remote-roots.jsonl`).
+///
+/// SPEC-2963: Slack/Teams thread each Workspace under a "root" summary-card
+/// message. The mapping `(provider, channel, key) -> root message id` is
+/// git-tracked (like `events.jsonl`) so the root is created once and shared
+/// across machines/agents, reconciled on branch divergence by a `merge=union`
+/// gitattribute.
+pub fn gwt_board_remote_roots_path(repo_root: &Path) -> PathBuf {
+    gwt_repo_local_work_dir(repo_root).join("board-remote-roots.jsonl")
+}
+
 /// Return the repo-scoped notes root (`~/.gwt/notes/`).
 pub fn gwt_notes_dir() -> PathBuf {
     gwt_home().join("notes")
