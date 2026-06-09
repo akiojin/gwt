@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 
 use chrono::{DateTime, TimeZone, Utc};
 use gwt_core::board_remote_roots::GENERAL_THREAD_KEY;
-use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind, BoardMentionTargetKind};
 use gwt_core::workspace_projection::{WorkspaceStatusCategory, WorkspaceWorkItem};
 
 /// Parse a Slack message timestamp (`"1700000000.123456"`) into UTC.
@@ -134,6 +134,14 @@ pub fn board_entry_meta_line(entry: &BoardEntry) -> String {
         author_kind,
         entry.kind.as_str()
     );
+    // Audience / mention targeting (who the post is addressed to), mirroring
+    // the Local board's `boardEntryAudienceLabels`. Without this a remote
+    // reader cannot tell whether a post is broadcast, pinned to a Workspace,
+    // or directed at a specific user / agent.
+    line.push_str(&format!(
+        " · {}",
+        board_entry_audience_labels(entry).join(", ")
+    ));
     let branch = entry
         .origin_branch
         .as_deref()
@@ -152,6 +160,51 @@ pub fn board_entry_meta_line(entry: &BoardEntry) -> String {
         (None, None) => {}
     }
     line
+}
+
+/// Audience / mention targeting labels, mirroring the Local board's
+/// `boardEntryAudienceLabels` (`board-surface.js`). Unlike the Local helper —
+/// which short-circuits on Workspace audience and so hides an explicit
+/// `@user` / `@agent` mention behind the Workspace label — this concatenates
+/// Workspace audience *and* explicit mentions so a directed ping is never
+/// dropped. Falls back to `"Broadcast"` when a post targets no one.
+fn board_entry_audience_labels(entry: &BoardEntry) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    let push = |label: String, labels: &mut Vec<String>| {
+        if !label.is_empty() && !labels.contains(&label) {
+            labels.push(label);
+        }
+    };
+    for workspace in &entry.audience {
+        let id = workspace.trim();
+        if !id.is_empty() {
+            push(format!("Workspace: {id}"), &mut labels);
+        }
+    }
+    for mention in &entry.mentions {
+        let label_text = mention
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| mention.target.trim());
+        if label_text.is_empty() {
+            continue;
+        }
+        let formatted = match mention.target_kind {
+            BoardMentionTargetKind::Agent | BoardMentionTargetKind::User => {
+                format!("To: {label_text}")
+            }
+            BoardMentionTargetKind::Session => format!("Session: {label_text}"),
+            BoardMentionTargetKind::Branch => format!("Branch: {label_text}"),
+            BoardMentionTargetKind::Workspace => format!("Workspace: {label_text}"),
+        };
+        push(formatted, &mut labels);
+    }
+    if labels.is_empty() {
+        labels.push("Broadcast".to_string());
+    }
+    labels
 }
 
 /// Stable hash of a rendered root card (title + body), used to detect when the
@@ -220,6 +273,7 @@ pub fn slack_message_to_board_entry(msg: &SlackMessage, workspace_id: &str) -> B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::coordination::BoardMention;
 
     #[test]
     fn parses_slack_ts() {
@@ -345,8 +399,10 @@ mod tests {
             !line.contains("95862acd-a761"),
             "session truncated to 8: {line}"
         );
+        // No audience / mentions -> Broadcast, placed before the origin suffix.
+        assert!(line.contains("status · Broadcast · feature/x"), "{line}");
 
-        // User / system author kinds, and no origin -> no trailing origin part.
+        // User / system author kinds, and no origin -> Broadcast audience only.
         let user = BoardEntry::new(
             AuthorKind::User,
             "akiojin",
@@ -357,7 +413,10 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(board_entry_meta_line(&user), "akiojin (user) · decision");
+        assert_eq!(
+            board_entry_meta_line(&user),
+            "akiojin (user) · decision · Broadcast"
+        );
         let system = BoardEntry::new(
             AuthorKind::System,
             "gwt",
@@ -368,6 +427,66 @@ mod tests {
             vec![],
             vec![],
         );
-        assert_eq!(board_entry_meta_line(&system), "gwt (system) · blocked");
+        assert_eq!(
+            board_entry_meta_line(&system),
+            "gwt (system) · blocked · Broadcast"
+        );
+    }
+
+    #[test]
+    fn meta_line_names_audience_and_mentions() {
+        // SPEC-2963: a remote reader must see who a post is addressed to, the
+        // same way the Local board shows Workspace / To / Session badges.
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Handoff,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.audience = vec!["ws-alpha".to_string()];
+        entry.mentions = vec![
+            BoardMention::new(BoardMentionTargetKind::User, "akiojin"),
+            BoardMention::new(BoardMentionTargetKind::Agent, "codex"),
+        ];
+        let line = board_entry_meta_line(&entry);
+        assert!(
+            line.contains("Workspace: ws-alpha"),
+            "workspace audience: {line}"
+        );
+        assert!(
+            line.contains("To: akiojin"),
+            "user mention not hidden: {line}"
+        );
+        assert!(line.contains("To: codex"), "agent mention: {line}");
+
+        // Session / branch mention kinds render with their own labels.
+        let mut targeted = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Question,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        targeted.mentions = vec![
+            BoardMention::new(BoardMentionTargetKind::Session, "0d293994"),
+            BoardMention::new(BoardMentionTargetKind::Branch, "feature/y"),
+        ];
+        let line = board_entry_meta_line(&targeted);
+        assert!(
+            line.contains("Session: 0d293994"),
+            "session mention: {line}"
+        );
+        assert!(line.contains("Branch: feature/y"), "branch mention: {line}");
+        assert!(
+            !line.contains("Broadcast"),
+            "targeted is not broadcast: {line}"
+        );
     }
 }
