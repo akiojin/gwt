@@ -6760,3 +6760,17 @@ Type: lesson
 Context: Issue #2995: Branches/Work からの Resume が「ときどき」できず再起動でも直らない。初期診断では collect_quick_start_entries_from_sessions (quick_start.rs) の WorktreePathScope 完全一致がバグと推定したが誤りだった。実コード追跡で、Branches availability/resolution の実ゲートは public quick_start_entries_from_sessions の QuickStartRepoScope（完全一致 OR repo_hash OR main_worktree_root の3段階、#2546 で既に正しい）であり、collect_ の WorktreePathScope は worktree_path を repo_path に上書き後に呼ばれるためバイパスされていた。実環境検証（git -C <workspace home> rev-parse --git-common-dir が fatal → first_child_bare_repository が bare child gwt.git を発見 → detect_repo_hash で repo identity 99a8660247f5bc49 を解決）で、workspace-home project_root でも repo_hash 一致で正しく match することを確認。
 Learning: 真因は launch_wizard_cache.sessions（起動時1回ロード、spawn 時のみ per-window 部分更新、sessions_dir watcher 無し）の陳腐化。hook CLI (cli/hook/runtime_state.rs → persist_agent_session_id) が agent 起動後に書く agent_session_id を GUI cache が観測しないため、同一プロセス内で launch→stop したセッションが Branches から resume 不可になる。Work picker は projection+disk 都度ロードのため影響が小さく「Branches が多い」と一致。gwt は daemon/tray 常駐（SPEC-2077/2920）でプロセスが生き続けるため window 再起動では cache が再ロードされず「再起動でも直らない」とも一致。修正は availability(spawn_branch_load_async) と resolution(latest_resumable_branch_session) を sessions_dir から disk-fresh に読むだけ（既存の正しい QuickStartRepoScope を再利用）。
 Future Action: 「resume できない」系バグでは matching を疑う前に (1) どの関数が実ゲートか call graph を確定（wrapper が後段 scope をバイパスしていないか）、(2) 実データ・実 git レイアウトで matching が本当に false になるか empirical に検証、(3) データソースの鮮度（in-memory cache vs disk、watcher 有無、常駐プロセス寿命）を疑う。推測で大改修に入る前に再現を取る。
+
+## 2026-06-09 — Avoid wall-clock upper bounds for async coalesce tests
+
+Type: failure-pattern
+Context: pre-pr verification for PR #3001 repeatedly failed in the full suite on app_runtime::persist_dispatcher::tests::suppresses_identical_snapshot_while_pending while isolated runs passed.
+Learning: The test asserted an elapsed wall-clock upper bound that included scheduler and disk latency, so suite load could fail the test even when duplicate enqueue suppression was correct.
+Future Action: For async coalescing and background-worker tests, assert internal state transitions or use deterministic test harnesses instead of wall-clock upper bounds for completion time.
+
+## 2026-06-09 — Lock HOME readers in parallel Rust tests
+
+Type: lesson
+Context: PR #3001 の Linux Test (Rust) で workspace_projection::tests::resolve_workspace_id_for_session_returns_none_when_session_missing が save_workspace_projection(...).unwrap() の ENOENT で失敗した。
+Learning: 同じ test binary 内で HOME を一時ディレクトリに差し替えるテストがある場合、HOME を変更しないテストでも gwt_home()/gwt_workspace_*_for_repo_path() を読むなら env_lock が必要。読み手が lock を取らないと、差し替えテストの TempDir drop と write_atomic の create/open が競合する。
+Future Action: HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL など process-wide env から path を導くテストを追加・変更するときは、env を変更する側だけでなく読む側にも crate::test_support::env_lock() を適用する。
