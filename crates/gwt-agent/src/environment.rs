@@ -337,7 +337,7 @@ fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
 
 fn extend_env_layer(target: &mut HashMap<String, String>, layer: HashMap<String, String>) {
     for (key, value) in layer {
-        if key.eq_ignore_ascii_case("PATH") {
+        if env_key_matches_path(&key) {
             remove_env_key(target, &key);
         }
         target.insert(key, value);
@@ -345,10 +345,22 @@ fn extend_env_layer(target: &mut HashMap<String, String>, layer: HashMap<String,
 }
 
 fn remove_env_key(env: &mut HashMap<String, String>, key: &str) {
-    if key.eq_ignore_ascii_case("PATH") {
-        env.retain(|candidate, _| !candidate.eq_ignore_ascii_case("PATH"));
+    if env_key_matches_path(key) {
+        env.retain(|candidate, _| !env_key_matches_path(candidate));
     } else {
         env.remove(key);
+    }
+}
+
+fn env_key_matches_path(key: &str) -> bool {
+    env_key_matches_path_for_platform(key, cfg!(windows))
+}
+
+fn env_key_matches_path_for_platform(key: &str, windows: bool) -> bool {
+    if windows {
+        key.eq_ignore_ascii_case("PATH")
+    } else {
+        key == "PATH"
     }
 }
 
@@ -575,6 +587,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn apply_to_parts_replaces_windows_style_path_key_case_insensitively() {
         let launch_env = LaunchEnvironment::from_base_env(vec![
@@ -595,6 +608,16 @@ mod tests {
             "case-variant PATH keys must not coexist: {env_vars:?}"
         );
         assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
+    }
+
+    #[test]
+    fn path_key_matching_is_case_insensitive_only_on_windows() {
+        assert!(env_key_matches_path_for_platform("Path", true));
+        assert!(env_key_matches_path_for_platform("PATH", true));
+        assert!(env_key_matches_path_for_platform("path", true));
+        assert!(!env_key_matches_path_for_platform("Path", false));
+        assert!(env_key_matches_path_for_platform("PATH", false));
+        assert!(!env_key_matches_path_for_platform("path", false));
     }
 
     #[test]

@@ -101,11 +101,9 @@ impl TrayLockHandle {
     }
 
     /// Update the URL stored inside the lock file once the embedded
-    /// server has finished binding. Uses a single rewrite (no rename)
-    /// because the file is already locked exclusively by the current
-    /// process — concurrent readers would only ever be inspecting the
-    /// file from a *failed* lock attempt, in which case they re-read
-    /// after seeing the contention.
+    /// server has finished binding. The readable payload is replaced via
+    /// temp file + rename so a failed second launch never observes partial
+    /// JSON while reading after lock contention.
     pub fn set_url(&mut self, url: &str) -> io::Result<()> {
         let payload = build_lock_payload(std::process::id(), url);
         write_lock_contents(&self.path, &payload)

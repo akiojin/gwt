@@ -498,11 +498,11 @@ pub fn install_launch_gwt_bin_env_with_lookup(
 /// already present.
 ///
 /// Returns `true` if the entry was updated, `false` for a no-op (empty `dir`,
-/// dir already on PATH, or `join_paths` failure). Key lookup is
-/// case-insensitive: Windows processes may expose the variable as `Path` or
-/// `path`, and a case-sensitive read would produce a duplicate `PATH` key
-/// alongside the original, corrupting command lookup once the child process
-/// inherits both. PATH parsing uses [`std::env::split_paths`] /
+/// dir already on PATH, or `join_paths` failure). On Windows, key lookup is
+/// case-insensitive because processes may expose the variable as `Path` or
+/// `path`; on Unix-like hosts it remains an exact `PATH` lookup because
+/// environment keys are case-sensitive there. PATH parsing uses
+/// [`std::env::split_paths`] /
 /// [`std::env::join_paths`] so the `:` / `;` separator difference between
 /// Unix and Windows is handled automatically.
 pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -> bool {
@@ -511,7 +511,7 @@ pub fn prepend_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &Path) -
     }
     let existing_key = env_vars
         .keys()
-        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .find(|key| path_env_key_matches_for_host(key))
         .cloned();
     let key = existing_key.unwrap_or_else(|| "PATH".to_string());
     let existing_path = env_vars
@@ -543,7 +543,7 @@ pub fn prepend_posix_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &P
     }
     let existing_key = env_vars
         .keys()
-        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .find(|key| path_env_key_matches_for_platform(key, false))
         .cloned();
     let key = existing_key.unwrap_or_else(|| "PATH".to_string());
     let existing_path = env_vars
@@ -566,6 +566,18 @@ pub fn prepend_posix_dir_to_path(env_vars: &mut HashMap<String, String>, dir: &P
     entries.insert(0, dir_value);
     env_vars.insert(key, entries.join(":"));
     true
+}
+
+fn path_env_key_matches_for_host(key: &str) -> bool {
+    path_env_key_matches_for_platform(key, cfg!(windows))
+}
+
+fn path_env_key_matches_for_platform(key: &str, windows: bool) -> bool {
+    if windows {
+        key.eq_ignore_ascii_case("PATH")
+    } else {
+        key == "PATH"
+    }
 }
 
 pub fn resolve_public_gwt_bin_with_lookup(
@@ -2270,6 +2282,41 @@ mod tests {
         path.split(':').collect()
     }
 
+    #[test]
+    fn path_env_key_matching_is_case_insensitive_only_on_windows_hosts() {
+        assert!(path_env_key_matches_for_platform("PATH", true));
+        assert!(path_env_key_matches_for_platform("Path", true));
+        assert!(path_env_key_matches_for_platform("path", true));
+        assert!(path_env_key_matches_for_platform("PATH", false));
+        assert!(!path_env_key_matches_for_platform("Path", false));
+        assert!(!path_env_key_matches_for_platform("path", false));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn prepend_dir_to_path_creates_canonical_path_when_only_mixed_case_key_exists_on_unix() {
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let original_value = existing.to_string_lossy().into_owned();
+        let mut env_vars = HashMap::from([("Path".to_string(), original_value.clone())]);
+        let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
+        assert!(
+            updated,
+            "Unix hosts must create PATH instead of treating Path as PATH"
+        );
+        assert_eq!(
+            env_vars.get("Path").map(String::as_str),
+            Some(original_value.as_str()),
+            "mixed-case Path should be left untouched on case-sensitive hosts"
+        );
+        let path = env_vars.get("PATH").expect("PATH should be created");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/gwt/bin"))
+        );
+    }
+
     // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
     // install_launch_gwt_bin_env_with_lookup must prepend the GWT_BIN_PATH
     // parent directory to env_vars["PATH"] so agent subshells can resolve
@@ -2417,6 +2464,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn prepend_dir_to_path_preserves_windows_style_path_key() {
         // CodeRabbit P1 regression follow-up: Windows processes may expose
@@ -2447,6 +2495,7 @@ mod tests {
         assert!(entries.iter().any(|p| p == Path::new("/bin")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn prepend_dir_to_path_preserves_lowercase_path_key() {
         let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
@@ -2467,6 +2516,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn prepend_dir_to_path_dedups_case_insensitive_existing_dir() {
         let existing = std::env::join_paths([Path::new("/opt/gwt/bin"), Path::new("/usr/bin")])

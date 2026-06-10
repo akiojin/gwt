@@ -6871,3 +6871,10 @@ Type: lesson
 Context: board_reminder_hook_test called production config resolution in an integration-test binary, so a developer machine with Teams-backed ~/.gwt/config.toml turned hook contract tests into live remote Board calls.
 Learning: Integration tests that exercise hook IO boundaries must isolate HOME and USERPROFILE and clear GWT_SESSION_ID before calling handle_with_input or compute_plan.
 Future Action: Before adding hook integration tests, wrap them in a process-env guard and run the full cargo test matrix on a machine with real Board config present.
+
+## 2026-06-10 — PATH key casing is OS-specific
+
+Type: lesson
+Context: Windows verification cleanup found PATH/Path fixes had been applied too broadly in gwt-agent prepare/environment helpers.
+Learning: Windows environment keys are case-insensitive, but Unix-like hosts and Docker/POSIX containers treat Path and PATH as distinct. Case-insensitive PATH merging must be gated to Windows only; POSIX PATH handling should use exact PATH.
+Future Action: When changing environment layer or launch PATH code, add a pure platform-selection test and cfg(windows) coverage for Windows-style Path keys, then search for eq_ignore_ascii_case("PATH") outside platform helpers.
