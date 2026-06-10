@@ -64,6 +64,11 @@ macro_rules! root_js_modules {
 // way with /release-notes-window.js, see SPEC-2780 and PR #2797 memory).
 root_js_modules! {
     "branch-cleanup-modal.js" => "renderBranchCleanupModal",
+    // SPEC-2009 Phase 7 (FR-064..FR-067) — Branches detail-check reconnect
+    // self-heal / last-known retention / stale-load guard. app.js imports
+    // this at module top level, so the asset MUST be registered or the ES
+    // module load fails and the splash hangs.
+    "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-tab-confirm-modal.js" => "renderCloseProjectTabConfirmModal",
     "migration-modal.js" => "renderMigrationModal",

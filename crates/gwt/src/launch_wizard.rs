@@ -3733,12 +3733,17 @@ const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     },
 ];
 
+// Auto is the default: gwt skips the CLAUDE_CODE_EFFORT_LEVEL export so
+// Claude Code applies its own per-model default effort (`high` on
+// Fable 5 / Opus 4.8, `xhigh` on Opus 4.7). Hardcoding a level here goes
+// stale whenever a model generation changes its default, and the `opus`
+// alias resolves to different generations per provider.
 const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
-        description: "Let the model choose the effort",
-        is_default: false,
+        description: "Follow Claude Code's default effort for the model",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "Low",
@@ -3756,7 +3761,7 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
         label: "High",
         stored_value: "high",
         description: "Balances tokens and intelligence (Fable 5 / Opus 4.8 default)",
-        is_default: true,
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "xHigh",
@@ -3782,8 +3787,8 @@ const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
-        description: "Let the model choose the effort",
-        is_default: false,
+        description: "Follow Claude Code's default effort for the model",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "Low",
@@ -3801,7 +3806,7 @@ const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
         label: "High",
         stored_value: "high",
         description: "Deeper reasoning for complex work (Sonnet 4.6 default)",
-        is_default: true,
+        is_default: false,
     },
 ];
 
@@ -8518,7 +8523,7 @@ mod tests {
             .expect("opus options must contain ultracode");
         assert!(
             !ultra.is_default,
-            "ultracode must be opt-in; high stays the Opus-tier default"
+            "ultracode must be opt-in; auto stays the Opus-tier default"
         );
     }
 
@@ -8537,14 +8542,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_opus_reasoning_default_is_high() {
-        // Claude Code model-config docs: default effort is `high` on
-        // Fable 5 / Opus 4.8 (`xhigh` was the Opus 4.7 default).
+    fn claude_opus_reasoning_default_is_auto() {
+        // Defaulting to Auto skips the CLAUDE_CODE_EFFORT_LEVEL export so
+        // Claude Code applies its own per-model default (`high` on
+        // Fable 5 / Opus 4.8, `xhigh` on Opus 4.7) regardless of which
+        // model the alias resolves to on the user's provider.
         let default = super::CLAUDE_OPUS_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Opus reasoning options must have a default row");
-        assert_eq!(default.stored_value, "high");
+        assert_eq!(default.stored_value, "auto");
     }
 
     fn claude_state(model: &str, ultracode_supported: bool) -> LaunchWizardState {
@@ -8593,7 +8600,7 @@ mod tests {
     }
 
     #[test]
-    fn fable_reasoning_matches_opus_ladder_with_high_default() {
+    fn fable_reasoning_matches_opus_ladder_with_auto_default() {
         let values = claude_reasoning_values(&claude_state("fable", true));
         assert_eq!(
             values,
@@ -8605,7 +8612,7 @@ mod tests {
             .iter()
             .find(|option| option.is_default)
             .map(|option| option.stored_value);
-        assert_eq!(default, Some("high"));
+        assert_eq!(default, Some("auto"));
     }
 
     #[test]
@@ -8635,14 +8642,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_reasoning_default_is_high() {
-        // Claude Code model-config docs: default effort is `high` on
-        // Sonnet 4.6.
+    fn claude_sonnet_reasoning_default_is_auto() {
+        // Auto delegates the default effort to Claude Code itself
+        // (`high` on Sonnet 4.6 per the model-config docs).
         let default = super::CLAUDE_SONNET_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Sonnet reasoning options must have a default row");
-        assert_eq!(default.stored_value, "high");
+        assert_eq!(default.stored_value, "auto");
     }
 
     #[test]

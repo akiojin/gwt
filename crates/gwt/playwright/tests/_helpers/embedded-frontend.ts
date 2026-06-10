@@ -17,6 +17,9 @@ const ROOT_MODULES = new Set([
   "app.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
+  // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
+  // self-heal / last-known retention / stale-load guard.
+  "branch-list-state.js",
   // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
   "canvas-wheel-gesture.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab

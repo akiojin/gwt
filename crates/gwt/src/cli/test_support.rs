@@ -194,12 +194,9 @@ fn main() -> ExitCode {
     let source_path = bin_dir.join("gh.rs");
     fs::write(&source_path, source).expect("write fake gh source");
     let output_path = bin_dir.join(format!("gh{}", env::consts::EXE_SUFFIX));
-    // Pin rustc's working directory to `bin_dir` (all path args are
-    // absolute). Inheriting the test harness's process CWD is racy: tests
-    // that temporarily `set_current_dir` into their own tempdir (e.g.
-    // index_worker's CurrentDirGuard) can delete that directory while rustc
-    // is still compiling, which kills rustc with "Current directory is
-    // invalid" mid-suite.
+    // Pin the child's working directory: parallel tests may set the
+    // process-wide CWD to a tempdir that gets dropped, and rustc refuses to
+    // start from a deleted CWD ("Current directory is invalid", #3006).
     let status = std::process::Command::new("rustc")
         .arg(&source_path)
         .arg("-o")

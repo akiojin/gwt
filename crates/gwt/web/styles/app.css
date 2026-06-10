@@ -3404,6 +3404,14 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 10%, transparent);
 }
 
+/* SPEC-2009 FR-066: the interrupted detail-check now self-heals on reconnect,
+   so its notice is a muted, non-blocking inline hint rather than an alarming
+   band — the branch list keeps showing the last verified cleanup badges. */
+.branch-notice[data-branch-status="interrupted"] {
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-text-muted) 8%, transparent);
+}
+
 .branch-notice[data-branch-status="checking"]::before {
   content: "";
   position: absolute;

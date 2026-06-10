@@ -53,6 +53,8 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/app.js"),
         "\n",
+        include_str!("../web/branch-list-state.js"),
+        "\n",
         include_str!("../web/board-surface.js"),
         "\n",
         include_str!("../web/workspace-kanban-surface.js"),
@@ -1820,15 +1822,23 @@ fn embedded_web_branches_surface_explains_detail_check_state() {
     );
     for expected in [
         "Checking branch details",
-        "Branch detail check interrupted",
+        // SPEC-2009 FR-066: the interrupted detail check now self-heals on
+        // reconnect, so the copy is reassuring rather than alarming.
+        "Reconnecting branch details",
+        "Recovering automatically",
         "Safety unknown",
-        "Refresh to verify cleanup safety",
     ] {
         assert!(
             html.contains(expected),
             "expected Branches bundle to include clarity copy: {expected}",
         );
     }
+    // FR-066: the manual "Refresh to verify cleanup safety" banner copy is
+    // gone — the detail check recovers without a user-driven refresh.
+    assert!(
+        !html.contains("Refresh to verify cleanup safety"),
+        "expected the manual-refresh detail-check banner copy to be removed",
+    );
     assert!(
         !html.contains("Cleanup status unavailable"),
         "expected Branches bundle to avoid ambiguous cleanup unavailable copy",

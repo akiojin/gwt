@@ -73,6 +73,12 @@
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
+      import {
+        markBranchDetailInterrupted,
+        branchWindowNeedsResync,
+        applyBranchEntriesEvent,
+        branchLoadStatusSummary,
+      } from "/branch-list-state.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
@@ -1680,6 +1686,15 @@
             }
             if (shouldRenderBranches) {
               renderBranches(windowId);
+            }
+          }
+        } else {
+          // FR-064: reconnect self-heal. Re-hydrate any open Branches window
+          // whose detail check was interrupted by an evict/reconnect so the
+          // interrupted notice clears automatically — without a manual Refresh.
+          for (const [windowId, state] of branchListStateMap.entries()) {
+            if (branchWindowNeedsResync(state)) {
+              requestBranches(windowId);
             }
           }
         }
@@ -6793,6 +6808,11 @@
             filter: "local",
             cleanupSelected: new Set(),
             notice: "",
+            // SPEC-2009 Phase 7 (FR-064..FR-067): detail-check reconnect state.
+            lastHydratedByName: new Map(),
+            lastLoadId: 0,
+            detailCheckStale: false,
+            needsResync: false,
             cleanupModal: {
               open: false,
               stage: "confirm",
@@ -11077,17 +11097,26 @@
         return "Select for cleanup";
       }
 
+      function cleanupInfoDetailText(cleanup) {
+        if (cleanup.availability === "blocked") {
+          return cleanupBlockedReasonText(cleanup.blocked_reason);
+        }
+        if (cleanup.risks?.length) {
+          return cleanupRiskLabels(cleanup.risks).join(", ");
+        }
+        return cleanupMergeTargetText(cleanup.merge_target);
+      }
+
       function cleanupDetailText(entry, state) {
         if (!entry.cleanup_ready) {
+          // FR-065: keep the last verified detail visible while re-checking.
+          if (entry.cleanup_stale && entry.cleanup) {
+            const base = cleanupInfoDetailText(entry.cleanup);
+            return base ? `${base} · re-checking` : "Re-checking cleanup safety";
+          }
           return branchCleanupPendingText(state);
         }
-        if (entry.cleanup.availability === "blocked") {
-          return cleanupBlockedReasonText(entry.cleanup.blocked_reason);
-        }
-        if (entry.cleanup.risks?.length) {
-          return cleanupRiskLabels(entry.cleanup.risks).join(", ");
-        }
-        return cleanupMergeTargetText(entry.cleanup.merge_target);
+        return cleanupInfoDetailText(entry.cleanup);
       }
 
       function cleanupBlockedReasonText(reason) {
@@ -11114,6 +11143,8 @@
               return "remote-tracking";
             case "unmerged":
               return "unmerged";
+            case "protected_base":
+              return "protected base (remote kept)";
             default:
               return "warning";
           }
@@ -11128,47 +11159,6 @@
             return "upstream is gone";
         }
         return target.reference ? `merged to ${target.reference}` : "";
-      }
-
-      const BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE = "Branch detail check interrupted";
-
-      function branchLoadStatusSummary(state) {
-        if (!state) {
-          return null;
-        }
-        if (state.error) {
-          return {
-            kind: "error",
-            title: "Branches unavailable",
-            detail: state.error,
-            hint: "Refresh to try again.",
-          };
-        }
-        if (state.loading && state.entries.length > 0) {
-          return {
-            kind: "checking",
-            title: "Checking branch details",
-            detail: "Loading branch details while cleanup safety is checked.",
-            hint: "Cleanup selection unlocks after verification.",
-          };
-        }
-        if (state.notice === BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE) {
-          return {
-            kind: "interrupted",
-            title: BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE,
-            detail: "Branch names are available, but cleanup safety was not verified.",
-            hint: "Refresh to verify cleanup safety.",
-          };
-        }
-        if (state.notice) {
-          return {
-            kind: "notice",
-            title: "Branch notice",
-            detail: state.notice,
-            hint: "",
-          };
-        }
-        return null;
       }
 
       function renderBranchLoadStatusSummary(notice, summary) {
@@ -11204,28 +11194,30 @@
       }
 
       function failLoadingBranchesOnConnectionLoss(windowId, state) {
-        if (!state || !state.loading) {
-          return false;
+        // FR-064/FR-065: keep the rows + last-known cleanup badges, flag the
+        // window for auto re-hydration on reconnect, and stop the spinner —
+        // never collapse every row to "Safety unknown" or a manual-refresh-only
+        // banner. markBranchDetailInterrupted owns the state transition.
+        const changed = markBranchDetailInterrupted(state);
+        if (changed) {
+          syncBranchSelectionState(state);
         }
-        state.loading = false;
-        state.receivedFreshEntries = false;
-        if (state.entries.length === 0) {
-          state.error = "Connection lost while loading branches";
-          state.notice = "";
-        } else {
-          state.error = "";
-          state.notice = BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE;
-        }
-        syncBranchSelectionState(state);
-        return true;
+        return changed;
       }
 
       function branchCleanupPendingText(state) {
-        return state.loading ? "Checking cleanup safety" : "Refresh to verify cleanup safety";
+        // FR-064/FR-066: the detail check now recovers automatically on
+        // reconnect, so we never tell the user to manually "Refresh to verify".
+        return state.loading ? "Checking cleanup safety" : "Re-checking cleanup safety";
       }
 
       function cleanupAvailabilityForRender(entry, state) {
         if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        // FR-065: show the last verified availability while a re-check is
+        // pending instead of dropping to "unknown".
+        if (entry.cleanup_stale && entry.cleanup) {
           return entry.cleanup.availability;
         }
         if (state.loading) {
@@ -11235,7 +11227,14 @@
       }
 
       function cleanupBadgeText(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "checking" : "Safety unknown";
+        if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        // FR-065: keep showing the last verified badge during re-hydration.
+        if (entry.cleanup_stale && entry.cleanup) {
+          return entry.cleanup.availability;
+        }
+        return state.loading ? "checking" : "Safety unknown";
       }
 
       function toggleBranchCleanupSelection(windowId, branchName) {
@@ -14057,23 +14056,25 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
-            state.entries = event.entries;
-            const phase = String(event.phase || "hydrated").toLowerCase();
-            state.phase = phase;
-            state.loading = phase !== "hydrated";
-            state.receivedFreshEntries = true;
-            state.error = "";
-            state.notice = "";
-            syncBranchSelectionState(state);
-            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            // SPEC-2356 — feed branch count into the Operator Status Strip WK
-            // cell via develop's guarded telemetry helper. The dead Sidebar
-            // Layers `git` counter was removed in the operator chrome cleanup,
-            // so only `branches` is forwarded now.
-            const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
-            applyOperatorTelemetryCounts({
-              branches: branchesCount,
-            });
+            // FR-065/FR-067: ingest via the shared state helper so a stale
+            // (older load_id) event is dropped and inventory phases keep the
+            // last verified cleanup badges instead of flashing "Safety unknown".
+            // Single trailing break (no early break) so the SPEC-2356 telemetry
+            // contract test can extract this whole case body.
+            const { applied } = applyBranchEntriesEvent(state, event);
+            if (applied) {
+              syncBranchSelectionState(state);
+              frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+              // SPEC-2356 — feed branch count into the Operator Status Strip WK
+              // cell via develop's guarded telemetry helper. The dead Sidebar
+              // Layers `git` counter was removed in the operator chrome cleanup,
+              // so only `branches` is forwarded now. Count from state.entries so
+              // the telemetry reflects the post-ingest list (FR-065 carry-over).
+              const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
+              applyOperatorTelemetryCounts({
+                branches: branchesCount,
+              });
+            }
             break;
           }
           case "profile_snapshot": {

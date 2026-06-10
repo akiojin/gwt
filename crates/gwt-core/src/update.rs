@@ -881,14 +881,10 @@ impl UpdateManager {
             .join(format!("v{}", latest.trim().trim_start_matches('v')));
         fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
 
-        #[cfg(windows)]
-        let helper_name = "gwt-update-helper.exe".to_string();
-        #[cfg(not(windows))]
-        let helper_name = current_exe
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("{s}.update-helper"))
-            .unwrap_or_else(|| "gwt.update-helper".to_string());
+        let helper_name = helper_file_name(
+            cfg!(windows),
+            current_exe.file_name().and_then(|s| s.to_str()),
+        );
         let helper_path = update_dir.join(helper_name);
 
         fs::copy(current_exe, &helper_path)
@@ -1182,6 +1178,24 @@ pub fn internal_run_installer_with_executor(
     {
         let _ = (target_exe, installer, installer_kind, args_file);
         Err("installer updates are not supported on this platform".to_string())
+    }
+}
+
+/// File name for the self-copy spawned to apply an update (#3018).
+///
+/// The Windows name must not contain UAC installer-detection keywords
+/// ("update", "setup", "install", "patch"): gwt.exe spawns this copy via
+/// CreateProcess, which cannot elevate, so a keyword match on a
+/// manifest-less executable fails with ERROR_ELEVATION_REQUIRED (os error
+/// 740) on machines where EnableInstallerDetection is on (Windows Home
+/// default).
+fn helper_file_name(windows: bool, current_exe_file_name: Option<&str>) -> String {
+    if windows {
+        "gwt-restart-helper.exe".to_string()
+    } else {
+        current_exe_file_name
+            .map(|s| format!("{s}.update-helper"))
+            .unwrap_or_else(|| "gwt.update-helper".to_string())
     }
 }
 
@@ -2816,6 +2830,32 @@ mod tests {
         assert_eq!(restart.program, target_exe.as_os_str());
         assert_eq!(restart.mode, ExecutionMode::Spawn);
         assert_eq!(restart.args_lossy(), vec!["--restored"]);
+    }
+
+    #[test]
+    fn windows_helper_file_name_avoids_uac_installer_detection_keywords() {
+        // #3018: spawning a manifest-less exe whose name matches UAC
+        // installer-detection keywords fails with os error 740.
+        let name = helper_file_name(true, Some("gwt.exe")).to_lowercase();
+        for keyword in ["update", "setup", "install", "patch"] {
+            assert!(
+                !name.contains(keyword),
+                "windows helper name {name:?} contains UAC installer-detection keyword {keyword:?}"
+            );
+        }
+        assert!(name.ends_with(".exe"));
+    }
+
+    #[test]
+    fn non_windows_helper_file_name_derives_from_current_exe() {
+        assert_eq!(
+            helper_file_name(false, Some("gwt")),
+            "gwt.update-helper".to_string()
+        );
+        assert_eq!(
+            helper_file_name(false, None),
+            "gwt.update-helper".to_string()
+        );
     }
 
     #[test]

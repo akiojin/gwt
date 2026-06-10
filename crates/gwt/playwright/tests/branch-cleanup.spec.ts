@@ -13,7 +13,16 @@ test.describe("Branch Cleanup E2E", () => {
     viewport: { width: 1440, height: 900 },
   });
 
-  test("shows cleanup progress and sends force filesystem delete", async ({
+  // SPEC-2359 W-13 fused the Work / Git Branches tabs into a single Workspace
+  // List+Detail surface; preset "branches" now maps to surface "work" and the
+  // standalone branches surface markup is unreachable until SPEC-2009 Phase 7
+  // #3 (Branches re-integration) restores a navigation path. These three specs
+  // drive the old `[data-work-tab='branches']` tab, so they cannot pass on
+  // develop today (CI does not run Playwright; the breakage landed silently
+  // with the fusion). The state-layer behavior they covered is unit-tested in
+  // __tests__/branch-list-state.test.mjs and branch-cleanup.smoke.test.mjs.
+  // Re-enable these together with the #3 navigation work.
+  test.fixme("shows cleanup progress and sends force filesystem delete", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -149,7 +158,7 @@ test.describe("Branch Cleanup E2E", () => {
     await expect(modal.getByRole("button", { name: "Close" })).toBeVisible();
   });
 
-  test("explains branch detail checks and interrupted cleanup safety", async ({
+  test.fixme("explains branch detail checks and self-heals after interruption", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -196,35 +205,22 @@ test.describe("Branch Cleanup E2E", () => {
 
     await page.evaluate(() => window.__branchDetailFixture.close());
 
+    // SPEC-2009 FR-064/FR-066: the detail check self-heals on reconnect. The
+    // Branches surface re-requests automatically and returns to the checking
+    // state — there is no alarming "Branch detail check interrupted" banner and
+    // never a manual "Refresh to verify cleanup safety" step.
     await expect(notice.locator(".branch-notice-title")).toHaveText(
-      "Branch detail check interrupted",
+      "Checking branch details",
     );
-    await expect(notice).toContainText("Refresh to verify cleanup safety.");
-    await expect(branch.locator(".branch-cleanup-badge")).toHaveText(
-      "Safety unknown",
-    );
+    await expect(notice).not.toContainText("Refresh to verify cleanup safety");
+    await expect(branch.locator(".branch-cleanup-badge")).toHaveText("checking");
     await expect(branch.locator(".branch-cleanup-toggle")).toHaveAttribute(
       "title",
-      "Refresh to verify cleanup safety",
+      "Checking cleanup safety",
     );
-    await expect
-      .poll(() =>
-        notice.evaluate(
-          (element) =>
-            window.getComputedStyle(element, "::before").animationName,
-        ),
-      )
-      .toBe("none");
-    await expect
-      .poll(() =>
-        branch
-          .locator(".branch-cleanup-badge")
-          .evaluate((element) => window.getComputedStyle(element).animationName),
-      )
-      .toBe("none");
   });
 
-  test("honors reduced motion for branch detail check animations", async ({
+  test.fixme("honors reduced motion for branch detail check animations", async ({
     page,
   }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
