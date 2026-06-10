@@ -2859,34 +2859,29 @@ test("Sidebar row buttons reset UA chrome so Windows WebView2 stops drawing defa
 
 // --- SPEC-2359 Work Unification (US-49): Workspace → Work/Works labels ---
 
-test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
+// SPEC-2359 W-15 (FR-392) supersedes the former SC-207 blanket "no Workspace
+// labels" rule (US-49): the W-13 three-layer model names the place "Workspace"
+// (Workspace = place / Work = launch / Session = conversation), so surface
+// entry points say "Workspace" while launch-level rows keep "Work".
+test("FR-392: surface entry points are labelled 'Workspace' (3-layer model)", () => {
   const sidebarLabel = document.querySelector("#op-workspace-overview-entry .op-layer__label");
   assert.ok(sidebarLabel, "expected sidebar overview entry to exist");
-  assert.equal(sidebarLabel.textContent.trim(), "Work");
-  assert.doesNotMatch(sidebarLabel.textContent, /Workspace/i);
+  assert.equal(sidebarLabel.textContent.trim(), "Workspace");
 
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
-  assert.doesNotMatch(sidebarAria.getAttribute("aria-label") ?? "", /workspace/i);
+  assert.equal(sidebarAria.getAttribute("aria-label"), "Workspace");
 
-  const presetSections = document.querySelectorAll(".preset-section-label");
-  for (const presetSection of presetSections) {
-    if (/workspace/i.test(presetSection.textContent)) {
-      assert.fail("preset section label must not contain 'Workspace'");
-    }
+  const paletteEntry = Array.from(document.querySelectorAll(".preset-button strong"))
+    .find((btn) => /^Work(space)?$/.test(btn.textContent.trim()));
+  if (paletteEntry) {
+    assert.equal(paletteEntry.textContent.trim(), "Workspace",
+      "palette surface entry must say 'Workspace'");
   }
 
-  const presetButtons = document.querySelectorAll(".preset-button strong");
-  for (const btn of presetButtons) {
-    assert.doesNotMatch(btn.textContent, /^Workspace$/i,
-      `preset button "${btn.textContent}" must not say 'Workspace'`);
-  }
-
-  const allAriaLabels = Array.from(document.querySelectorAll("[aria-label]"))
-    .map((el) => el.getAttribute("aria-label") ?? "");
-  for (const label of allAriaLabels) {
-    assert.doesNotMatch(label, /Workspace/i,
-      `aria-label "${label}" must not contain 'Workspace'`);
-  }
+  const hotkeyRows = Array.from(document.querySelectorAll(".op-hotkey-card__row span"))
+    .map((el) => el.textContent.trim());
+  assert.ok(!hotkeyRows.includes("Work surface"),
+    "hotkey card must name the surface 'Workspace surface', not 'Work surface'");
 });
 
 function cssBlockContaining(css, selector) {

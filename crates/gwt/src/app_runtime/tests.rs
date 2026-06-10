@@ -13780,3 +13780,142 @@ fn os_url_open_command_keeps_oauth_query_intact_and_avoids_cmd() {
         "must not use the cmd `start` builtin which splits on &: {args:?}"
     );
 }
+
+/// SPEC-2359 Phase W-15 (FR-380): the Backfill kind reaches the frontend as
+/// "backfill" on the wire.
+#[test]
+fn workspace_work_event_kind_wire_maps_backfill() {
+    assert_eq!(
+        super::workspace_work_event_kind_wire(
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Backfill
+        ),
+        "backfill"
+    );
+}
+
+/// SPEC-2359 Phase W-15 (FR-379/FR-382, T-547): a real linked worktree with no
+/// Work record is backfilled by `reconcile_workspace_worktrees` and surfaces
+/// on the Workspace list as a Paused row. Repeated reconciliation is
+/// idempotent (SC-255).
+#[test]
+fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    for args in [
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test User"].as_slice(),
+        ["commit", "--allow-empty", "-m", "init"].as_slice(),
+    ] {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let worktree = temp.path().join("repo-foo");
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/foo",
+            worktree.to_str().unwrap(),
+        ])
+        .current_dir(&repo)
+        .output()
+        .expect("git worktree add");
+    assert!(
+        output.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workspace_projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &workspace_projection)
+        .expect("save workspace projection");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.reconcile_workspace_worktrees(&repo);
+    runtime.reconcile_workspace_worktrees(&repo);
+
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    let projection =
+        gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("works projection exists");
+    let expected_main = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        repo_head_branch(&repo).as_deref(),
+        None,
+    );
+    let expected_foo =
+        gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/foo"), None)
+            .expect("canonical id");
+    assert!(
+        projection
+            .work_items
+            .iter()
+            .any(|item| item.id == expected_foo),
+        "work/foo worktree must be backfilled: {:?}",
+        projection
+            .work_items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    );
+    let foo_count = projection
+        .work_items
+        .iter()
+        .filter(|item| item.id == expected_foo)
+        .count();
+    assert_eq!(foo_count, 1, "repeated reconcile must not duplicate items");
+    let _ = expected_main;
+
+    let events_path = gwt_core::paths::gwt_repo_local_work_events_path(&worktree);
+    let events_text = fs::read_to_string(&events_path).expect("worktree events log");
+    assert_eq!(
+        events_text.lines().count(),
+        1,
+        "exactly one backfill event line after two reconciles"
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == expected_foo)
+        .expect("backfilled Workspace row on the surface");
+    assert_eq!(row.lifecycle_state, "paused");
+    assert_eq!(row.branch.as_deref(), Some("work/foo"));
+}
+
+fn repo_head_branch(repo: &Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}

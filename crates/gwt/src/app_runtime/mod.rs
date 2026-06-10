@@ -3563,6 +3563,44 @@ impl AppRuntime {
         Ok(app)
     }
 
+    /// SPEC-2359 Phase W-15 (FR-379/FR-380/FR-382): reconcile locally existing
+    /// worktrees with the persisted Work records. Worktrees without a record
+    /// are backfilled (event into the worktree's own `.gwt/work/events.jsonl`
+    /// plus the home works projection) so the Workspace list shows the union
+    /// of existing worktrees and unclosed records. Errors are logged and
+    /// swallowed — reconciliation must never block startup or project open.
+    pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
+        let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    "workspace worktree reconcile: enumerate failed for {}: {error}",
+                    project_root.display()
+                );
+                return;
+            }
+        };
+        let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
+        if sources.is_empty() {
+            return;
+        }
+        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+            project_root,
+            &sources,
+            chrono::Utc::now(),
+        ) {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+                project_root.display()
+            ),
+            Err(error) => tracing::warn!(
+                "workspace worktree reconcile failed for {}: {error}",
+                project_root.display()
+            ),
+        }
+    }
+
     pub(crate) fn bootstrap(&mut self) {
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
@@ -3594,6 +3632,12 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
                 &tab.project_root,
             );
+            // SPEC-2359 Phase W-15 (FR-379/FR-382): reconcile locally existing
+            // worktrees with the Work records so every real worktree surfaces
+            // on the Workspace list (union of existing worktrees and unclosed
+            // records). Runs after the rebuild above so already-recorded
+            // branches are not redundantly backfilled.
+            self.reconcile_workspace_worktrees(&tab.project_root);
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -5483,6 +5527,17 @@ impl AppRuntime {
                 // their agent panes stayed `Stopped`.
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
+                }
+                // SPEC-2359 Phase W-15 (FR-379): reconcile the opened
+                // project's worktrees before the first Workspace broadcast so
+                // backfilled rows are part of the initial list.
+                if let Some(project_root) = self
+                    .active_tab_id
+                    .as_ref()
+                    .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+                    .map(|tab| tab.project_root.clone())
+                {
+                    self.reconcile_workspace_worktrees(&project_root);
                 }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);
