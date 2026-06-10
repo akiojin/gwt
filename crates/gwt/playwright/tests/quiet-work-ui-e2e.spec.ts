@@ -39,6 +39,66 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     );
   });
 
+  test("Workspace detail renders Work → Session with the active conversation highlighted", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installBackend(page);
+    await page.goto(APP_URL);
+
+    // Row 0 ("Quiet Work UI redesign") is auto-selected; its single Work split
+    // into two conversation Sessions, the latest of which is active.
+    const rows = page.locator(".workspace-overview-row[data-workspace-id]");
+    await expect(rows.nth(0)).toHaveAttribute("aria-selected", "true");
+
+    const sessions = page.locator(".workspace-detail-session");
+    await expect(sessions).toHaveCount(2);
+
+    const active = page.locator('.workspace-detail-session[data-active="true"]');
+    await expect(active).toHaveCount(1);
+    await expect(active).toContainText("conv-bbb");
+    // The active Session is badged "Current"; past Sessions are badged "Past".
+    await expect(
+      active.locator('.workspace-detail-session-badge[data-session-state="current"]'),
+    ).toHaveText("Current");
+    await expect(
+      page.locator('.workspace-detail-session-badge[data-session-state="past"]'),
+    ).toHaveText("Past");
+
+    // Each Work renders one Agent header (the agent/tool name), always shown,
+    // so two Sessions of one Work never look like two Agents. The Session rows
+    // are labelled "Session ...", not with the agent name.
+    const heading = page.locator(".workspace-detail-work-heading");
+    await expect(heading).toHaveCount(1);
+    await expect(heading).toHaveText("Codex");
+    await expect(sessions.first()).toContainText("Session");
+    // Persistent data renders; never the stale "No assigned agents" placeholder.
+    await expect(page.locator(".workspace-overview-detail-pane")).not.toContainText(
+      "No assigned agents",
+    );
+
+    // The surface is titled "Workspace" (the selected entity is a Workspace,
+    // not an individual Work).
+    await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
+      "Workspace",
+    );
+    // Resume lives on each Session row (one per conversation), not on the
+    // Workspace header and not as a single Work-level control.
+    await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
+    await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
+    const sessionResume = page.locator("[data-action='resume-session']");
+    await expect(sessionResume).toHaveCount(2);
+    await expect(sessionResume.nth(0)).toHaveAttribute("data-session-id", "agent-current");
+    await expect(sessionResume.nth(0)).toHaveAttribute(
+      "data-agent-session-id",
+      "conv-aaaa1111",
+    );
+    await expect(sessionResume.nth(1)).toHaveAttribute(
+      "data-agent-session-id",
+      "conv-bbbb2222",
+    );
+  });
+
   test("Release Notes opens as a modal-style op-global-window", async ({
     page,
   }) => {
@@ -142,10 +202,23 @@ async function installBackend(page: any) {
             agents: [
               {
                 session_id: "agent-current",
+                agent_id: "codex",
                 display_name: "Codex",
-                status_category: "active",
+                status_category: "idle",
                 title_summary: "Phase 10 implementation",
                 current_focus: "Workspace Overview shell",
+                sessions: [
+                  {
+                    agent_session_id: "conv-aaaa1111",
+                    started_at: "2026-05-21T03:20:00Z",
+                    is_active: false,
+                  },
+                  {
+                    agent_session_id: "conv-bbbb2222",
+                    started_at: "2026-05-21T04:00:00Z",
+                    is_active: true,
+                  },
+                ],
               },
             ],
             events: [],

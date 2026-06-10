@@ -1,8 +1,12 @@
-/* SPEC-2356 Phase 9 — Hover-reveal chrome (FR-021/FR-022/FR-031/FR-032 / US4-AS8/9/12/13).
+/* SPEC-2356 Phase 9 — Hover-reveal chrome (FR-021/FR-031/FR-032 / US4-AS8/9/12/13).
  *
- * Sidebar (`op-sidebar`) と canvas 内の Window controls (`#floating-window-controls`)
- * を auto-hide にし、画面端の peek 帯への hover/focus/tap で overlay 展開、200〜400ms
- * 遅延で収納する hover-reveal state machine を assert する。クリック型 chip / Cmd+\\ は廃止。
+ * Sidebar (`op-sidebar`) を auto-hide にし、画面左端の peek 帯への hover/focus/tap で
+ * overlay 展開、200〜400ms 遅延で収納する hover-reveal state machine を assert する。
+ * クリック型 chip / Cmd+\\ は廃止。
+ *
+ * SPEC-2356 operator chrome cleanup: window controls / Command Palette / Update CTA を
+ * sidebar に集約したため、独立した window-controls peek 帯 / hover-reveal は撤去。
+ * sidebar の hover-reveal と、更新到着時の sidebar peek/badge のみを assert する。
  */
 
 import { test } from "node:test";
@@ -39,14 +43,19 @@ test("hover-reveal: peek 帯への pointerenter で sidebar が即時 reveal", a
   }
 });
 
-test("hover-reveal: peek 帯への pointerenter で window controls が即時 reveal", async () => {
+test("hover-reveal: window controls peek 帯 は撤去され、sidebar peek のみが残る", async () => {
   const fixture = await mountFixture();
   try {
     fixture.init();
-    const peek = fixture.document.querySelector(".op-window-controls-peek");
-    assert.ok(peek, "expected .op-window-controls-peek element");
-    peek.dispatchEvent(new fixture.window.Event("pointerenter", { bubbles: true }));
-    assert.equal(fixture.document.documentElement.dataset.opWindowControls, "revealed");
+    assert.equal(
+      fixture.document.querySelector(".op-window-controls-peek"),
+      null,
+      "window controls peek 帯 must be removed — controls live in the sidebar",
+    );
+    assert.ok(
+      fixture.document.querySelector(".op-sidebar-peek"),
+      "the sidebar peek 帯 remains the single hover-reveal affordance",
+    );
   } finally {
     fixture.dispose();
   }
@@ -99,15 +108,15 @@ test("hover-reveal: keyboard focusin で peek 帯から panel を reveal、focus
   }
 });
 
-test("hover-reveal: touch (pointerType=touch) でも peek 帯から reveal", async () => {
+test("hover-reveal: touch (pointerType=touch) でも sidebar peek 帯から reveal", async () => {
   const fixture = await mountFixture();
   try {
     fixture.init();
-    const peek = fixture.document.querySelector(".op-window-controls-peek");
+    const peek = fixture.document.querySelector(".op-sidebar-peek");
     const event = new fixture.window.Event("pointerdown", { bubbles: true });
     Object.defineProperty(event, "pointerType", { value: "touch" });
     peek.dispatchEvent(event);
-    assert.equal(fixture.document.documentElement.dataset.opWindowControls, "revealed");
+    assert.equal(fixture.document.documentElement.dataset.opSidebar, "revealed");
   } finally {
     fixture.dispose();
   }
@@ -159,34 +168,58 @@ test("hover-reveal: panel 自体への pointerenter は close timer を中断す
   }
 });
 
-test("hover-reveal: moving from window controls peek to Add window keeps controls revealed", async () => {
+test("hover-reveal: window controls (Tile/Stack/Align/Windows/Add) は sidebar 内に常駐する", async () => {
+  // SPEC-2356 operator chrome cleanup: window operations move into the sidebar
+  // Windows section, so revealing the sidebar reveals them — there is no
+  // separate window-controls reveal state to manage anymore.
   const fixture = await mountFixture();
   try {
     fixture.init();
-    const peek = fixture.document.querySelector(".op-window-controls-peek");
-    const actions = fixture.document.getElementById("floating-window-controls-actions");
-    const addButton = fixture.document.getElementById("add-button");
-    assert.ok(peek, "expected .op-window-controls-peek element");
-    assert.ok(actions, "expected continuous window controls actions group");
-    assert.ok(addButton, "expected Add window button");
-    assert.ok(actions.contains(addButton), "Add window must stay inside the continuous actions group");
+    const sidebar = fixture.document.getElementById("op-sidebar");
+    for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
+      const control = fixture.document.getElementById(id);
+      assert.ok(control, `expected ${id}`);
+      assert.ok(sidebar.contains(control), `${id} must live inside the sidebar`);
+    }
 
+    const peek = fixture.document.querySelector(".op-sidebar-peek");
     peek.dispatchEvent(new fixture.window.Event("pointerenter", { bubbles: true }));
-    assert.equal(fixture.document.documentElement.dataset.opWindowControls, "revealed");
-
-    peek.dispatchEvent(new fixture.window.Event("pointerleave", { bubbles: true }));
-    fixture.advanceTime(200);
-    actions.dispatchEvent(new fixture.window.Event("pointerenter", { bubbles: true }));
-    fixture.advanceTime(100);
     assert.equal(
-      fixture.document.documentElement.dataset.opWindowControls,
+      fixture.document.documentElement.dataset.opSidebar,
       "revealed",
-      "entering the continuous Add-window path must cancel the pending close timer",
+      "revealing the sidebar reveals the window controls along with it",
+    );
+  } finally {
+    fixture.dispose();
+  }
+});
+
+test("update peek: op:update-available で sidebar が peek し data-op-sidebar-update が付く", async () => {
+  // SPEC-2356 operator chrome cleanup: the Update CTA lives in the auto-hidden
+  // sidebar. When update-cta.js dispatches op:update-available the shell peeks
+  // the sidebar (briefly reveal + close) and badges the peek 帯 so the user
+  // notices without hovering.
+  const fixture = await mountFixture();
+  try {
+    fixture.init();
+    fixture.document.dispatchEvent(new fixture.window.CustomEvent("op:update-available"));
+    assert.equal(
+      fixture.document.documentElement.dataset.opSidebarUpdate,
+      "available",
+      "update availability must badge the sidebar peek 帯",
+    );
+    assert.equal(
+      fixture.document.documentElement.dataset.opSidebar,
+      "revealed",
+      "the sidebar must peek open so the Update CTA is briefly visible",
     );
 
-    actions.dispatchEvent(new fixture.window.Event("pointerleave", { bubbles: true }));
-    fixture.advanceTime(260);
-    assert.equal(fixture.document.documentElement.dataset.opWindowControls, undefined);
+    fixture.document.dispatchEvent(new fixture.window.CustomEvent("op:update-dismissed"));
+    assert.equal(
+      fixture.document.documentElement.dataset.opSidebarUpdate,
+      undefined,
+      "dismissing the update clears the peek badge",
+    );
   } finally {
     fixture.dispose();
   }

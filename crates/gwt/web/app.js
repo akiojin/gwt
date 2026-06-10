@@ -152,10 +152,6 @@
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const worldGrid = document.getElementById("canvas-world-grid");
-      const activeWorkSection = document.getElementById("op-active-work");
-      const activeWorkCount = document.getElementById("op-active-work-count");
-      const activeWorkSummary = document.getElementById("op-active-work-summary");
-      const activeWorkAgents = document.getElementById("op-active-work-agents");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
@@ -2183,17 +2179,19 @@
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
-        not_started: "Not Started",
+        starting: "Starting",
         idle: "Idle",
         waiting: "Waiting",
         stopped: "Stopped",
         error: "Error",
       });
 
+      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
+      // spellings (and the older `starting`→running conflation) normalize to it.
       const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        starting: "running",
-        notstarted: "not_started",
-        "not-started": "not_started",
+        not_started: "starting",
+        notstarted: "starting",
+        "not-started": "starting",
         ready: "idle",
         exited: "stopped",
       });
@@ -2777,6 +2775,89 @@
 
       let presetModalFocusReturn = null;
       let presetModalFocusTrapRelease = null;
+      // SPEC-2356 "Surface Deck" — arrow-key roving across the 2-column
+      // preset grid. Buttons are walked in document order; ←→ step within a
+      // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
+      // currently-focused tile so the keyboard glow tracks the cursor.
+      // SPEC-2356 landscape weighted deck — roving is geometry direction-nearest
+      // (not a fixed column-count jump) so the 45/33/22 weighted columns and the
+      // uneven per-column row counts navigate intuitively. The handler reads real
+      // tile geometry; a too-diagonal candidate (>~63°) is rejected so pressing
+      // Down at the bottom of a short column clamps instead of leaping columns.
+      function findGeometryNeighbor(buttons, current, key) {
+        const src = buttons[current].getBoundingClientRect();
+        const sx = src.left + src.width / 2;
+        const sy = src.top + src.height / 2;
+        const AXIS_BIAS = 2.5;
+        let best = -1;
+        let bestScore = Infinity;
+        buttons.forEach((btn, i) => {
+          if (i === current) return;
+          const r = btn.getBoundingClientRect();
+          const dx = r.left + r.width / 2 - sx;
+          const dy = r.top + r.height / 2 - sy;
+          const inDirection =
+            (key === "ArrowRight" && dx > 1) ||
+            (key === "ArrowLeft" && dx < -1) ||
+            (key === "ArrowDown" && dy > 1) ||
+            (key === "ArrowUp" && dy < -1);
+          if (!inDirection) return;
+          const horizontal = key === "ArrowRight" || key === "ArrowLeft";
+          const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
+          const secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
+          if (secondary > primary * 2) return;
+          const score = primary + secondary * AXIS_BIAS;
+          if (score < bestScore) {
+            bestScore = score;
+            best = i;
+          }
+        });
+        return best;
+      }
+      function presetRovingButtons() {
+        return [...modal.querySelectorAll(".preset-button")];
+      }
+      function setActivePresetButton(buttons, index) {
+        if (!buttons.length) return;
+        const clamped = Math.max(0, Math.min(index, buttons.length - 1));
+        buttons.forEach((button, i) => {
+          button.classList.toggle("is-active", i === clamped);
+        });
+        const target = buttons[clamped];
+        if (target && typeof target.focus === "function") {
+          try { target.focus({ preventScroll: true }); }
+          catch { target.focus(); }
+        }
+      }
+      function handlePresetRovingKeydown(event) {
+        const key = event.key;
+        if (
+          key !== "ArrowRight" &&
+          key !== "ArrowLeft" &&
+          key !== "ArrowUp" &&
+          key !== "ArrowDown" &&
+          key !== "Enter"
+        ) {
+          return;
+        }
+        const buttons = presetRovingButtons();
+        if (!buttons.length) return;
+        let current = buttons.indexOf(document.activeElement);
+        if (current < 0) {
+          current = buttons.findIndex((button) =>
+            button.classList.contains("is-active"),
+          );
+          if (current < 0) current = 0;
+        }
+        if (key === "Enter") {
+          event.preventDefault();
+          buttons[current].click();
+          return;
+        }
+        event.preventDefault();
+        const next = findGeometryNeighbor(buttons, current, key);
+        if (next >= 0) setActivePresetButton(buttons, next);
+      }
       function openModal() {
         // SPEC-2356 — capture trigger BEFORE adding .open so we can
         // restore focus on close. The preset modal is invoked via the
@@ -2794,6 +2875,12 @@
         if (presetShell) {
           presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
         }
+        // SPEC-2356 "Surface Deck" — drop focus onto the first preset tile so
+        // arrow-key roving works immediately without a stray Tab.
+        const buttons = presetRovingButtons();
+        if (buttons.length) {
+          setActivePresetButton(buttons, 0);
+        }
       }
 
       function closeModal() {
@@ -2810,6 +2897,10 @@
             catch { presetModalFocusReturn.focus(); }
           }
           presetModalFocusReturn = null;
+          // SPEC-2356 — clear the roving highlight so a re-open starts clean.
+          for (const button of presetRovingButtons()) {
+            button.classList.remove("is-active");
+          }
         }
       }
 
@@ -3814,10 +3905,12 @@
         }
         // Re-render regardless of session count: when a snapshot drops back to
         // sessions:[] (agent stopped, rollout/transcript unreadable, settings
-        // change) the Active Work footer must clear its stale token/context
-        // instead of keeping the previous poll's values.
+        // change) the Work surface must clear its stale token/context instead
+        // of keeping the previous poll's values. SPEC-2359 Phase W-12 Slice 3
+        // (FR-351): the sidebar Active Works overview is gone, so usage now
+        // refreshes through the Workspace Overview (Kanban) Work surface.
         try {
-          renderActiveWorkOverview();
+          workspaceOverviewSurface.renderWindows();
         } catch {
           /* no-op */
         }
@@ -4238,142 +4331,6 @@
         return [{ ...activeWorkProjection, agents }];
       }
 
-      function activeWorkDisplayTitle(projection, agents) {
-        const agentTitle = (Array.isArray(agents) ? agents : [])
-          .find((agent) => agent && String(agent.title_summary || "").trim())
-          ?.title_summary;
-        const candidates = [
-          agentTitle,
-          projection?.summary,
-          projection?.owner,
-          projection?.title,
-        ];
-        for (const value of candidates) {
-          const title = String(value || "").trim();
-          if (!title || title === "Start Work") continue;
-          return title;
-        }
-        return "Active Work";
-      }
-
-      function renderActiveWorkAgentCard(agent) {
-        const state = String(agent.status_category || "unknown").toLowerCase();
-        const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
-        const coordinationLabel = coordinationKindLabel(coordinationKind);
-        const card = createNode("article", "op-agent-card");
-        card.dataset.state = state;
-        if (coordinationKind) card.dataset.kind = coordinationKind;
-        if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
-
-        const head = createNode("div", "op-agent-head");
-        head.appendChild(
-          createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
-        );
-        const chips = createNode("div", "op-agent-chips");
-        if (coordinationLabel) {
-          chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
-        }
-        chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
-        head.appendChild(chips);
-        card.appendChild(head);
-
-        const agentMeta = createNode("div", "op-agent-meta");
-        appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
-        card.appendChild(agentMeta);
-
-        if (agent.coordination_scope) {
-          card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
-        }
-
-        const agentFocusText = agent.title_summary || agent.current_focus;
-        if (agentFocusText) {
-          const focusText = coordinationLabel
-            ? `${coordinationLabel}: ${agentFocusText}`
-            : agentFocusText;
-          const agentFocus = createNode("div", "op-agent-focus", focusText);
-          if (agent.current_focus && agent.current_focus !== agentFocusText) {
-            agentFocus.title = agent.current_focus;
-          }
-          card.appendChild(agentFocus);
-        }
-
-        // SPEC-2970 FR-019/FR-020 — per-session usage footer (enhanced CLI
-        // footer): model · tokens · context-left + this provider's account badge.
-        const sessionUsage = usageForSession(agent.session_id);
-        if (sessionUsage) {
-          const footer = createNode("div", "op-agent-usage");
-          if (sessionUsage.model) {
-            footer.appendChild(createNode("span", "op-agent-usage__model", sessionUsage.model));
-          }
-          footer.appendChild(
-            createNode("span", "op-agent-usage__tok", `${usageFmtTokens(sessionUsage.total_tokens)} tok`),
-          );
-          const eligible = sessionUsage.eligible !== false;
-          if (eligible && sessionUsage.context_left_pct != null) {
-            footer.appendChild(
-              createNode("span", "op-agent-usage__ctx", `ctx ${Math.round(sessionUsage.context_left_pct)}%`),
-            );
-          }
-          if (eligible) {
-            const acct = (latestProviderUsage.accounts || []).find(
-              (a) => a.provider === sessionUsage.provider,
-            );
-            const five = acct && (acct.windows || []).find((w) => w.kind === "five_hour");
-            const wk = acct && (acct.windows || []).find((w) => w.kind === "weekly");
-            const parts = [];
-            if (five) parts.push(`5h ${Math.round(five.used_percent)}%`);
-            if (wk) parts.push(`wk ${Math.round(wk.used_percent)}%`);
-            if (parts.length) {
-              footer.appendChild(createNode("span", "op-agent-usage__acct", parts.join(" · ")));
-            }
-          }
-          if (sessionUsage.limit_reached) {
-            footer.appendChild(createNode("span", "op-agent-usage__limit", "limit reached"));
-          }
-          card.appendChild(footer);
-        }
-
-        const agentActions = createNode("div", "op-agent-actions");
-        const focusButton = createNode("button", "op-agent-action", "Focus");
-        focusButton.type = "button";
-        focusButton.addEventListener("click", () => {
-          focusActiveWorkAgentWindow(agent);
-        });
-        agentActions.appendChild(focusButton);
-        if (agent.last_board_entry_id) {
-          const boardButton = createNode("button", "op-agent-action", "Open Entry");
-          boardButton.type = "button";
-          boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
-          agentActions.appendChild(boardButton);
-        }
-        if (agentActions.childNodes.length > 0) {
-          card.appendChild(agentActions);
-        }
-
-        return card;
-      }
-
-      // SPEC-2359 Phase U-7 (FR-148): human-readable label for the Phase
-      // U-6 `WorkspaceLifecycleStage` enum on the Active Work card. Mirror
-      // of `formatLifecycleStageLabel` in workspace-kanban-surface.js so
-      // both surfaces show identical strings.
-      function formatActiveWorkLifecycleLabel(stage) {
-        switch (String(stage || "").toLowerCase()) {
-          case "planning":
-            return "Planning";
-          case "active":
-            return "Active";
-          case "in_review":
-            return "In Review";
-          case "done":
-            return "Done";
-          case "archived":
-            return "Archived";
-          default:
-            return "";
-        }
-      }
-
       function agentStatusLabel(state) {
         switch (String(state || "").toLowerCase()) {
           case "active":
@@ -4387,37 +4344,6 @@
           default:
             return "Unknown";
         }
-      }
-
-      function agentRuntimeStatusLabel(agent) {
-        const windowData = workspaceWindowById(agent.window_id);
-        if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
-          const runtimeState = runtimeStateForWindow(windowData);
-          return windowRuntimeLabel(runtimeState);
-        }
-        return agentStatusLabel(agent.status_category);
-      }
-
-      function focusActiveWorkAgentWindow(agent) {
-        if (!agent?.window_id) return;
-        const windowData = workspaceWindowById(agent.window_id);
-        if (!windowData) return;
-        if (windowData.minimized) {
-          send({ kind: "restore_window", id: agent.window_id });
-        }
-        focusWindowRemotely(agent.window_id, { center: true });
-      }
-
-      function setActiveWorkSectionVisible(visible) {
-        if (activeWorkSection) {
-          activeWorkSection.hidden = !visible;
-        }
-      }
-
-      function projectionIssueNumber(projection) {
-        const owner = String(projection?.owner || "");
-        const match = owner.match(/^Issue\s+#(\d+)$/i);
-        return match ? Number(match[1]) : null;
       }
 
       function compactPathLabel(value) {
@@ -4449,25 +4375,6 @@
         return item;
       }
 
-      function coordinationKindLabel(kind) {
-        switch (String(kind || "").toLowerCase()) {
-          case "blocked":
-            return "Blocked";
-          case "handoff":
-            return "Handoff";
-          case "next":
-            return "Next";
-          case "claim":
-            return "Claim";
-          case "decision":
-            return "Decision";
-          case "status":
-            return "Status";
-          default:
-            return "";
-        }
-      }
-
       function activeBoardWindowIds() {
         return (activeWorkspace().windows || [])
           .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
@@ -4497,151 +4404,15 @@
         focusOrSpawnPreset("board");
       }
 
-      function renderActiveWorkOverview() {
-        if (!activeWorkSummary || !activeWorkAgents) return;
-        activeWorkSummary.innerHTML = "";
-        activeWorkAgents.innerHTML = "";
-
-        if (!activeWorkProjection) {
-          if (activeWorkCount) activeWorkCount.textContent = "0";
-          setActiveWorkSectionVisible(false);
-          return;
-        }
-
-        const works = activeWorkItemsFromProjection();
-        const workCount = works.length;
-        const agentCount = works.reduce((total, work) => total + work.agents.length, 0);
-        if (activeWorkCount) activeWorkCount.textContent = String(workCount);
-
-        if (workCount === 0) {
-          setActiveWorkSectionVisible(false);
-          return;
-        }
-
-        setActiveWorkSectionVisible(true);
-
-        activeWorkSummary.appendChild(
-          createNode(
-            "div",
-            "op-work-title",
-            `${workCount} Active Work${workCount === 1 ? "" : "s"}`,
-          ),
-        );
-        const meta = createNode("div", "op-work-meta");
-        appendMeta(meta, `${agentCount} assigned Agent${agentCount === 1 ? "" : "s"}`);
-        const activePr = createWorkspacePrMeta(activeWorkProjection);
-        if (activePr) meta.appendChild(activePr);
-        // SPEC-2359 Phase U-7 (FR-148, FR-149): render the Phase U-6
-        // `lifecycle_stage` in the Active Work meta so user can spot at a
-        // glance whether the work is Planning / Active / InReview / Done /
-        // Archived without opening the Workspace Detail pane. Falls back
-        // silently when the field is absent (legacy daemon payload).
-        const lifecycleStage = activeWorkProjection.lifecycle_stage;
-        if (lifecycleStage) {
-          const chip = createNode(
-            "span",
-            `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
-            formatActiveWorkLifecycleLabel(lifecycleStage),
-          );
-          meta.appendChild(chip);
-        }
-        activeWorkSummary.appendChild(meta);
-        // SPEC-2359 Phase U-7 (FR-141, FR-149): when `blocked_reason` is
-        // populated, surface it directly in the Active Work status line
-        // instead of letting it hide behind `next_action` / `status_text`.
-        // This mirrors the Detail pane Blocked Reason section so the user
-        // sees consistent "what is blocking" copy across surfaces.
-        const blockedReason =
-          typeof activeWorkProjection.blocked_reason === "string"
-            ? activeWorkProjection.blocked_reason.trim()
-            : "";
-        const statusBody =
-          blockedReason ||
-          activeWorkProjection.next_action ||
-          activeWorkProjection.status_text ||
-          "Work is active";
-        const statusNode = createNode("div", "op-work-status", statusBody);
-        if (blockedReason) {
-          statusNode.classList.add("op-work-status--blocked");
-        }
-        activeWorkSummary.appendChild(statusNode);
-
-        for (const work of works) {
-          const state = String(work.status_category || "unknown").toLowerCase();
-          const card = createNode("article", "op-work-card");
-          card.dataset.state = state;
-          card.appendChild(
-            createNode("div", "op-work-title", activeWorkDisplayTitle(work, work.agents)),
-          );
-
-          const workMeta = createNode("div", "op-work-meta");
-          appendMeta(workMeta, work.owner);
-          appendMeta(workMeta, `${work.agents.length} Agent${work.agents.length === 1 ? "" : "s"}`);
-          const workPr = createWorkspacePrMeta(work);
-          if (workPr) workMeta.appendChild(workPr);
-          const lifecycleStage = work.lifecycle_stage;
-          if (lifecycleStage) {
-            const chip = createNode(
-              "span",
-              `op-work-lifecycle-chip lifecycle-chip lifecycle-chip--${lifecycleStage}`,
-              formatActiveWorkLifecycleLabel(lifecycleStage),
-            );
-            workMeta.appendChild(chip);
-          }
-          card.appendChild(workMeta);
-
-          const workBlockedReason =
-            typeof work.blocked_reason === "string" ? work.blocked_reason.trim() : "";
-          const workStatusBody =
-            workBlockedReason || work.next_action || work.status_text || work.summary || "Work is active";
-          const workStatus = createNode("div", "op-work-status", workStatusBody);
-          if (workBlockedReason) workStatus.classList.add("op-work-status--blocked");
-          card.appendChild(workStatus);
-
-          const actions = createNode("div", "op-work-actions");
-          if (work.branch) {
-            const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
-            addAgent.type = "button";
-            addAgent.addEventListener("click", () => {
-              send({
-                kind: "open_active_work_launch_wizard",
-                branch_name: work.branch,
-                linked_issue_number: projectionIssueNumber(work),
-              });
-            });
-            actions.appendChild(addAgent);
-          }
-          const boardRefs = work.board_refs || [];
-          const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
-          if (latestBoardRef) {
-            const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
-            openBoard.type = "button";
-            openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
-            actions.appendChild(openBoard);
-          }
-          if (actions.childNodes.length > 0) {
-            card.appendChild(actions);
-          }
-
-          const agentList = createNode("div", "op-agent-list");
-          for (const agent of work.agents) {
-            agentList.appendChild(renderActiveWorkAgentCard(agent));
-          }
-          card.appendChild(agentList);
-          activeWorkAgents.appendChild(card);
-        }
-      }
-
       // SPEC-2356 — translate legacy runtime state vocabulary to Living
       // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
       // intentionally narrow so future runtime states surface as
       // `idle` until the design language explicitly handles them.
       function mapAgentTelemetryState(runtimeState) {
         switch (runtimeState) {
-          case "starting":
           case "running":
             return "active";
-          case "not_started":
+          case "starting":
             return "not_started";
           case "ready":
           case "idle":
@@ -4669,7 +4440,7 @@
               detailMap.set(windowId, detail);
             } else if (
               runtimeState === "running" ||
-              runtimeState === "not_started" ||
+              runtimeState === "starting" ||
               runtimeState === "idle" ||
               runtimeState === "waiting"
             ) {
@@ -7708,6 +7479,7 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        getResumeBounds: () => visibleBounds(),
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -14069,7 +13841,11 @@
             syncCurrentProjectWorkspaceIds(
               deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
             );
-            renderActiveWorkOverview();
+            refreshBoardCurrentWorkspaceId();
+            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
+            // overview is removed; the Work surface lives in the Workspace
+            // Overview (Kanban). Keep the projection global + telemetry update
+            // so the Kanban surface and Status Strip stay in sync.
             workspaceOverviewSurface.renderWindows();
             recomputeOperatorTelemetry();
             break;
@@ -14338,18 +14114,22 @@
             // FR-065/FR-067: ingest via the shared state helper so a stale
             // (older load_id) event is dropped and inventory phases keep the
             // last verified cleanup badges instead of flashing "Safety unknown".
+            // Single trailing break (no early break) so the SPEC-2356 telemetry
+            // contract test can extract this whole case body.
             const { applied } = applyBranchEntriesEvent(state, event);
-            if (!applied) {
-              break;
+            if (applied) {
+              syncBranchSelectionState(state);
+              frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+              // SPEC-2356 — feed branch count into the Operator Status Strip WK
+              // cell via develop's guarded telemetry helper. The dead Sidebar
+              // Layers `git` counter was removed in the operator chrome cleanup,
+              // so only `branches` is forwarded now. Count from state.entries so
+              // the telemetry reflects the post-ingest list (FR-065 carry-over).
+              const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
+              applyOperatorTelemetryCounts({
+                branches: branchesCount,
+              });
             }
-            syncBranchSelectionState(state);
-            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            // SPEC-2356 — feed git layer count into the Operator Status Strip.
-            const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
-            applyOperatorTelemetryCounts({
-              branches: branchesCount,
-              git: branchesCount,
-            });
             break;
           }
           case "profile_snapshot": {
@@ -15992,6 +15772,11 @@
         });
       }
 
+      // SPEC-2356 "Surface Deck" — arrow-key roving + Enter-to-deploy. Esc is
+      // already handled by the global modal close handler, so the roving
+      // listener only needs the directional keys and Enter.
+      modal.addEventListener("keydown", handlePresetRovingKeydown);
+
       // SPEC-2356 — bridge Command Palette + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
@@ -16136,5 +15921,4 @@
 
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       installPlaywrightTestBridge();
-      renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();

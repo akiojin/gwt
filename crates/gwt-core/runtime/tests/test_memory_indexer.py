@@ -1,6 +1,6 @@
 """Tests for the memory (post-mortem) scope indexer.
 
-Memory entries live in `tasks/memory.md` as H2 sections with the canonical shape:
+Memory entries live in `.gwt/work/memory.md` as H2 sections with the canonical shape:
 
     ## YYYY-MM-DD — title
     ### 事象
@@ -55,9 +55,9 @@ class LoadMemoryDocumentsTests(unittest.TestCase):
     def _write_memory_file(self, contents: str) -> Path:
         tmp = tempfile.mkdtemp()
         root = Path(tmp)
-        tasks = root / "tasks"
-        tasks.mkdir(parents=True, exist_ok=True)
-        (tasks / "memory.md").write_text(contents, encoding="utf-8")
+        work_dir = root / ".gwt" / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "memory.md").write_text(contents, encoding="utf-8")
         return root
 
     def test_returns_chunks_for_each_h2_section(self):
@@ -67,7 +67,7 @@ class LoadMemoryDocumentsTests(unittest.TestCase):
         self.assertEqual(len(memory), 3)
         # manifest has exactly one entry (the single source file)
         self.assertEqual(len(manifest), 1)
-        self.assertEqual(manifest[0]["path"], "tasks/memory.md")
+        self.assertEqual(manifest[0]["path"], ".gwt/work/memory.md")
 
     def test_extracts_date_from_dated_sections(self):
         root = self._write_memory_file(SAMPLE_MEMORY)
@@ -131,9 +131,9 @@ class ActionIndexMemoryTests(unittest.TestCase):
     def test_full_mode_writes_manifest_and_chunks(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
             root = Path(wt)
-            tasks = root / "tasks"
-            tasks.mkdir(parents=True, exist_ok=True)
-            (tasks / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
+            work_dir = root / ".gwt" / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (work_dir / "memory.md").write_text(SAMPLE_MEMORY, encoding="utf-8")
 
             result = runner.action_index_memory_v2(
                 project_root=str(root),
@@ -154,7 +154,7 @@ class ActionIndexMemoryTests(unittest.TestCase):
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["path"], "tasks/memory.md")
+            self.assertEqual(entries[0]["path"], ".gwt/work/memory.md")
 
     def test_missing_memory_file_returns_indexed_zero(self):
         with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:

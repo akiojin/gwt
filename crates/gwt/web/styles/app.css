@@ -299,20 +299,10 @@ body {
   background: var(--color-state-active);
 }
 
-.floating-actions {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.floating-window-controls-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+/* SPEC-2356 operator chrome cleanup: the right-bottom floating toolbar and its
+   window-control group rows are removed. Window operations live in the sidebar
+   Windows section; Zoom lives in the Status Strip. No floating chrome over the
+   bottom-right canvas corner. */
 
 .window-list-shell {
   position: relative;
@@ -769,7 +759,7 @@ body {
   background: var(--color-state-active);
 }
 
-.status-chip.not_started .status-dot {
+.status-chip.starting .status-dot {
   background: var(--color-state-idle);
 }
 
@@ -3801,12 +3791,38 @@ body {
   gap: 12px;
 }
 
+/* SPEC-2356 "Surface Deck" — categorized preset modal. The kicker, the
+   per-category section bands, and the icon-chip button grid are layered
+   on the shared .modal-shell primitive; theme accents + atmosphere live
+   in components.css so dual-theme switching stays a pure token swap. */
+.preset-modal__kicker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.preset-modal__tick {
+  font-size: 0.7em;
+  line-height: 1;
+  color: var(--color-state-active);
+}
+
 .preset-section + .preset-section {
-  margin-top: 12px;
+  margin-top: var(--space-4);
 }
 
 .preset-section-label {
-  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
   font-family: var(--font-display);
   font-stretch: 75%;
   font-size: var(--type-xs);
@@ -3816,24 +3832,115 @@ body {
   color: var(--color-text-muted);
 }
 
+.preset-section-label::before {
+  content: "▸";
+  font-size: 0.7em;
+  line-height: 1;
+  color: var(--cat-accent, var(--color-text-muted));
+}
+
 .preset-list {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+@media (max-width: 520px) {
+  .preset-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* SPEC-2356 landscape Surface Deck (Plan B, "weighted deck") — the three category
+   sections become side-by-side weighted columns so the deck stays low and never
+   overflows short viewports. Width maps to content volume: SURFACES (5 buttons)
+   widest, CONFIGURATION (2) narrowest. */
+.modal-shell.is-surface-deck {
+  width: min(940px, calc(100vw - 32px));
+  max-height: min(580px, calc(100vh - 60px));
+}
+
+.preset-deck {
+  display: grid;
+  grid-template-columns: 45fr 33fr 22fr;
+  gap: 0;
+  align-items: start;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.preset-deck .preset-section {
+  padding: var(--space-3);
+  margin-top: 0;
+}
+
+.preset-deck .preset-section + .preset-section {
+  margin-top: 0;
+  border-left: 1px solid var(--color-border);
+}
+
+/* CONFIGURATION carries only 2 buttons — keep it a single column so it does not
+   leave a wide half-empty row. SURFACES + KNOWLEDGE inherit the base 2-col grid. */
+.preset-deck .preset-section[data-category="config"] .preset-list {
+  grid-template-columns: 1fr;
+}
+
+/* Narrow viewports: collapse the deck back to a stacked single column that
+   scrolls, restoring per-category 2-col inner grids. */
+@media (max-width: 720px) {
+  .modal-shell.is-surface-deck {
+    width: min(520px, calc(100vw - 32px));
+  }
+  .preset-deck {
+    grid-template-columns: 1fr;
+  }
+  .preset-deck .preset-section {
+    border-left: none;
+  }
+  .preset-deck .preset-section + .preset-section {
+    margin-top: 0;
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+  }
+  .preset-deck .preset-section[data-category="config"] .preset-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .preset-button {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
   width: 100%;
   text-align: left;
-  padding: 10px 12px;
+  padding: var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
 }
-.preset-button:hover {
-  border-color: var(--color-focus-ring);
-  background: var(--color-surface-elevated);
+
+.preset-button__icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--cat-accent, var(--color-text-muted));
+  background: color-mix(in oklab, var(--cat-accent, var(--color-text-muted)) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--cat-accent, var(--color-text-muted)) 30%, transparent);
+  transition: box-shadow var(--motion-fast) var(--motion-curve),
+              background var(--motion-fast) var(--motion-curve);
+}
+
+.preset-button__text {
+  display: block;
+  min-width: 0;
 }
 
 .preset-button strong {
@@ -3845,19 +3952,30 @@ body {
   letter-spacing: var(--tracking-display);
   text-transform: uppercase;
   color: var(--color-display-fg);
-  margin-bottom: 3px;
+  margin-bottom: var(--space-1);
 }
 
-.preset-button span {
+.preset-button__text span {
   display: block;
   font-family: var(--font-body);
   font-size: var(--type-xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
+.preset-modal__hint {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
   color: var(--color-text-muted);
 }
 
 .modal-footer {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: var(--space-3);
   margin-top: 10px;
 }
 

@@ -18,7 +18,8 @@ use gwt_skills::{
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
-    crate::cli::memory::migrate_legacy_lessons_file(worktree).ok();
+    crate::cli::memory::migrate_legacy_memory_file(worktree).ok();
+    crate::cli::discussion::migrate_legacy_discussions_file(worktree).ok();
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &ManagedAssetTarget::ALL,

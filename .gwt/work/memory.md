@@ -6677,6 +6677,27 @@ Context: Issue #2981: bunx probe 失敗後の host package-runner fallback が b
 Learning: spawn する executable は platform で解決形が異なる(Windows は .cmd 必須)。fallback/secondary 経路で runner 名をハードコードすると primary の Windows-aware 解決(find_package_runner_in_path)を取りこぼし、Windows 限定 bug を生む。
 Future Action: launch/spawn 系で runner executable を選ぶ箇所は必ず find_package_runner_in_path 系の platform-aware 解決を経由する。新しい fallback を足すときは bare 名のハードコードを禁止し、未解決時のみ bare 名へフォールバックする。
 
+## 2026-06-04 — Workspace→Work 統合は FR-334 決定済みだが実装未完了（agent guidance 含む）
+
+Type: lesson
+Context: SPEC-2359 FR-334 で canonical naming=Work と決定済み。だが WorkspaceProjection struct(850+行)/workspace_projection.rs/gwtd workspace CLI/.gwt/workspace/ storage/WorkspaceState protocol、特に coordination_guidance.rs:24,79 の agent guidance が今も「Workspace を update しろ」と指示している。
+Learning: enum/UI label だけ Work に統一され、domain/CLI/storage/protocol/agent guidance が未統一の technical debt。agent guidance が残る限り agent は Workspace 用語で作業し続けるため、命名統一の核は coordination_guidance.rs。
+Future Action: Work 系の作業前に coordination_guidance.rs と命名統一の残作業を確認する。FR-334 完遂は SPEC-2359 Phase W-12 (US-66/FR-357/358) で扱う。
+
+## 2026-06-04 — Work 概念モデル = agent session + lifecycle（Board とは分離維持）
+
+Type: lesson
+Context: gwt-discussion で Work UI/UX 全面再設計に合意。Work=agent session 単位(1 agent:1 Work)、lifecycle Active/Paused/Done/Discarded、手動 close まで一覧に残す、Canvas 専用 surface 集約(サイドバー Active Works 撤去)、cleanup は worktree のみ削除、repo-local 追跡で永続コア/揮発ランタイムの 2 層。
+Learning: Work current state と Board は責務分離(event log vs snapshot、shared vs project-scoped、author vs owner)。統合せず board_refs/board_entry_id でリンクする。FR-008 と 2026-05-07 lesson(Board を current state に流用するな、live 照合せよ)を維持。
+Future Action: Work state を Board に統合しようとしない。Active 判定は必ず live session/window 照合を挟む。設計の正本は SPEC-2359 Phase W-12。
+
+## 2026-06-06 — repo-local tracked ファイルは --show-toplevel(現 worktree)に解決する。--git-common-dir は bare repo を返す
+
+Type: lesson
+Context: SPEC-2359 W-12 Slice 5b で gwt_repo_local_work_dir が resolve_main_worktree_root(git rev-parse --git-common-dir)を使い、gwt の workspace-home layout(親が bare repo gwt.git を持つ)では bare repo dir(gwt.git)に解決。bare repo は working tree を持たないため .gwt/work/events.jsonl/memory.md が tracked されず gwt.git/.gwt/work/ に書かれ、committed の <worktree>/.gwt/work/ と不一致になった。
+Learning: git-tracked な repo-local ファイルの配置先は必ず git rev-parse --show-toplevel(現在の worktree の working tree root)で解決する。--git-common-dir / main_worktree_root は linked worktree で共有 git dir(しばしば bare)を返し working tree が無いので tracked file には使えない。worktree 横断の共有は filesystem 共有でなく git commit + merge=union で行う(各 worktree が自分の .gwt/work/ を持つ)。
+Future Action: repo-local tracked ファイルの path helper は --show-toplevel ベースにする。CLI 書込み先と committed 場所が一致するか git ls-files/git show で確認する。
+
 ## 2026-06-04 — Board/storage tests must share env lock
 
 Type: lesson
@@ -6719,6 +6740,20 @@ Context: SPEC-2012 visual verification needed a Claude Code window in an isolate
 Learning: spawn_agent_window_with_placement first focuses any existing live agent for the same worktree/branch without checking the requested agent type. In fresh verification environments, this can make Add Agent/Launch Agent look like a no-op when switching from Codex to Claude.
 Future Action: When browser-check needs a specific second agent for the same Work, either close the existing fresh-check agent pane first or explicitly verify the product supports multiple agents before using Launch Wizard as the setup path.
 
+## 2026-06-08 — 遅れたブランチの test-file マージは ours+append だけでは develop の base-test 修正を取りこぼす
+
+Type: lesson
+Context: SPEC-2359 W-12 / SPEC-2356 ブランチ (develop 76 commit 遅れ) のマージで operator-chrome-structure.test.mjs が 1400 行の単一巨大 conflict 化。ours(私の119テスト)を土台に develop の新規 perf テスト33個を append する戦略を取ったが、develop が base テスト 'Launch wizard runtime confirmation' を contract 変更 (showConfirm 追加) していたのに ours が旧版を保持し、merged app.js (develop の launch wizard) と不一致で1件 RED になった。
+Learning: ours+append-theirs'-new-tests 戦略は『theirs が base テストを変更し ours が触っていない』ケースを取りこぼす。新規テスト名 (comm -13 base theirs) は拾えても、同名 base テストの body 変更は拾えない。全テストランナーを oracle にすれば contract 不一致は RED として顕在化するので、append 後に必ず full suite を回し、RED の base テストは theirs 版へ swap する。obsolete 化したテスト (削除済み関数参照) のみ除外する。
+Future Action: 大きく遅れたブランチの test-file conflict は (1) theirs を土台に git apply --3way で ours の diff を当てるか、(2) ours+append 後に full suite を oracle にして RED を theirs 版へ swap する。どちらでも append/swap 後に full frontend+cargo suite で 0 fail を確認してから commit する。
+
+## 2026-06-08 — browser-check の session.json seed: recent_projects は RecentProjectEntry 構造体配列 (string 配列は起動 panic)
+
+Type: lesson
+Context: merged build で fresh 隔離インスタンスを起動した際、seed した session.json の recent_projects を文字列配列 ['<repo>'] にしたら 'app runtime: invalid type: string, expected struct RecentProjectEntry' で起動 panic (main.rs:6356)。RecentProjectEntry は persistence.rs:122 で { path, title, kind } 構造体。develop 側でスキーマが string→struct に変わっていた。
+Learning: browser-check で session.json を seed する時、recent_projects は { path, title, kind } の構造体配列。空 [] にすればプロジェクトタブ (tabs) だけでアプリに着地でき安全。古い string 配列形式は新ビルドで起動を落とす。これは seed バグであり製品バグではない。
+Future Action: browser-check の seed では recent_projects は [] にするか persistence.rs の RecentProjectEntry 現行 shape をその場で確認してから書く。起動 panic 時は seed スキーマ不一致をまず疑い、CHECK_HOME/.gwt/session.json を現行 struct 定義と突き合わせる。
+
 ## 2026-06-07 — Branches Resume 不可の真因は scope 照合ではなく in-memory session cache の陳腐化（初期診断の訂正）
 
 Type: lesson
@@ -6739,3 +6774,65 @@ Type: lesson
 Context: Phase C 視覚検証中、main が BLOCKED な理由を確認するため 'git が refuse するはず' と誤想定して git branch -d main を実 repo で実行した。
 Learning: git branch -d は merged branch を実際に削除する（refuse しない）。bare repo の HEAD→main は worktree checkout ではないため git は main の削除をブロックしない（実際に削除された）。よって Phase C の current_head ブロックは bare repo の symbolic HEAD を誤検出している。復元は元 SHA で 'git branch main <sha>' により可能（origin/main とは別 commit だったため exact SHA 復元が必須だった）。
 Future Action: 調査/検証中はユーザーの実 repo で破壊的 git コマンド（branch -d/-D, push --delete, worktree remove 等）を絶対に実行しない。ブランチ削除可否は read-only 検査（git worktree list で checkout 有無、symbolic-ref で HEAD、show-ref）だけで判定する。branch_list の current_head 判定は bare symbolic HEAD と実 worktree checkout を区別すべき。
+## 2026-06-08 — 概念変更要望では SPEC 末尾の最新 Phase を実読してから設計判断する
+
+Type: lesson
+Context: gwt-discussion で『Work と Branches を統合/分離』要望を受けた。explore agent の要約と user の『Work=Branch』前提だけに従うと、SPEC-2359 を Work=branch identity に差し戻す方向（option A・大規模）に進みかけた。
+Learning: SPEC-2359 の spec section 末尾（4日前の Phase W-12 / US-60〜66）を実読すると、Work=agent session(1 agent:1 Work, FR-348) へ意図的に再設計済みで Work=branch(W-8/US-54) は supersede 済みだった。この矛盾を user に提示した結果、判断が option A → option B（presentation のみ統合・W-12 identity 維持）に変わり、4日前確定の設計を覆さずに要望を満たせた。
+Future Action: 既存概念の変更要望では、対象 SPEC section の『最新/末尾の Update Phase / Supersede note』を必ず実読し、user 前提や explore 要約と現行正本が食い違わないか確認してから設計判断する。recent supersede note を見落とさない。
+
+## 2026-06-08 — SPEC テキストと実装の drift: Work は code 上 branch 由来 multi-agent (W-8) で W-12(1:1) は未実装
+
+Type: lesson
+Context: SPEC-2359 W-13 実装で、SPEC 最新セクション W-12 (2026-06-04, FR-348 '1 agent:1 Work') を維持する前提で branch 背骨 UI を作ったが、ユーザーが視覚チェックで『Work を主導に・Work に複数 agent』と指摘。
+Learning: 実コード active_work_items_from_projection (mod.rs:2186) は active_work_agent_work_id→canonical_work_id(branch 由来) で agent を grouping し、1 Work に複数 agent を持たせる W-8 モデルを実装している。ActiveWorkItemView.agents は Vec。W-12 の '1 agent:1 Work' は SPEC テキストのみで未実装のドリフト。SPEC の最新 Update セクションを読んでも実装の真実とは限らない。
+Future Action: UI 設計前に SPEC のモデル記述だけで判断せず、対応する projection 構築コード（active_work_items_from_projection / canonical_work_id 等）を読んで実装の実態を確認する。SPEC text と code が食い違う場合は実装を真実とし、drift を明示してユーザーに確認する。
+
+## 2026-06-08 — Work/Workspace 一覧の土台はライブ active_work_projection ではなく永続 WorkspaceWorkItem(W-12)
+
+Type: lesson
+Context: 「Work surface 作り直し」で、ユーザーの『Work』をライブ active_work_projection(稼働中 agent から導出・停止で消える非永続)と誤解し、agent 一覧を spine にして何度も方向を外した(branch 背骨→Active Works→Option A→…と4回以上やり直し)。
+Learning: ユーザーの Work(=Workspace)は永続概念: 1 Start Work 単位、branch と 1:1 だがローカル branch 消失でも永続、own id、.gwt/work/events.jsonl で git 追跡、lifecycle Active/Paused/Done/Discarded、複数 session を順番に束ね(active は 1 つ)、linked SPEC/Issue/PR、Board スレッドを内包。= develop の WorkspaceWorkItem(W-12)。一覧は is_incomplete(Active+Paused)。ライブ projection は agent が無いと空で、ユーザー視覚検証も不能になる。
+Future Action: Work/Workspace 一覧 UI は最初に『永続 WorkspaceWorkItem store(load_workspace_work_items / .gwt/work/events.jsonl, develop W-12)』を土台にする。Work は agent/branch の有無に依存しない永続概念だと最初に確認。SPEC の最新フェーズ(W-12)を実装の正本とし、UI を projection ではなく永続 store に接続する。
+
+## 2026-06-09 — Avoid wall-clock upper bounds for async coalesce tests
+
+Type: failure-pattern
+Context: pre-pr verification for PR #3001 repeatedly failed in the full suite on app_runtime::persist_dispatcher::tests::suppresses_identical_snapshot_while_pending while isolated runs passed.
+Learning: The test asserted an elapsed wall-clock upper bound that included scheduler and disk latency, so suite load could fail the test even when duplicate enqueue suppression was correct.
+Future Action: For async coalescing and background-worker tests, assert internal state transitions or use deterministic test harnesses instead of wall-clock upper bounds for completion time.
+
+## 2026-06-09 — Lock HOME readers in parallel Rust tests
+
+Type: lesson
+Context: PR #3001 の Linux Test (Rust) で workspace_projection::tests::resolve_workspace_id_for_session_returns_none_when_session_missing が save_workspace_projection(...).unwrap() の ENOENT で失敗した。
+Learning: 同じ test binary 内で HOME を一時ディレクトリに差し替えるテストがある場合、HOME を変更しないテストでも gwt_home()/gwt_workspace_*_for_repo_path() を読むなら env_lock が必要。読み手が lock を取らないと、差し替えテストの TempDir drop と write_atomic の create/open が競合する。
+Future Action: HOME/USERPROFILE/XDG_CONFIG_HOME/GIT_CONFIG_GLOBAL など process-wide env から path を導くテストを追加・変更するときは、env を変更する側だけでなく読む側にも crate::test_support::env_lock() を適用する。
+
+## 2026-06-09 — Installed app/runtime staleness can hide CPU regressions
+
+Type: failure-pattern
+Context: SPEC-1939 Phase 67 investigated >100% CPU in the installed GWT.app while a fresh target/debug/gwt checkout was idle.
+Learning: Current-checkout smoke passing is insufficient when the running installed app uses an older binary/runtime runner; compare installed/current hashes, runtime manifest runner hash, child runner processes, and recent log storm counters.
+Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --json against the live machine before declaring the checkout fixed, and explicitly record whether installed app/runtime remain stale.
+
+## 2026-06-10 — 新モデル追加時は per-model default effort も Claude Code docs で確認する
+
+Type: lesson
+Context: PR #3007 で Fable 5 をモデル候補に追加した際、opus と同じ reasoning ladder (xHigh default) を共有させたが、Codex レビューで Fable 5 の Claude Code 既定 effort は high だと指摘された。検証の結果 Opus 4.8 / Sonnet 4.6 の既定も high で、gwt の xHigh/medium 既定は旧バージョン (Opus 4.7 時代) の stale な引き継ぎだった。
+Learning: Claude Code の既定 effort はモデル世代ごとに変わる (4.7=xhigh, 4.8/Fable5/Sonnet4.6=high)。モデル候補の追加・ラベル更新時にラベルだけ追従して既定値の追従が漏れると、ユーザーが意図せず高コスト effort で起動する。
+Future Action: launch_wizard のモデル一覧や既定値を更新する際は https://code.claude.com/docs/en/model-config#adjust-effort-level の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
+
+## 2026-06-10 — effort 既定はハードコードせず Auto（非 export）で Claude Code に委譲する
+
+Type: decision
+Context: PR #3009 で既定 effort を docs の high に揃えた直後、Codex レビューが「AWS platform では opus→Opus 4.7（既定 xhigh）に解決されるため high 固定は不一致」と指摘。provider・モデル世代ごとに既定が異なるため、gwt 側のハードコードはどの値でも何処かで stale になる。
+Learning: Claude の effort 既定は reasoning=auto（CLAUDE_CODE_EFFORT_LEVEL 非 export）にして Claude Code 自身の per-model 既定に委譲するのが構造的な解。値の追従更新が不要になり、stale 既定バグのクラスごと消える。
+Future Action: launch オプションの「既定値」を gwt 側に持たせる前に、CLI 側に既定解決を委譲できるか（フラグ/環境変数を渡さない選択肢）を先に検討する。
+
+## 2026-06-10 — wizard slider の E2E は focusout で interaction guard を解放してから assert する
+
+Type: failure-pattern
+Context: launch-wizard-controls-live.spec.ts の ArrowRight→summary assert が常に失敗。WS 送信・backend 適用は正常で、frontend の wizardInteractionGuard（SPEC-2014 2026-05-29）が slider focus 中の launch_wizard_state 再レンダリングを focusout まで defer していた。Playwright の press は focus を残すため summary が永遠に古いままになり、後続 probe の echo も全て deferred に飲まれて「backend が死んだ」ように見えた。
+Learning: guard は <select> と .launch-range__input の focus/pointer 中に activate され focusout/Escape で release される。slider 操作後の backend 反映を assert する E2E は blur() などで guard を先に解放する必要がある。
+Future Action: wizard の <select>/slider を操作する E2E・自動検証では、操作後に blur または別要素クリックを挟んでから backend 反映を assert する。「アクションが無視される」症状を見たら interaction guard の defer を最初に疑う。

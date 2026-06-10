@@ -383,11 +383,11 @@ mod tests {
         ] {
             assert!(text.contains("gwtd workspace update"));
             assert!(text.contains("Board"));
-            assert!(text.contains("Workspace"));
+            assert!(text.contains("Work"));
         }
         assert!(
             !matches!(stop.output, HookOutput::StopBlock { .. }),
-            "Workspace update reminder must not block Stop"
+            "Work update reminder must not block Stop"
         );
     }
 
@@ -683,7 +683,7 @@ mod tests {
         let text = additional_context(&plan.output);
 
         assert!(text.contains("最近 Board に投稿済み"));
-        assert!(text.contains("Workspace"));
+        assert!(text.contains("Work は current state"));
         assert!(text.contains("Use language: ja"));
         assert!(!text.contains("You posted to the Board recently"));
     }

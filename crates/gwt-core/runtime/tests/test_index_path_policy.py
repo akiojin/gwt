@@ -77,8 +77,9 @@ class IndexPathPolicyTests(unittest.TestCase):
     def test_shared_policy_exposes_memory_allowlist(self):
         policy = runner.load_index_path_policy()
 
-        self.assertIn("tasks/memory.md", policy["allow_paths"])
-        self.assertIn("tasks", policy["deny_root_prefixes"])
+        self.assertIn(".gwt/work/memory.md", policy["allow_paths"])
+        self.assertIn(".gwt/work/discussions.md", policy["allow_paths"])
+        self.assertIn(".gwt", policy["deny_root_prefixes"])
 
 
 if __name__ == "__main__":

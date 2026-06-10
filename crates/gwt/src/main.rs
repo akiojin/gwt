@@ -6472,11 +6472,14 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
+    let tray_copy_url =
+        MenuItem::with_id(gwt::cli::tray::menu::ids::COPY_URL, "Copy URL", true, None);
     let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     tray_menu
         .append_items(&[
             &tray_open,
+            &tray_copy_url,
             &PredefinedMenuItem::separator(),
             &tray_about,
             &PredefinedMenuItem::separator(),
@@ -6983,6 +6986,16 @@ fn main() -> std::io::Result<()> {
                                 error = %error,
                                 url = browser_url.as_str(),
                                 "tray Open menu failed to launch the default browser"
+                            );
+                        }
+                    }
+                    Some(MenuAction::CopyUrl) => {
+                        if let Err(error) = gwt_clipboard::ClipboardText::set_text(&browser_url) {
+                            tracing::warn!(
+                                target: "gwt_tray",
+                                error = %error,
+                                url = browser_url.as_str(),
+                                "tray Copy URL menu failed to copy browser URL to clipboard"
                             );
                         }
                     }

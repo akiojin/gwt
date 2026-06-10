@@ -3297,7 +3297,8 @@ impl LaunchWizardState {
     fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
         if self.agent_is_codex() {
             CODEX_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude" && is_claude_opus_model(self.model.as_str())
+        } else if self.effective_agent_id() == "claude"
+            && is_claude_opus_tier_model(self.model.as_str())
         {
             let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
             // `ultracode` is opt-in and only usable on Opus 4.7/4.8 with a
@@ -3649,18 +3650,24 @@ fn default_launch_path(
 
 const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.8)";
 
-fn is_claude_opus_model(model: &str) -> bool {
-    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus"
+// Fable 5 shares the Opus 4.7/4.8 effort surface (low..max), so both models
+// use the same opus-tier reasoning ladder.
+fn is_claude_opus_tier_model(model: &str) -> bool {
+    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus" || model == "fable"
 }
 
 fn is_claude_effort_capable_model(model: &str) -> bool {
-    is_claude_opus_model(model) || model == "sonnet"
+    is_claude_opus_tier_model(model) || model == "sonnet"
 }
 
-const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
+const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 5] = [
     ModelDisplayOption {
         label: CLAUDE_DEFAULT_MODEL_LABEL,
         description: "Most capable for complex work",
+    },
+    ModelDisplayOption {
+        label: "fable",
+        description: "Most capable for the hardest, longest-running tasks",
     },
     ModelDisplayOption {
         label: "opus",
@@ -3676,11 +3683,7 @@ const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     },
 ];
 
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
-    ModelDisplayOption {
-        label: "Default (Auto)",
-        description: "Use Codex default model (gpt-5.5)",
-    },
+const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     ModelDisplayOption {
         label: "gpt-5.5",
         description: "Frontier model for complex coding, research, and real-world work",
@@ -3694,16 +3697,8 @@ const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
         description: "Small, fast, and cost-efficient model for simpler coding tasks",
     },
     ModelDisplayOption {
-        label: "gpt-5.3-codex",
-        description: "Coding-optimized model",
-    },
-    ModelDisplayOption {
         label: "gpt-5.3-codex-spark",
         description: "Ultra-fast coding model",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.2",
-        description: "Optimized for professional work and long-running agents",
     },
 ];
 
@@ -3738,12 +3733,17 @@ const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     },
 ];
 
+// Auto is the default: gwt skips the CLAUDE_CODE_EFFORT_LEVEL export so
+// Claude Code applies its own per-model default effort (`high` on
+// Fable 5 / Opus 4.8, `xhigh` on Opus 4.7). Hardcoding a level here goes
+// stale whenever a model generation changes its default, and the `opus`
+// alias resolves to different generations per provider.
 const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
-        description: "Let the model choose the effort",
-        is_default: false,
+        description: "Follow Claude Code's default effort for the model",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "Low",
@@ -3760,14 +3760,14 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Deeper reasoning for complex work",
+        description: "Balances tokens and intelligence (Fable 5 / Opus 4.8 default)",
         is_default: false,
     },
     ReasoningDisplayOption {
         label: "xHigh",
         stored_value: "xhigh",
-        description: "Best results for most coding tasks (Opus 4.8 default)",
-        is_default: true,
+        description: "Deeper reasoning at higher token spend",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "Max",
@@ -3778,7 +3778,7 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 7] = [
     ReasoningDisplayOption {
         label: "Ultracode",
         stored_value: "ultracode",
-        description: "Top-tier effort plus dynamic workflow orchestration (Opus only)",
+        description: "Top-tier effort plus dynamic workflow orchestration (Opus-tier only)",
         is_default: false,
     },
 ];
@@ -3787,8 +3787,8 @@ const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
-        description: "Let the model choose the effort",
-        is_default: false,
+        description: "Follow Claude Code's default effort for the model",
+        is_default: true,
     },
     ReasoningDisplayOption {
         label: "Low",
@@ -3800,12 +3800,12 @@ const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
         label: "Medium",
         stored_value: "medium",
         description: "Balanced reasoning for everyday work",
-        is_default: true,
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Deeper reasoning for complex work",
+        description: "Deeper reasoning for complex work (Sonnet 4.6 default)",
         is_default: false,
     },
 ];
@@ -4477,7 +4477,7 @@ fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str 
 fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
     match status {
         crate::WindowProcessStatus::Running => "running",
-        crate::WindowProcessStatus::NotStarted => "not_started",
+        crate::WindowProcessStatus::Starting => "starting",
         crate::WindowProcessStatus::Idle => "idle",
         crate::WindowProcessStatus::Waiting => "waiting",
         crate::WindowProcessStatus::Stopped => "stopped",
@@ -5891,7 +5891,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_with_removed_codex_model_falls_back_to_auto() {
+    fn quick_start_with_removed_codex_model_falls_back_to_current_default() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -5917,11 +5917,11 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "Default (Auto)");
+        assert_eq!(state.model, "gpt-5.5");
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert!(config.model.is_none());
+                    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -7257,7 +7257,7 @@ mod tests {
         assert_eq!(state.agent_id, "codex");
 
         state.step = LaunchWizardStep::ModelSelect;
-        state.selected = 1;
+        state.selected = 0;
         state.apply_selection();
         assert_eq!(state.model, "gpt-5.5");
 
@@ -7817,19 +7817,13 @@ mod tests {
             .iter()
             .any(|option| option.value == "continue"));
 
-        assert!(current_model_options("claude").contains(&"sonnet"));
-        assert!(current_model_options("claude").contains(&"Default (Opus 4.8)"));
+        assert_eq!(
+            current_model_options("claude"),
+            vec!["Default (Opus 4.8)", "fable", "opus", "sonnet", "haiku"]
+        );
         assert_eq!(
             current_model_options("codex"),
-            vec![
-                "Default (Auto)",
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.3-codex",
-                "gpt-5.3-codex-spark",
-                "gpt-5.2",
-            ]
+            vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
         );
         assert_eq!(
             current_model_options("gemini"),
@@ -8529,7 +8523,7 @@ mod tests {
             .expect("opus options must contain ultracode");
         assert!(
             !ultra.is_default,
-            "ultracode must be opt-in; xhigh stays the Opus default"
+            "ultracode must be opt-in; auto stays the Opus-tier default"
         );
     }
 
@@ -8548,15 +8542,19 @@ mod tests {
     }
 
     #[test]
-    fn claude_opus_reasoning_default_is_xhigh() {
+    fn claude_opus_reasoning_default_is_auto() {
+        // Defaulting to Auto skips the CLAUDE_CODE_EFFORT_LEVEL export so
+        // Claude Code applies its own per-model default (`high` on
+        // Fable 5 / Opus 4.8, `xhigh` on Opus 4.7) regardless of which
+        // model the alias resolves to on the user's provider.
         let default = super::CLAUDE_OPUS_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Opus reasoning options must have a default row");
-        assert_eq!(default.stored_value, "xhigh");
+        assert_eq!(default.stored_value, "auto");
     }
 
-    fn opus_state(ultracode_supported: bool) -> LaunchWizardState {
+    fn claude_state(model: &str, ultracode_supported: bool) -> LaunchWizardState {
         let agent_options = vec![AgentOption {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
@@ -8571,13 +8569,13 @@ mod tests {
         // field at render time — see `current_reasoning_options`).
         ctx.ultracode_supported = ultracode_supported;
         let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
-        // Drive current_reasoning_options() down the Claude Opus branch.
+        // Drive current_reasoning_options() down the requested Claude model branch.
         state.agent_id = "claude".to_string();
-        state.model = "opus".to_string();
+        state.model = model.to_string();
         state
     }
 
-    fn opus_reasoning_values(state: &LaunchWizardState) -> Vec<&'static str> {
+    fn claude_reasoning_values(state: &LaunchWizardState) -> Vec<&'static str> {
         state
             .current_reasoning_options()
             .iter()
@@ -8587,18 +8585,49 @@ mod tests {
 
     #[test]
     fn opus_reasoning_includes_ultracode_when_supported() {
-        let values = opus_reasoning_values(&opus_state(true));
+        let values = claude_reasoning_values(&claude_state("opus", true));
         assert!(values.contains(&"ultracode"));
         assert_eq!(values.last(), Some(&"ultracode"));
     }
 
     #[test]
     fn opus_reasoning_excludes_ultracode_when_unsupported() {
-        let values = opus_reasoning_values(&opus_state(false));
+        let values = claude_reasoning_values(&claude_state("opus", false));
         assert!(!values.contains(&"ultracode"));
         // Common levels remain intact when ultracode is gated out.
         assert!(values.contains(&"xhigh"));
         assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_matches_opus_ladder_with_auto_default() {
+        let values = claude_reasoning_values(&claude_state("fable", true));
+        assert_eq!(
+            values,
+            ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]
+        );
+        let state = claude_state("fable", true);
+        let default = state
+            .current_reasoning_options()
+            .iter()
+            .find(|option| option.is_default)
+            .map(|option| option.stored_value);
+        assert_eq!(default, Some("auto"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_when_unsupported() {
+        let values = claude_reasoning_values(&claude_state("fable", false));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_is_effort_capable_for_launch() {
+        let mut state = claude_state("fable", true);
+        state.reasoning = "xhigh".to_string();
+        assert_eq!(state.reasoning_level_for_launch(), Some("xhigh"));
     }
 
     #[test]
@@ -8613,12 +8642,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_reasoning_default_is_medium() {
+    fn claude_sonnet_reasoning_default_is_auto() {
+        // Auto delegates the default effort to Claude Code itself
+        // (`high` on Sonnet 4.6 per the model-config docs).
         let default = super::CLAUDE_SONNET_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)
             .expect("Sonnet reasoning options must have a default row");
-        assert_eq!(default.stored_value, "medium");
+        assert_eq!(default.stored_value, "auto");
     }
 
     #[test]

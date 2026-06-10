@@ -60,9 +60,9 @@ function createTabButton(document, send, requestCloseProjectTab) {
 const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
 
 const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-  starting: "running",
-  notstarted: "not_started",
-  "not-started": "not_started",
+  not_started: "starting",
+  notstarted: "starting",
+  "not-started": "starting",
   ready: "idle",
   exited: "stopped",
 });

@@ -130,7 +130,8 @@ pub use protocol::{
     IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
     RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
     WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
-    WorkspaceWorkAgentView, WorkspaceWorkEventView, WorkspaceWorkItemView,
+    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
+    WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;
