@@ -533,8 +533,9 @@ body::after {
 .op-theme-toggle {
   display: inline-flex;
   align-items: stretch;
-  height: 26px;
-  padding: 2px;
+  /* SPEC-3038 US-4: compact the toggle so the project bar breathes. */
+  height: 22px;
+  padding: 1px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border-strong);
   background: color-mix(in oklab, var(--color-text-muted) 8%, transparent);
@@ -2169,11 +2170,6 @@ kbd.op-kbd {
   font-size: var(--type-sm);
 }
 
-:root[data-theme] .hint {
-  color: var(--color-text-muted);
-  background: color-mix(in oklab, var(--color-surface) 80%, transparent);
-}
-
 :root[data-theme] .arrange-button,
 :root[data-theme] .wizard-button {
   background: var(--color-button-bg);
@@ -2509,11 +2505,6 @@ kbd.op-kbd {
 }
 
 /* Connection dot */
-:root[data-theme] .connection-dot {
-  background: var(--color-state-idle);
-}
-:root[data-theme] .connection-dot.connected { background: var(--color-state-active); }
-:root[data-theme] .connection-dot.error { background: var(--color-state-blocked); }
 
 /* ============================================================
    Drawer bridge — opt-in slide-over for legacy `.modal-backdrop`.

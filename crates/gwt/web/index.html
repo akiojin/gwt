@@ -250,11 +250,9 @@
           </div>
         </aside>
         <div class="canvas-area">
-          <div class="hint" role="status" aria-live="polite">
-            <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
-            <span id="connection-label" aria-label="Connection state">Connecting</span>
-            <span class="hint__copy">Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
-          </div>
+          <!-- SPEC-3038 US-4: the permanent hint bar is retired. Canvas
+               guidance lives in the ⌘? hotkey overlay; connection state has
+               one home — the Status Strip ONLINE cell. -->
           <div class="canvas" id="canvas">
             <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
             <div class="canvas-stage" id="canvas-stage"></div>
@@ -274,6 +272,23 @@
               </button>
               <div class="picker-section-label">Recent</div>
               <div class="project-recent-list" id="recent-project-list"></div>
+            </div>
+          </div>
+          <!-- SPEC-3038 AS-4.5: empty-canvas call to action. app.js toggles
+               `hidden` from the live window count (updateCanvasEmptyState). -->
+          <div class="canvas-empty-state" id="canvas-empty-state" hidden>
+            <p class="canvas-empty-state__kicker"><span aria-hidden="true">▸</span> OPERATOR READY</p>
+            <h2 class="canvas-empty-state__title">No windows on canvas</h2>
+            <p class="canvas-empty-state__copy">
+              Start work on a branch, or add a surface window.
+            </p>
+            <div class="canvas-empty-state__actions">
+              <button class="wizard-button primary" id="canvas-empty-start-work" type="button">
+                Start Work
+              </button>
+              <button class="wizard-button" id="canvas-empty-add-window" type="button">
+                Add window
+              </button>
             </div>
           </div>
           <div class="project-onboarding" id="project-onboarding">
@@ -315,7 +330,7 @@
             <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
           </div>
           <div class="op-status-strip__cell">
-            <span class="op-status-strip__label">WK</span>
+            <span class="op-status-strip__label">WORK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
@@ -337,7 +352,6 @@
             hidden
           ></button>
           <div class="op-status-strip__cell" aria-hidden="true">
-            <span class="op-status-strip__label">T</span>
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
         </footer>
@@ -422,6 +436,27 @@
             <div class="op-hotkey-card__row">
               <span>Logs surface</span>
               <kbd class="op-kbd">⌘ L</kbd>
+            </div>
+          </div>
+          <!-- SPEC-3038 US-4: canvas guidance moved here from the retired
+               permanent hint bar. -->
+          <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Canvas</h3>
+            <div class="op-hotkey-card__row">
+              <span>Pan canvas</span>
+              <kbd class="op-kbd">Scroll / drag</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Pan anywhere</span>
+              <kbd class="op-kbd">Middle-drag</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Zoom canvas</span>
+              <kbd class="op-kbd">Ctrl/⌘ + wheel</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Move window</span>
+              <kbd class="op-kbd">Drag titlebar</kbd>
             </div>
           </div>
           <div class="op-hotkey-card__group">

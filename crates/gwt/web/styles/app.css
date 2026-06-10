@@ -271,32 +271,57 @@ body {
   background: transparent;
 }
 
-.hint {
+/* SPEC-3038 AS-4.5 — empty-canvas call to action. Centered over the canvas,
+   pointer-events scoped to the card so canvas pan/zoom keep working around
+   it. */
+.canvas-empty-state {
   position: absolute;
-  left: 18px;
-  top: 16px;
+  inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  gap: var(--space-2);
+  text-align: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.canvas-empty-state[hidden] {
+  display: none;
+}
+
+.canvas-empty-state__kicker {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-state-active);
+}
+
+.canvas-empty-state__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-2xl);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.canvas-empty-state__copy {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
   color: var(--color-text-muted);
 }
 
-.connection-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--color-state-idle);
-}
-
-.connection-dot.connected {
-  background: var(--color-state-active);
+.canvas-empty-state__actions {
+  display: flex;
+  gap: var(--space-3);
+  pointer-events: auto;
 }
 
 /* SPEC-2356 operator chrome cleanup: the right-bottom floating toolbar and its

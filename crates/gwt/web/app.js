@@ -189,8 +189,6 @@
       const migrationDialog = migrationModal
         ? migrationModal.querySelector(".modal-shell")
         : null;
-      const connectionDot = document.getElementById("connection-dot");
-      const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
@@ -1658,11 +1656,9 @@
       });
 
       function setConnectionState(connected) {
-        connectionDot.classList.toggle("connected", connected);
-        connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
-        // SPEC-2356 — propagate connection state to the Operator Status Strip
-        // so the bottom strip clearly reflects whether the WebSocket bridge is
-        // online. The class is set on the strip element and consumed via CSS.
+        // SPEC-3038 US-4: the Status Strip is the single home for connection
+        // state (the permanent canvas hint bar is retired). The class is set
+        // on the strip element and consumed via CSS.
         const strip = document.getElementById("op-status-strip");
         const connectionStatusLabel = strip?.querySelector(
           "[data-role='connection-label']",
@@ -3772,7 +3768,17 @@
         }
       }
 
+      // SPEC-3038 AS-4.5: the empty-canvas call to action follows the live
+      // window count, even when the operator shell is degraded.
+      function updateCanvasEmptyState() {
+        const emptyState = document.getElementById("canvas-empty-state");
+        if (emptyState) {
+          emptyState.hidden = windowMap.size > 0;
+        }
+      }
+
       function recomputeOperatorTelemetry() {
+        updateCanvasEmptyState();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
         const counts = {
@@ -13647,6 +13653,11 @@
 
             scheduleMaximizedWindowsToViewportSync();
 
+            // SPEC-3038: keep the rail window-count badge and the empty-canvas
+            // state in sync with window mounts/unmounts, not only with agent
+            // status events.
+            recomputeOperatorTelemetry();
+
             const topmostId = topmostWindowId(workspace);
             if (topmostId && activeWindowIdSet.has(topmostId)) {
               focusWindowLocally(topmostId);
@@ -15496,6 +15507,23 @@
         }
         openModal();
       });
+
+      // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
+      document
+        .getElementById("canvas-empty-start-work")
+        ?.addEventListener("click", () => {
+          document.dispatchEvent(
+            new CustomEvent("op:command", { detail: { id: "start-work" } }),
+          );
+        });
+      document
+        .getElementById("canvas-empty-add-window")
+        ?.addEventListener("click", () => {
+          if (addButton.disabled) {
+            return;
+          }
+          openModal();
+        });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
       alignButton.addEventListener("click", () => arrangeWindows("align"));

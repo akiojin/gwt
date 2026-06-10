@@ -1222,6 +1222,80 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
 });
 
+test("the permanent canvas hint bar is retired; guidance lives in the hotkey overlay (SPEC-3038 US-4)", () => {
+  assert.equal(document.querySelector(".hint"), null, ".hint must be removed");
+  assert.equal(document.getElementById("connection-dot"), null);
+  assert.equal(document.getElementById("connection-label"), null);
+  // Connection state has exactly one home: the Status Strip ONLINE cell.
+  assert.doesNotMatch(appSource, /\bconnectionDot\b/);
+  assert.doesNotMatch(appSource, /\bconnectionLabel\b/);
+  const overlayText = document
+    .getElementById("op-hotkey-overlay")
+    .textContent.replace(/\s+/g, " ");
+  for (const phrase of ["Pan canvas", "Zoom canvas", "Move window"]) {
+    assert.ok(
+      overlayText.includes(phrase),
+      `hotkey overlay must carry canvas guidance: ${phrase}`,
+    );
+  }
+  assert.doesNotMatch(inlineStyle, /\.hint\s*\{/);
+  assert.doesNotMatch(inlineStyle, /\.hint__copy/);
+  assert.doesNotMatch(inlineStyle, /\.connection-dot/);
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.doesNotMatch(css, /\.hint\b/);
+  assert.doesNotMatch(css, /\.connection-dot/);
+});
+
+test("Status Strip spells out WORK and drops the cryptic T clock label (SPEC-3038 US-4)", () => {
+  const branchesCell = document.getElementById("op-strip-branches")?.parentElement;
+  assert.ok(branchesCell, "expected the Work cell");
+  assert.equal(
+    branchesCell.querySelector(".op-status-strip__label")?.textContent?.trim(),
+    "WORK",
+    "the WK label must spell out WORK",
+  );
+  const clockCell = document.getElementById("op-strip-clock")?.parentElement;
+  assert.ok(clockCell, "expected the clock cell");
+  assert.equal(
+    clockCell.querySelector(".op-status-strip__label"),
+    null,
+    "the clock needs no cryptic T label",
+  );
+});
+
+test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () => {
+  const empty = document.getElementById("canvas-empty-state");
+  assert.ok(empty, "expected #canvas-empty-state");
+  assert.ok(
+    empty.hasAttribute("hidden"),
+    "empty state ships hidden until the workspace reports zero windows",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-start-work"),
+    "expected a Start Work action",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-add-window"),
+    "expected an Add window action",
+  );
+  assert.match(
+    appSource,
+    /function\s+updateCanvasEmptyState\(\)[\s\S]{0,300}?windowMap\.size/,
+    "app.js must toggle the empty state from the live window count",
+  );
+  assert.match(appSource, /canvas-empty-start-work/, "Start Work action must be wired");
+  assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
+});
+
+test("renderWorkspace refreshes operator telemetry when windows mount/unmount (SPEC-3038)", () => {
+  const body = extractFunctionBody(appSource, "renderWorkspace");
+  assert.match(
+    body,
+    /recomputeOperatorTelemetry\(\)/,
+    "window-count badge + empty state must update when windows mount/unmount",
+  );
+});
+
 test("window close always routes through the Close Guard confirm modal (SPEC-3038 US-3)", () => {
   // index.html ships the modal scaffold.
   const modal = document.getElementById("window-close-confirm-modal");
