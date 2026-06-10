@@ -6836,3 +6836,10 @@ Type: failure-pattern
 Context: launch-wizard-controls-live.spec.ts の ArrowRight→summary assert が常に失敗。WS 送信・backend 適用は正常で、frontend の wizardInteractionGuard（SPEC-2014 2026-05-29）が slider focus 中の launch_wizard_state 再レンダリングを focusout まで defer していた。Playwright の press は focus を残すため summary が永遠に古いままになり、後続 probe の echo も全て deferred に飲まれて「backend が死んだ」ように見えた。
 Learning: guard は <select> と .launch-range__input の focus/pointer 中に activate され focusout/Escape で release される。slider 操作後の backend 反映を assert する E2E は blur() などで guard を先に解放する必要がある。
 Future Action: wizard の <select>/slider を操作する E2E・自動検証では、操作後に blur または別要素クリックを挟んでから backend 反映を assert する。「アクションが無視される」症状を見たら interaction guard の defer を最初に疑う。
+
+## 2026-06-10 — Windows 配布 exe には asInvoker manifest を必ず埋め込む
+
+Type: decision
+Context: Windows 自動更新で helper exe (gwt-update-helper.exe) の spawn が os error 740 で失敗 (#3018)。manifest 無しの exe は名前に update/setup/install/patch を含むと UAC Installer Detection で昇格要求され、CreateProcess は昇格できず ERROR_ELEVATION_REQUIRED になる。EnableInstallerDetection は Windows Home 既定有効でマシン依存再現。
+Learning: rustc は exe にデフォルト manifest を埋め込まない。winresource も set_manifest 明示時のみ。Microsoft 規定の対処は requestedExecutionLevel=asInvoker の manifest 埋め込みで、これが installer detection の off-switch になる。
+Future Action: Windows 向けバイナリを追加・リネームする際は (1) build.rs の set_manifest が適用されるか、(2) exe / 一時コピーの名前に installer-detection キーワードを含めないかを確認する。自己更新系の修正は実行中バイナリ側に効くため E2E は 2 リリース跨ぎになる前提で検証計画を立てる。
