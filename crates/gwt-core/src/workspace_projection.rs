@@ -1351,36 +1351,55 @@ impl WorkspaceWorkItemsProjection {
     }
 
     fn apply_event(&mut self, event: WorkspaceWorkEvent) {
-        let index = self
+        let existing_index = self
             .work_items
             .iter()
-            .position(|item| item.id == event.work_item_id)
-            .unwrap_or_else(|| {
-                self.work_items.push(WorkspaceWorkItem {
-                    id: event.work_item_id.clone(),
-                    title: event
-                        .title
-                        .clone()
-                        .or_else(|| event.intent.clone())
-                        .unwrap_or_else(|| event.work_item_id.clone()),
-                    intent: event.intent.clone(),
-                    summary: event.summary.clone(),
-                    status_category: workspace_work_event_status(&event),
-                    owner: event.owner.clone(),
-                    created_at: event.updated_at,
-                    updated_at: event.updated_at,
-                    completed_at: None,
-                    agents: Vec::new(),
-                    execution_containers: Vec::new(),
-                    board_refs: Vec::new(),
-                    related_work_item_ids: Vec::new(),
-                    events: Vec::new(),
-                    discarded: false,
-                });
-                self.work_items.len() - 1
+            .position(|item| item.id == event.work_item_id);
+        let index = existing_index.unwrap_or_else(|| {
+            self.work_items.push(WorkspaceWorkItem {
+                id: event.work_item_id.clone(),
+                title: event
+                    .title
+                    .clone()
+                    .or_else(|| event.intent.clone())
+                    .unwrap_or_else(|| event.work_item_id.clone()),
+                intent: event.intent.clone(),
+                summary: event.summary.clone(),
+                status_category: workspace_work_event_status(&event),
+                owner: event.owner.clone(),
+                created_at: event.updated_at,
+                updated_at: event.updated_at,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: Vec::new(),
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                discarded: false,
             });
+            self.work_items.len() - 1
+        });
 
         let item = &mut self.work_items[index];
+        // SPEC-2359 Phase W-16 (FR-403): a Backfill event is a synthetic
+        // materialization marker, not activity. Applied to an existing item
+        // (a duplicated / replayed backfill line), it must not advance
+        // `updated_at`, overwrite the real title, or touch status — otherwise
+        // every materialized row collapses onto the replay instant and the
+        // recency sort degenerates. Only the execution container may merge.
+        if existing_index.is_some() && event.kind == WorkspaceWorkEventKind::Backfill {
+            if let Some(container) = event.execution_container.clone() {
+                if !item
+                    .execution_containers
+                    .iter()
+                    .any(|existing| workspace_execution_container_same(existing, &container))
+                {
+                    item.execution_containers.push(container);
+                }
+            }
+            item.events.push(event);
+            return;
+        }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
             item.title = title;
         }
@@ -6887,5 +6906,48 @@ mod tests {
             .expect("projection exists");
         assert_eq!(reloaded.work_items.len(), 1);
         assert_eq!(reloaded.work_items[0].id, "work-session-abc");
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): a Backfill event is a
+    /// synthetic materialization marker, not activity. Re-applying one (e.g.
+    /// replaying a duplicated backfill line) must not advance an existing
+    /// item's `updated_at` — otherwise hundreds of rows collapse onto the
+    /// replay instant and the recency sort degenerates.
+    #[test]
+    fn backfill_event_does_not_bump_updated_at_of_existing_item() {
+        let t_old = Utc.with_ymd_and_hms(2026, 5, 18, 9, 15, 0).unwrap();
+        let t_backfill = Utc.with_ymd_and_hms(2026, 6, 10, 6, 19, 47).unwrap();
+        let mut projection = WorkspaceWorkItemsProjection::empty(t_old);
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "work-x", t_old);
+        start.title = Some("作業中".to_string());
+        projection.apply_event(start);
+        assert_eq!(projection.work_items[0].updated_at, t_old);
+
+        let mut backfill =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-x", t_backfill);
+        backfill.title = Some("work/x".to_string());
+        projection.apply_event(backfill);
+
+        let item = &projection.work_items[0];
+        assert_eq!(
+            item.updated_at, t_old,
+            "backfill must not advance an existing item's updated_at"
+        );
+        assert_eq!(
+            item.title, "作業中",
+            "backfill must not overwrite a real title"
+        );
+
+        // A brand-new item still gets the backfill time as its baseline.
+        let mut fresh =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-new", t_backfill);
+        fresh.title = Some("work/new".to_string());
+        projection.apply_event(fresh);
+        let fresh_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-new")
+            .expect("new item");
+        assert_eq!(fresh_item.updated_at, t_backfill);
     }
 }
