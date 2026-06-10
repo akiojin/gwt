@@ -3087,6 +3087,28 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_launch_wizard_runtime_target_payload_uses_backend_enum_values() {
+        let html = frontend_bundle_source();
+        let payload_mapper = regex::Regex::new(
+            r#"function runtimeTargetPayload\(value\)\s*\{\s*return value === "docker" \? "Docker" : "Host";\s*\}"#,
+        )
+        .expect("valid regex");
+        let runtime_target_action = regex::Regex::new(
+            r#"kind:\s*"set_runtime_target",\s*target:\s*runtimeTargetPayload\(value\),"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            payload_mapper.is_match(html),
+            "expected Runtime target UI values to map to LaunchRuntimeTarget serde variants",
+        );
+        assert!(
+            runtime_target_action.is_match(html),
+            "expected Runtime target changes to send backend enum values instead of raw UI values",
+        );
+    }
+
+    #[test]
     fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer() {
         let html = frontend_bundle_source();
 
