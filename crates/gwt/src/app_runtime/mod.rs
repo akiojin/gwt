@@ -2948,9 +2948,7 @@ fn attach_registry_sessions_to_active_works(
         agent_sessions,
         project_repo_hash.as_ref().map(|hash| hash.as_str()),
     );
-    if registry.is_empty() {
-        return;
-    }
+    let cap = crate::workspace_session_registry::REGISTRY_SESSION_CAP;
     for work in active_works.iter_mut() {
         let existing: Vec<&str> = work
             .agents
@@ -2962,7 +2960,7 @@ fn attach_registry_sessions_to_active_works(
                 &registry,
                 work.branch.as_deref(),
                 &existing,
-                crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+                cap,
             );
         work.session_agent_total = (work.agents.len() + extra_total) as u32;
         for session in additions {
@@ -2975,6 +2973,16 @@ fn attach_registry_sessions_to_active_works(
             let history_view = workspace_work_agent_view_from_ref(&agent_ref, session_index);
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
+        }
+        // The cap applies to the row's TOTAL agents: a decomposed legacy row
+        // can carry hundreds of record agents, and the workspace payload feeds
+        // every connected client (unbounded fan-out amplifies the WebSocket
+        // eviction storm). Keep the newest agents; the uncapped count already
+        // rides `session_agent_total`. RFC3339 UTC strings sort lexically.
+        if work.agents.len() > cap {
+            work.agents
+                .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            work.agents.truncate(cap);
         }
     }
 }

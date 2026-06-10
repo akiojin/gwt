@@ -14033,3 +14033,71 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     assert_eq!(row.agents[0].sessions[0].agent_session_id, "conv-1");
     assert_eq!(row.session_agent_total, 1);
 }
+
+/// SPEC-2359 Phase W-16 (FR-394): the wire cap applies to the row's TOTAL
+/// agents (record agents included), not just registry additions — a
+/// decomposed legacy row can carry hundreds of record agents and must not
+/// flood the workspace payload. The uncapped count rides
+/// `session_agent_total`, newest agents win.
+#[test]
+fn attach_registry_sessions_caps_total_agents_on_the_wire() {
+    let agents: Vec<gwt::ActiveWorkAgentView> = (0..12)
+        .map(|index| gwt::ActiveWorkAgentView {
+            session_id: format!("rec-{index:02}"),
+            window_id: None,
+            agent_id: "claude".to_string(),
+            display_name: format!("Claude {index:02}"),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: "idle".to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: format!("2026-06-10T12:{index:02}:00Z"),
+            sessions: Vec::new(),
+        })
+        .collect();
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-develop-7ea5aa57".to_string(),
+        title: "develop".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("develop".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents,
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+    }];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
+    assert_eq!(
+        works[0].agents.len(),
+        crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+        "wire payload capped"
+    );
+    assert_eq!(
+        works[0].agents[0].session_id, "rec-11",
+        "newest agents win the cap"
+    );
+}
