@@ -1,0 +1,206 @@
+name: Prepare Release
+
+# Branch-agnostic release preparation. Trigger from the GitHub Actions
+# "Run workflow" button (workflow_dispatch) from anywhere — no local develop
+# checkout, no raw gh from an agent. The job always operates on develop and
+# opens a develop -> main Release PR, preserving the develop->main gate
+# enforced by pr-source-check.yml. The heavy build/tag/release pipeline lives
+# in release.yml and is intentionally left untouched.
+#
+# History note (SPEC-1932): an older prepare-release.yml was removed in #712
+# because it depended on an external create-release-pr action, used git-cliff
+# full-history bumping (which regressed versions), and required a
+# main->develop sync. This workflow avoids all three: relative-tag version
+# calc via scripts/compute_release_version.py, structured edits via
+# cargo set-version + cargo update + git-cliff, and no main->develop sync.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump level"
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare Release PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v6
+        with:
+          ref: develop
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch tags
+        run: git fetch origin --tags --force
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install release tooling
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit,git-cliff
+
+      - name: Compute next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --list 'v[0-9]*' --sort=-version:refname | head -1)
+          NEW_VERSION=$(python3 scripts/compute_release_version.py --bump "$BUMP")
+          TAG_NAME="v${NEW_VERSION}"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${PREV_TAG:-<none>}"
+          echo "Next version: ${NEW_VERSION} (bump=${BUMP})"
+
+      - name: Guard against existing tag
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG_NAME} already exists; nothing to release." >&2
+            exit 1
+          fi
+
+      - name: Apply version bump
+        run: |
+          set -euo pipefail
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          cargo set-version --workspace "$NEW_VERSION"
+          cargo update -w
+
+      - name: Generate CHANGELOG
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          git-cliff --unreleased --tag "$TAG_NAME" --prepend CHANGELOG.md
+
+      - name: Validate version files
+        run: |
+          set -euo pipefail
+          EXPECTED="${{ steps.version.outputs.new_version }}"
+
+          # Structured read: the workspace version Cargo resolves must match.
+          META_VERSION=$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; m=json.load(sys.stdin); print(next(p["version"] for p in m["packages"] if p["name"]=="gwt"))')
+          if [ "$META_VERSION" != "$EXPECTED" ]; then
+            echo "::error::cargo metadata version ${META_VERSION} != expected ${EXPECTED}; version edit did not apply cleanly." >&2
+            exit 1
+          fi
+
+          # Consistency with release.yml's tag read (grep '^version = ').
+          GREP_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$GREP_VERSION" != "$EXPECTED" ]; then
+            echo "::error::Cargo.toml version line '${GREP_VERSION}' != expected ${EXPECTED}; release.yml tag read would break." >&2
+            exit 1
+          fi
+          echo "Version files validated at ${EXPECTED}."
+
+      - name: Commit and push to develop
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): ${TAG_NAME}"
+          git pull --rebase origin develop
+          git push origin develop
+
+      - name: Collect closing issues
+        id: issues
+        run: |
+          set -euo pipefail
+          PREV_TAG="${{ steps.version.outputs.prev_tag }}"
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+          ISSUE_JSON=$(python3 scripts/release_issue_refs.py --range "$RANGE" --format json)
+          {
+            echo "auto_close<<EOF"
+            printf '%s\n' "$ISSUE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"Closes #{n}") for n in d.get("auto_close_issues", [])]'
+            echo "EOF"
+            echo "related<<EOF"
+            printf '%s\n' "$ISSUE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"#{n}") for n in d.get("reference_only_issues", [])]'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update Release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP: ${{ inputs.bump }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          CLOSING: ${{ steps.issues.outputs.auto_close }}
+          RELATED: ${{ steps.issues.outputs.related }}
+        run: |
+          set -euo pipefail
+
+          BODY_FILE="$(mktemp)"
+          {
+            echo "## Summary"
+            echo ""
+            echo "Release ${TAG_NAME}. Version bump and CHANGELOG generated by the Prepare Release workflow."
+            echo ""
+            echo "## Version"
+            echo ""
+            echo "- ${TAG_NAME} (bump: ${BUMP})"
+            echo ""
+            echo "## Closing Issues"
+            echo ""
+            if [ -n "${CLOSING//[$'\n\r\t ']/}" ]; then
+              printf '%s\n' "$CLOSING"
+            else
+              echo "None"
+            fi
+            echo ""
+            echo "## Related Issues / Links"
+            echo ""
+            if [ -n "${RELATED//[$'\n\r\t ']/}" ]; then
+              printf '%s\n' "$RELATED"
+            else
+              echo "None"
+            fi
+          } > "$BODY_FILE"
+
+          EXISTING=$(gh pr list --base main --head develop --state open --json number -q '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "chore(release): ${TAG_NAME}" --add-label release --body-file "$BODY_FILE"
+            PR_URL=$(gh pr view "$EXISTING" --json url -q '.url')
+          else
+            PR_URL=$(gh pr create --base main --head develop --title "chore(release): ${TAG_NAME}" --label release --body-file "$BODY_FILE")
+          fi
+          rm -f "$BODY_FILE"
+
+          echo "Release PR: ${PR_URL}"
+          {
+            echo "## Prepare Release"
+            echo ""
+            echo "- Version: ${TAG_NAME}"
+            echo "- Release PR: ${PR_URL}"
+            echo ""
+            echo "Review the PR (version, CHANGELOG, diff) and merge to main to trigger the build/release pipeline."
+          } >> "$GITHUB_STEP_SUMMARY"
