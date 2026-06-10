@@ -618,6 +618,15 @@ where
         .as_deref()
         .and_then(|base| detect_windows_npx_cache_corruption(&probe_output, base));
     let Some(repair_candidate) = repair_candidate else {
+        if first_npx_probe.timed_out {
+            config.command = fallback_executable;
+            config.args = fallback_args;
+            report.switched_to_fallback = true;
+            report.messages.push(format!(
+                "npx package-runner probe timed out for {version_spec}; continuing in terminal..."
+            ));
+            return Ok(report);
+        }
         return Err(format!(
             "npx package-runner probe failed for {version_spec}. {} Manual recovery: run `npx --yes {version_spec} --version` in a terminal and repair the reported npm `_npx` directory if npm reports a missing executable.",
             first_npx_probe.diagnostic()
@@ -850,6 +859,18 @@ impl PackageRunnerProbeOutcome {
             stdout: String::new(),
             stderr: stderr.to_string(),
             timed_out: false,
+            error: None,
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    fn timeout() -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
             error: None,
         }
     }
@@ -1880,6 +1901,54 @@ mod tests {
         assert_eq!(repair_calls, 0);
         assert!(error.contains("npx package-runner probe failed"));
         assert!(error.contains("registry timeout"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_host_package_runner_fallback_continues_when_npx_probe_times_out() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let mut config = sample_versioned_launch_config();
+        let mut probe_calls = Vec::new();
+        let mut repair_calls = 0;
+
+        let report = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            Some(npx_base),
+            |command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((command.to_string(), args.clone()));
+                if command.eq_ignore_ascii_case("bunx") {
+                    PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable")
+                } else {
+                    PackageRunnerProbeOutcome::timeout()
+                }
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .expect("timeout-only npx probe should continue to terminal launch");
+
+        assert!(report.switched_to_fallback);
+        assert!(!report.repaired_npx_cache);
+        assert_eq!(repair_calls, 0);
+        assert_eq!(probe_calls.len(), 2);
+        assert_eq!(probe_calls[1].0, "npx");
+        assert!(report
+            .messages
+            .iter()
+            .any(|message| message.contains("probe timed out") && message.contains("continuing")));
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+        );
     }
 
     // Issue #2948 — non-Windows host launches must decide the package runner by

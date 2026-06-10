@@ -6836,3 +6836,10 @@ Type: failure-pattern
 Context: launch-wizard-controls-live.spec.ts の ArrowRight→summary assert が常に失敗。WS 送信・backend 適用は正常で、frontend の wizardInteractionGuard（SPEC-2014 2026-05-29）が slider focus 中の launch_wizard_state 再レンダリングを focusout まで defer していた。Playwright の press は focus を残すため summary が永遠に古いままになり、後続 probe の echo も全て deferred に飲まれて「backend が死んだ」ように見えた。
 Learning: guard は <select> と .launch-range__input の focus/pointer 中に activate され focusout/Escape で release される。slider 操作後の backend 反映を assert する E2E は blur() などで guard を先に解放する必要がある。
 Future Action: wizard の <select>/slider を操作する E2E・自動検証では、操作後に blur または別要素クリックを挟んでから backend 反映を assert する。「アクションが無視される」症状を見たら interaction guard の defer を最初に疑う。
+
+## 2026-06-10 — Windows npx probe timeout is inconclusive
+
+Type: failure-pattern
+Context: SPEC-1921 Phase 67: Claude Code host launch showed a pre-PTY error when the fallback npx --version probe timed out, while the same npx command succeeded manually afterward.
+Learning: A Windows npx probe timeout without a verified npm _npx corruption signature can be cold install/extraction latency and should not be treated as a deterministic launch-blocking failure.
+Future Action: For package-runner probes, keep deterministic repair/error handling for corrupted _npx or immediate unrelated failures, but continue to terminal launch with npx --yes when the only fallback probe signal is timeout.
