@@ -1082,6 +1082,14 @@ fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<Strin
         if key.is_empty() || !is_valid_docker_env_key(key) {
             continue;
         }
+        // Never override the container's PATH: the image PATH carries the
+        // in-container toolchain locations (e.g. /root/.bun/bin for bunx).
+        // Injecting the host-assembled PATH made the post-probe agent exec
+        // fail with `exec: "bunx": executable file not found in $PATH`
+        // while the env-free probe succeeded (Issue #3029).
+        if key.eq_ignore_ascii_case("PATH") {
+            continue;
+        }
         let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
         args.push(format!("{key}={value}"));
@@ -1615,6 +1623,26 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn docker_compose_exec_env_args_does_not_override_container_path() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/local/bin".to_string());
+        env.insert(
+            "GWT_BIN_PATH".to_string(),
+            "/usr/local/bin/gwtd".to_string(),
+        );
+        let args = docker_compose_exec_env_args(&env);
+        assert!(
+            !args.iter().any(|arg| arg == "PATH=/usr/local/bin"),
+            "PATH must not be injected into the container: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "GWT_BIN_PATH=/usr/local/bin/gwtd"),
+            "non-PATH env vars must still be injected: {args:?}"
+        );
+    }
 
     fn sample_versioned_launch_config(worktree: &Path) -> LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
