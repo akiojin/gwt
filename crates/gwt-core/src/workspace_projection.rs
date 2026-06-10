@@ -914,6 +914,13 @@ pub enum WorkspaceWorkEventKind {
     /// the Work leaves the active surface but its provenance is retained as
     /// discarded (not completed). Agent stop alone never yields Discard.
     Discard,
+    /// SPEC-2359 Phase W-15 (FR-380): a worktree existed on disk without any
+    /// matching Work record, so reconciliation materialized one. The event
+    /// must not carry an explicit `status_category`: `apply_event` only
+    /// preserves terminal (Done/Discarded) items against implicit-status
+    /// events, and a committed Backfill event may be re-ingested on another
+    /// machine after the Work was closed there (W-16 intake).
+    Backfill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1522,6 +1529,131 @@ pub fn record_workspace_work_event_paths(
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     append_workspace_work_event_to_path(events_path, &event)?;
     Ok(())
+}
+
+/// SPEC-2359 Phase W-15 (FR-379/FR-381): one locally existing worktree as
+/// reconcile input. `branch == None` (detached worktree) is never backfilled,
+/// which encodes FR-381 — records are only generated for branches that have a
+/// real working tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeReconcileSource {
+    pub branch: Option<String>,
+    pub worktree_path: PathBuf,
+}
+
+/// SPEC-2359 Phase W-15 (FR-380 idempotency / SC-255): pure decision step of
+/// worktree reconciliation. Returns the `(canonical work id, source)` pairs
+/// that still need a Backfill record. A source is skipped when any existing
+/// item already covers it: matching id, matching execution-container branch
+/// (compared via the canonical branch identity, so `origin/x` == `x`), or
+/// matching worktree path. Terminal (Done/Discarded) items also match here,
+/// which keeps closed Work closed (US-61 — backfill never re-opens).
+pub fn worktree_sources_needing_backfill(
+    projection: &WorkspaceWorkItemsProjection,
+    project_root: &Path,
+    sources: &[WorktreeReconcileSource],
+) -> Vec<(String, WorktreeReconcileSource)> {
+    let mut pending = Vec::new();
+    for source in sources {
+        let Some(branch) = source
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(work_id) = canonical_work_id(project_root, Some(branch), None) else {
+            continue;
+        };
+        let branch_identity = canonical_work_branch_identity(branch);
+        let worktree_identity = canonical_worktree_identity(&source.worktree_path);
+        let covered = projection.work_items.iter().any(|item| {
+            item.id == work_id
+                || item.execution_containers.iter().any(|container| {
+                    container.branch.as_deref().is_some_and(|existing| {
+                        canonical_work_branch_identity(existing) == branch_identity
+                    }) || container.worktree_path.as_deref().is_some_and(|existing| {
+                        canonical_worktree_identity(existing) == worktree_identity
+                    })
+                })
+        });
+        if covered || pending.iter().any(|(id, _)| *id == work_id) {
+            continue;
+        }
+        pending.push((work_id, source.clone()));
+    }
+    pending
+}
+
+/// SPEC-2359 Phase W-15 (FR-380): record a single Backfill event for a
+/// worktree that has no Work record. `status_category` stays `None` so a
+/// re-ingested copy of this event (W-16 intake on another machine) cannot
+/// regress a terminal item; the Idle surface state comes from the kind
+/// mapping in `workspace_work_event_status`.
+pub fn record_workspace_backfill_event_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    work_id: &str,
+    branch: &str,
+    worktree_path: &Path,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, work_id, updated_at);
+    event.title = Some(branch.to_string());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(worktree_path.to_path_buf()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    record_workspace_work_event_paths(work_items_path, events_path, event)
+}
+
+/// SPEC-2359 Phase W-15 (FR-379/FR-380): reconcile locally existing worktrees
+/// against the Work records and backfill the missing ones. Each Backfill
+/// event is appended to the *owning worktree's* repo-local event log
+/// (`<worktree>/.gwt/work/events.jsonl`) so it travels with that branch, and
+/// applied to the shared home works projection. Returns the number of
+/// backfilled worktrees.
+pub fn reconcile_worktree_work_items_paths(
+    work_items_path: &Path,
+    project_root: &Path,
+    sources: &[WorktreeReconcileSource],
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let projection = load_workspace_work_items_from_path(work_items_path)?
+        .unwrap_or_else(|| WorkspaceWorkItemsProjection::empty(now));
+    let pending = worktree_sources_needing_backfill(&projection, project_root, sources);
+    for (work_id, source) in &pending {
+        let Some(branch) = source.branch.as_deref() else {
+            continue;
+        };
+        let events_path = gwt_repo_local_work_events_path(&source.worktree_path);
+        record_workspace_backfill_event_paths(
+            work_items_path,
+            &events_path,
+            work_id,
+            branch,
+            &source.worktree_path,
+            now,
+        )?;
+    }
+    Ok(pending.len())
+}
+
+/// Convenience wrapper resolving the home works projection for `repo_path`
+/// (with the legacy migration applied), then delegating to
+/// [`reconcile_worktree_work_items_paths`].
+pub fn reconcile_worktree_work_items(
+    repo_path: &Path,
+    sources: &[WorktreeReconcileSource],
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    reconcile_worktree_work_items_paths(&work_items_path, repo_path, sources, now)
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a `Pause` work event so a
@@ -2443,6 +2575,9 @@ fn workspace_work_event_status(event: &WorkspaceWorkEvent) -> WorkspaceStatusCat
         // terminal close is carried by the `discarded` flag (FR-352). Idle
         // mirrors the retained-but-not-running runtime status.
         WorkspaceWorkEventKind::Discard => WorkspaceStatusCategory::Idle,
+        // Backfill materializes a Work for an existing worktree with no live
+        // agent, so it surfaces as retained-but-not-running (rendered Paused).
+        WorkspaceWorkEventKind::Backfill => WorkspaceStatusCategory::Idle,
         WorkspaceWorkEventKind::Start
         | WorkspaceWorkEventKind::Claim
         | WorkspaceWorkEventKind::Update
@@ -5525,5 +5660,266 @@ mod tests {
             WorkspaceStatusCategory::Done,
             "Done terminal state recovered via repo-local replay"
         );
+    }
+
+    fn backfill_source(branch: Option<&str>, worktree_path: &Path) -> WorktreeReconcileSource {
+        WorktreeReconcileSource {
+            branch: branch.map(str::to_string),
+            worktree_path: worktree_path.to_path_buf(),
+        }
+    }
+
+    fn seeded_work_item(
+        id: &str,
+        branch: Option<&str>,
+        status: WorkspaceStatusCategory,
+        discarded: bool,
+        at: DateTime<Utc>,
+    ) -> WorkspaceWorkItem {
+        WorkspaceWorkItem {
+            id: id.to_string(),
+            title: id.to_string(),
+            intent: None,
+            summary: None,
+            status_category: status,
+            owner: None,
+            created_at: at,
+            updated_at: at,
+            completed_at: None,
+            agents: Vec::new(),
+            execution_containers: branch
+                .map(|branch| {
+                    vec![WorkspaceExecutionContainerRef {
+                        branch: Some(branch.to_string()),
+                        worktree_path: None,
+                        pr_number: None,
+                        pr_url: None,
+                        pr_state: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+            discarded,
+        }
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-379/FR-380): a real worktree without any
+    /// matching record gets a Backfill event recorded into the worktree's own
+    /// repo-local event log and surfaces as an Idle (-> Paused) work item with
+    /// title = branch name and the canonical branch-derived work id.
+    #[test]
+    fn backfill_records_work_item_for_worktree_without_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let backfilled = reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[backfill_source(Some("work/foo"), &worktree)],
+            now,
+        )
+        .expect("reconcile");
+        assert_eq!(backfilled, 1);
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(projection.work_items.len(), 1);
+        let item = &projection.work_items[0];
+        let expected_id = canonical_work_id(&project_root, Some("work/foo"), None).unwrap();
+        assert_eq!(item.id, expected_id);
+        assert_eq!(item.title, "work/foo");
+        assert_eq!(
+            item.status_category,
+            WorkspaceStatusCategory::Idle,
+            "backfill surfaces as Idle (rendered Paused without live agent)"
+        );
+        assert!(item
+            .execution_containers
+            .iter()
+            .any(|container| container.branch.as_deref() == Some("work/foo")
+                && container.worktree_path.as_deref() == Some(worktree.as_path())));
+
+        let events_path = gwt_repo_local_work_events_path(&worktree);
+        let events_text = fs::read_to_string(&events_path).expect("worktree events log");
+        let lines: Vec<&str> = events_text.lines().collect();
+        assert_eq!(lines.len(), 1, "exactly one backfill event line");
+        let event: WorkspaceWorkEvent = serde_json::from_str(lines[0]).expect("event json");
+        assert_eq!(event.kind, WorkspaceWorkEventKind::Backfill);
+        assert_eq!(
+            event.status_category, None,
+            "backfill must not carry an explicit status so apply_event terminal \
+             preservation keeps closed items closed when the event is re-ingested"
+        );
+    }
+
+    /// SPEC-2359 Phase W-15 (SC-255): repeated reconcile over the same sources
+    /// is idempotent — no duplicate work items and no duplicate event lines.
+    #[test]
+    fn backfill_is_idempotent_across_repeated_reconcile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        let sources = [backfill_source(Some("work/foo"), &worktree)];
+
+        let first =
+            reconcile_worktree_work_items_paths(&work_items_path, &project_root, &sources, now)
+                .expect("first reconcile");
+        let second =
+            reconcile_worktree_work_items_paths(&work_items_path, &project_root, &sources, now)
+                .expect("second reconcile");
+        assert_eq!((first, second), (1, 0));
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(projection.work_items.len(), 1);
+        let events_text =
+            fs::read_to_string(gwt_repo_local_work_events_path(&worktree)).expect("events log");
+        assert_eq!(events_text.lines().count(), 1);
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-380 idempotency): a worktree whose branch is
+    /// already covered by a session-keyed record (work-session-<uuid>) must not
+    /// be backfilled, including when the recorded branch carries an origin/
+    /// prefix (canonical branch identity comparison).
+    #[test]
+    fn backfill_skips_worktree_already_covered_by_session_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let projection = WorkspaceWorkItemsProjection {
+            updated_at: now,
+            work_items: vec![seeded_work_item(
+                "work-session-abc",
+                Some("origin/work/foo"),
+                WorkspaceStatusCategory::Active,
+                false,
+                now,
+            )],
+        };
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let backfilled = reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[backfill_source(Some("work/foo"), &worktree)],
+            now,
+        )
+        .expect("reconcile");
+        assert_eq!(backfilled, 0);
+        assert!(
+            !gwt_repo_local_work_events_path(&worktree).exists(),
+            "no backfill event log should be created for a covered branch"
+        );
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-381): a detached worktree (no branch) is never
+    /// backfilled.
+    #[test]
+    fn backfill_skips_detached_worktree_without_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let backfilled = reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[backfill_source(None, &worktree)],
+            now,
+        )
+        .expect("reconcile");
+        assert_eq!(backfilled, 0);
+        assert!(load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .is_none());
+    }
+
+    /// SPEC-2359 Phase W-15 (US-61 preservation): a terminal record (Done or
+    /// discarded) matching the worktree's branch is skipped entirely — no
+    /// event is appended and the terminal status never regresses.
+    #[test]
+    fn backfill_does_not_reopen_terminal_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let done_worktree = temp.path().join("repo-done");
+        let discarded_worktree = temp.path().join("repo-discarded");
+        fs::create_dir_all(&done_worktree).expect("worktree dir");
+        fs::create_dir_all(&discarded_worktree).expect("worktree dir");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let projection = WorkspaceWorkItemsProjection {
+            updated_at: now,
+            work_items: vec![
+                seeded_work_item(
+                    "work-session-done",
+                    Some("work/done"),
+                    WorkspaceStatusCategory::Done,
+                    false,
+                    now,
+                ),
+                seeded_work_item(
+                    "work-session-discarded",
+                    Some("work/discarded"),
+                    WorkspaceStatusCategory::Idle,
+                    true,
+                    now,
+                ),
+            ],
+        };
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let backfilled = reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[
+                backfill_source(Some("work/done"), &done_worktree),
+                backfill_source(Some("work/discarded"), &discarded_worktree),
+            ],
+            now,
+        )
+        .expect("reconcile");
+        assert_eq!(backfilled, 0);
+
+        let reloaded = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(reloaded.work_items.len(), 2);
+        assert_eq!(
+            reloaded.work_items[0].status_category,
+            WorkspaceStatusCategory::Done
+        );
+        assert!(reloaded.work_items[1].discarded);
+        assert!(!gwt_repo_local_work_events_path(&done_worktree).exists());
+        assert!(!gwt_repo_local_work_events_path(&discarded_worktree).exists());
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-380): the Backfill kind serializes as
+    /// snake_case "backfill" on the wire and round-trips.
+    #[test]
+    fn backfill_event_kind_serializes_as_snake_case() {
+        let json = serde_json::to_string(&WorkspaceWorkEventKind::Backfill).expect("serialize");
+        assert_eq!(json, "\"backfill\"");
+        let parsed: WorkspaceWorkEventKind = serde_json::from_str("\"backfill\"").expect("parse");
+        assert_eq!(parsed, WorkspaceWorkEventKind::Backfill);
     }
 }
