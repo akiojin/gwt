@@ -2740,6 +2740,7 @@ fn workspace_work_event_kind_wire(
         WorkspaceWorkEventKind::Pause => "pause",
         WorkspaceWorkEventKind::Done => "done",
         WorkspaceWorkEventKind::Discard => "discard",
+        WorkspaceWorkEventKind::Backfill => "backfill",
     }
 }
 
