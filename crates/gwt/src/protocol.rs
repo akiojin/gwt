@@ -1106,6 +1106,12 @@ pub struct ActiveWorkItemView {
     /// payloads) and must not render a label.
     #[serde(default)]
     pub session_agent_total: u32,
+    /// SPEC-2359 Phase W-16 (FR-403): RFC3339 timestamp of the Workspace's
+    /// last update (record `updated_at`). The list sorts by
+    /// `max(updated_at, agents[].updated_at)` descending so the most recently
+    /// touched branch is on top. Empty string for legacy payloads.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2715,6 +2721,7 @@ mod tests {
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
                     session_agent_total: 0,
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),

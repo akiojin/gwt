@@ -14081,6 +14081,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
+        updated_at: String::new(),
     }];
 
     super::attach_registry_sessions_to_active_works(
@@ -14137,4 +14138,72 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
     assert_eq!(view.sessions[0].agent_session_id, "conv-latest");
     assert!(view.sessions[0].is_active);
     assert!(view.sessions[0].resumable);
+}
+
+/// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
+/// update, newest first — rows with fresher records or fresher ledger
+/// sessions float to the top, stale backfill rows sink.
+#[test]
+fn active_works_are_sorted_by_latest_update_descending() {
+    let row = |id: &str, branch: &str, updated_at: &str| gwt::ActiveWorkItemView {
+        id: id.to_string(),
+        title: branch.to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some(branch.to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: Vec::new(),
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        updated_at: updated_at.to_string(),
+    };
+    let mut works = vec![
+        row("work-old", "work/old", "2026-05-01T00:00:00Z"),
+        row("work-new", "work/new", "2026-06-10T09:00:00Z"),
+        row("work-mid", "work/mid", "2026-06-01T00:00:00Z"),
+    ];
+    // The mid row carries a fresher ledger session than its record stamp, so
+    // it must outrank the 06-10 09:00 row.
+    works[2].agents.push(gwt::ActiveWorkAgentView {
+        session_id: "sess-fresh".to_string(),
+        window_id: None,
+        agent_id: "claude".to_string(),
+        display_name: "Claude".to_string(),
+        affiliation_status: "assigned".to_string(),
+        workspace_id: None,
+        status_category: "idle".to_string(),
+        current_focus: None,
+        title_summary: None,
+        branch: None,
+        worktree_path: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at: "2026-06-10T12:00:00Z".to_string(),
+        sessions: Vec::new(),
+    });
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    );
+
+    let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["work-mid", "work-new", "work-old"],
+        "rows sort by max(record updated_at, agents updated_at) descending"
+    );
 }

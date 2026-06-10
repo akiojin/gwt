@@ -2278,6 +2278,12 @@ fn active_work_items_from_projection(
                 .iter()
                 .filter(|agent| agent.status_category == "blocked")
                 .count();
+            // FR-403: live rows sort by their freshest agent activity.
+            let row_updated_at = agents
+                .iter()
+                .map(|agent| agent.updated_at.clone())
+                .max()
+                .unwrap_or_default();
             let status_category = if blocked_agents > 0 {
                 "blocked".to_string()
             } else if active_agents > 0 {
@@ -2398,6 +2404,7 @@ fn active_work_items_from_projection(
                 .to_string(),
                 closed_at: None,
                 session_agent_total: 0,
+                updated_at: row_updated_at,
             }
         })
         .collect::<Vec<_>>();
@@ -2480,6 +2487,8 @@ fn append_paused_work_items(
             .to_string(),
             closed_at: None,
             session_agent_total: 0,
+            // FR-403: paused/backfill rows carry the record's last update.
+            updated_at: work.updated_at.clone(),
         });
     }
 }
@@ -3003,6 +3012,18 @@ fn attach_registry_sessions_to_active_works(
             work.agents.truncate(cap);
         }
     }
+    // SPEC-2359 Phase W-16 (FR-403): order the list by last update, newest
+    // first — the row stamp or its freshest agent/ledger session, whichever
+    // is newer. RFC3339 UTC strings compare lexically.
+    let row_sort_key = |work: &gwt::ActiveWorkItemView| -> String {
+        work.agents
+            .iter()
+            .map(|agent| agent.updated_at.clone())
+            .chain(std::iter::once(work.updated_at.clone()))
+            .max()
+            .unwrap_or_default()
+    };
+    active_works.sort_by_key(|work| std::cmp::Reverse(row_sort_key(work)));
 }
 
 fn paused_work_agent_view_from_history(
@@ -5501,6 +5522,7 @@ impl AppRuntime {
             .to_string(),
             closed_at: None,
             session_agent_total: 0,
+            updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {
             id: tab_id.to_string(),
