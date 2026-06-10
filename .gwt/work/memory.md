@@ -6850,3 +6850,17 @@ Type: lesson
 Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
+
+## 2026-06-10 — llvm-cov はビルド失敗時に 0% レポートを静かに出力する
+
+Type: lesson
+Context: arch-review P1 で workspace カバレッジを計測した際、テストファイルの import エラーで cargo build が失敗していたのに --ignore-run-fail 指定の cargo llvm-cov が exit 0 相当で summary JSON を生成し、covered=0 の無意味な数値を報告した
+Learning: --ignore-run-fail はテスト実行失敗のみ許容し、ビルド失敗時もレポート生成自体は完走する。0% や極端に低い数値が出たら、まず llvm-cov の実行ログで全テストバイナリがビルド・実行されたかを確認する
+Future Action: カバレッジ計測値を意思決定に使う前に、実行ログの 'error\[' / 'build failed' を grep し、test result 行数が期待クレート数と一致することを確認する
+
+## 2026-06-10 — CI ゲート拡張は hermeticity 監査 + 現行ゲート相当との差分比較で安全に行う
+
+Type: lesson
+Context: arch-review P1 で per-PR CI を 2→12 クレートに拡張する際、ローカル (Windows) で 9 件のテスト失敗が出たが、現行ゲート相当のコマンド (cargo test -p gwt --lib) でも同一に失敗することを確認し、本変更起因でないと証明できた
+Learning: (1) 未ゲートテストの CI 安全性は spawn/network/docker/cfg を grep する hermeticity 監査で事前確認する (2) ローカル失敗が出たら『現行ゲート相当の選択で同じ失敗が出るか』の差分比較で回帰有無を切り分ける (3) Windows ローカルと ubuntu CI はテスト成否が異なる前提で、PR 自身の CI 実行を最終検証点に据える
+Future Action: CI 対象拡張時は、新規対象クレートの tests を #\[ignore\]/reqwest/TcpListener/Command::new/cfg(unix) で grep し、ローカル全実行 → 失敗があれば現行ゲート相当コマンドで再現確認 → PR CI で最終確認、の 3 段で検証する
