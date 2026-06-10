@@ -1222,6 +1222,40 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
 });
 
+test("modal buttons follow the ghost / primary / destructive hierarchy (SPEC-3038 FR-011 / US-5)", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // Base wizard buttons become ghost — the solid dark-block treatment is
+  // reserved for the single primary action per view.
+  assert.match(
+    css,
+    /:root\[data-theme\] \.wizard-button\s*\{[^}]*background:\s*transparent/,
+    "base .wizard-button must be ghost (transparent background)",
+  );
+  // Primary stays the single solid accent.
+  assert.match(
+    css,
+    /:root\[data-theme\] \.wizard-button\.primary\s*\{[^}]*var\(--color-state-active\)/,
+    ".wizard-button.primary keeps the solid accent treatment",
+  );
+  // Destructive becomes a red-tinted ghost on the WCAG-checked blocked token.
+  assert.match(
+    css,
+    /\.wizard-button\.destructive[\s\S]{0,400}?color-mix\(in oklab, var\(--color-state-blocked\)/,
+    ".wizard-button.destructive must tint from --color-state-blocked",
+  );
+  assert.doesNotMatch(
+    css,
+    /--color-state-danger, #c83a3a/,
+    "hardcoded danger fallbacks are replaced by the checked blocked token",
+  );
+  // Modal titles speak the Mission Control display voice.
+  assert.match(
+    css,
+    /\.modal-shell h2[\s\S]{0,400}?var\(--font-display\)/,
+    "modal titles must use the display face",
+  );
+});
+
 test("the permanent canvas hint bar is retired; guidance lives in the hotkey overlay (SPEC-3038 US-4)", () => {
   assert.equal(document.querySelector(".hint"), null, ".hint must be removed");
   assert.equal(document.getElementById("connection-dot"), null);
