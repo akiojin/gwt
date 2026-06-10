@@ -169,6 +169,7 @@ pub type AgentLaunchCompletion = (
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
+mod launch_output_mirror;
 mod migration;
 pub(crate) mod persist_dispatcher;
 mod profile;
@@ -9003,6 +9004,18 @@ impl AppRuntime {
         profile_config_path: PathBuf,
         hook_forward_target: Option<HookForwardTarget>,
     ) {
+        // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
+        // compose ps/up incl. image build, exec probes), mirror docker-kind
+        // Process Console lines into the agent terminal. Host launches keep
+        // their immediate-PTY behavior untouched (FR-142). The guard's Drop
+        // performs a final drain when preparation finishes or fails.
+        let _docker_output_mirror =
+            (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
+                launch_output_mirror::DockerLaunchOutputMirror::start(
+                    proxy.clone(),
+                    window_id.clone(),
+                )
+            });
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
