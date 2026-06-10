@@ -2543,14 +2543,22 @@ test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-dr
 });
 
 test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", () => {
-  // app.js has a closure-scoped runtime→Living Telemetry mapper. CSS only
-  // styles `[data-agent-state]` for declared telemetry states — any drift
-  // (e.g. emitting "warn" or "exited") would silently render no rim. Pin
-  // the contract so refactors can't introduce undeclared states.
-  const mapperBlock = appSource.match(
-    /function\s+mapAgentTelemetryState\s*\([^)]*\)\s*\{[\s\S]*?\n\s{6,8}\}/,
+  // SPEC-3015 moved the runtime→Living Telemetry mapper from app.js to
+  // window-runtime-state.js. CSS only styles `[data-agent-state]` for
+  // declared telemetry states — any drift (e.g. emitting "warn" or
+  // "exited") would silently render no rim. Pin the contract so refactors
+  // can't introduce undeclared states.
+  const windowRuntimeStateSource = readFileSync(
+    resolve(here, "../window-runtime-state.js"),
+    "utf8",
   );
-  assert.ok(mapperBlock, "expected mapAgentTelemetryState to be defined in app.js");
+  const mapperBlock = windowRuntimeStateSource.match(
+    /function\s+mapAgentTelemetryState\s*\([^)]*\)\s*\{[\s\S]*?\n\}/,
+  );
+  assert.ok(
+    mapperBlock,
+    "expected mapAgentTelemetryState to be defined in window-runtime-state.js",
+  );
   const returnedStates = new Set();
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);
