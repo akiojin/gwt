@@ -6857,3 +6857,17 @@ Type: lesson
 Context: During completion audit after stabilizing Windows tray lock tests, the guard-lock split left the readable tray lock payload using truncate-and-rewrite while comments still promised atomic rename.
 Learning: A separate OS guard lock fixes same-process fs2 contention but does not protect failed-launch readers that read the discovery payload after lock contention. The readable payload must be replaced via temp-file plus rename so readers never observe partial JSON.
 Future Action: When splitting lock ownership from readable discovery files, audit both the locking primitive and the reader-visible update path; add tests for valid replacement and temp cleanup, not only lock contention.
+
+## 2026-06-10 — Tray guard lock may outlive readable payload
+
+Type: lesson
+Context: Windows tray single-instance lock cleanup deletes the readable JSON payload before the guard lock is released during shutdown.
+Learning: Contention readers must handle a missing payload while the guard lock is still held as a starting/stopping instance, not as a hard IO failure.
+Future Action: When changing tray lock lifecycle or cleanup order, add contention tests for empty, corrupt, partially written, and missing payload states while the guard lock is held.
+
+## 2026-06-10 — Hook integration tests must isolate user config
+
+Type: lesson
+Context: board_reminder_hook_test called production config resolution in an integration-test binary, so a developer machine with Teams-backed ~/.gwt/config.toml turned hook contract tests into live remote Board calls.
+Learning: Integration tests that exercise hook IO boundaries must isolate HOME and USERPROFILE and clear GWT_SESSION_ID before calling handle_with_input or compute_plan.
+Future Action: Before adding hook integration tests, wrap them in a process-env guard and run the full cargo test matrix on a machine with real Board config present.

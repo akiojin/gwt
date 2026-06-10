@@ -290,10 +290,18 @@ fn write_lock_contents(path: &Path, payload: &TrayLockFile) -> io::Result<()> {
 }
 
 fn read_lock_contents(path: &Path) -> Result<TrayLockFile, TrayLockError> {
-    let mut file = File::open(path).map_err(|source| TrayLockError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(empty_lock_payload());
+        }
+        Err(source) => {
+            return Err(TrayLockError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
     let mut buf = String::new();
     file.read_to_string(&mut buf)
         .map_err(|source| TrayLockError::Io {
@@ -301,20 +309,25 @@ fn read_lock_contents(path: &Path) -> Result<TrayLockFile, TrayLockError> {
             source,
         })?;
     if buf.trim().is_empty() {
-        // The owning process may have just created an empty placeholder
-        // before writing the URL. Surface a synthetic payload so the
-        // contention message stays informative.
-        return Ok(TrayLockFile {
-            pid: 0,
-            url: String::new(),
-            started_at: Utc::now(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        });
+        // The owning process may be between acquire/write or in the shutdown
+        // window where the guard lock is still held but the payload has been
+        // removed. Surface a synthetic payload so the contention message stays
+        // informative.
+        return Ok(empty_lock_payload());
     }
     serde_json::from_str(&buf).map_err(|source| TrayLockError::Corrupt {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn empty_lock_payload() -> TrayLockFile {
+    TrayLockFile {
+        pid: 0,
+        url: String::new(),
+        started_at: Utc::now(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +402,24 @@ mod tests {
         match acquire(gwt_home).expect_err("second acquire must report contention") {
             TrayLockError::AlreadyRunning { url, .. } => {
                 assert_eq!(url, "http://127.0.0.1:55555/");
+            }
+            other => panic!("unexpected lock error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn second_acquire_reports_starting_or_stopping_when_payload_is_missing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let gwt_home = tmp.path();
+        let holder = acquire(gwt_home).expect("first acquire succeeds");
+        fs::remove_file(holder.path()).expect("remove payload while guard remains locked");
+
+        match acquire(gwt_home).expect_err("second acquire must report contention") {
+            TrayLockError::AlreadyRunning { url, .. } => {
+                assert!(
+                    url.is_empty(),
+                    "missing payload should surface an empty URL"
+                );
             }
             other => panic!("unexpected lock error: {other:?}"),
         }
