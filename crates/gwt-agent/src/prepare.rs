@@ -1731,6 +1731,44 @@ mod tests {
     }
 
     #[test]
+    fn host_package_runner_fallback_only_probes_bunx_before_switching_to_npx() {
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_claude_code_bunx_launch_config(temp.path());
+        let mut probe_calls = Vec::new();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((command.to_string(), args));
+                false
+            },
+        );
+
+        assert!(changed, "failed bunx probe must switch to npx");
+        assert_eq!(
+            probe_calls,
+            vec![(
+                "bunx".to_string(),
+                vec![
+                    "@anthropic-ai/claude-code@latest".to_string(),
+                    "--version".to_string(),
+                ],
+            )],
+            "prepare fallback must not pre-gate the npx launch with a second probe",
+        );
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn prepare_agent_launch_persists_session_and_builds_process_launch() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo-feature");
