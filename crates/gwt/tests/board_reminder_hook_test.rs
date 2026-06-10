@@ -12,6 +12,45 @@
 
 use gwt::cli::hook::board_reminder;
 use serde_json::Value;
+use std::{ffi::OsString, path::Path, sync::Mutex};
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_isolated_home<T>(run: impl FnOnce(&Path) -> T) -> T {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    run(home.path())
+}
 
 fn run(event: &str) -> (String, usize) {
     let mut stdout: Vec<u8> = Vec::new();
@@ -49,29 +88,31 @@ fn reminder_payload_shape_matches_claude_code_contract() {
     use chrono::Utc;
     use gwt_agent::{AgentId, Session};
 
-    let dir = tempfile::tempdir().unwrap();
-    let session = {
-        let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
-        s.display_name = "Codex".to_string();
-        s
-    };
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let session = {
+            let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
+            s.display_name = "Codex".to_string();
+            s
+        };
 
-    let plan = board_reminder::compute_plan("UserPromptSubmit", &session, Utc::now())
-        .unwrap()
-        .expect("UserPromptSubmit must produce output");
-    let mut buf = Vec::new();
-    plan.output.serialize_to(&mut buf).unwrap();
-    let parsed: Value = serde_json::from_slice(&buf).unwrap();
+        let plan = board_reminder::compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .expect("UserPromptSubmit must produce output");
+        let mut buf = Vec::new();
+        plan.output.serialize_to(&mut buf).unwrap();
+        let parsed: Value = serde_json::from_slice(&buf).unwrap();
 
-    assert_eq!(
-        parsed["hookSpecificOutput"]["hookEventName"],
-        "UserPromptSubmit"
-    );
-    let additional = parsed["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(additional.contains("phase"));
-    assert!(additional.contains("Do NOT") || additional.contains("手動で作成"));
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let additional = parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(additional.contains("phase"));
+        assert!(additional.contains("Do NOT") || additional.contains("手動で作成"));
+    });
 }
 
 #[test]
@@ -79,20 +120,22 @@ fn stop_payload_uses_system_message_contract() {
     use chrono::Utc;
     use gwt_agent::{AgentId, Session};
 
-    let dir = tempfile::tempdir().unwrap();
-    let session = {
-        let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
-        s.display_name = "Codex".to_string();
-        s
-    };
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().unwrap();
+        let session = {
+            let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
+            s.display_name = "Codex".to_string();
+            s
+        };
 
-    let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
-        .unwrap()
-        .expect("Stop must produce output");
-    let mut buf = Vec::new();
-    plan.output.serialize_to(&mut buf).unwrap();
-    let parsed: Value = serde_json::from_slice(&buf).unwrap();
+        let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+            .unwrap()
+            .expect("Stop must produce output");
+        let mut buf = Vec::new();
+        plan.output.serialize_to(&mut buf).unwrap();
+        let parsed: Value = serde_json::from_slice(&buf).unwrap();
 
-    assert!(parsed.get("hookSpecificOutput").is_none());
-    assert!(parsed["systemMessage"].as_str().unwrap().contains("Stop"));
+        assert!(parsed.get("hookSpecificOutput").is_none());
+        assert!(parsed["systemMessage"].as_str().unwrap().contains("Stop"));
+    });
 }

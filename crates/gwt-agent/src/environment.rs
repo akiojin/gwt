@@ -41,6 +41,7 @@ where
     I: IntoIterator<Item = (String, String)>,
 {
     let mut env: HashMap<String, String> = base_env.into_iter().collect();
+    normalize_windows_path_key(&mut env);
     remove_inherited_launch_env(&mut env);
     hydrate_host_path(&mut env);
     env
@@ -58,6 +59,7 @@ where
     I: IntoIterator<Item = (String, String)>,
 {
     let mut env: HashMap<String, String> = base_env.into_iter().collect();
+    normalize_windows_path_key(&mut env);
     hydrate_host_path(&mut env);
     env.get("PATH").cloned()
 }
@@ -157,6 +159,7 @@ impl LaunchEnvironment {
         I: IntoIterator<Item = (String, String)>,
     {
         let mut env: HashMap<String, String> = base_env.into_iter().collect();
+        normalize_windows_path_key(&mut env);
         apply_required_terminal_defaults(&mut env);
         Self {
             base_env: env,
@@ -202,6 +205,7 @@ impl LaunchEnvironment {
         let profile_remove_env = normalized_remove_env(&profile.disabled_env);
         let remove_env = merged_remove_env(&inherited_remove_env, &profile_remove_env);
         let mut base_env: HashMap<String, String> = base_env.into_iter().collect();
+        normalize_windows_path_key(&mut base_env);
         for key in &remove_env {
             base_env.remove(key);
         }
@@ -334,6 +338,26 @@ fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
         env.remove(*key);
     }
 }
+
+#[cfg(windows)]
+fn normalize_windows_path_key(env: &mut HashMap<String, String>) {
+    if env.contains_key("PATH") {
+        return;
+    }
+    let Some(existing_key) = env
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(value) = env.remove(&existing_key) {
+        env.insert("PATH".to_string(), value);
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_path_key(_env: &mut HashMap<String, String>) {}
 
 #[cfg(windows)]
 fn hydrate_host_path(_env: &mut HashMap<String, String>) {}
@@ -673,6 +697,34 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert_eq!(remove_env, vec!["NO_COLOR".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn from_base_env_normalizes_windows_path_key() {
+        let base_env = vec![("Path".to_string(), r"C:\Windows\System32".to_string())];
+
+        let (env, _) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some(r"C:\Windows\System32")
+        );
+        assert!(
+            !env.contains_key("Path"),
+            "launch env must expose one canonical PATH key"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compute_hydrated_path_reads_windows_path_key() {
+        let base_env = vec![("Path".to_string(), r"C:\Windows\System32".to_string())];
+
+        assert_eq!(
+            compute_hydrated_path(base_env).as_deref(),
+            Some(r"C:\Windows\System32")
+        );
     }
 
     #[test]

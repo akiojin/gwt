@@ -12,6 +12,7 @@ export function createWorkspaceKanbanSurface({
   openWorkspaceResumePicker,
   getResumeBounds,
   branchesSurface,
+  launchPending,
 }) {
   const workspaceStateMap = new Map();
 
@@ -394,8 +395,31 @@ export function createWorkspaceKanbanSurface({
     button.type = "button";
     button.dataset.action = "resume-work";
     button.dataset.sessionId = work.session_id;
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeWork(work));
     return button;
+  }
+
+  // SPEC-2359 W-17 (FR-398): pending key shared with the Resume picker and
+  // the dispatcher's ack/error settle path.
+  function workPendingKey(sessionId) {
+    return `session:${sessionId}`;
+  }
+
+  function isWorkResumePending(sessionId) {
+    return Boolean(
+      sessionId
+        && launchPending
+        && launchPending.isPending(workPendingKey(sessionId)),
+    );
+  }
+
+  function markResumeButtonPending(button) {
+    button.disabled = true;
+    button.textContent = "Resuming...";
+    button.classList.add("is-pending");
   }
 
   function resumeWork(work) {
@@ -407,10 +431,17 @@ export function createWorkspaceKanbanSurface({
     if (!bounds) {
       return;
     }
+    if (
+      launchPending
+      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+    ) {
+      return;
+    }
     // resume_workspace_agent resumes by the gwt session id (the Work / launch),
     // which is exactly work.session_id. Without an agent_session_id the Work's
     // latest conversation (or a fresh start) is resumed.
     send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
+    renderWindows();
   }
 
   function renderSessionResumeButton(work, session) {
@@ -441,6 +472,9 @@ export function createWorkspaceKanbanSurface({
     } else {
       button.setAttribute("aria-label", "Resume this conversation");
     }
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeSession(work, session));
     return button;
   }
@@ -468,6 +502,9 @@ export function createWorkspaceKanbanSurface({
     button.dataset.action = "resume-work";
     button.dataset.sessionId = work.session_id;
     button.setAttribute("aria-label", "Start a fresh conversation for this Work");
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeWork(work));
     wrap.appendChild(button);
     return wrap;
@@ -485,6 +522,12 @@ export function createWorkspaceKanbanSurface({
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
     // agent_session_id (this Session row).
+    if (
+      launchPending
+      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+    ) {
+      return;
+    }
     const agentSessionId = session && session.agent_session_id ? session.agent_session_id : null;
     send({
       kind: "resume_workspace_agent",
@@ -492,6 +535,7 @@ export function createWorkspaceKanbanSurface({
       agent_session_id: agentSessionId,
       bounds,
     });
+    renderWindows();
   }
 
   function shortSessionId(value) {

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
+import { createLaunchPendingController } from "../launch-pending-controller.js";
 
 test("Workspace Overview renders a quiet List + Detail shell instead of status Kanban columns", () => {
   const fixture = createFixture();
@@ -710,3 +711,65 @@ function createNode(document, tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+
+// SPEC-2359 W-17 (FR-398): Resume entry points show pending state and guard
+// against double-sends via the shared launch-pending controller.
+test("Resume click marks the Work pending and a re-click does not re-send", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  const fixture = createFixture();
+  const sent = [];
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  resume.click();
+  assert.equal(sent.length, 1);
+  assert.equal(
+    launchPending.isPending("session:work-launch-1"),
+    true,
+    "click registers the Work as pending",
+  );
+
+  resume.click();
+  assert.equal(sent.length, 1, "re-click while pending must not re-send");
+});
+
+test("a pending Work renders its Resume button disabled with progress label", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  const fixture = createFixture();
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  launchPending.begin("session:work-launch-1", "Resume");
+  const surface = createSurface(fixture, projection, {
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  assert.ok(resume, "Resume control still renders while pending");
+  assert.equal(resume.disabled, true, "pending Work disables its Resume");
+  assert.match(resume.textContent, /Resuming/);
+});

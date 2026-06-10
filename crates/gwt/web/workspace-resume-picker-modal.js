@@ -181,6 +181,14 @@ export function renderWorkspaceResumePicker({
         meta.appendChild(whenRow);
       }
       if (meta.childElementCount > 0) row.appendChild(meta);
+      // SPEC-2359 W-17 (FR-398): while one resume is in flight the rows are
+      // disabled so the modal cannot fire a second launch.
+      if (state.pendingSessionId) {
+        row.disabled = true;
+        if (agent.session_id === state.pendingSessionId) {
+          row.classList.add("is-pending");
+        }
+      }
       row.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -189,6 +197,16 @@ export function renderWorkspaceResumePicker({
       list.appendChild(row);
     }
     dialogEl.appendChild(list);
+  }
+
+  if (state.pendingSessionId) {
+    dialogEl.appendChild(
+      createNode(
+        "div",
+        "workspace-resume-picker-pending",
+        "Resuming... waiting for the agent window to start.",
+      ),
+    );
   }
 
   if (state.error) {
@@ -222,12 +240,17 @@ export function createWorkspaceResumePickerController({
   createNode,
   send,
   getResumeBounds,
+  launchPending,
 }) {
   const state = {
     open: false,
     agents: [],
     workspaceId: null,
     error: "",
+    // SPEC-2359 W-17 (FR-398): session id of the in-flight resume. The modal
+    // stays open in a pending state until the backend acks
+    // (`workspace_resume_agent_started`) or errors — no optimistic close.
+    pendingSessionId: null,
   };
 
   function close() {
@@ -235,16 +258,25 @@ export function createWorkspaceResumePickerController({
     state.agents = [];
     state.workspaceId = null;
     state.error = "";
+    state.pendingSessionId = null;
     render();
   }
 
   function pick(agent) {
     if (!agent || !agent.session_id) return;
+    if (state.pendingSessionId) return;
     state.error = "";
     const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
     if (!bounds) {
       state.error = "Cannot determine viewport bounds.";
       render();
+      return;
+    }
+    if (
+      launchPending
+      && !launchPending.begin(`session:${agent.session_id}`, "Resume")
+    ) {
+      // The same Work is already resuming from another surface.
       return;
     }
     if (typeof send === "function") {
@@ -254,9 +286,8 @@ export function createWorkspaceResumePickerController({
         bounds,
       });
     }
-    // Optimistically close; if backend reports failure we re-open via
-    // handleError.
-    close();
+    state.pendingSessionId = agent.session_id;
+    render();
   }
 
   function render() {
@@ -289,8 +320,20 @@ export function createWorkspaceResumePickerController({
       state.agents = Array.isArray(event?.agents) ? event.agents : [];
       render();
     },
+    // SPEC-2359 W-17 (FR-398): backend ack that the resume was accepted —
+    // the agent window is spawning (or an existing one was focused), so the
+    // picker's job is done.
+    handleStarted: (event) => {
+      const sessionId = event?.session_id;
+      if (!state.open) return;
+      if (state.pendingSessionId && sessionId !== state.pendingSessionId) {
+        return;
+      }
+      close();
+    },
     handleError: (event) => {
       state.open = true;
+      state.pendingSessionId = null;
       state.error = event?.message || "Failed to resume the selected agent.";
       render();
     },

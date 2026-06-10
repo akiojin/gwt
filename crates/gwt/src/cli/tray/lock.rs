@@ -52,6 +52,13 @@ pub fn forced_lock_path(gwt_home: &Path, user_id: &str, pid: u32) -> PathBuf {
         .join(format!("tray-{user_id}-forced-{pid}.lock"))
 }
 
+fn guard_lock_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.with_extension("guard");
+    };
+    path.with_file_name(format!("{file_name}.guard"))
+}
+
 /// Resolve the OS-level user id used as the lock scope. Falls back to
 /// the OS env vars if the `whoami` crate cannot infer the username, and
 /// to a fixed sentinel as a last resort so the lock path is always
@@ -92,6 +99,8 @@ fn sanitize_user_id_segment(value: &str) -> String {
 pub struct TrayLockHandle {
     path: PathBuf,
     file: File,
+    guard_path: PathBuf,
+    guard_file: File,
 }
 
 impl TrayLockHandle {
@@ -114,7 +123,6 @@ impl TrayLockHandle {
 
 impl Drop for TrayLockHandle {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
         // Best-effort removal so subsequent launches don't trip on a
         // stale file. Failure is logged but never panics during Drop.
         if let Err(error) = fs::remove_file(&self.path) {
@@ -123,6 +131,15 @@ impl Drop for TrayLockHandle {
                 path = %self.path.display(),
                 error = %error,
                 "failed to remove tray lock file on drop"
+            );
+        }
+        let _ = self.guard_file.unlock();
+        if let Err(error) = fs::remove_file(&self.guard_path) {
+            tracing::debug!(
+                target: "gwt_tray_lock",
+                path = %self.guard_path.display(),
+                error = %error,
+                "failed to remove tray guard file on drop"
             );
         }
     }
@@ -190,6 +207,31 @@ fn acquire_inner(
             source,
         })?;
     }
+    let guard_path = guard_lock_path(&path);
+    let guard_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&guard_path)
+        .map_err(|source| TrayLockError::Io {
+            path: guard_path.clone(),
+            source,
+        })?;
+    match guard_file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(_) => {
+            // Another process holds the guard lock. Read the unlocked
+            // payload so the caller can guide the user even on Windows,
+            // where byte-range locks block reads from the locked file.
+            let existing = read_lock_contents(&path)?;
+            return Err(TrayLockError::AlreadyRunning {
+                user_id,
+                path,
+                url: existing.url,
+            });
+        }
+    }
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -200,26 +242,17 @@ fn acquire_inner(
             path: path.clone(),
             source,
         })?;
-    match file.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(_) => {
-            // Another process holds the lock. Read its URL out so the
-            // caller can guide the user. Failure to parse is reported
-            // separately so the user sees the real issue.
-            let existing = read_lock_contents(&path)?;
-            return Err(TrayLockError::AlreadyRunning {
-                user_id,
-                path,
-                url: existing.url,
-            });
-        }
-    }
     let payload = build_lock_payload(std::process::id(), "");
     write_lock_contents(&path, &mut file, &payload).map_err(|source| TrayLockError::Io {
         path: path.clone(),
         source,
     })?;
-    Ok(TrayLockHandle { path, file })
+    Ok(TrayLockHandle {
+        path,
+        file,
+        guard_path,
+        guard_file,
+    })
 }
 
 fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
@@ -338,39 +371,22 @@ mod tests {
     fn second_acquire_for_same_user_reports_already_running() {
         let tmp = TempDir::new().expect("tempdir");
         let gwt_home = tmp.path();
-        let _holder = acquire(gwt_home).expect("first acquire succeeds");
+        let mut holder = acquire(gwt_home).expect("first acquire succeeds");
 
-        // The same process cannot fs2-lock the file twice on most
-        // platforms even with a different OpenOptions handle, so we
-        // emulate the contention by writing the file directly with a
-        // populated URL and then re-acquiring (which surfaces the
-        // contention against the still-held _holder).
+        holder.set_url("http://127.0.0.1:55555/").expect("set url");
         let user_id = current_user_id();
         let path = lock_path(gwt_home, &user_id);
-        let payload = TrayLockFile {
-            pid: std::process::id(),
-            url: "http://127.0.0.1:55555/".to_string(),
-            started_at: Utc::now(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        // The lock is held by _holder, but on macOS / Linux fs2 uses
-        // POSIX advisory locks which are per-process; an exclusive lock
-        // taken from the same process via a second handle behaves
-        // platform-dependently. To keep the test deterministic across
-        // POSIX and Windows we update the existing file contents (the
-        // owning handle stays alive throughout the test) and only
-        // assert that `read_lock_contents` round-trips the URL.
+
+        #[cfg(windows)]
         {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create(false)
-                .open(&path)
-                .expect("reopen for url overwrite");
-            f.set_len(0).expect("truncate");
-            let json = serde_json::to_vec(&payload).expect("serialize");
-            f.write_all(&json).expect("write");
-            f.sync_all().expect("sync");
+            match acquire(gwt_home).expect_err("second acquire must report the running tray") {
+                TrayLockError::AlreadyRunning { url, .. } => {
+                    assert_eq!(url, "http://127.0.0.1:55555/");
+                }
+                other => panic!("expected AlreadyRunning, got {other:?}"),
+            }
         }
+
         let read_back = read_lock_contents(&path).expect("read existing lock contents");
         assert_eq!(read_back.url, "http://127.0.0.1:55555/");
     }

@@ -926,6 +926,13 @@ enum UserEvent {
         window_id: String,
         message: String,
     },
+    /// SPEC-2359 W-17 (FR-396): a client's queue dropped streamed output for
+    /// these panes under pressure; re-send fresh snapshots to that client so
+    /// its terminal display self-heals.
+    ClientPaneSnapshotRepair {
+        client_id: ClientId,
+        pane_ids: Vec<String>,
+    },
     /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
     /// should be appended to the launching agent window's terminal.
     LaunchTerminalOutput {
@@ -1463,8 +1470,8 @@ mod tests {
     #[test]
     fn runtime_hook_event_broadcast_reaches_all_registered_clients() {
         let clients = ClientHub::default();
-        let mut native = clients.register("native".to_string());
-        let mut browser = clients.register("browser".to_string());
+        let native = clients.register("native".to_string());
+        let browser = clients.register("browser".to_string());
 
         broadcast_runtime_hook_event(
             &clients,
@@ -1492,8 +1499,8 @@ mod tests {
     #[test]
     fn log_entry_broadcast_reaches_all_registered_clients() {
         let clients = ClientHub::default();
-        let mut native = clients.register("native".to_string());
-        let mut browser = clients.register("browser".to_string());
+        let native = clients.register("native".to_string());
+        let browser = clients.register("browser".to_string());
 
         broadcast_log_entry(
             &clients,
@@ -1763,9 +1770,9 @@ mod tests {
         );
     }
 
-    fn drain_client_payloads(receiver: &mut tokio::sync::mpsc::Receiver<String>) -> Vec<String> {
+    fn drain_client_payloads(queue: &crate::embedded_server::ClientQueue) -> Vec<String> {
         let mut payloads = Vec::new();
-        while let Ok(payload) = receiver.try_recv() {
+        while let Some(payload) = queue.try_recv() {
             payloads.push(payload);
         }
         payloads
@@ -1830,8 +1837,8 @@ mod tests {
     #[test]
     fn client_hub_dispatch_keeps_frontend_sync_events_client_scoped() {
         let clients = ClientHub::default();
-        let mut primary = clients.register("primary".to_string());
-        let mut secondary = clients.register("secondary".to_string());
+        let primary = clients.register("primary".to_string());
+        let secondary = clients.register("secondary".to_string());
         let tabs = vec![sample_project_tab_with_window(
             "tab-1",
             "shell-1",
@@ -1849,8 +1856,8 @@ mod tests {
 
         clients.dispatch(events);
 
-        let primary_payloads = drain_client_payloads(&mut primary);
-        let secondary_payloads = drain_client_payloads(&mut secondary);
+        let primary_payloads = drain_client_payloads(&primary);
+        let secondary_payloads = drain_client_payloads(&secondary);
 
         assert_eq!(primary_payloads.len(), 3);
         assert_eq!(secondary_payloads.len(), 1);
@@ -2139,6 +2146,7 @@ mod tests {
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
+            inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
@@ -4910,8 +4918,8 @@ mod tests {
     #[test]
     fn client_hub_dispatches_broadcast_and_targeted_messages() {
         let hub = super::ClientHub::default();
-        let mut client_one = hub.register("client-1".to_string());
-        let mut client_two = hub.register("client-2".to_string());
+        let client_one = hub.register("client-1".to_string());
+        let client_two = hub.register("client-2".to_string());
 
         hub.dispatch(vec![
             super::OutboundEvent::broadcast(gwt::BackendEvent::ProjectOpenError {
@@ -4927,10 +4935,7 @@ mod tests {
 
         let first = client_one.try_recv().expect("broadcast for client one");
         assert!(first.contains("broadcast"));
-        assert!(matches!(
-            client_one.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(client_one.try_recv().is_none());
 
         let second = client_two.try_recv().expect("broadcast for client two");
         let third = client_two.try_recv().expect("targeted for client two");
@@ -4943,11 +4948,10 @@ mod tests {
                 message: "after-unregister".to_string(),
             },
         )]);
-        assert!(matches!(
-            client_one.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected
-                | tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+        assert!(
+            client_one.try_recv().is_none(),
+            "unregistered client receives nothing further"
+        );
         assert!(client_two
             .try_recv()
             .expect("client two should still receive messages")
@@ -6666,6 +6670,13 @@ fn main() -> std::io::Result<()> {
                         message,
                     },
                 )]);
+            }
+            Event::UserEvent(UserEvent::ClientPaneSnapshotRepair {
+                client_id,
+                pane_ids,
+            }) => {
+                let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
                 clients.dispatch(vec![OutboundEvent::broadcast(

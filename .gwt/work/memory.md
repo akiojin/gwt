@@ -6864,3 +6864,12 @@ Type: lesson
 Context: arch-review P1 で per-PR CI を 2→12 クレートに拡張する際、ローカル (Windows) で 9 件のテスト失敗が出たが、現行ゲート相当のコマンド (cargo test -p gwt --lib) でも同一に失敗することを確認し、本変更起因でないと証明できた
 Learning: (1) 未ゲートテストの CI 安全性は spawn/network/docker/cfg を grep する hermeticity 監査で事前確認する (2) ローカル失敗が出たら『現行ゲート相当の選択で同じ失敗が出るか』の差分比較で回帰有無を切り分ける (3) Windows ローカルと ubuntu CI はテスト成否が異なる前提で、PR 自身の CI 実行を最終検証点に据える
 Future Action: CI 対象拡張時は、新規対象クレートの tests を #\[ignore\]/reqwest/TcpListener/Command::new/cfg(unix) で grep し、ローカル全実行 → 失敗があれば現行ゲート相当コマンドで再現確認 → PR CI で最終確認、の 3 段で検証する
+
+## 2026-06-10 — GUI フリーズ調査は WebSocket eviction ログ（evicting lagging websocket clients）を最初に疑う
+
+Type: lesson
+Context: Start Work/Resume 後の無表示・操作不能・無反応の報告。フロントの pending UI 欠如だけでは説明できない完全フリーズが含まれていた。
+Learning: 原因は per-client outbound queue(64) 溢れでクライアントを即切断する ClientHub の eviction 設計。エージェント起動直後の TerminalOutput broadcast 洪水で操作したクライアント自身が evict され、再接続時の全 pane snapshot 一括 replay が再バーストを生んで storm 化する。~/.gwt/projects/<hash>/logs/gwt.log.* の 'evicting lagging websocket clients' と frontend user action の時刻相関（今回 open_start_work 10/10 で一致）が決定的証拠になる。切断中の frontend send() は黙ってキューされるため UI は無反応に見える。
+Future Action: GUI の無反応・取りこぼし系バグはコード読みの前に該当時間帯の gwt.log で eviction / frontend_ready 再接続 / client_id 変化（ユーザーのリロード痕跡）を確認する。修正は SPEC-2359 Phase W-17（lossy/lossless 分離・replay 分割・pending UI・スキャン抑止）を参照。
+
+>>>>>>> origin/develop
