@@ -1222,6 +1222,33 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
 });
 
+test("window tabs receive agent telemetry from runtime state (SPEC-3038 US-2)", () => {
+  // SPEC-3038 AS-2.1: tabs carry the same telemetry the window chrome shows.
+  assert.match(
+    appSource,
+    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?mapAgentTelemetryState/,
+    "expected a tab telemetry helper that gates on agent windows and reuses the telemetry mapping",
+  );
+  const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
+  assert.match(
+    renderTabsBody,
+    /agent_state:\s*windowTabTelemetryState\(tab\)/,
+    "renderWindowTabs must decorate tab data with telemetry state",
+  );
+  // AS-2.2: runtime state changes refresh the visible tab strip of the group.
+  const applyStatusBody = extractFunctionBody(appSource, "applyStatus");
+  assert.match(
+    applyStatusBody,
+    /refreshWindowTabTelemetry\(windowData\)/,
+    "status changes must refresh tab telemetry across the tab group",
+  );
+  assert.match(
+    appSource,
+    /function\s+refreshWindowTabTelemetry\(windowData\)[\s\S]{0,400}?windowTabsFor\(windowData\)/,
+    "expected a group-wide tab telemetry refresh helper",
+  );
+});
+
 test("Window tab activation updates tab chrome in place without remounting terminal body", () => {
   assert.match(
     appSource,

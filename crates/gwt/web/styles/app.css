@@ -895,6 +895,82 @@ body {
   cursor: grab;
 }
 
+/* SPEC-3038 US-2 — Telemetry tabs. The dot + label live inside the tab
+   button; the gap separates them without breaking the title ellipsis. */
+.window-tab .window-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-tab-state {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+  background: transparent;
+}
+
+.window-tab-state[hidden] {
+  display: none;
+}
+
+/* The window-level [data-agent-state] rules paint a rim glow + pulse meant
+   for full windows; tabs neutralize that and express telemetry through an
+   agent-colored left rim + a small state dot instead. */
+.window-tab[data-agent-state] {
+  box-shadow: none;
+  animation: none;
+  border-left: 3px solid var(--current-agent, var(--color-border-strong));
+  padding-left: 6px;
+}
+
+.window-tab[data-agent-state="active"] .window-tab-state {
+  background: var(--color-state-active);
+  animation: window-tab-state-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+.window-tab[data-agent-state="idle"] .window-tab-state {
+  background: var(--color-state-idle);
+}
+
+.window-tab[data-agent-state="not_started"] .window-tab-state {
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+}
+
+/* AS-2.3: blocked stays loud even on an inactive tab — red dot pulse plus a
+   red-tinted tab border. */
+.window-tab[data-agent-state="blocked"] .window-tab-state {
+  background: var(--color-state-blocked);
+  animation: window-tab-state-pulse calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+}
+
+.window-tab[data-agent-state="blocked"] {
+  border-color: color-mix(in oklab, var(--color-state-blocked) 55%, var(--color-border));
+}
+
+.window-tab[data-agent-state="done"] .window-tab-state {
+  background: var(--color-state-done);
+  opacity: 0.65;
+}
+
+@keyframes window-tab-state-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-tab[data-agent-state="active"] .window-tab-state,
+  .window-tab[data-agent-state="blocked"] .window-tab-state {
+    animation: none;
+  }
+}
+
+/* AS-2.4: the close button only appears on hover / keyboard focus so a tab
+   click can never be one stray pixel away from killing the window. */
 .window-tab-close {
   width: 22px;
   height: 24px;
@@ -904,6 +980,20 @@ body {
   background: var(--color-surface);
   color: var(--color-text-muted);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--motion-curve);
+}
+
+.window-tab-item:hover .window-tab-close,
+.window-tab-item:focus-within .window-tab-close,
+.window-tab-close:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .window-tab-close {
+    opacity: 1;
+  }
 }
 
 .window-tab.active {

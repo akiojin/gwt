@@ -4438,6 +4438,7 @@
             // `data-agent-state` attribute the components.css layer animates.
             element.dataset.agentState = mapAgentTelemetryState(runtimeState);
             recomputeOperatorTelemetry();
+            refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
             const statusTitle = effectiveDetail
               ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
@@ -4559,12 +4560,37 @@
         });
       }
 
+      // SPEC-3038 US-2: tabs carry the same Living Telemetry the window chrome
+      // shows. Only agent panes (terminal surface) report a state; other
+      // surfaces render plain tabs.
+      function windowTabTelemetryState(tab) {
+        if (!shouldShowRuntimeStatus(tab)) return "";
+        const runtimeState =
+          windowRuntimeStateMap.get(tab.id) ||
+          normalizeWindowRuntimeState(tab.status, tab.preset);
+        return mapAgentTelemetryState(runtimeState);
+      }
+
+      // AS-2.2: a runtime state change must repaint the tab strip of every
+      // window in the group (the visible strip belongs to the active window's
+      // element, not necessarily the one whose status changed).
+      function refreshWindowTabTelemetry(windowData) {
+        if (!windowData?.tab_group_id) return;
+        for (const tab of windowTabsFor(windowData)) {
+          const tabElement = windowMap.get(tab.id);
+          if (tabElement) renderWindowTabs(tab, tabElement);
+        }
+      }
+
       function renderWindowTabs(windowData, element) {
         const strip = element.querySelector(".window-tab-strip");
         if (!strip) return;
         renderWindowTabsView({
           strip,
-          tabs: windowTabsFor(windowData),
+          tabs: windowTabsFor(windowData).map((tab) => ({
+            ...tab,
+            agent_state: windowTabTelemetryState(tab),
+          })),
           activeWindowId: windowData.id,
           tooltipForWindow: windowTitleTooltip,
           send,
