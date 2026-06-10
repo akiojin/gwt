@@ -867,3 +867,51 @@ test("Workspace rows and detail are titled by branch with the record title as me
     .textContent;
   assert.match(subtitleText, /gwt-manage-pr/, "detail subtitle carries the record title");
 });
+
+// SPEC-2359 W-16 (FR-394): the agents list is capped on the wire; the detail
+// Work section renders "+N more sessions" from session_agent_total so the
+// user can tell more ledger sessions exist beyond the rendered ones.
+test("detail shows '+N more sessions' when session_agent_total exceeds rendered agents", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "develop",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          active_agents: 0,
+          blocked_agents: 0,
+          session_agent_total: 20,
+          agents: Array.from({ length: 8 }, (_, index) => ({
+            session_id: `sess-${index}`,
+            agent_id: "claude",
+            display_name: `Claude ${index}`,
+            affiliation_status: "assigned",
+            status_category: "idle",
+            updated_at: "2026-06-10T12:00:00Z",
+            sessions: [],
+          })),
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const more = fixture.body.querySelector(".workspace-detail-more-sessions");
+  assert.ok(more, "expected the more-sessions label");
+  assert.equal(more.textContent.trim(), "+12 more sessions");
+});

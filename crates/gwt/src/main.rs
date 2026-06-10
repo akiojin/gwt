@@ -48,6 +48,7 @@ mod repo_browser;
 mod runtime_support;
 mod update_front_door;
 mod usage_poller;
+mod workspace_session_registry;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {

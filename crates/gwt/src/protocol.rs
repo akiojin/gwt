@@ -1099,6 +1099,13 @@ pub struct ActiveWorkItemView {
     /// close (Done / Discarded). None while the Work is active / paused.
     #[serde(default)]
     pub closed_at: Option<String>,
+    /// SPEC-2359 Phase W-16 (FR-394): total agents known for this Workspace
+    /// (record agents plus machine-local ledger sessions for its branch). The
+    /// `agents` list is capped on the wire, so the frontend renders
+    /// "+N more sessions" from this count. `0` means "not computed" (legacy
+    /// payloads) and must not render a label.
+    #[serde(default)]
+    pub session_agent_total: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2707,6 +2714,7 @@ mod tests {
                     agents: Vec::new(),
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
+                    session_agent_total: 0,
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),

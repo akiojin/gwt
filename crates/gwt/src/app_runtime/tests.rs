@@ -13950,3 +13950,86 @@ fn repo_head_branch(repo: &Path) -> Option<String> {
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!branch.is_empty()).then_some(branch)
 }
+
+/// SPEC-2359 Phase W-16 (FR-394, T-571): a Workspace row whose record has no
+/// agents gains them from the machine-local session ledger — sessions whose
+/// TOML carries the same repo hash and branch attach to the row with their
+/// conversation history, and `session_agent_total` reports the count.
+#[test]
+fn app_runtime_active_work_projection_attaches_registry_sessions() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    for args in [
+        ["config", "user.email", "test@example.com"].as_slice(),
+        ["config", "user.name", "Test User"].as_slice(),
+        ["commit", "--allow-empty", "-m", "init"].as_slice(),
+    ] {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("run git");
+        assert!(output.status.success());
+    }
+    let worktree = temp.path().join("repo-foo");
+    let output = gwt_core::process::hidden_command("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work/foo",
+            worktree.to_str().unwrap(),
+        ])
+        .current_dir(&repo)
+        .output()
+        .expect("git worktree add");
+    assert!(output.status.success());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    // Machine-local ledger entry for the branch (no record agents exist).
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/foo", gwt_agent::AgentId::ClaudeCode);
+    session.agent_session_id = Some("conv-1".to_string());
+    session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
+        agent_session_id: "conv-1".to_string(),
+        started_at: chrono::Utc::now(),
+    }];
+    assert!(
+        session.repo_hash.is_some(),
+        "fixture session must derive the repo hash from its worktree"
+    );
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    runtime.reconcile_workspace_worktrees(&repo);
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let expected_id =
+        gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/foo"), None).unwrap();
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == expected_id)
+        .expect("backfilled Workspace row");
+    assert_eq!(
+        row.agents.len(),
+        1,
+        "ledger session must attach to the branch Workspace"
+    );
+    assert_eq!(row.agents[0].session_id, session.id);
+    assert_eq!(row.agents[0].display_name, "Claude Code");
+    assert_eq!(row.agents[0].sessions.len(), 1);
+    assert_eq!(row.agents[0].sessions[0].agent_session_id, "conv-1");
+    assert_eq!(row.session_agent_total, 1);
+}

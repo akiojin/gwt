@@ -154,6 +154,10 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // SPEC-2359 W-16 (FR-394): uncapped agent/session count for the
+      // "+N more sessions" label; 0 = not computed (legacy payloads).
+      session_agent_total:
+        Number(item?.session_agent_total) || Number(fallback.session_agent_total) || 0,
       events: Array.isArray(item?.events) ? item.events : [],
       cleanup_candidate: item?.cleanup_candidate || fallback.cleanup_candidate || null,
       updated_at: compactText(item?.updated_at || fallback.updated_at),
@@ -410,6 +414,19 @@ export function createWorkspaceKanbanSurface({
       wrap.appendChild(group);
     }
     container.appendChild(wrap);
+    // SPEC-2359 W-16 (FR-394): the agents list is capped on the wire; surface
+    // how many more ledger sessions exist beyond the rendered ones.
+    // `session_agent_total === 0` means "not computed" (legacy payload).
+    const total = Number(workspace && workspace.session_agent_total) || 0;
+    if (total > list.length) {
+      container.appendChild(
+        createNode(
+          "div",
+          "workspace-detail-more-sessions workspace-overview-empty",
+          `+${total - list.length} more sessions`,
+        ),
+      );
+    }
   }
 
   function renderWorkResumeButton(work) {

@@ -2397,6 +2397,7 @@ fn active_work_items_from_projection(
                 )
                 .to_string(),
                 closed_at: None,
+                session_agent_total: 0,
             }
         })
         .collect::<Vec<_>>();
@@ -2478,6 +2479,7 @@ fn append_paused_work_items(
             )
             .to_string(),
             closed_at: None,
+            session_agent_total: 0,
         });
     }
 }
@@ -2930,6 +2932,53 @@ fn active_work_agent_view_from_summary(
 /// Convert a persisted Work's agent (a launch, carrying its Session history) to
 /// the active-surface agent view so Paused Workspaces render their Work →
 /// Session list instead of an empty agent list.
+/// SPEC-2359 Phase W-16 (FR-394): attach machine-local ledger sessions to
+/// each Workspace (branch) row. Sessions whose TOML carries this project's
+/// repo hash and the row's branch join the row's agents (deduped by gwt
+/// session id, capped per [`crate::workspace_session_registry`]); the
+/// uncapped count rides `session_agent_total` so the frontend can render
+/// "+N more sessions".
+fn attach_registry_sessions_to_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    agent_sessions: &[gwt_agent::Session],
+    project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+) {
+    let registry = crate::workspace_session_registry::branch_session_registry(
+        agent_sessions,
+        project_repo_hash.as_ref().map(|hash| hash.as_str()),
+    );
+    if registry.is_empty() {
+        return;
+    }
+    for work in active_works.iter_mut() {
+        let existing: Vec<&str> = work
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect();
+        let (additions, extra_total) =
+            crate::workspace_session_registry::registry_sessions_for_branch(
+                &registry,
+                work.branch.as_deref(),
+                &existing,
+                crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+            );
+        work.session_agent_total = (work.agents.len() + extra_total) as u32;
+        for session in additions {
+            let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+                session_id: session.id.clone(),
+                agent_id: Some(session.agent_id.command().to_string()),
+                display_name: Some(session.display_name.clone()),
+                updated_at: session.last_activity_at,
+            };
+            let history_view = workspace_work_agent_view_from_ref(&agent_ref, session_index);
+            work.agents
+                .push(paused_work_agent_view_from_history(&history_view));
+        }
+    }
+}
+
 fn paused_work_agent_view_from_history(
     agent: &gwt::WorkspaceHistoryAgentView,
 ) -> gwt::ActiveWorkAgentView {
@@ -5361,12 +5410,22 @@ impl AppRuntime {
                 .iter()
                 .map(|item| workspace_work_item_view_from_item(item, &session_index))
                 .collect::<Vec<_>>();
-            return Some(active_work_projection_from_saved_with_journal(
+            let mut view = active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
                 workspaces,
                 cleanup_candidate,
-            ));
+            );
+            // SPEC-2359 Phase W-16 (FR-394): attach the machine-local session
+            // ledger to each Workspace (branch) row so sessions surface even
+            // when works.json never recorded an agent for the branch.
+            attach_registry_sessions_to_active_works(
+                &mut view.active_works,
+                &agent_sessions,
+                gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
+                &session_index,
+            );
+            return Some(view);
         }
 
         let first = sessions.first()?;
@@ -5415,6 +5474,7 @@ impl AppRuntime {
             )
             .to_string(),
             closed_at: None,
+            session_agent_total: 0,
         }];
         Some(gwt::ActiveWorkProjectionView {
             id: tab_id.to_string(),
