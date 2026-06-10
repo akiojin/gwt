@@ -171,7 +171,6 @@ pub fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts
     format!(
         concat!(
             "# Auto-generated docker-compose override for gwt bundle mounting\n",
-            "version: '3.8'\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
