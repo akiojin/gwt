@@ -14101,3 +14101,40 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         "newest agents win the cap"
     );
 }
+
+/// SPEC-2359 Phase W-16 (FR-394 follow-up, user verification 2026-06-10): on
+/// this machine none of the ledger TOMLs carry `session_history` (the field
+/// is newer than the sessions), but almost all carry `agent_session_id` (the
+/// latest conversation). The view must synthesize that latest conversation as
+/// a single Session row instead of rendering "No session yet" everywhere.
+#[test]
+fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
+    let mut session = gwt_agent::Session::new(
+        std::path::PathBuf::from("/tmp/none"),
+        "work/foo",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-1".to_string();
+    session.agent_session_id = Some("conv-latest".to_string());
+    session.session_history = Vec::new();
+    let mut index = std::collections::HashMap::new();
+    index.insert(session.id.as_str(), &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+        session_id: "gwt-session-1".to_string(),
+        agent_id: Some("claude".to_string()),
+        display_name: Some("Claude Code".to_string()),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+
+    assert_eq!(
+        view.sessions.len(),
+        1,
+        "latest conversation must be synthesized when history is empty"
+    );
+    assert_eq!(view.sessions[0].agent_session_id, "conv-latest");
+    assert!(view.sessions[0].is_active);
+    assert!(view.sessions[0].resumable);
+}

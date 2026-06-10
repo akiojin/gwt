@@ -2657,6 +2657,24 @@ fn workspace_work_agent_view_from_ref(
             // the append order alone is not guaranteed monotonic.
             let mut entries: Vec<_> = session.session_history.iter().collect();
             entries.sort_by_key(|entry| entry.started_at);
+            if entries.is_empty() {
+                // SPEC-2359 W-16 (FR-394 follow-up): `session_history` is newer
+                // than most ledger TOMLs (zero coverage on long-lived machines),
+                // but the latest conversation pointer still exists. Synthesize
+                // it as the single Session row instead of "No session yet".
+                return latest
+                    .map(|conversation| {
+                        vec![gwt::WorkspaceHistorySessionView {
+                            agent_session_id: conversation.to_string(),
+                            started_at: session
+                                .updated_at
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            is_active: true,
+                            resumable: session.is_resumable_conversation(conversation),
+                        }]
+                    })
+                    .unwrap_or_default();
+            }
             entries
                 .into_iter()
                 .map(|entry| gwt::WorkspaceHistorySessionView {
