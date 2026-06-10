@@ -24,12 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use gwt::{FrontendEvent, HookForwardTarget, RuntimeHookEvent};
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::AsyncWriteExt,
-    net::TcpListener,
-    runtime::Runtime,
-    sync::{mpsc, oneshot},
-};
+use tokio::{io::AsyncWriteExt, net::TcpListener, runtime::Runtime, sync::oneshot};
 use uuid::Uuid;
 
 use crate::{
@@ -38,7 +33,18 @@ use crate::{
 };
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
-const CLIENT_QUEUE_CAPACITY: usize = 64;
+
+/// SPEC-2359 W-17 (FR-394/FR-395): per-client outbound queue limits.
+///
+/// `LOSSY_HIGH_WATER` caps droppable stream traffic (terminal output and
+/// other `Streamed` / `EphemeralStatus` kinds); past it those entries are
+/// dropped instead of disconnecting the client. `LOSSLESS_HARD_CAP` is the
+/// disconnect of last resort for a client that stopped draining entirely.
+/// `DRAIN_LOW_WATER` is the drain level at which panes whose output was
+/// dropped get scheduled for snapshot self-repair (FR-396).
+const LOSSY_HIGH_WATER: usize = 256;
+const DRAIN_LOW_WATER: usize = 32;
+const LOSSLESS_HARD_CAP: usize = 8192;
 /// Upper bound on the in-memory access log ring buffer. The canonical sink
 /// for production is `tracing::info!(target: "gwt_access", ...)` which writes
 /// to `~/.gwt/logs/<date>/`; this in-memory ring exists only so tests (and an
@@ -96,26 +102,275 @@ impl AccessLogSink {
     }
 }
 
+/// How one [`BackendEvent`] kind behaves when a client's outbound queue is
+/// under pressure. Derived from `BACKEND_EVENT_POLICIES` (`protocol.rs`),
+/// which is the single source of truth for the delivery contract
+/// (SPEC-2359 W-17 FR-394).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueClass {
+    /// Droppable stream (terminal output, ephemeral statuses). Dropped past
+    /// `LOSSY_HIGH_WATER`; pane-scoped drops self-repair via snapshot.
+    Lossy,
+    /// Only the latest payload matters; replaces the queued entry in place.
+    IdempotentLatest,
+    /// Latest snapshot per (kind, pane) replaces the queued one — lossless,
+    /// but a replay burst never stacks stale snapshots.
+    SnapshotLatest,
+    /// Must reach the client. Never dropped; the hard cap disconnects the
+    /// client instead (last resort).
+    Lossless,
+}
+
+fn queue_class_for_kind(kind: &str) -> QueueClass {
+    use gwt::protocol::BackendEventDeliveryClass as Delivery;
+    match gwt::protocol::backend_event_policy(kind) {
+        Some(policy) => match policy.delivery {
+            Delivery::Streamed | Delivery::EphemeralStatus | Delivery::BestEffortDaemon => {
+                QueueClass::Lossy
+            }
+            Delivery::IdempotentLatest => QueueClass::IdempotentLatest,
+            Delivery::Snapshot => QueueClass::SnapshotLatest,
+            Delivery::Error => QueueClass::Lossless,
+        },
+        // Kinds missing from the policy table must never be silently
+        // droppable — fail toward guaranteed delivery.
+        None => QueueClass::Lossless,
+    }
+}
+
+/// One backend event serialized once and shared across every client queue.
+struct PreparedOutbound {
+    payload: String,
+    kind: &'static str,
+    pane_id: Option<String>,
+    class: QueueClass,
+}
+
+fn prepare_outbound(event: &gwt::BackendEvent) -> PreparedOutbound {
+    let kind = event.event_kind();
+    let pane_id = match event {
+        gwt::BackendEvent::TerminalOutput { id, .. }
+        | gwt::BackendEvent::TerminalSnapshot { id, .. } => Some(id.clone()),
+        _ => None,
+    };
+    PreparedOutbound {
+        payload: serde_json::to_string(event).expect("backend event json"),
+        kind,
+        pane_id,
+        class: queue_class_for_kind(kind),
+    }
+}
+
+struct QueuedOutbound {
+    payload: String,
+    kind: &'static str,
+    pane_id: Option<String>,
+}
+
+#[derive(Default)]
+struct ClientQueueState {
+    entries: std::collections::VecDeque<QueuedOutbound>,
+    dirty_panes: std::collections::HashSet<String>,
+    dropped_lossy: u64,
+    dead: bool,
+}
+
+/// One step handed to the per-client drain loop in [`client_session`].
+pub(super) enum DrainStep {
+    Message {
+        payload: String,
+        /// Panes whose streamed output was dropped while the queue was
+        /// saturated; the session loop must request snapshot re-sends for
+        /// them (SPEC-2359 W-17 FR-396).
+        repair_panes: Vec<String>,
+    },
+    Closed,
+}
+
+/// SPEC-2359 W-17 (FR-394/FR-395): per-client outbound queue that enforces
+/// the `BACKEND_EVENT_POLICIES` delivery contract. Replaces the former
+/// bounded mpsc channel whose overflow disconnected the client — under an
+/// agent-startup output flood that evicted the very client that initiated
+/// the launch and lost its lossless replies.
+#[derive(Default)]
+pub(super) struct ClientQueue {
+    state: Mutex<ClientQueueState>,
+    notify: tokio::sync::Notify,
+}
+
+impl ClientQueue {
+    /// Enqueue one prepared event. Returns `true` when the client crossed
+    /// the lossless hard cap and must be unregistered by the caller.
+    fn enqueue(&self, message: &PreparedOutbound) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.dead {
+            return true;
+        }
+        match message.class {
+            QueueClass::IdempotentLatest => {
+                if let Some(entry) = state
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.kind == message.kind)
+                {
+                    entry.payload = message.payload.clone();
+                } else {
+                    state.entries.push_back(Self::queued(message));
+                }
+            }
+            QueueClass::SnapshotLatest => {
+                if let Some(entry) = state
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.kind == message.kind && entry.pane_id == message.pane_id)
+                {
+                    entry.payload = message.payload.clone();
+                } else {
+                    state.entries.push_back(Self::queued(message));
+                }
+            }
+            QueueClass::Lossy => {
+                if state.entries.len() >= LOSSY_HIGH_WATER {
+                    state.dropped_lossy += 1;
+                    if let Some(pane) = &message.pane_id {
+                        state.dirty_panes.insert(pane.clone());
+                    }
+                    return false;
+                }
+                state.entries.push_back(Self::queued(message));
+            }
+            QueueClass::Lossless => {
+                if state.entries.len() >= LOSSLESS_HARD_CAP {
+                    state.dead = true;
+                    drop(state);
+                    self.notify.notify_one();
+                    return true;
+                }
+                state.entries.push_back(Self::queued(message));
+            }
+        }
+        drop(state);
+        self.notify.notify_one();
+        false
+    }
+
+    fn queued(message: &PreparedOutbound) -> QueuedOutbound {
+        QueuedOutbound {
+            payload: message.payload.clone(),
+            kind: message.kind,
+            pane_id: message.pane_id.clone(),
+        }
+    }
+
+    /// Pop the next message without waiting. `None` means the queue is
+    /// currently empty (but alive).
+    pub(super) fn try_next(&self) -> Option<DrainStep> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.dead {
+            return Some(DrainStep::Closed);
+        }
+        let entry = state.entries.pop_front()?;
+        let repair_panes = if state.entries.len() < DRAIN_LOW_WATER && !state.dirty_panes.is_empty()
+        {
+            state.dirty_panes.drain().collect()
+        } else {
+            Vec::new()
+        };
+        Some(DrainStep::Message {
+            payload: entry.payload,
+            repair_panes,
+        })
+    }
+
+    /// Await the next drain step. Cancel-safe: a popped message is returned
+    /// synchronously, never lost across an await point.
+    pub(super) async fn next(&self) -> DrainStep {
+        loop {
+            if let Some(step) = self.try_next() {
+                return step;
+            }
+            // `notify_one` stores a permit when no waiter is registered, so
+            // an enqueue racing this gap completes the await immediately.
+            self.notify.notified().await;
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.dead = true;
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
+    #[cfg(test)]
+    fn is_dead(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dead
+    }
+
+    #[cfg(test)]
+    fn dropped_lossy(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dropped_lossy
+    }
+
+    /// Test-only convenience mirroring the old mpsc `try_recv`: pop the next
+    /// queued payload, ignoring repair bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn try_recv(&self) -> Option<String> {
+        match self.try_next()? {
+            DrainStep::Message { payload, .. } => Some(payload),
+            DrainStep::Closed => None,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ClientHub {
-    clients: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
+    clients: Arc<Mutex<HashMap<String, Arc<ClientQueue>>>>,
 }
 
 impl ClientHub {
-    pub(super) fn register(&self, client_id: String) -> mpsc::Receiver<String> {
-        let (tx, rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
+    pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
+        let queue = Arc::new(ClientQueue::default());
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(client_id, tx);
-        rx
+            .insert(client_id, queue.clone());
+        queue
     }
 
     pub(super) fn unregister(&self, client_id: &str) {
-        self.clients
+        let removed = self
+            .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
+        if let Some(queue) = removed {
+            queue.close();
+        }
     }
 
     /// SPEC-2970 FR-007: whether any GUI client is currently connected. The
@@ -129,58 +384,63 @@ impl ClientHub {
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
-        // Snapshot sender clones under a short-lived lock so that serialization
-        // and per-client try_send work happen outside the registry mutex. This
-        // keeps register/unregister responsive even when the broadcast batch is
-        // large or one client is slow to drain its queue.
-        let snapshot: Vec<(String, mpsc::Sender<String>)> = {
+        // Snapshot queue handles under a short-lived lock so serialization
+        // and per-client enqueue work happen outside the registry mutex. This
+        // keeps register/unregister responsive even when the broadcast batch
+        // is large or one client is slow to drain its queue.
+        let snapshot: Vec<(String, Arc<ClientQueue>)> = {
             let clients = self
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             clients
                 .iter()
-                .map(|(id, sender)| (id.clone(), sender.clone()))
+                .map(|(id, queue)| (id.clone(), queue.clone()))
                 .collect()
         };
 
-        let mut stale_clients: Vec<String> = Vec::new();
+        let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
-            let payload = serde_json::to_string(&outbound.event).expect("backend event json");
+            let prepared = prepare_outbound(&outbound.event);
             match outbound.target {
                 DispatchTarget::Broadcast => {
-                    for (client_id, sender) in &snapshot {
-                        if sender.try_send(payload.clone()).is_err() {
-                            stale_clients.push(client_id.clone());
+                    for (client_id, queue) in &snapshot {
+                        if queue.enqueue(&prepared) {
+                            dead_clients.push(client_id.clone());
                         }
                     }
                 }
                 DispatchTarget::Client(client_id) => {
-                    if let Some((_, sender)) = snapshot.iter().find(|(id, _)| id == &client_id) {
-                        if sender.try_send(payload).is_err() {
-                            stale_clients.push(client_id);
+                    if let Some((_, queue)) = snapshot.iter().find(|(id, _)| id == &client_id) {
+                        if queue.enqueue(&prepared) {
+                            dead_clients.push(client_id);
                         }
                     }
                 }
             }
         }
 
-        if !stale_clients.is_empty() {
-            stale_clients.sort();
-            stale_clients.dedup();
+        if !dead_clients.is_empty() {
+            dead_clients.sort();
+            dead_clients.dedup();
+            // SPEC-2359 W-17 (FR-395): queue pressure alone no longer
+            // disconnects a client — only the lossless hard cap does, as the
+            // last resort for a client that stopped draining entirely.
             tracing::warn!(
                 target: "gwt::client_hub",
-                queue_capacity = CLIENT_QUEUE_CAPACITY,
-                stale_client_count = stale_clients.len(),
-                stale_clients = ?stale_clients,
-                "evicting lagging websocket clients after outbound queue overflow; reconnect will replay latest state"
+                lossless_hard_cap = LOSSLESS_HARD_CAP,
+                dead_client_count = dead_clients.len(),
+                dead_clients = ?dead_clients,
+                "disconnecting websocket clients stuck past the lossless hard cap; reconnect will replay latest state"
             );
             let mut clients = self
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in stale_clients {
-                clients.remove(&client_id);
+            for client_id in dead_clients {
+                if let Some(queue) = clients.remove(&client_id) {
+                    queue.close();
+                }
             }
         }
     }
@@ -722,19 +982,31 @@ async fn hook_live_handler(
 
 async fn client_session(socket: WebSocket, state: ServerState) {
     let client_id = Uuid::new_v4().to_string();
-    let mut outbound = state.clients.register(client_id.clone());
+    let outbound = state.clients.register(client_id.clone());
     let (mut sender, mut receiver) = socket.split();
 
     let input_seq = Arc::new(AtomicU64::new(0));
 
     loop {
         tokio::select! {
-            maybe_payload = outbound.recv() => {
-                let Some(payload) = maybe_payload else {
-                    break;
-                };
-                if sender.send(Message::Text(payload.into())).await.is_err() {
-                    break;
+            step = outbound.next() => {
+                match step {
+                    DrainStep::Message { payload, repair_panes } => {
+                        if sender.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                        if !repair_panes.is_empty() {
+                            // SPEC-2359 W-17 (FR-396): streamed output for
+                            // these panes was dropped under queue pressure —
+                            // ask the event loop for fresh snapshots so the
+                            // display self-heals.
+                            state.proxy.send(UserEvent::ClientPaneSnapshotRepair {
+                                client_id: client_id.clone(),
+                                pane_ids: repair_panes,
+                            });
+                        }
+                    }
+                    DrainStep::Closed => break,
                 }
             }
             maybe_message = receiver.next() => {
@@ -923,13 +1195,14 @@ mod tests {
     };
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
-    use tokio::{runtime::Runtime, sync::mpsc};
+    use tokio::runtime::Runtime;
 
     use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
     use super::{
-        handle_frontend_message, websocket_origin_authorized, ClientHub, EmbeddedServer,
-        ServerState, CLIENT_QUEUE_CAPACITY,
+        handle_frontend_message, prepare_outbound, queue_class_for_kind,
+        websocket_origin_authorized, ClientHub, ClientQueue, DrainStep, EmbeddedServer, QueueClass,
+        ServerState, DRAIN_LOW_WATER, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
@@ -1012,104 +1285,284 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn client_hub_drops_lagging_client_when_bounded_queue_is_full() {
-        let hub = ClientHub::default();
-        let _receiver = hub.register("slow-client".to_string());
+    fn terminal_output(pane: &str, data: &str) -> BackendEvent {
+        BackendEvent::TerminalOutput {
+            id: pane.to_string(),
+            data_base64: data.to_string(),
+        }
+    }
 
-        for index in 0..=CLIENT_QUEUE_CAPACITY {
-            hub.dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::ProjectOpenError {
-                    message: format!("message-{index}"),
-                },
-            )]);
+    fn terminal_snapshot(pane: &str, data: &str) -> BackendEvent {
+        BackendEvent::TerminalSnapshot {
+            id: pane.to_string(),
+            data_base64: data.to_string(),
+        }
+    }
+
+    fn lossless_error(message: &str) -> BackendEvent {
+        BackendEvent::ReleaseNotesError {
+            id: "release-notes-1".to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    fn index_status(message: &str) -> BackendEvent {
+        BackendEvent::ProjectIndexStatus {
+            project_root: "/tmp/project".to_string(),
+            status: gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Skipped,
+                message,
+            ),
+        }
+    }
+
+    fn drain_all(queue: &ClientQueue) -> (Vec<String>, Vec<String>) {
+        let mut payloads = Vec::new();
+        let mut repairs = Vec::new();
+        while let Some(step) = queue.try_next() {
+            match step {
+                DrainStep::Message {
+                    payload,
+                    repair_panes,
+                } => {
+                    payloads.push(payload);
+                    repairs.extend(repair_panes);
+                }
+                DrainStep::Closed => break,
+            }
+        }
+        (payloads, repairs)
+    }
+
+    // SPEC-2359 W-17 (FR-394/FR-395): queue pressure must never disconnect a
+    // client for lossy traffic — only drop the lossy entries themselves.
+    #[test]
+    fn client_queue_drops_lossy_at_high_water_without_disconnect() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER + 50) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            )));
         }
 
-        let clients = hub
-            .clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!queue.is_dead(), "lossy flood must not kill the client");
+        assert_eq!(queue.len(), LOSSY_HIGH_WATER, "queue capped at high water");
+        assert_eq!(queue.dropped_lossy(), 50, "overflow entries are dropped");
+    }
+
+    // SPEC-2359 W-17 (FR-395): lossless events must survive any lossy flood.
+    #[test]
+    fn client_queue_keeps_lossless_under_lossy_flood() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER * 2) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("flood-{index}"),
+            )));
+        }
+        for index in 0..5 {
+            queue.enqueue(&prepare_outbound(&lossless_error(&format!(
+                "must-arrive-{index}"
+            ))));
+        }
+        for index in 0..LOSSY_HIGH_WATER {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("flood-tail-{index}"),
+            )));
+        }
+
+        let (payloads, _) = drain_all(&queue);
+        for index in 0..5 {
+            let marker = format!("must-arrive-{index}");
+            assert!(
+                payloads.iter().any(|payload| payload.contains(&marker)),
+                "lossless payload {marker} must be delivered"
+            );
+        }
+        assert!(!queue.is_dead());
+    }
+
+    // SPEC-2359 W-17 (FR-394): IdempotentLatest kinds keep one entry holding
+    // the latest payload (server-side LatestWins).
+    #[test]
+    fn client_queue_replaces_idempotent_latest_in_place() {
+        let queue = ClientQueue::default();
+
+        queue.enqueue(&prepare_outbound(&index_status("first")));
+        queue.enqueue(&prepare_outbound(&lossless_error("between")));
+        queue.enqueue(&prepare_outbound(&index_status("latest")));
+
+        let (payloads, _) = drain_all(&queue);
+        let index_payloads: Vec<&String> = payloads
+            .iter()
+            .filter(|payload| payload.contains("\"kind\":\"project_index_status\""))
+            .collect();
+        assert_eq!(index_payloads.len(), 1, "only one queued entry per kind");
         assert!(
-            !clients.contains_key("slow-client"),
-            "lagging websocket client should be unregistered once its queue is full"
+            index_payloads[0].contains("latest"),
+            "queued entry must carry the latest payload"
+        );
+        assert!(
+            payloads[0].contains("project_index_status"),
+            "replacement keeps the original queue position"
         );
     }
 
+    // SPEC-2359 W-17 (FR-396/FR-397): snapshots dedupe per pane so a replay
+    // burst cannot accumulate stale snapshots, while staying lossless.
     #[test]
-    fn client_hub_dispatch_delivers_to_fast_clients_and_drops_only_full_one() {
+    fn client_queue_replaces_snapshot_per_pane() {
+        let queue = ClientQueue::default();
+
+        queue.enqueue(&prepare_outbound(&terminal_snapshot("pane-a", "a-v1")));
+        queue.enqueue(&prepare_outbound(&terminal_snapshot("pane-b", "b-v1")));
+        queue.enqueue(&prepare_outbound(&terminal_snapshot("pane-a", "a-v2")));
+
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 2, "one snapshot per pane");
+        assert!(
+            payloads.iter().any(|payload| payload.contains("a-v2")),
+            "pane-a keeps only the newest snapshot"
+        );
+        assert!(
+            !payloads.iter().any(|payload| payload.contains("a-v1")),
+            "stale pane-a snapshot is superseded"
+        );
+        assert!(payloads.iter().any(|payload| payload.contains("b-v1")));
+    }
+
+    // SPEC-2359 W-17 (FR-395): disconnect is the last resort, reached only via
+    // the lossless hard cap (a truly stuck client).
+    #[test]
+    fn client_queue_goes_dead_only_at_lossless_hard_cap() {
+        let queue = ClientQueue::default();
+
+        for index in 0..LOSSLESS_HARD_CAP {
+            let dead = queue.enqueue(&prepare_outbound(&lossless_error(&format!("fill-{index}"))));
+            assert!(!dead, "client stays alive until the hard cap");
+        }
+        assert!(!queue.is_dead());
+
+        let dead = queue.enqueue(&prepare_outbound(&lossless_error("overflow")));
+        assert!(dead, "hard cap overflow marks the client dead");
+        assert!(queue.is_dead());
+        assert!(
+            matches!(queue.try_next(), Some(DrainStep::Closed)),
+            "dead queue reports Closed to the drain loop"
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-396): dropped pane output self-heals via a snapshot
+    // repair request once the queue drains below the low-water mark.
+    #[test]
+    fn client_queue_surfaces_repair_panes_after_drain_below_low_water() {
+        let queue = ClientQueue::default();
+
+        for index in 0..(LOSSY_HIGH_WATER + 10) {
+            queue.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-7",
+                &format!("chunk-{index}"),
+            )));
+        }
+
+        let (payloads, repairs) = drain_all(&queue);
+        assert_eq!(payloads.len(), LOSSY_HIGH_WATER);
+        assert_eq!(
+            repairs,
+            vec!["tab-1::agent-7".to_string()],
+            "dropped pane is reported exactly once for snapshot repair"
+        );
+        assert!(
+            queue.len() < DRAIN_LOW_WATER,
+            "repair fires only below the low-water mark"
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-394): kinds missing from BACKEND_EVENT_POLICIES are
+    // treated as lossless so new events can never be silently dropped.
+    #[test]
+    fn queue_class_falls_back_to_lossless_for_unknown_kind() {
+        assert_eq!(
+            queue_class_for_kind("definitely_not_a_kind"),
+            QueueClass::Lossless
+        );
+        assert_eq!(queue_class_for_kind("terminal_output"), QueueClass::Lossy);
+        assert_eq!(
+            queue_class_for_kind("project_index_status"),
+            QueueClass::IdempotentLatest
+        );
+        assert_eq!(
+            queue_class_for_kind("terminal_snapshot"),
+            QueueClass::SnapshotLatest
+        );
+        assert_eq!(
+            queue_class_for_kind("release_notes_error"),
+            QueueClass::Lossless
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-395/SC-263): the dispatch path keeps clients
+    // registered under a terminal output flood — the requesting client must
+    // still receive lossless replies afterwards.
+    #[test]
+    fn client_hub_keeps_client_registered_under_terminal_output_flood() {
         let hub = ClientHub::default();
-        let mut slow_rx = hub.register("slow".to_string());
-        let mut fast_receivers: Vec<(String, mpsc::Receiver<String>)> = (0..5)
-            .map(|i| {
-                let id = format!("fast-{i}");
-                let rx = hub.register(id.clone());
-                (id, rx)
-            })
+        let queue = hub.register("busy-client".to_string());
+
+        for index in 0..(LOSSY_HIGH_WATER * 4) {
+            hub.dispatch(vec![OutboundEvent::broadcast(terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            ))]);
+        }
+
+        {
+            let clients = hub
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                clients.contains_key("busy-client"),
+                "lossy flood must not evict the client"
+            );
+        }
+
+        hub.dispatch(vec![OutboundEvent::broadcast(lossless_error(
+            "after-flood",
+        ))]);
+        let (payloads, _) = drain_all(&queue);
+        assert!(
+            payloads
+                .iter()
+                .any(|payload| payload.contains("after-flood")),
+            "lossless reply still reaches the client after the flood"
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-395): only the lossless hard cap unregisters a
+    // client (replacement for the old capacity-64 eviction behavior).
+    #[test]
+    fn client_hub_unregisters_client_only_at_lossless_hard_cap() {
+        let hub = ClientHub::default();
+        let _queue = hub.register("stuck-client".to_string());
+
+        let events: Vec<OutboundEvent> = (0..=LOSSLESS_HARD_CAP)
+            .map(|index| OutboundEvent::broadcast(lossless_error(&format!("fill-{index}"))))
             .collect();
-
-        for index in 0..CLIENT_QUEUE_CAPACITY {
-            hub.dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::ProjectOpenError {
-                    message: format!("fill-{index}"),
-                },
-            )]);
-        }
-
-        for (_, rx) in &mut fast_receivers {
-            for _ in 0..CLIENT_QUEUE_CAPACITY {
-                rx.try_recv()
-                    .expect("fast client receives every fill message");
-            }
-        }
-        for _ in 0..CLIENT_QUEUE_CAPACITY {
-            slow_rx
-                .try_recv()
-                .expect("slow client buffers every fill message before going full");
-        }
-
-        for _ in 0..CLIENT_QUEUE_CAPACITY {
-            hub.dispatch(vec![OutboundEvent::broadcast(
-                BackendEvent::ProjectOpenError {
-                    message: "saturate".to_string(),
-                },
-            )]);
-        }
-
-        for (_, rx) in &mut fast_receivers {
-            for _ in 0..CLIENT_QUEUE_CAPACITY {
-                rx.try_recv()
-                    .expect("fast client keeps draining while slow client backs up");
-            }
-        }
-
-        hub.dispatch(vec![OutboundEvent::broadcast(
-            BackendEvent::ProjectOpenError {
-                message: "after-saturate".to_string(),
-            },
-        )]);
+        hub.dispatch(events);
 
         let clients = hub
             .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
-            !clients.contains_key("slow"),
-            "saturated slow client should be evicted"
+            !clients.contains_key("stuck-client"),
+            "hard-capped client is unregistered as the last resort"
         );
-        for i in 0..5 {
-            assert!(
-                clients.contains_key(&format!("fast-{i}")),
-                "fast client {i} should remain registered"
-            );
-        }
-        drop(clients);
-
-        for (_, rx) in &mut fast_receivers {
-            let payload = rx
-                .try_recv()
-                .expect("fast client still receives after slow eviction");
-            assert!(payload.contains("after-saturate"));
-        }
     }
 
     #[test]

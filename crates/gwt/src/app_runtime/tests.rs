@@ -13780,3 +13780,53 @@ fn os_url_open_command_keeps_oauth_query_intact_and_avoids_cmd() {
         "must not use the cmd `start` builtin which splits on &: {args:?}"
     );
 }
+
+// SPEC-2359 W-17 (FR-396): when a client's queue dropped streamed output,
+// the repair path re-sends a fresh full snapshot — client-scoped, and only
+// for panes that still have a live runtime.
+#[test]
+fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+    runtime
+        .runtimes
+        .get(&shell_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .process_bytes(b"hello-repair");
+
+    let events = runtime.client_pane_snapshot_repair_events(
+        "client-9",
+        &[shell_id.clone(), "tab-1::missing-pane".to_string()],
+    );
+
+    assert_eq!(events.len(), 1, "unknown panes produce no repair events");
+    assert!(
+        matches!(&events[0].target, DispatchTarget::Client(id) if id == "client-9"),
+        "repair snapshot is scoped to the requesting client"
+    );
+    match &events[0].event {
+        BackendEvent::TerminalSnapshot { id, data_base64 } => {
+            assert_eq!(id, &shell_id);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64)
+                .expect("snapshot base64");
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("hello-repair"),
+                "snapshot carries the pane's current screen content"
+            );
+        }
+        other => panic!("expected TerminalSnapshot, got {other:?}"),
+    }
+}

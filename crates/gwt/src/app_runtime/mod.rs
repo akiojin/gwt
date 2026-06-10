@@ -1933,16 +1933,6 @@ pub fn build_frontend_sync_events(
         ));
     }
 
-    for (id, snapshot) in terminal_snapshots {
-        events.push(OutboundEvent::reply(
-            client_id,
-            BackendEvent::TerminalSnapshot {
-                id,
-                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-            },
-        ));
-    }
-
     events.push(OutboundEvent::reply(
         client_id,
         BackendEvent::LaunchWizardState {
@@ -1954,6 +1944,19 @@ pub fn build_frontend_sync_events(
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::UpdateState(state),
+        ));
+    }
+
+    // SPEC-2359 W-17 (FR-397): bulky terminal snapshots go last so a
+    // reconnect replay delivers lightweight state (wizard, statuses, update)
+    // before scrollback payloads, instead of burying it behind them.
+    for (id, snapshot) in terminal_snapshots {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalSnapshot {
+                id,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+            },
         ));
     }
 
@@ -5194,6 +5197,36 @@ impl AppRuntime {
         events.extend(self.migration_detected_replies(client_id));
         events.extend(self.migration_recovery_replies(client_id));
         events
+    }
+
+    /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
+    /// streamed output was dropped under client queue pressure, restoring
+    /// display consistency for the affected client only.
+    pub(crate) fn client_pane_snapshot_repair_events(
+        &self,
+        client_id: &str,
+        pane_ids: &[String],
+    ) -> Vec<OutboundEvent> {
+        pane_ids
+            .iter()
+            .filter_map(|id| {
+                let runtime = self.runtimes.get(id)?;
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.snapshot_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then(|| {
+                    OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::TerminalSnapshot {
+                            id: id.clone(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                        },
+                    )
+                })
+            })
+            .collect()
     }
 
     fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
