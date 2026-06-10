@@ -6,10 +6,10 @@
 //! the `startup_dir` (worktree) dimension entirely and uses
 //! `(gwt_home, "tray", user_id)`.
 //!
-//! The on-disk payload doubles as a discovery mechanism: a second `gwt`
-//! launched by the same user reads the existing lock file's `url` field
-//! and re-prints it on stderr so the user can just open the running tray
-//! instead of seeing a hard error.
+//! The guard file carries the OS lock. The on-disk payload doubles as a
+//! discovery mechanism: a second `gwt` launched by the same user reads the
+//! existing lock file's `url` field and re-prints it on stderr so the user can
+//! just open the running tray instead of seeing a hard error.
 //!
 //! The lock file lives under `<gwt_home>/run/tray-<user_id>.lock`. We
 //! intentionally do **not** reuse the SPEC-1942 `runtime/{gui,headless}/`
@@ -252,15 +252,34 @@ fn guard_path_for_payload(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
+fn temp_path_for_payload(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| format!("{}.{}.tmp", name.to_string_lossy(), std::process::id()))
+        .unwrap_or_else(|| format!("tray.lock.{}.tmp", std::process::id()));
+    path.with_file_name(file_name)
+}
+
 fn write_lock_contents(path: &Path, payload: &TrayLockFile) -> io::Result<()> {
     let json = serde_json::to_vec(payload).map_err(io::Error::other)?;
+    let tmp_path = temp_path_for_payload(path);
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(path)?;
+        .open(&tmp_path)?;
     file.write_all(&json)?;
     file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(parent_dir) = File::open(parent) {
+            let _ = parent_dir.sync_all();
+        }
+    }
     tracing::debug!(
         target: "gwt_tray_lock",
         path = %path.display(),
@@ -438,5 +457,23 @@ mod tests {
         let contents = fs::read_to_string(handle.path()).expect("read lock file");
         let payload: TrayLockFile = serde_json::from_str(&contents).expect("payload deserializes");
         assert_eq!(payload.url, "http://127.0.0.1:54321/");
+    }
+
+    #[test]
+    fn write_lock_contents_replaces_payload_atomically_and_cleans_temp_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("tray-alice.lock");
+        let first = build_lock_payload(1, "http://127.0.0.1:11111/");
+        let second = build_lock_payload(2, "http://127.0.0.1:22222/");
+
+        write_lock_contents(&path, &first).expect("write first payload");
+        write_lock_contents(&path, &second).expect("replace payload");
+
+        let payload = read_lock_contents(&path).expect("read payload");
+        assert_eq!(payload, second);
+        assert!(
+            !temp_path_for_payload(&path).exists(),
+            "temporary lock payload file must be removed after rename"
+        );
     }
 }

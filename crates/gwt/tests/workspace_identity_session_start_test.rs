@@ -97,6 +97,36 @@ fn save_session(repo_path: &Path) -> String {
     session.id
 }
 
+fn write_teams_board_config(home: &Path) {
+    let config_dir = home.join(".gwt");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[board]
+provider = "teams"
+
+[board.teams]
+default_channel = "team-1/channel-1"
+"#,
+    )
+    .expect("write Teams board config");
+}
+
+fn assert_registered_agent(repo_path: &Path, session_id: &str) {
+    let projection = load_workspace_projection(repo_path)
+        .expect("load projection")
+        .expect("projection should exist after SessionStart");
+    let agent = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session_id)
+        .expect("SessionStart must register the running session");
+    assert!(agent.is_unassigned());
+    assert_eq!(agent.agent_id, "codex");
+    assert_eq!(agent.title_summary, None);
+}
+
 #[test]
 fn session_start_hook_registers_agent_so_workspace_update_persists_title_summary() {
     let home = tempfile::tempdir().expect("temp home");
@@ -108,17 +138,7 @@ fn session_start_hook_registers_agent_so_workspace_update_persists_title_summary
         .expect("SessionStart dispatch should succeed");
     drop(output);
 
-    let projection = load_workspace_projection(&repo_path)
-        .expect("load projection")
-        .expect("projection should exist after SessionStart");
-    let agent = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-        .expect("SessionStart must register the running session");
-    assert!(agent.is_unassigned());
-    assert_eq!(agent.agent_id, "codex");
-    assert_eq!(agent.title_summary, None);
+    assert_registered_agent(&repo_path, &session_id);
 
     let update = WorkspaceProjectionUpdate {
         title: None,
@@ -169,4 +189,19 @@ fn session_start_hook_is_idempotent_across_repeated_invocations() {
         .filter(|agent| agent.session_id == session_id)
         .count();
     assert_eq!(matches, 1, "SessionStart hook must not duplicate agents");
+}
+
+#[test]
+fn session_start_hook_registers_agent_even_when_remote_board_is_not_signed_in() {
+    let home = tempfile::tempdir().expect("temp home");
+    let _env = with_temp_env(home.path(), "session-start-fixture");
+    write_teams_board_config(home.path());
+    let repo_path = init_repo(&home);
+    let session_id = save_session(&repo_path);
+
+    let output = event_dispatcher::handle_with_input("SessionStart", "{}", &repo_path, None)
+        .expect("SessionStart dispatch should fail open for remote Board auth errors");
+    assert_eq!(output, gwt::cli::hook::HookOutput::Silent);
+
+    assert_registered_agent(&repo_path, &session_id);
 }

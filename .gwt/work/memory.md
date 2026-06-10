@@ -6850,3 +6850,10 @@ Type: lesson
 Context: During verification cleanup on Windows, gwt binary/integration tests read the real user Teams-backed config through gwt_config, SessionStart aborted on non-critical Board/coordination failures, and gwt-agent launch prepended PATH was masked by a coexisting Path key.
 Learning: Library cfg(test) overrides do not protect binary/integration tests that link the crate normally. Config home resolution must honor HOME/USERPROFILE isolation, boot-critical hooks should fail open for non-critical Board reminders, and Windows environment layering must merge PATH keys case-insensitively.
 Future Action: Before declaring Windows verification clean, run binary/integration tests with realistic user config present and check for both Path/PATH variants; prefer hermetic config resolution and case-insensitive env merging over test-only provider overrides.
+
+## 2026-06-10 — Tray lock readable payloads must be atomic
+
+Type: lesson
+Context: During completion audit after stabilizing Windows tray lock tests, the guard-lock split left the readable tray lock payload using truncate-and-rewrite while comments still promised atomic rename.
+Learning: A separate OS guard lock fixes same-process fs2 contention but does not protect failed-launch readers that read the discovery payload after lock contention. The readable payload must be replaced via temp-file plus rename so readers never observe partial JSON.
+Future Action: When splitting lock ownership from readable discovery files, audit both the locking primitive and the reader-visible update path; add tests for valid replacement and temp cleanup, not only lock contention.
