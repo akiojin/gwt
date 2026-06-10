@@ -3233,7 +3233,14 @@ mod tests {
             WindowProcessStatus::Exited,
             Some("Process exited".to_string()),
         );
-        assert_eq!(close_events.len(), 1);
+        // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item,
+        // so the structural close now also broadcasts the work projection
+        // (the surface must update without a saved current.json).
+        assert_eq!(close_events.len(), 2);
+        assert!(matches!(
+            close_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(!runtime.window_lookup.contains_key(&claude_two_id));
 

@@ -5290,9 +5290,29 @@ impl AppRuntime {
             .values()
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
-        if let Ok(Some(projection)) =
+        let saved_projection =
             gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
-        {
+                .ok()
+                .flatten();
+        // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
+        // union of existing worktrees and unclosed records, independent of
+        // live agents and of whether the project was ever launched here. When
+        // no projection has been saved yet (fresh home / never-launched
+        // project) but Work records exist (e.g. worktree backfill), synthesize
+        // a default projection so the records still surface.
+        let loaded_projection = saved_projection.or_else(|| {
+            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                &tab.project_root,
+            )
+            .ok()
+            .filter(|works| !works.work_items.is_empty())
+            .map(|_| {
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    &tab.project_root,
+                )
+            })
+        });
+        if let Some(projection) = loaded_projection {
             let mut projection = projection;
             let had_saved_agents = !projection.agents.is_empty();
             let cleanup_candidate =

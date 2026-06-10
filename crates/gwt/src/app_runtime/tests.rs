@@ -2929,7 +2929,15 @@ fn app_runtime_open_project_path_emits_active_work_projection_for_new_tab() {
 
 #[test]
 fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status() {
+    // Scoped HOME: with FR-382 the projection broadcast also fires when home
+    // work records exist, so this lightweight-path assertion must not depend
+    // on whatever ~/.gwt state the developer machine has accumulated (#3022).
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "shell-1",
@@ -5728,7 +5736,12 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
 
 #[test]
 fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -5748,10 +5761,17 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
         Some("Process exited".to_string()),
     );
 
-    assert_eq!(events.len(), 1);
+    // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item, and
+    // the surface must update without a saved current.json or live agents —
+    // so the projection broadcast accompanies the WorkspaceState event.
+    assert_eq!(events.len(), 2);
     assert!(matches!(
         events[0].event,
         BackendEvent::WorkspaceState { .. }
+    ));
+    assert!(matches!(
+        events[1].event,
+        BackendEvent::ActiveWorkProjection { .. }
     ));
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
@@ -8265,7 +8285,12 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
 
 #[test]
 fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let tab = sample_project_tab_with_window(
         "tab-1",
         "codex-1",
@@ -8281,10 +8306,17 @@ fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
 
     let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
 
-    assert_eq!(events.len(), 1);
+    // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item, and
+    // the surface must update without a saved current.json or live agents —
+    // so the projection broadcast accompanies the WorkspaceState event.
+    assert_eq!(events.len(), 2);
     assert!(matches!(
         events[0].event,
         BackendEvent::WorkspaceState { .. }
+    ));
+    assert!(matches!(
+        events[1].event,
+        BackendEvent::ActiveWorkProjection { .. }
     ));
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
@@ -13844,11 +13876,10 @@ fn app_runtime_reconcile_workspace_worktrees_backfills_existing_worktree() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let workspace_projection =
-        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
-    gwt_core::workspace_projection::save_workspace_projection(&repo, &workspace_projection)
-        .expect("save workspace projection");
-
+    // SPEC-2359 Phase W-15 (FR-382): deliberately NO saved WorkspaceProjection
+    // (current.json) and NO live agent session — a fresh home must still
+    // surface backfilled records (the list must not depend on live agents or
+    // on a previously launched project).
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.reconcile_workspace_worktrees(&repo);
