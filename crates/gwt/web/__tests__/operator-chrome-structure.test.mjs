@@ -146,7 +146,7 @@ function extractContainerBlocks(css, condition) {
 test("index.html declares Operator chrome scaffold", () => {
   for (const sel of [
     "#op-theme-toggle",
-    ".op-sidebar",
+    ".op-rail",
     ".op-status-strip",
     "#op-strip-clock",
     "#op-strip-active",
@@ -163,15 +163,20 @@ test("index.html declares Operator chrome scaffold", () => {
   }
 });
 
-test("SPEC-2356 operator chrome cleanup retires the dead Layers section", () => {
-  // The Layers toggles (Agents / Git / Hooks) only set dataset.opLayer* on the
-  // document element; no CSS ever reads those, so toggling was a no-op. The
-  // section + its counters are removed so the sidebar only carries actionable
-  // controls. Telemetry counts now live solely in the Status Strip.
+test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
+  // SPEC-3038 US-1: the 240px auto-hide overlay sidebar (`.op-sidebar`) and
+  // its checkbox-style `.op-layer` rows are replaced by the always-visible
+  // 56px Command Rail. No legacy sidebar scaffolding may remain.
+  assert.equal(document.querySelector(".op-sidebar"), null, ".op-sidebar must be removed");
   assert.equal(
-    document.querySelectorAll(".op-sidebar .op-layer[data-layer]").length,
+    document.querySelectorAll(".op-layer").length,
     0,
-    "Layers toggle buttons must be removed from the sidebar",
+    ".op-layer rows must be replaced by .op-rail__item buttons",
+  );
+  assert.equal(
+    document.querySelector(".op-sidebar__heading"),
+    null,
+    "sidebar section headings must be removed — rail groups carry aria-labels instead",
   );
   for (const id of [
     "op-layer-count-agents",
@@ -181,15 +186,11 @@ test("SPEC-2356 operator chrome cleanup retires the dead Layers section", () => 
   ]) {
     assert.equal(document.getElementById(id), null, `${id} counter must be removed`);
   }
-  const headings = Array.from(document.querySelectorAll(".op-sidebar__heading span")).map((el) =>
-    el.textContent?.trim(),
-  );
-  assert.ok(!headings.includes("Layers"), "Layers heading must be removed");
 });
 
 test("project bar and command palette expose Start Work outside the Branches surface", () => {
-  const projectBarAction = document.querySelector('.op-sidebar .op-layer[data-cmd="start-work"]');
-  assert.ok(projectBarAction, "expected Project Bar to expose a Start Work action");
+  const projectBarAction = document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]');
+  assert.ok(projectBarAction, "expected the Command Rail to expose a Start Work action");
   assert.match(projectBarAction.textContent, /Start Work/);
   assert.match(
     operatorShellSource,
@@ -280,68 +281,52 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Sidebar groups actionable controls into Quick / Windows / Palette / Update (SPEC-2356)", () => {
-  // SPEC-2356 operator chrome cleanup: the right-bottom floating controls and
-  // the dead Layers section are gone. The sidebar is the single home for the
-  // Command Palette, window operations (Tile / Stack / Align / Windows / Add),
-  // and the Update CTA — in that order, after the Quick navigation block.
-  const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
-  const headings = sections.map((section) =>
-    section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
+test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1)", () => {
+  // SPEC-3038 US-1: the rail is the single always-visible home for navigation
+  // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
+  // Align / Windows / Add), and system actions (Palette / Update) — in that
+  // order. Groups carry aria-labels instead of visual headings.
+  const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
+    (group) => group.getAttribute("aria-label"),
   );
   assert.deepEqual(
-    headings,
-    ["Quick", "Windows", "Palette", "Update"],
-    "Sidebar order must be Quick → Windows → Palette → Update with no Layers section",
-  );
-  assert.ok(
-    !headings.includes("Active Works"),
-    "Active Works heading must be removed from the sidebar",
-  );
-  assert.ok(
-    !headings.includes("Layers"),
-    "dead Layers heading must be removed from the sidebar",
+    groups,
+    ["Navigate", "Windows", "System"],
+    "Rail order must be Navigate → Windows → System",
   );
 });
 
-test("Sidebar Windows section carries the flat window-operation controls (SPEC-2356)", () => {
-  // Window operations move out of the right-bottom floating toolbar into a flat
-  // Windows section in the sidebar. The hover-reveal peek 帯 nesting is gone;
-  // the controls sit directly inside the section so the whole sidebar reveal
-  // exposes them.
-  const windowsSection = Array.from(
-    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
-  ).find(
-    (section) =>
-      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Windows",
-  );
-  assert.ok(windowsSection, "expected a Windows section in the sidebar");
+test("Command Rail Windows group carries the window-operation controls (SPEC-3038 US-1)", () => {
+  const windowsGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="Windows"]');
+  assert.ok(windowsGroup, "expected a Windows group in the rail");
   for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
     const control = document.getElementById(id);
     assert.ok(control, `expected ${id}`);
     assert.ok(
-      windowsSection.contains(control),
-      `${id} must live inside the sidebar Windows section`,
+      windowsGroup.contains(control),
+      `${id} must live inside the rail Windows group`,
+    );
+    assert.ok(
+      control.classList.contains("op-rail__item"),
+      `${id} must adopt the rail item vocabulary`,
     );
   }
-  // The window-list dropdown panel rides along with its trigger.
+  // The window-list popover rides along with its trigger.
   assert.ok(
-    windowsSection.querySelector("#window-list-panel"),
-    "window-list-panel must move into the Windows section with its trigger",
+    windowsGroup.querySelector("#window-list-panel"),
+    "window-list-panel must anchor to its rail trigger",
   );
+  // AS-1.4: the Windows item carries an open-window count badge.
+  const badge = windowsGroup.querySelector("#op-rail-window-count.op-rail__badge");
+  assert.ok(badge, "expected the Windows rail item to expose a window-count badge");
 });
 
-test("Sidebar Palette section hosts the Command Palette trigger (SPEC-2356)", () => {
-  const paletteSection = Array.from(
-    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
-  ).find(
-    (section) =>
-      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Palette",
-  );
-  assert.ok(paletteSection, "expected a Palette section in the sidebar");
+test("Command Rail System group hosts the Command Palette trigger (SPEC-3038 US-1)", () => {
+  const systemGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="System"]');
+  assert.ok(systemGroup, "expected a System group in the rail");
   const trigger = document.getElementById("op-palette-button");
   assert.ok(trigger, "expected op-palette-button");
-  assert.ok(paletteSection.contains(trigger), "Command Palette trigger must live in the sidebar");
+  assert.ok(systemGroup.contains(trigger), "Command Palette trigger must live in the rail");
 });
 
 test("Right-bottom floating controls are removed; the canvas corner is empty (SPEC-2356)", () => {
@@ -382,36 +367,31 @@ test("Status Strip hosts the zoom controls so canvas zoom is always reachable (S
   assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
 });
 
-test("Sidebar Update section provides the mount anchor for the Update CTA (SPEC-2356)", () => {
-  // SPEC-2356 chrome cleanup: the Update CTA moves out of the fixed bottom-right
-  // corner into a dedicated sidebar Update section. update-cta.js mounts the
-  // shell into this anchor instead of document.body.
-  const updateSection = Array.from(
-    document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
-  ).find(
-    (section) =>
-      section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Update",
-  );
-  assert.ok(updateSection, "expected an Update section in the sidebar");
-  const anchor = updateSection.querySelector("#update-cta-anchor");
-  assert.ok(anchor, "expected #update-cta-anchor inside the Update section");
+test("Command Rail System group provides the mount anchor for the Update CTA (SPEC-3038 US-1)", () => {
+  // SPEC-3038 US-1 AS-1.5: the Update CTA mounts into the rail System group.
+  // update-cta.js keeps mounting the shell into this anchor instead of
+  // document.body; the CTA card pops out beside the rail when an update lands.
+  const systemGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="System"]');
+  assert.ok(systemGroup, "expected a System group in the rail");
+  const anchor = systemGroup.querySelector("#update-cta-anchor");
+  assert.ok(anchor, "expected #update-cta-anchor inside the rail System group");
 });
 
-test("update-cta.js mounts into the sidebar anchor and peeks the sidebar when an update arrives (SPEC-2356)", () => {
+test("update-cta.js mounts into the rail anchor and badges the rail when an update arrives (SPEC-3038)", () => {
   const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
-  // The shell must prefer the sidebar anchor over document.body so the CTA
-  // lives inside the sidebar Update section.
+  // The shell must prefer the rail anchor over document.body so the CTA
+  // lives inside the rail System group.
   assert.match(
     updateCtaSource,
     /update-cta-anchor/,
-    "update-cta.js must mount into the sidebar #update-cta-anchor",
+    "update-cta.js must mount into the rail #update-cta-anchor",
   );
-  // When an update becomes available, the sidebar must peek/badge so the user
-  // notices even though the sidebar is auto-hidden (hover not required).
+  // When an update becomes available, the rail must badge/pulse so the user
+  // notices (AS-1.5).
   assert.match(
     updateCtaSource,
     /op:update-available/,
-    "update-cta.js must signal update availability so the sidebar can peek/badge",
+    "update-cta.js must signal update availability so the rail can badge",
   );
 });
 
@@ -1071,18 +1051,58 @@ test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () 
   assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
 });
 
-test("Sidebar Quick rows expose aria-keyshortcuts and kbd badges", () => {
+test("Command Rail items expose aria-keyshortcuts and flyout kbd hints (SPEC-3038 AS-1.2)", () => {
   for (const [cmd, key] of [
     ["open-board", "B"],
     ["open-logs", "L"],
   ]) {
-    const button = document.querySelector(`.op-layer[data-cmd="${cmd}"]`);
-    assert.ok(button, `expected Quick row for ${cmd}`);
+    const button = document.querySelector(`.op-rail__item[data-cmd="${cmd}"]`);
+    assert.ok(button, `expected rail item for ${cmd}`);
     const shortcut = button.getAttribute("aria-keyshortcuts");
     assert.ok(shortcut, `${cmd} must declare aria-keyshortcuts`);
     assert.match(shortcut, new RegExp(`Meta\\+${key}`));
-    const kbd = button.querySelector("kbd.op-layer__kbd");
-    assert.ok(kbd, `${cmd} must show a kbd badge`);
+    const kbd = button.querySelector(".op-rail__flyout kbd.op-rail__kbd");
+    assert.ok(kbd, `${cmd} must show a kbd hint inside its flyout`);
+  }
+});
+
+test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
+  // GO / INFO looked like keyboard shortcuts but were not. kbd chips are
+  // reserved for real shortcuts only.
+  const kbdTexts = Array.from(document.querySelectorAll(".op-rail kbd")).map((el) =>
+    el.textContent?.trim(),
+  );
+  for (const fake of ["GO", "INFO"]) {
+    assert.ok(!kbdTexts.includes(fake), `pseudo kbd badge ${fake} must be removed`);
+  }
+});
+
+test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
+  const items = Array.from(document.querySelectorAll(".op-rail .op-rail__item"));
+  assert.ok(items.length >= 10, `expected >=10 rail items, got ${items.length}`);
+  for (const item of items) {
+    assert.ok(
+      item.getAttribute("aria-label"),
+      "every rail item must carry an aria-label (icon-only button)",
+    );
+    const icon = item.querySelector(".op-rail__icon");
+    assert.ok(icon, "every rail item must render a Unicode symbol icon");
+    assert.equal(
+      icon.getAttribute("aria-hidden"),
+      "true",
+      "rail icons are decorative — aria-hidden",
+    );
+    const flyout = item.querySelector(".op-rail__flyout");
+    assert.ok(flyout, "every rail item must provide a hover flyout label");
+    assert.equal(
+      flyout.getAttribute("aria-hidden"),
+      "true",
+      "flyout labels duplicate the aria-label — keep them aria-hidden",
+    );
+    assert.ok(
+      flyout.querySelector(".op-rail__flyout-label")?.textContent?.trim(),
+      "flyout must carry a readable label",
+    );
   }
 });
 
@@ -1094,12 +1114,9 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("chrome visibility uses the sidebar peek 帯 hover-reveal instead of click chips", () => {
-  // SPEC-2356 Phase 9 (FR-021/FR-022): the chip-style toggles and Project Bar
-  // text toggles are removed; the auto-hide sidebar is summoned via the peek 帯
-  // (`.op-sidebar-peek`). SPEC-2356 chrome cleanup additionally folds the
-  // window controls into that sidebar, so the separate window-controls peek is
-  // retired entirely.
+test("Command Rail is always visible — hover-reveal chrome is fully retired (SPEC-3038 AS-1.1/AS-1.6)", () => {
+  // SPEC-3038 US-1: the rail is docked into the layout grid, so the peek 帯,
+  // the chip toggles, and the data-op-sidebar reveal machinery are all gone.
   assert.equal(
     document.getElementById("op-sidebar-toggle"),
     null,
@@ -1113,25 +1130,28 @@ test("chrome visibility uses the sidebar peek 帯 hover-reveal instead of click 
   assert.equal(
     document.getElementById("op-sidebar-edge-toggle"),
     null,
-    "<< chip toggle is removed in Phase 9",
+    "<< chip toggle stays removed",
   );
   assert.equal(
     document.getElementById("op-window-controls-edge-toggle"),
     null,
-    "vv chip toggle is removed in Phase 9",
+    "vv chip toggle stays removed",
   );
-
-  const sidebarPeek = document.querySelector(".op-sidebar-peek");
-  assert.ok(sidebarPeek, "expected .op-sidebar-peek hover trigger");
+  assert.equal(
+    document.querySelector(".op-sidebar-peek"),
+    null,
+    "the 6px peek 帯 is retired — the rail is always visible",
+  );
   assert.equal(
     document.querySelector(".op-window-controls-peek"),
     null,
-    "window controls peek 帯 is retired — window operations live in the sidebar",
+    "window controls peek 帯 stays retired",
   );
-  assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
-  assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
-  assert.equal(sidebarPeek.getAttribute("tabindex"), "0", "sidebar peek 帯 must be keyboard-focusable");
-  assert.equal(sidebarPeek.getAttribute("role"), "button");
+
+  const rail = document.getElementById("op-rail");
+  assert.ok(rail, "expected #op-rail");
+  assert.ok(rail.classList.contains("op-rail"), "rail root carries .op-rail");
+  assert.match(rail.getAttribute("aria-label") ?? "", /command rail/i);
 });
 
 test("workspace windows expose draggable tab docking affordances", () => {
@@ -1336,24 +1356,23 @@ test("xterm fontFamily is resolved without CSS var() so OffscreenCanvas char mea
   );
 });
 
-test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
+test("operator-shell keeps Mission Briefing early dismiss without any reveal machinery (SPEC-3038)", () => {
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-031): hover-reveal state machine sets
-  // root.dataset.opSidebar = "revealed" / opWindowControls = "revealed" rather
-  // than "collapsed", and Cmd+\\ hotkey is removed.
+  // SPEC-2356 Phase 9 removed Cmd+\\ and toggle entrypoints; SPEC-3038 removes
+  // the hover-reveal state machine entirely — the rail is always visible.
   assert.ok(
     !operatorShell.includes('hotkey.register("cmd+\\\\"'),
-    "Cmd+backslash hotkey must be removed in Phase 9",
+    "Cmd+backslash hotkey stays removed",
   );
   assert.doesNotMatch(
     operatorShell,
     /toggleSidebar\s*:/,
-    "Phase 9 hover-reveal controller must not expose a toggleSidebar entrypoint",
+    "no sidebar toggle entrypoint may exist",
   );
-  assert.match(
+  assert.doesNotMatch(
     operatorShell,
-    /root\.dataset\[datasetKey\]\s*=\s*"revealed"/,
-    "expected hover-reveal state machine to write data-op-* = \"revealed\"",
+    /dataset\[datasetKey\]\s*=\s*"revealed"/,
+    "no hover-reveal state machine may write reveal attributes",
   );
   assert.match(
     operatorShell,
@@ -1385,13 +1404,21 @@ test("components.css retires the floating window controls toolbar CSS (SPEC-2356
   assert.doesNotMatch(css, /\.op-window-controls-peek/);
   assert.doesNotMatch(css, /\[data-op-window-controls/);
   assert.doesNotMatch(css, /\.floating-actions/);
-  assert.match(css, /\.op-sidebar-peek\s*\{/);
+  // SPEC-3038: the sidebar peek 帯 and the data-op-sidebar reveal state are
+  // retired together with the overlay sidebar — the rail is grid-docked.
+  assert.doesNotMatch(css, /op-sidebar/);
+  assert.doesNotMatch(css, /\.op-layer\b/);
+  assert.match(css, /\.op-rail\s*\{/);
 });
 
-test("Windows section exposes Align without resizing windows", () => {
+test("Windows group exposes Align without resizing windows", () => {
   const button = document.getElementById("align-button");
   assert.ok(button, "expected Align button");
-  assert.equal(button.textContent.trim(), "Align");
+  assert.equal(
+    button.querySelector(".op-rail__flyout-label")?.textContent?.trim(),
+    "Align",
+    "Align rail item must label its flyout",
+  );
   assert.match(
     appSource,
     /alignButton\.addEventListener\("click",\s*\(\)\s*=>\s*arrangeWindows\("align"\)\)/,
@@ -1399,12 +1426,12 @@ test("Windows section exposes Align without resizing windows", () => {
   );
 });
 
-test("operator-shell migrates legacy chrome keys and wires the sidebar hover-reveal", () => {
+test("operator-shell migrates legacy chrome keys and drops the hover-reveal machinery (SPEC-3038)", () => {
   // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
-  // and the chip-style toggles (and their Project Bar text counterparts) must
-  // not be referenced anywhere in operator-shell. SPEC-2356 chrome cleanup
-  // folds window controls into the sidebar, so the separate window-controls
-  // hover-reveal controller / peek 帯 are gone.
+  // and the chip-style toggles must not be referenced anywhere in
+  // operator-shell. SPEC-3038 retires the hover-reveal state machine entirely:
+  // the rail is always visible, so no peek 帯 wiring and no reveal dataset
+  // attribute may remain.
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
   assert.doesNotMatch(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
   assert.doesNotMatch(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
@@ -1416,8 +1443,10 @@ test("operator-shell migrates legacy chrome keys and wires the sidebar hover-rev
   assert.doesNotMatch(operatorShell, /op:window-controls-changed/);
   assert.match(operatorShell, /removeItem\("gwt:ui:sidebar-collapsed"\)/);
   assert.match(operatorShell, /removeItem\("gwt:ui:window-controls"\)/);
-  assert.match(operatorShell, /op:chrome-visibility-changed/);
-  assert.match(operatorShell, /\.op-sidebar-peek/);
+  assert.doesNotMatch(operatorShell, /createHoverRevealController/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-peek/);
+  assert.doesNotMatch(operatorShell, /opSidebar\b/);
+  assert.doesNotMatch(operatorShell, /op:chrome-visibility-changed/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse", () => {
@@ -2880,40 +2909,41 @@ test("every readable non-terminal surface participates in the opaque window chro
   }
 });
 
-test("Sidebar row buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
-  // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
-  // default は border + grey background を出す。`.op-layer` (sidebar row 共通
-  // クラス、Quick / Windows / Palette / Update が利用) は indicator dot +
-  // label color + token-driven focus ring のみで状態を表現するため、base rule
-  // で UA chrome を解除する必要がある。
+test("Rail item buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+  // SPEC-2356 FR-030 / SPEC-3038: WebView2 / Chromium の `<button>` UA
+  // default は border + grey background を出す。`.op-rail__item` は ghost
+  // ボタンとして icon + flyout + token focus ring のみで状態を表現するため、
+  // base rule で UA chrome を解除する必要がある。
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
-  assert.ok(layerRule, "expected base .op-layer rule in components.css");
-  const body = layerRule[1];
+  const itemRule = css.match(/\.op-rail__item\s*\{([^}]*)\}/);
+  assert.ok(itemRule, "expected base .op-rail__item rule in components.css");
+  const body = itemRule[1];
   assert.match(
     body,
     /appearance:\s*none/,
-    ".op-layer must declare appearance:none to disable UA <button> chrome",
+    ".op-rail__item must declare appearance:none to disable UA <button> chrome",
   );
   assert.match(
     body,
-    /border:\s*0/,
-    ".op-layer must zero out border so WebView2 stops drawing the default frame",
+    /border:\s*0|border:\s*none/,
+    ".op-rail__item must zero out border so WebView2 stops drawing the default frame",
   );
   assert.match(
     body,
     /background:\s*transparent/,
-    ".op-layer must clear background so the sidebar surface shows through",
+    ".op-rail__item must clear background so the rail surface shows through",
   );
 });
 
 // --- SPEC-2359 Work Unification (US-49): Workspace → Work/Works labels ---
 
 test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
-  const sidebarLabel = document.querySelector("#op-workspace-overview-entry .op-layer__label");
-  assert.ok(sidebarLabel, "expected sidebar overview entry to exist");
-  assert.equal(sidebarLabel.textContent.trim(), "Work");
-  assert.doesNotMatch(sidebarLabel.textContent, /Workspace/i);
+  const railLabel = document.querySelector(
+    "#op-workspace-overview-entry .op-rail__flyout-label",
+  );
+  assert.ok(railLabel, "expected rail Work entry to exist");
+  assert.equal(railLabel.textContent.trim(), "Work");
+  assert.doesNotMatch(railLabel.textContent, /Workspace/i);
 
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
   assert.doesNotMatch(sidebarAria.getAttribute("aria-label") ?? "", /workspace/i);

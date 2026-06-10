@@ -9,10 +9,6 @@ import { wireThemeToggle as wireSegmentedThemeToggle } from "/theme-toggle.js";
 
 const BRIEFING_KEY = "gwt:ui:briefing";
 
-// SPEC-2356 Phase 9 (FR-031): hover-reveal state machine close delay window.
-// open delay = 0 (instant reveal), close delay defaults to 250ms (200〜400ms range).
-const HOVER_REVEAL_CLOSE_DELAY_MS = 250;
-
 export function initOperatorShell(deps = {}) {
   const doc = deps.document ?? document;
   const win = deps.window ?? window;
@@ -28,13 +24,8 @@ export function initOperatorShell(deps = {}) {
   const hotkey = deps.hotkey ?? createHotkeyManager();
 
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
-  const chromeVisibility = safeWire(
-    "chrome visibility",
-    () => wireChromeVisibility({ doc, win }),
-    markDegraded,
-    null,
-  );
-  safeWire("sidebar commands", () => wireSidebarCommands({ doc }), markDegraded);
+  safeWire("rail update badge", () => wireRailUpdateBadge({ doc, win }), markDegraded);
+  safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
   safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
@@ -50,8 +41,6 @@ export function initOperatorShell(deps = {}) {
     () => wireGlobalHotkeys({ doc, hotkey, palette }),
     markDegraded,
   );
-
-  void chromeVisibility;
 
   return { themeManager, hotkey, palette };
 }
@@ -93,59 +82,25 @@ function hideMissionBriefingImmediately(doc) {
 }
 
 // ------------------------------------------------------------
-// Chrome visibility — sidebar hover-reveal state machine (SPEC-2356 Phase 9)
+// Command Rail — update badge (SPEC-3038 AS-1.5)
 // ------------------------------------------------------------
-// FR-021: Sidebar を auto-hide にし、画面左端の peek 帯 (`.op-sidebar-peek`)
-// への pointer hover / keyboard focus / pointer tap で overlay 展開、panel +
-// peek 領域から離れて 200〜400ms 経過後に収納する hover-reveal state machine。
-// FR-031: prefers-reduced-motion: reduce で close delay 0ms に縮退。
-// FR-032: 起動時に旧 localStorage キー (`gwt:ui:sidebar-collapsed` /
-// `gwt:ui:window-controls`) を `removeItem` で 1 回だけ migration する。
-//
-// SPEC-2356 operator chrome cleanup: window controls (Tile / Stack / Align /
-// Windows / Add) と Command Palette / Update CTA を sidebar に集約したため、
-// 旧来の独立した window-controls peek 帯 / hover-reveal controller は撤去し、
-// sidebar の hover-reveal のみを管理する。
+// The rail is grid-docked and always visible, so the SPEC-2356 hover-reveal
+// state machine is retired. The Update CTA mounts inside the rail System
+// group; when update-cta.js dispatches `op:update-available` we badge the
+// rail via data-op-rail-update so the anchor pulses (CSS) until the update is
+// applied or dismissed. The SPEC-2356 Phase 9 one-shot localStorage migration
+// stays so legacy keys keep getting cleaned up.
 
-function wireChromeVisibility({ doc, win }) {
+function wireRailUpdateBadge({ doc, win }) {
   removeLegacyChromeKeys(win);
 
   const root = doc.documentElement;
-  const closeDelayFor = () =>
-    matchPrefersReducedMotion(win) ? 0 : HOVER_REVEAL_CLOSE_DELAY_MS;
-
-  const sidebar = createHoverRevealController({
-    doc,
-    win,
-    peek: doc.querySelector(".op-sidebar-peek"),
-    panel: doc.getElementById("op-sidebar"),
-    revealedAttr: "opSidebar",
-    eventName: "op:chrome-visibility-changed",
-    eventDetail: () => ({ sidebarVisible: sidebarRevealed() }),
-    closeDelayFor,
-  });
-
-  function sidebarRevealed() {
-    return root.dataset.opSidebar === "revealed";
-  }
-
-  // SPEC-2356 operator chrome cleanup: the Update CTA lives in the sidebar
-  // Update section, which is auto-hidden. When an update becomes available the
-  // CTA dispatches `op:update-available` so we briefly peek the sidebar (and
-  // mark it with a badge attribute) — the user notices without hovering.
   doc.addEventListener("op:update-available", () => {
-    root.dataset.opSidebarUpdate = "available";
-    sidebar.open();
-    sidebar.requestClose(closeDelayFor());
+    root.dataset.opRailUpdate = "available";
   });
   doc.addEventListener("op:update-dismissed", () => {
-    delete root.dataset.opSidebarUpdate;
+    delete root.dataset.opRailUpdate;
   });
-
-  return {
-    isSidebarRevealed: sidebarRevealed,
-    closeSidebar: () => sidebar.requestClose(0),
-  };
 }
 
 function removeLegacyChromeKeys(win) {
@@ -157,97 +112,6 @@ function removeLegacyChromeKeys(win) {
 
 function safeLocalStorage(win) {
   try { return win.localStorage ?? null; } catch { return null; }
-}
-
-function matchPrefersReducedMotion(win) {
-  try {
-    return Boolean(win.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
-  } catch {
-    return false;
-  }
-}
-
-function createHoverRevealController({
-  doc,
-  win,
-  peek,
-  panel,
-  extraPanels = [],
-  revealedAttr,
-  eventName,
-  eventDetail,
-  closeDelayFor,
-}) {
-  const root = doc.documentElement;
-  const datasetKey = revealedAttr;
-  const setTimeoutFn = win.setTimeout?.bind(win) ?? globalThis.setTimeout;
-  const clearTimeoutFn = win.clearTimeout?.bind(win) ?? globalThis.clearTimeout;
-  let closeTimer = null;
-
-  const cancelClose = () => {
-    if (closeTimer !== null) {
-      clearTimeoutFn(closeTimer);
-      closeTimer = null;
-    }
-  };
-
-  const setRevealed = (next) => {
-    const before = root.dataset[datasetKey];
-    if (next) {
-      root.dataset[datasetKey] = "revealed";
-    } else {
-      delete root.dataset[datasetKey];
-    }
-    if (before !== root.dataset[datasetKey]) {
-      try {
-        doc.dispatchEvent(new CustomEvent(eventName, { detail: eventDetail() }));
-      } catch { /* no-op */ }
-    }
-  };
-
-  const open = () => {
-    cancelClose();
-    setRevealed(true);
-  };
-
-  const requestClose = (delay) => {
-    cancelClose();
-    if (!delay || delay <= 0) {
-      setRevealed(false);
-      return;
-    }
-    closeTimer = setTimeoutFn(() => {
-      closeTimer = null;
-      setRevealed(false);
-    }, delay);
-  };
-
-  if (!peek || !panel) {
-    return { open, requestClose };
-  }
-
-  const allTargets = [peek, panel, ...extraPanels].filter(Boolean);
-
-  for (const target of allTargets) {
-    target.addEventListener("pointerenter", open);
-    target.addEventListener("focusin", open);
-    target.addEventListener("pointerdown", (event) => {
-      if (event && event.pointerType === "touch") open();
-    });
-    target.addEventListener("pointerleave", () => requestClose(closeDelayFor()));
-    target.addEventListener("focusout", () => requestClose(closeDelayFor()));
-  }
-
-  // Tap-away: pointerdown outside the peek / panel collapses an open overlay.
-  doc.addEventListener("pointerdown", (event) => {
-    if (root.dataset[datasetKey] !== "revealed") return;
-    const target = event?.target;
-    if (!target) return;
-    const inside = allTargets.some((node) => node === target || node?.contains?.(target));
-    if (!inside) requestClose(closeDelayFor());
-  });
-
-  return { open, requestClose };
 }
 
 // ------------------------------------------------------------
@@ -262,17 +126,15 @@ function wireThemeToggle(opts) {
 }
 
 // ------------------------------------------------------------
-// Sidebar command rows
+// Command Rail command items
 // ------------------------------------------------------------
-// SPEC-2356 operator chrome cleanup: the dead Layers section (Agents / Git /
-// Hooks toggles + counters) is removed — toggling only set dataset.opLayer*
-// which no CSS ever read, so it was a no-op. The sidebar now carries only
-// actionable rows; this wiring dispatches the `data-cmd` rows (Start Work /
-// Board / Logs etc.) onto the operator command bus.
+// SPEC-3038: rail items carrying a `data-cmd` attribute (Start Work / Board /
+// Logs) dispatch onto the operator command bus; id-wired items (#tile-button
+// etc.) keep their app.js handlers untouched.
 
-function wireSidebarCommands({ doc }) {
-  const cmdRows = doc.querySelectorAll(".op-sidebar .op-layer[data-cmd]");
-  cmdRows.forEach((el) => {
+function wireRailCommands({ doc }) {
+  const items = doc.querySelectorAll(".op-rail .op-rail__item[data-cmd]");
+  items.forEach((el) => {
     el.addEventListener("click", () => {
       doc.dispatchEvent(new CustomEvent("op:command", { detail: { id: el.dataset.cmd } }));
     });
@@ -348,6 +210,15 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-idle", counts.idle ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
+  // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+  if ("windows" in counts) {
+    const badge = doc.getElementById("op-rail-window-count");
+    if (badge) {
+      const value = Number(counts.windows) || 0;
+      badge.textContent = String(value);
+      badge.hidden = value <= 0;
+    }
+  }
 }
 
 // ------------------------------------------------------------

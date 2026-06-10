@@ -3772,7 +3772,15 @@
 
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
+        // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+        const counts = {
+          active: 0,
+          idle: 0,
+          blocked: 0,
+          done: 0,
+          agents: 0,
+          windows: windowMap.size,
+        };
         for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
           if (!state) continue;

@@ -129,81 +129,124 @@
             </div>
           </div>
         </div>
-        <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar">
-          <div class="op-sidebar__section">
-            <h3 class="op-sidebar__heading">
-              <span>Quick</span>
-            </h3>
-            <button class="op-layer" type="button" data-cmd="start-work" aria-label="Start Work">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Start Work</span>
-              <kbd class="op-layer__kbd">GO</kbd>
+        <!-- SPEC-3038 US-1: the Command Rail is the always-visible 56px home
+             for navigation, window operations, and system actions. Operation
+             IDs (#tile-button etc.) and data-cmd attributes are preserved so
+             app.js / operator-shell.js wiring stays intact. Icons are Unicode
+             symbols; hover flyouts carry the label + real shortcut. -->
+        <aside class="op-rail" id="op-rail" aria-label="Command rail">
+          <div class="op-rail__group" role="group" aria-label="Navigate">
+            <button class="op-rail__item" type="button" data-cmd="start-work" aria-label="Start Work" title="Start Work">
+              <span class="op-rail__icon" aria-hidden="true">▶</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Start Work</span>
+              </span>
             </button>
-            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Work">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Work</span>
-              <kbd class="op-layer__kbd">INFO</kbd>
+            <button
+              class="op-rail__item"
+              type="button"
+              id="op-workspace-overview-entry"
+              aria-label="Work (Cmd+G)"
+              aria-keyshortcuts="Meta+G"
+              title="Work"
+            >
+              <span class="op-rail__icon" aria-hidden="true">◆</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Work</span>
+                <kbd class="op-rail__kbd">⌘ G</kbd>
+              </span>
             </button>
-            <button class="op-layer" type="button" data-cmd="open-board" aria-label="Open Board (Cmd+B)" aria-keyshortcuts="Meta+B">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Board</span>
-              <kbd class="op-layer__kbd">⌘ B</kbd>
+            <button
+              class="op-rail__item"
+              type="button"
+              data-cmd="open-board"
+              aria-label="Open Board (Cmd+B)"
+              aria-keyshortcuts="Meta+B"
+              title="Board"
+            >
+              <span class="op-rail__icon" aria-hidden="true">▦</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Board</span>
+                <kbd class="op-rail__kbd">⌘ B</kbd>
+              </span>
             </button>
-            <button class="op-layer" type="button" data-cmd="open-logs" aria-label="Open Logs (Cmd+L)" aria-keyshortcuts="Meta+L">
-              <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Logs</span>
-              <kbd class="op-layer__kbd">⌘ L</kbd>
+            <button
+              class="op-rail__item"
+              type="button"
+              data-cmd="open-logs"
+              aria-label="Open Logs (Cmd+L)"
+              aria-keyshortcuts="Meta+L"
+              title="Logs"
+            >
+              <span class="op-rail__icon" aria-hidden="true">≣</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Logs</span>
+                <kbd class="op-rail__kbd">⌘ L</kbd>
+              </span>
             </button>
           </div>
-          <!-- SPEC-2356 operator chrome cleanup: window operations move out of the
-               right-bottom floating toolbar into a flat sidebar Windows section.
-               IDs are preserved so app.js handlers stay wired by id. -->
-          <div class="op-sidebar__section op-sidebar__section--windows">
-            <h3 class="op-sidebar__heading">
-              <span>Windows</span>
-            </h3>
-            <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
-            <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
-            <button class="arrange-button" id="align-button" aria-label="Align windows without resizing">Align</button>
+          <div class="op-rail__divider" aria-hidden="true"></div>
+          <div class="op-rail__group" role="group" aria-label="Windows">
+            <button class="op-rail__item" id="tile-button" aria-label="Tile windows" title="Tile windows">
+              <span class="op-rail__icon" aria-hidden="true">⊞</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Tile</span>
+              </span>
+            </button>
+            <button class="op-rail__item" id="stack-button" aria-label="Stack windows" title="Stack windows">
+              <span class="op-rail__icon" aria-hidden="true">⊟</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Stack</span>
+              </span>
+            </button>
+            <button class="op-rail__item" id="align-button" aria-label="Align windows without resizing" title="Align windows">
+              <span class="op-rail__icon" aria-hidden="true">⊜</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Align</span>
+              </span>
+            </button>
             <div class="window-list-shell">
               <button
-                class="arrange-button"
+                class="op-rail__item"
                 id="window-list-button"
                 aria-label="List windows"
                 aria-expanded="false"
+                title="List windows"
               >
-                Windows
+                <span class="op-rail__icon" aria-hidden="true">❒</span>
+                <span class="op-rail__badge" id="op-rail-window-count" hidden></span>
+                <span class="op-rail__flyout" aria-hidden="true">
+                  <span class="op-rail__flyout-label">Windows</span>
+                </span>
               </button>
               <div class="window-list-panel" id="window-list-panel" hidden></div>
             </div>
-            <button class="add-button" id="add-button" aria-label="Add window">+</button>
+            <button class="op-rail__item" id="add-button" aria-label="Add window" title="Add window">
+              <span class="op-rail__icon" aria-hidden="true">＋</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Add window</span>
+              </span>
+            </button>
           </div>
-          <!-- SPEC-2356 operator chrome cleanup: Command Palette trigger moves
-               from the right-bottom toolbar into the sidebar. -->
-          <div class="op-sidebar__section op-sidebar__section--palette">
-            <h3 class="op-sidebar__heading">
-              <span>Palette</span>
-            </h3>
+          <div class="op-rail__spacer" aria-hidden="true"></div>
+          <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
             <button
-              class="arrange-button op-palette-trigger"
+              class="op-rail__item"
               id="op-palette-button"
               aria-label="Command palette"
               title="Command palette (⌘K / ⌘P)"
               aria-keyshortcuts="Meta+K Meta+P"
             >
-              <span class="op-palette-trigger__label">⌘K</span>
-              <span class="op-palette-trigger__hint">Palette</span>
+              <span class="op-rail__icon op-rail__icon--palette" aria-hidden="true">⌘K</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Palette</span>
+                <kbd class="op-rail__kbd">⌘ K</kbd>
+              </span>
             </button>
-          </div>
-          <!-- SPEC-2356 operator chrome cleanup: the Update CTA moves from the
-               fixed bottom-right corner into this sidebar Update section. The CTA
-               shell (update-cta.js) mounts into #update-cta-anchor; the sidebar
-               peeks/badges when an update becomes available. -->
-          <div class="op-sidebar__section op-sidebar__section--update">
-            <h3 class="op-sidebar__heading">
-              <span>Update</span>
-            </h3>
-            <div id="update-cta-anchor" class="op-sidebar__update-anchor"></div>
+            <!-- SPEC-3038 AS-1.5: update-cta.js mounts the CTA shell here; the
+                 card pops out beside the rail and the rail badge pulses via
+                 html[data-op-rail-update="available"]. -->
+            <div id="update-cta-anchor" class="op-rail__update-anchor"></div>
           </div>
         </aside>
         <div class="canvas-area">
@@ -244,19 +287,9 @@
               </button>
             </div>
           </div>
-          <!-- SPEC-2356 operator chrome cleanup: the right-bottom floating
-               toolbar (Palette / Zoom / Tile / Stack / Align / Windows / Add)
-               and the window-controls peek band are removed. Palette + window
-               operations live in the sidebar; Zoom lives in the Status Strip;
-               the bottom-right canvas corner is left empty. -->
-          <div
-            class="op-sidebar-peek"
-            role="button"
-            tabindex="0"
-            aria-label="Show sidebar"
-            aria-controls="op-sidebar"
-            data-hover-reveal="sidebar"
-          ></div>
+          <!-- SPEC-3038: the sidebar peek band is retired — the Command Rail
+               is grid-docked and always visible. Zoom lives in the Status
+               Strip; the bottom-right canvas corner stays empty. -->
         </div>
         <footer
           class="op-status-strip"

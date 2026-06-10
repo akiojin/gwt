@@ -6850,3 +6850,10 @@ Type: lesson
 Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
+
+## 2026-06-10 — gwtd register start --spec 0 後は phase が実IDを拒否する
+
+Type: lesson
+Context: gwt-register-spec skill の手順通り register start --spec 0 で開始後、phase --spec 3038 --label create が 'state owns SPEC-Some(0)' で exit 2 拒否された (SPEC-3038 登録時)
+Learning: skill doc は『phase で実 id を bind する』と書くが、skill_state_runtime.rs は owner_spec 不一致の phase を拒否する。start は状態を無条件上書きするため、Issue 番号確定後に register start --spec <n> で再 start して束縛し直すのが正しい運用
+Future Action: gwt-register-spec で Issue 作成後は phase の前に register start --spec <実ID> を必ず挟む。skill doc 側の記述修正も別タスクで検討

@@ -221,11 +221,11 @@ test("SPEC-2356: unified update CTA renders inside the sidebar Update section", 
   assert.doesNotMatch(indexHtml, /\.update-cta\s*\{/);
 });
 
-test("SPEC-2356: update CTA shell mounts into the sidebar anchor when present", () => {
-  // When the sidebar Update section anchor exists, the controller must mount
-  // the shell there instead of document.body so the CTA lives in the sidebar.
+test("SPEC-3038: update CTA shell mounts into the rail anchor when present", () => {
+  // When the rail System group anchor exists, the controller must mount the
+  // shell there instead of document.body so the CTA pops out beside the rail.
   const { document } = parseHTML(
-    '<!doctype html><html><body><aside class="op-sidebar"><div class="op-sidebar__section"><div id="update-cta-anchor"></div></div></aside></body></html>',
+    '<!doctype html><html><body><aside class="op-rail"><div class="op-rail__group" aria-label="System"><div id="update-cta-anchor"></div></div></aside></body></html>',
   );
   const sent = [];
   const controller = createUpdateCtaController({
@@ -238,7 +238,7 @@ test("SPEC-2356: update CTA shell mounts into the sidebar anchor when present", 
   const shell = document.getElementById("update-cta-shell");
   assert.ok(shell, "expected the update CTA shell to be created");
   const anchor = document.getElementById("update-cta-anchor");
-  assert.ok(anchor.contains(shell), "shell must mount inside the sidebar anchor");
+  assert.ok(anchor.contains(shell), "shell must mount inside the rail anchor");
 });
 
 function createFixture({ confirmResult = true } = {}) {

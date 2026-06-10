@@ -156,14 +156,14 @@ body::after {
   z-index: 1;
   height: 100%;
   display: grid;
-  /* SPEC-2356 Phase 9 (FR-021): canvas takes full width; sidebar is an
-     auto-hide overlay positioned outside of the grid flow. */
-  grid-template-columns: 1fr;
+  /* SPEC-3038 US-1: the Command Rail is grid-docked at 56px so it is always
+     visible and never overlays canvas windows. */
+  grid-template-columns: 56px 1fr;
   grid-template-rows: 44px 1fr 28px;
   grid-template-areas:
-    "projectbar"
-    "canvas"
-    "strip";
+    "projectbar projectbar"
+    "rail canvas"
+    "strip strip";
   background: var(--bg-depth-glow), transparent;
 }
 
@@ -234,14 +234,18 @@ body::after {
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
    earlier split toast + persistent button flow.
-   SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
-   bottom-right corner; it mounts into the sidebar Update section anchor
-   (#update-cta-anchor) and flows with the sidebar surface. */
+   SPEC-3038: the CTA mounts into the Command Rail System anchor
+   (#update-cta-anchor) and pops out beside the rail as a floating card so
+   the 56px rail stays compact. */
 .update-cta-shell {
+  position: absolute;
+  left: calc(100% + 10px);
+  bottom: 0;
+  width: 300px;
   display: flex;
-  width: 100%;
   align-items: stretch;
   gap: var(--space-1);
+  z-index: 45;
 }
 
 .update-cta-shell .update-cta {
@@ -584,196 +588,220 @@ body::after {
 }
 
 /* ============================================================
-   Sidebar Layers — left chrome
+   Command Rail — left chrome (SPEC-3038 US-1)
    ============================================================ */
 
-.op-sidebar {
-  /* SPEC-2356 Phase 9 (FR-021/FR-031): sidebar lives outside the grid as an
-     auto-hide overlay. Default state slides off-screen to the left and
-     re-enters when [data-op-sidebar="revealed"] is set on the document
-     element by the hover-reveal state machine. */
-  position: absolute;
-  top: 44px;
-  left: 0;
-  bottom: 28px;
-  width: 240px;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
+.op-rail {
+  grid-area: rail;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
+  overflow: visible;
   z-index: 30;
-  transform: translateX(-100%);
-  transition: transform var(--motion-medium) var(--motion-curve);
-  pointer-events: none;
-  box-shadow: 4px 0 16px color-mix(in oklab, var(--color-shadow, #000) 30%, transparent);
 }
 
-:root[data-op-sidebar="revealed"] .op-sidebar {
-  transform: translateX(0);
-  pointer-events: auto;
+.op-rail__group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
 }
 
-/* SPEC-2356 Phase 9 (FR-021): the always-visible peek 帯 on the left edge
-   acts as the hover/focus/tap target that summons the sidebar overlay. */
-.op-sidebar-peek {
-  position: absolute;
-  top: 44px;
-  left: 0;
-  bottom: 28px;
-  width: 6px;
-  z-index: 31;
+.op-rail__divider {
+  width: 24px;
+  height: 1px;
+  flex-shrink: 0;
+  background: var(--color-border-strong);
+  margin: var(--space-1) 0;
+}
+
+.op-rail__spacer {
+  flex: 1;
+}
+
+/* Rail item — 40×40 ghost icon button. SPEC-2356 FR-030 carry-over: reset the
+   WebView2 / Chromium <button> UA chrome (border + grey background); state is
+   expressed via hover surface, icon color, and the token focus ring only. */
+.op-rail__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
   cursor: pointer;
-  background: linear-gradient(
-    to right,
-    color-mix(in oklab, var(--color-state-active) 70%, transparent) 0%,
-    color-mix(in oklab, var(--color-state-active) 18%, transparent) 100%
-  );
-  border-right: 1px solid color-mix(in oklab, var(--color-border-strong) 55%, transparent);
-  transition: background var(--motion-fast) var(--motion-curve), width var(--motion-fast) var(--motion-curve);
+  user-select: none;
+  transition: background var(--motion-fast) var(--motion-curve),
+              color var(--motion-fast) var(--motion-curve);
 }
 
-.op-sidebar-peek:hover,
-.op-sidebar-peek:focus-visible {
-  background: linear-gradient(
-    to right,
-    var(--color-state-active) 0%,
-    color-mix(in oklab, var(--color-state-active) 50%, transparent) 100%
-  );
-  width: 8px;
-  outline: none;
+.op-rail__item:hover {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-strong);
+}
+
+.op-rail__item:focus-visible {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-strong);
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+.op-rail__item:active {
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+}
+
+.op-rail__icon {
+  font-size: var(--type-md);
+  line-height: 1;
+}
+
+/* The palette item reads as the literal ⌘K chord in mono. */
+.op-rail__icon--palette {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-state-active);
+}
+
+/* Flyout chip — CSS-only label + real shortcut shown on hover / focus
+   (SPEC-3038 AS-1.2). aria-hidden because the button's aria-label already
+   carries the accessible name. */
+.op-rail__flyout {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  white-space: nowrap;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text-strong);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--motion-curve),
+              transform var(--motion-fast) var(--motion-curve);
+  z-index: 40;
+}
+
+.op-rail__item:hover .op-rail__flyout,
+.op-rail__item:focus-visible .op-rail__flyout {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .op-sidebar,
-  .op-sidebar-peek {
+  .op-rail__item,
+  .op-rail__flyout {
     transition: none;
   }
 }
 
-@media (forced-colors: active) {
-  .op-sidebar-peek {
-    background: Highlight;
-  }
+/* kbd chip inside the flyout — real shortcuts only (SPEC-3038 FR-012). */
+.op-rail__kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-state-active) 35%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
 }
 
-/* SPEC-2356 operator chrome cleanup: when an update is available the sidebar
-   Update section lives behind the auto-hide. The operator shell sets
-   data-op-sidebar-update="available" on <html>; widen + pulse the peek 帯 so
-   the user is drawn to reveal the sidebar (and the Update CTA) without relying
-   on a fixed bottom-right toast. */
-:root[data-op-sidebar-update="available"] .op-sidebar-peek {
-  width: 10px;
-  background: linear-gradient(
-    to right,
-    var(--color-state-active) 0%,
-    color-mix(in oklab, var(--color-state-active) 60%, transparent) 100%
-  );
-  animation: op-sidebar-update-peek var(--motion-pulse) ease-in-out infinite;
+/* AS-1.4 — open-window count badge on the Windows rail item. */
+.op-rail__badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-button-fg);
+  background: var(--color-button-bg);
+  border: 1px solid var(--color-button-border);
+  border-radius: var(--radius-pill);
+  pointer-events: none;
 }
 
-@keyframes op-sidebar-update-peek {
+.op-rail__badge[hidden] {
+  display: none;
+}
+
+/* Update CTA mount point (SPEC-3038 AS-1.5). The CTA shell pops out beside
+   the rail; while an update is available the anchor shows a pulsing marker
+   driven by html[data-op-rail-update="available"]. */
+.op-rail__update-anchor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40px;
+}
+
+:root[data-op-rail-update="available"] .op-rail__update-anchor::before {
+  content: "↑";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  font-size: var(--type-md);
+  line-height: 1;
+  color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
+  animation: op-rail-update-pulse var(--motion-pulse) ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes op-rail-update-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
+  50% { opacity: 0.45; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-op-sidebar-update="available"] .op-sidebar-peek {
+  :root[data-op-rail-update="available"] .op-rail__update-anchor::before {
     animation: none;
   }
 }
 
-.op-sidebar__section {
-  border-bottom: 1px solid var(--color-border);
-  padding: var(--space-3) var(--space-4);
-}
+@media (forced-colors: active) {
+  .op-rail {
+    border-right: 1px solid CanvasText;
+  }
 
-.op-sidebar__heading {
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-  margin: 0 0 var(--space-2) 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: var(--space-2);
-}
-
-/* SPEC-2356 operator chrome cleanup: the Windows / Palette / Update sidebar
-   sections lay their controls out as a vertical stack of full-width rows. */
-.op-sidebar__section--windows,
-.op-sidebar__section--palette,
-.op-sidebar__section--update {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.op-sidebar__section--windows .op-sidebar__heading,
-.op-sidebar__section--palette .op-sidebar__heading,
-.op-sidebar__section--update .op-sidebar__heading {
-  margin-bottom: var(--space-1);
-}
-
-/* Window operation + palette buttons fill the section width so they read as
-   sidebar rows rather than floating chips. */
-.op-sidebar__section--windows .arrange-button,
-.op-sidebar__section--windows .add-button,
-.op-sidebar__section--palette .arrange-button {
-  width: 100%;
-  justify-content: flex-start;
-  text-align: left;
-}
-
-/* The window-list dropdown anchors to its trigger; keep it full width too. */
-.op-sidebar__section--windows .window-list-shell {
-  width: 100%;
-}
-
-.op-sidebar__update-anchor {
-  display: flex;
-}
-
-.op-layer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) 0;
-  cursor: pointer;
-  user-select: none;
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text);
-  /* SPEC-2356 FR-030: WebView2 / Chromium の <button> UA chrome (border +
-     grey background) を解除し、状態は indicator dot + label color + token
-     focus ring のみで表現する。macOS WebKit では UA default が控えめだが
-     Windows で灰色枠が出ていたのを統一して消す。 */
-  appearance: none;
-  border: 0;
-  background: transparent;
-}
-
-.op-layer__indicator {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  border: 1px solid var(--color-border-strong);
-  background: transparent;
-  flex-shrink: 0;
-  transition: background var(--motion-fast) var(--motion-curve);
-}
-
-/* SPEC-2356 operator chrome cleanup: the Layers toggle `aria-pressed` active
-   state and the `.op-layer__count` Layers count badge are removed together with
-   the dead Layers section. The indicator dot stays as a quiet leading marker
-   for the remaining actionable sidebar rows. */
-
-.op-layer__label {
-  flex: 1;
+  .op-rail__item:focus-visible {
+    outline: 2px solid Highlight;
+  }
 }
 
 .workspace-pr-meta {
@@ -923,16 +951,8 @@ body::after {
   background: var(--color-canvas);
 }
 
-/* SPEC-2356 operator chrome cleanup: the bottom Window-controls peek 帯 is
-   removed — window operations now live in the sidebar Windows section, revealed
-   together with the rest of the sidebar via `.op-sidebar-peek`. */
-
-/* SPEC-2356 Phase 9 (T-136): while a floating window resize is in flight,
-   peek 帯 hits are suppressed so the pointer cannot steal focus from the
-   resize handle if the user crosses the screen edge mid-drag. */
-:root[data-op-resize-active] .op-sidebar-peek {
-  pointer-events: none;
-}
+/* SPEC-3038: the peek 帯 era is over — window operations live in the
+   always-visible Command Rail, so no resize-time peek suppression is needed. */
 
 .canvas-world-grid {
   position: absolute;
@@ -946,29 +966,6 @@ body::after {
   background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
   background-position: 0 0;
   opacity: 0.9;
-}
-
-/* SPEC-2356 operator chrome cleanup: window-operation + add buttons now live in
-   the sidebar Windows section. They reuse the Operator button vocabulary while
-   reading as full-width sidebar rows (see .op-sidebar__section--windows). */
-.op-sidebar__section--windows .arrange-button,
-.op-sidebar__section--windows .add-button,
-.op-sidebar__section--palette .arrange-button {
-  background: var(--color-button-bg);
-  color: var(--color-button-fg);
-  border: 1px solid var(--color-button-border);
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
-  transition: background var(--motion-fast) var(--motion-curve);
-}
-
-.op-sidebar__section--windows .arrange-button:hover,
-.op-sidebar__section--windows .add-button:hover,
-.op-sidebar__section--palette .arrange-button:hover {
-  background: var(--color-button-bg-hover);
 }
 
 /* ============================================================
@@ -2178,14 +2175,12 @@ kbd.op-kbd {
 }
 
 :root[data-theme] .arrange-button,
-:root[data-theme] .add-button,
 :root[data-theme] .wizard-button {
   background: var(--color-button-bg);
   color: var(--color-button-fg);
   border-color: var(--color-button-border);
 }
 :root[data-theme] .arrange-button:hover,
-:root[data-theme] .add-button:hover,
 :root[data-theme] .wizard-button:hover {
   background: var(--color-button-bg-hover);
 }
@@ -2555,12 +2550,11 @@ kbd.op-kbd {
    `outline-offset` so it does not get clipped by tight chrome.
    ============================================================ */
 
-:root[data-theme] .op-layer:focus-visible,
 :root[data-theme] .op-status-strip__cell:focus-visible,
 :root[data-theme] .op-palette__row:focus-visible,
 :root[data-theme] .op-drawer__close:focus-visible,
 :root[data-theme] .arrange-button:focus-visible,
-:root[data-theme] .add-button:focus-visible,
+:root[data-theme] .op-rail__item:focus-visible,
 :root[data-theme] .wizard-button:focus-visible,
 :root[data-theme] .preset-button:focus-visible,
 :root[data-theme] .branch-filter-button:focus-visible,
@@ -2786,50 +2780,8 @@ kbd.op-kbd {
   .op-briefing__progress { display: none; }
 }
 
-/* SPEC-2356 operator chrome cleanup: the Sidebar Layers "live" hint
-   (`.op-layer[data-live]` leading dot) is removed with the dead Layers section.
-   Live status is conveyed by the Status Strip cells. */
-
-/* Command Palette trigger button — emphasises the ⌘K hotkey */
-:root[data-theme] .op-palette-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-:root[data-theme] .op-palette-trigger__label {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-state-active);
-}
-
-:root[data-theme] .op-palette-trigger__hint {
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-/* Sidebar Layer kbd badge — small kbd-styled chip on Quick rows */
-:root[data-theme] .op-layer__kbd {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text);
-  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 1px var(--space-1);
-}
-
-:root[data-theme] .op-layer:hover .op-layer__kbd {
-  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-  color: var(--color-state-active);
-  border-color: var(--color-state-active);
-}
+/* SPEC-3038: the legacy sidebar row vocabulary is retired — rail items carry
+   icons, flyouts, and .op-rail__kbd chips. */
 
 /* SPEC-2356 — universal focus ring on input/select/textarea elements
    without their own dedicated focus rule. Token-driven, never overrides
@@ -2919,7 +2871,6 @@ kbd.op-kbd {
 :root[data-theme] .live-session-button,
 :root[data-theme] .launch-choice-button,
 :root[data-theme] .arrange-button,
-:root[data-theme] .add-button,
 :root[data-theme] .op-edge-handle,
 :root[data-theme] .wizard-button {
   transition: background var(--motion-fast) var(--motion-curve),
@@ -2933,7 +2884,6 @@ kbd.op-kbd {
   :root[data-theme] .live-session-button,
   :root[data-theme] .launch-choice-button,
   :root[data-theme] .arrange-button,
-  :root[data-theme] .add-button,
   :root[data-theme] .op-edge-handle,
   :root[data-theme] .wizard-button {
     transition: none;
@@ -2945,7 +2895,7 @@ kbd.op-kbd {
    chrome doesn't snap; surface backgrounds + text colours fade through
    the change in 200ms. reduced-motion / forced-colors keep the snap. */
 :root[data-theme] body,
-:root[data-theme] .op-sidebar,
+:root[data-theme] .op-rail,
 :root[data-theme] .op-status-strip,
 :root[data-theme] .project-bar,
 :root[data-theme] .modal-shell,
@@ -2958,7 +2908,7 @@ kbd.op-kbd {
 
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme] body,
-  :root[data-theme] .op-sidebar,
+  :root[data-theme] .op-rail,
   :root[data-theme] .op-status-strip,
   :root[data-theme] .project-bar,
   :root[data-theme] .modal-shell,
@@ -2968,9 +2918,8 @@ kbd.op-kbd {
   }
 }
 
-/* SPEC-2356 Phase 9: the previous "collapsed" sidebar accent stripe on
-   .project-bar is removed — the always-visible peek 帯 (`.op-sidebar-peek`)
-   provides the discoverability cue for the hover-reveal sidebar instead. */
+/* SPEC-3038: the always-visible Command Rail replaces every sidebar
+   discoverability cue — no accent stripes or peek 帯 remain. */
 
 /* SPEC-2356 — Project Tab active-state subtle accent strip on the bottom
    so the active project reads as "currently selected" with the same
