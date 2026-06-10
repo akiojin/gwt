@@ -6857,3 +6857,10 @@ Type: lesson
 Context: gwt-register-spec skill の手順通り register start --spec 0 で開始後、phase --spec 3038 --label create が 'state owns SPEC-Some(0)' で exit 2 拒否された (SPEC-3038 登録時)
 Learning: skill doc は『phase で実 id を bind する』と書くが、skill_state_runtime.rs は owner_spec 不一致の phase を拒否する。start は状態を無条件上書きするため、Issue 番号確定後に register start --spec <n> で再 start して束縛し直すのが正しい運用
 Future Action: gwt-register-spec で Issue 作成後は phase の前に register start --spec <実ID> を必ず挟む。skill doc 側の記述修正も別タスクで検討
+
+## 2026-06-10 — クリーンツリーでの git stash は空振りし、pop が他人の古い stash を展開する
+
+Type: lesson
+Context: SPEC-3038 検証中、全作業コミット済みの状態で git stash -q && ... && git stash pop -q を実行。stash は『No local changes』で何も積まず、pop が リポジトリに残っていた Tauri 時代の stash@{0} を展開して CLAUDE.md 等で大規模コンフリクトが発生した
+Learning: git stash は変更ゼロだとエントリを作らないが exit 0 を返す。直後の pop はスタック先頭の既存エントリ（他セッションの遺物）を適用してしまう。比較検証で stash/pop ペアを使う前に、stash 出力か git stash list で自分のエントリが積まれたか確認が必須
+Future Action: ベースライン比較は git stash ではなく git checkout <base-commit> -- <paths> でファイル復元→検証→git checkout HEAD -- . で戻す方式を使う。stash を使う場合は push -m で名前を付け、pop ではなく stash apply/drop を名前で指定する
