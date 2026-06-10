@@ -214,7 +214,9 @@ the named-pipe path lands.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
    only when launch is confirmed.
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
-   and decisions while agents run.
+   and decisions while agents run. To mirror those Board posts into Slack or
+   Teams, configure a remote Board provider first; see
+   [Board providers](#board-providers-local--slack--teams).
 7. Open `Branches` only when you need Git inspection, filtering, cleanup, or
    lower-level branch/worktree details.
 
@@ -345,6 +347,35 @@ is active (switching back restores them). Secrets and OAuth tokens are stored in
 a permission-restricted credential store under `~/.gwt/credentials/`, never in
 `config.toml`.
 
+Quick setup route: choose **Slack** or **Teams**, save the provider's
+**Default channel**, sign in, then make sure the bot or signed-in user can access
+that channel. The default channel is the primary Board association; posts that do
+not have a more specific Workspace mapping go there.
+
+### Associate Workspaces with Slack/Teams channels
+
+Remote providers resolve each Board post's channel in this order:
+
+1. A `channel_map` entry for the post's first Workspace audience.
+2. The provider's `default_channel`.
+
+Posts without a Workspace audience use `default_channel` and are placed under a
+General thread. For each Workspace/channel pair, gwt creates one remote root
+message and stores the root id in `.gwt/work/board-remote-roots.jsonl`; keep that
+file, and the matching `.gitattributes` `merge=union` rule, in git so other
+machines and agents reuse the same threads.
+
+The Settings UI edits the default channel. For Workspace-specific routing, edit
+`~/.gwt/config.toml`:
+
+```toml
+[board.slack]
+channel_map = { "workspace-id" = "C0123456789" }
+
+[board.teams]
+channel_map = { "workspace-id" = "team_id/channel_id" }
+```
+
 ### Use Slack as the Board backend
 
 > 📷 *Screenshot placeholders are marked below. The Slack admin screens live at
@@ -453,21 +484,23 @@ Board.
 `ChannelMessage.Send`, `ChannelMessage.Read.All`, `Channel.ReadBasic.All`,
 `offline_access`. Grant admin consent if your tenant requires it.
 
-#### 3. Find the team_id / channel_id
+#### 3. Copy the channel link
 
-In Teams, open the channel → **Get link to channel**. In the URL,
-`groupId=<GUID>` is the **team_id**, and the URL-decoded `19:...@thread.tacv2`
-(after `/channel/`) is the **channel_id**. gwt's **Default channel** is
-`<team_id>/<channel_id>`. (Alternatively, Graph Explorer:
-`GET /me/joinedTeams`, then `GET /teams/{id}/channels`.)
+In Teams, open the channel -> **Get link to channel** and copy the link. gwt
+parses `groupId=<GUID>` and the URL-decoded `19:...@thread.tacv2` segment after
+`/channel/` when you save the form. If the Teams link is unavailable, use Graph
+Explorer (`GET /me/joinedTeams`, then `GET /teams/{id}/channels`) and set
+`[board.teams].default_channel = "team_id/channel_id"` in `config.toml`.
 
 #### 4. Configure gwt and sign in
 
-**Settings → Board provider → Teams** → enter **Application (client) ID**,
-**Tenant ID**, and **Default channel** (`team_id/channel_id`) → **Save** →
-**Sign in**. Posts appear as the signed-in user (Graph delegated; app-only
-channel posting is not supported). You must be a **member** of the target team
-and channel — otherwise Graph returns `403` and gwt shows an actionable hint.
+**Settings → Board provider → Teams** → enter **Application (client) ID** and
+**Tenant ID**, paste the Teams link into **Teams channel link**, then
+**Save** → **Sign in**. gwt stores the channel internally as the existing
+`team_id/channel_id` format. Posts appear as the signed-in user (Graph
+delegated; app-only channel posting is not supported). You must be a
+**member** of the target team and channel — otherwise Graph returns `403` and
+gwt shows an actionable hint.
 
 ## Canvas Operations
 
