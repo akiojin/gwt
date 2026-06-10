@@ -809,3 +809,61 @@ test("Launch control uses the flex empty-state row and duplicate branch meta is 
     `branch meta must be suppressed when identical to the title: ${JSON.stringify(metaTexts)}`,
   );
 });
+
+// SPEC-2359 W-15 (user design decision 2026-06-10): the Workspace list is a
+// branch list — the row title and the detail heading show the branch (the
+// place), while the record's own title (work summary) moves to the meta line
+// and the detail subtitle. Work / Session contents live inside the detail.
+test("Workspace rows and detail are titled by branch with the record title as meta", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "gwt-manage-pr",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          owner: "SPEC-2359",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  assert.equal(
+    row.querySelector(".workspace-overview-row-title").textContent.trim(),
+    "develop",
+    "row title is the branch (Workspace = place)",
+  );
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.ok(
+    metaTexts.includes("gwt-manage-pr"),
+    `record title moves to the meta line: ${JSON.stringify(metaTexts)}`,
+  );
+
+  const heading = fixture.body.querySelector(".workspace-detail-title");
+  assert.equal(heading.textContent.trim(), "develop", "detail heading is the branch");
+  const subtitleText = fixture.body
+    .querySelector(".workspace-detail-subtitle")
+    .textContent;
+  assert.match(subtitleText, /gwt-manage-pr/, "detail subtitle carries the record title");
+});

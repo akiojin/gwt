@@ -226,7 +226,11 @@ export function createWorkspaceKanbanSurface({
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
     const titleRow = createNode("span", "workspace-overview-row-title-row");
-    titleRow.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    // SPEC-2359 W-15 (user design decision 2026-06-10): the Workspace list is
+    // a branch list — the row is titled by the branch (the place); the
+    // record's own title (work summary) moves to the meta line below.
+    const rowTitle = item.branch || item.title;
+    titleRow.appendChild(createNode("span", "workspace-overview-row-title", rowTitle));
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
     // so the Work surface is the single home for Work lifecycle.
@@ -240,11 +244,10 @@ export function createWorkspaceKanbanSurface({
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
-    // A backfilled Workspace is titled by its branch name; repeating the same
-    // string as subtitle meta is noise, so only show the branch when it adds
-    // information beyond the title.
-    if (item.branch !== item.title) {
-      appendMetaText(meta, item.branch);
+    // The record title adds information only when it differs from the branch
+    // shown as the row title (backfilled rows are titled by branch already).
+    if (item.title && item.title !== rowTitle) {
+      appendMetaText(meta, item.title);
     }
     const prMeta = createWorkspacePrMeta?.(item);
     if (prMeta) {
@@ -693,8 +696,14 @@ export function createWorkspaceKanbanSurface({
 
     const header = createNode("header", "workspace-detail-header");
     const titleWrap = createNode("div", "workspace-detail-heading");
-    titleWrap.appendChild(createNode("h2", "workspace-detail-title", workspace.title));
+    // SPEC-2359 W-15 (user design decision 2026-06-10): the detail heading is
+    // the branch (the place); the record's title joins the subtitle line.
+    const detailTitle = workspace.branch || workspace.title;
+    titleWrap.appendChild(createNode("h2", "workspace-detail-title", detailTitle));
     const subtitle = createNode("div", "workspace-detail-subtitle");
+    if (workspace.title && workspace.title !== detailTitle) {
+      appendMetaText(subtitle, workspace.title);
+    }
     appendMetaText(subtitle, statusLabel(workspace.status_category));
     appendMetaText(subtitle, workspace.owner);
     appendMetaText(subtitle, formatLifecycleStageLabel(workspace.lifecycle_stage));
