@@ -11,19 +11,33 @@ use gwt_git::migration::{
 };
 use gwt_git::repository::{detect_repo_type, install_develop_protection, RepoType};
 
+fn run_git(args: &[&str], cwd: &std::path::Path) {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Tests reference `master` explicitly, so pin the initial branch instead of
+/// relying on the git version's default. Committer identity is configured
+/// because CI runners have no global git config and refuse to auto-detect.
 fn init_normal_repo(path: &std::path::Path) {
     gwt_core::process::hidden_command("git")
-        .args(["init", path.to_str().unwrap()])
+        .args(["init", "--initial-branch=master", path.to_str().unwrap()])
         .output()
         .expect("git init");
+    run_git(&["config", "user.email", "test@example.com"], path);
+    run_git(&["config", "user.name", "Test"], path);
 }
 
 fn commit_initial(path: &std::path::Path) {
-    gwt_core::process::hidden_command("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(path)
-        .output()
-        .expect("git commit");
+    run_git(&["commit", "--allow-empty", "-m", "init"], path);
 }
 
 fn is_bare_repo(path: &std::path::Path) -> bool {

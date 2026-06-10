@@ -27,13 +27,21 @@ jobs:
         continue-on-error: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate filtered summary
-        run: cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json
-        timeout-minutes: 15
-      - name: Enforce coverage threshold
-        run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
+      # Coverage is measured workspace-wide so every crate is visible in
+      # Codecov, but the 90% release threshold applies to gwt-core + gwt
+      # only (historical mandate surface; outer shells are excluded inside
+      # check-coverage-threshold.mjs). The remaining domain crates are
+      # gated by an 80% floor as a ratchet (measured ~83% on 2026-06-10);
+      # raise the floor toward 90% as their test suites grow.
+      - name: Generate workspace summary
+        run: cargo llvm-cov --workspace --all-features --json --summary-only --output-path target/coverage-summary.json
+        timeout-minutes: 20
+      - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
+        run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
+      - name: Enforce coverage floor (domain crates @ 80%)
+        run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"
       - name: Generate lcov
-        run: cargo llvm-cov report -p gwt-core -p gwt --lcov --output-path lcov.info
+        run: cargo llvm-cov report --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
         uses: codecov/codecov-action@v7
