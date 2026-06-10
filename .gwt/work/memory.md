@@ -6850,3 +6850,10 @@ Type: lesson
 Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
+
+## 2026-06-10 — PowerShell wrapper は .cmd ターゲットへ常に Legacy passing で埋め込み quote を壊す
+
+Type: lesson
+Context: SPEC-2014 Fast mode 起動失敗。PS wrapper 経由の --settings {"fastMode":true} が {fastMode:true} に破損し claude が Error: Invalid JSON provided to --settings で exit 1（windows_shell=PowerShell 7、npx.cmd 経由）
+Learning: pwsh 7.3+ でも .cmd/.bat への native argument passing は Legacy 固定で、空白なし引数は raw 配置・埋め込み " は非エスケープ。MSVCRT 互換の事前エスケープ（" 直前の backslash run 倍化 + バックスラッシュ+quote）と $PSNativeCommandArgumentPassing='Legacy' 固定で全 PS バージョン決定的になる。末尾 backslash は PS が wrap 時に自前で倍化するので触らない（pwsh7/PS5.1 で node argv echo probe により実測確認）
+Future Action: シェルラッパー経由で引数を渡す変更では、quote/space/backslash 入り引数の argv echo probe を pwsh7/PS5.1/cmd.exe で先に実測してから実装する。inline JSON を CLI 引数に乗せる設計は避け、ファイルパス渡しを正本にする
