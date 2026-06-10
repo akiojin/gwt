@@ -336,28 +336,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.as_ref() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
+use gwt_core::test_support::ScopedEnvVar;
 
 fn json_commands(raw: &str) -> Vec<String> {
     fn collect(value: &Value, out: &mut Vec<String>) {

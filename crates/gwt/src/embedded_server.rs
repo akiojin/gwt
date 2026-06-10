@@ -259,94 +259,37 @@ impl EmbeddedServer {
         let attachment_upload_token = Uuid::new_v4().to_string();
         let access_log = AccessLogSink::default();
 
-        let app = route_root_js_modules(
-            Router::new()
-                .route("/", get(embedded_web::index_handler))
-                .route("/app.js", get(embedded_web::app_js_handler)),
-        )
-        .route(
-            "/assets/xterm/xterm.mjs",
-            get(embedded_web::xterm_js_handler),
-        )
-        .route(
-            "/assets/xterm/addon-fit.mjs",
-            get(embedded_web::xterm_fit_js_handler),
-        )
-        .route(
-            "/assets/xterm/xterm.css",
-            get(embedded_web::xterm_css_handler),
-        )
-        // SPEC-2009 Phase 2b — highlight.js vendored module + dark theme
-        // for the File Tree text viewer syntax highlighting overlay.
-        .route(
-            "/assets/highlight/highlight.min.js",
-            get(embedded_web::highlight_js_handler),
-        )
-        .route(
-            "/assets/highlight/github-dark.min.css",
-            get(embedded_web::highlight_css_handler),
-        )
-        // SPEC-2356 Operator Design System — styles + fonts.
-        .route(
-            "/styles/tokens.css",
-            get(embedded_web::styles_tokens_css_handler),
-        )
-        .route(
-            "/styles/typography.css",
-            get(embedded_web::styles_typography_css_handler),
-        )
-        .route(
-            "/styles/components.css",
-            get(embedded_web::styles_components_css_handler),
-        )
-        .route("/styles/app.css", get(embedded_web::styles_app_css_handler))
-        .route(
-            "/assets/fonts/MonaSans.woff2",
-            get(embedded_web::font_mona_sans_handler),
-        )
-        .route(
-            "/assets/fonts/HubotSans-Regular.woff2",
-            get(embedded_web::font_hubot_regular_handler),
-        )
-        .route(
-            "/assets/fonts/HubotSans-Bold.woff2",
-            get(embedded_web::font_hubot_bold_handler),
-        )
-        .route(
-            "/assets/fonts/HubotSansCondensed-Bold.woff2",
-            get(embedded_web::font_hubot_condensed_bold_handler),
-        )
-        .route(
-            "/assets/fonts/JetBrainsMono.woff2",
-            get(embedded_web::font_jetbrains_mono_handler),
-        )
-        .route("/healthz", get(health_handler))
-        // SPEC-2963 Phase 5: OAuth redirect target for remote Board provider
-        // sign-in. Completes the flow against the process-global session store.
-        .route("/oauth/callback", get(oauth_callback_handler))
-        .route(
-            "/internal/attachment-upload-token",
-            get(attachment_upload_token_handler),
-        )
-        .route(
-            "/internal/attachments/upload",
-            post(attachment_upload_handler),
-        )
-        .route("/internal/hook-live", post(hook_live_handler))
-        .route("/ws", get(websocket_handler))
-        .with_state(ServerState {
-            proxy,
-            clients,
-            hook_forward_token: hook_forward_token.clone(),
-            attachment_upload_token,
-            attachment_uploads,
-            pty_writers,
-            access_log: access_log.clone(),
-        })
-        .layer(middleware::from_fn_with_state(
-            access_log.clone(),
-            access_log_middleware,
-        ));
+        // SPEC-3016: every embedded frontend asset route (entrypoints, root
+        // JS modules, vendor JS/CSS, stylesheets, fonts) is registered from
+        // the embedded_web manifest tables.
+        let app = route_root_js_modules(route_static_assets(Router::new()))
+            .route("/healthz", get(health_handler))
+            // SPEC-2963 Phase 5: OAuth redirect target for remote Board provider
+            // sign-in. Completes the flow against the process-global session store.
+            .route("/oauth/callback", get(oauth_callback_handler))
+            .route(
+                "/internal/attachment-upload-token",
+                get(attachment_upload_token_handler),
+            )
+            .route(
+                "/internal/attachments/upload",
+                post(attachment_upload_handler),
+            )
+            .route("/internal/hook-live", post(hook_live_handler))
+            .route("/ws", get(websocket_handler))
+            .with_state(ServerState {
+                proxy,
+                clients,
+                hook_forward_token: hook_forward_token.clone(),
+                attachment_upload_token,
+                attachment_uploads,
+                pty_writers,
+                access_log: access_log.clone(),
+            })
+            .layer(middleware::from_fn_with_state(
+                access_log.clone(),
+                access_log_middleware,
+            ));
 
         // SPEC-2963 FR-005: dedicated fixed-port loopback OAuth callback
         // listener. The OAuth redirect_uri must be a stable, pre-registered URL
@@ -440,6 +383,18 @@ fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState>
         router = router.route(
             asset.path,
             get(move || async move { embedded_web::root_js_module_response(asset) }),
+        );
+    }
+    router
+}
+
+/// Registers one GET route per [`embedded_web::StaticAsset`] manifest entry
+/// (SPEC-3016: the manifest is the routing source of truth).
+fn route_static_assets(mut router: Router<ServerState>) -> Router<ServerState> {
+    for asset in embedded_web::static_assets() {
+        router = router.route(
+            asset.route,
+            get(move || async move { embedded_web::static_asset_response(asset) }),
         );
     }
     router

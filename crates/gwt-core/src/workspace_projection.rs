@@ -1,3 +1,14 @@
+//! Workspace / Work projection: the repo-local "current state" model that the
+//! GUI, CLI, and hooks all read and update.
+//!
+//! SPEC-2359 Phase W-14 (US-70 / FR-378): every state transition of
+//! [`WorkspaceProjection`] (status category changes, agent merge/assign/retain
+//! rules, launch/start composition) is owned by the methods on
+//! [`WorkspaceProjection`] in this module. Callers in UI/CLI layers must go
+//! through these APIs; assigning transition fields (`status_category`,
+//! `status_text`, `next_action`, `agents`) directly from outside this module
+//! is not allowed in new code, so the transition rules stay single-source.
+
 use std::{
     fs,
     io::Write,
@@ -20,6 +31,17 @@ use crate::{
     },
 };
 
+/// Runtime activity of a Work / its assigned Agents, updated continuously
+/// while agents run ("is somebody working right now, and can they proceed?").
+///
+/// SPEC-2359 Phase W-14 (US-70 / FR-377): this is one of three deliberately
+/// distinct lifecycle enums. [`WorkspaceLifecycleStage`] is the user-facing
+/// workflow phase derived from events + this category (planning → active →
+/// in review → done → archived), and [`WorkActiveLifecycleState`] is the
+/// agent-session-centric Work lifecycle (active / paused / done / discarded,
+/// closed only by an explicit user action). They share variant names like
+/// `Active` / `Done` but answer different questions and have different
+/// transition rules — do not use them interchangeably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceStatusCategory {
@@ -30,6 +52,8 @@ pub enum WorkspaceStatusCategory {
     Unknown,
 }
 
+/// Whether an agent session is attached to a Workspace. `Unassigned` agents
+/// were launched outside Start Work and wait for the user to adopt them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceAgentAffiliationStatus {
@@ -119,6 +143,9 @@ fn canonical_work_slug(value: &str) -> String {
     }
 }
 
+/// Git execution context of a Workspace: branch, worktree path, base branch,
+/// and the linked PR snapshot. Populated by Start Work / Launch
+/// materialization and refreshed when PR state is polled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDetails {
     pub branch: Option<String>,
@@ -320,6 +347,8 @@ pub fn workspace_projection_default_created_at() -> DateTime<Utc> {
     DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now)
 }
 
+/// Why a branch/worktree pair is offered for cleanup: its Workspace reached
+/// Done, or its PR merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceCleanupReason {
@@ -336,6 +365,8 @@ impl WorkspaceCleanupReason {
     }
 }
 
+/// One branch/worktree pair proposed to the cleanup UI, with the reason and
+/// the default remote-delete decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCleanupCandidate {
     pub branch: String,
@@ -392,6 +423,9 @@ impl Default for WorkspaceRetentionConfig {
     }
 }
 
+/// Per-agent slice of a [`WorkspaceProjection`]: session identity, runtime
+/// status, current focus, and Board linkage. Updated from agent session
+/// events and `gwtd workspace update`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
@@ -427,6 +461,10 @@ impl WorkspaceAgentSummary {
     }
 }
 
+/// Materialized "current state" view of one Workspace (title, status,
+/// agents, git details). Persisted per project and consumed by the GUI; the
+/// Board stays the coordination/history log while this projection tracks the
+/// present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceProjection {
     pub id: String,
@@ -787,19 +825,236 @@ impl WorkspaceProjection {
         let removed = self.agents.len() != before;
         if removed {
             self.updated_at = updated_at;
-            if !self.agents.iter().any(|agent| {
-                agent.is_assigned()
-                    && matches!(
-                        agent.status_category,
-                        WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
-                    )
-            }) {
-                self.status_category = WorkspaceStatusCategory::Idle;
-                self.status_text = "No active work".to_string();
-                self.next_action = None;
+            if !self.has_current_agents() {
+                self.transition_to_idle(updated_at);
             }
         }
         removed
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): true when at least one assigned
+    /// agent is currently driving this Work (Active or Blocked). Unassigned
+    /// or idle agents do not count.
+    pub fn has_current_agents(&self) -> bool {
+        self.agents.iter().any(|agent| {
+            agent.is_assigned()
+                && matches!(
+                    agent.status_category,
+                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
+                )
+        })
+    }
+
+    /// The single Idle transition rule: Idle category, "No active work"
+    /// status text, cleared next action.
+    fn transition_to_idle(&mut self, updated_at: DateTime<Utc>) {
+        self.status_category = WorkspaceStatusCategory::Idle;
+        self.status_text = "No active work".to_string();
+        self.next_action = None;
+        self.updated_at = updated_at;
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): the agent merge rule. Updates
+    /// the summary stored for `summary.session_id` (or inserts it). A stored
+    /// `Blocked` status is never overwritten by a non-Blocked upsert, `None`
+    /// incoming identity fields never clear stored values, and `updated_at`
+    /// never rewinds.
+    pub fn upsert_agent_summary(&mut self, summary: WorkspaceAgentSummary) {
+        if let Some(existing) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.session_id == summary.session_id)
+        {
+            existing.agent_id = summary.agent_id;
+            existing.window_id = summary.window_id;
+            existing.display_name = summary.display_name;
+            existing.worktree_path = summary.worktree_path;
+            existing.branch = summary.branch;
+            if existing.status_category != WorkspaceStatusCategory::Blocked {
+                existing.status_category = summary.status_category;
+            }
+            if summary.current_focus.is_some() {
+                existing.current_focus = summary.current_focus;
+            }
+            if summary.last_board_entry_id.is_some() {
+                existing.last_board_entry_id = summary.last_board_entry_id;
+            }
+            if summary.last_board_entry_kind.is_some() {
+                existing.last_board_entry_kind = summary.last_board_entry_kind;
+            }
+            if summary.coordination_scope.is_some() {
+                existing.coordination_scope = summary.coordination_scope;
+            }
+            if summary.title_summary.is_some() {
+                existing.title_summary = summary.title_summary;
+            }
+            existing.affiliation_status = summary.affiliation_status;
+            existing.workspace_id = summary.workspace_id;
+            if summary.updated_at > existing.updated_at {
+                existing.updated_at = summary.updated_at;
+            }
+        } else {
+            self.agents.push(summary);
+        }
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): drop agents whose session is no
+    /// longer live and apply the Idle transition when no assigned Active or
+    /// Blocked agent remains. A projection that still has current agents is
+    /// left untouched.
+    pub fn retain_live_agents<'a>(
+        &mut self,
+        live_session_ids: impl IntoIterator<Item = &'a str>,
+        updated_at: DateTime<Utc>,
+    ) {
+        let live: std::collections::HashSet<&str> = live_session_ids.into_iter().collect();
+        self.agents
+            .retain(|agent| live.contains(agent.session_id.as_str()));
+        if !self.has_current_agents() {
+            self.transition_to_idle(updated_at);
+        }
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): reset the projection to the
+    /// idle "no current work" identity for a project tab, clearing the
+    /// work-specific identity fields alongside the Idle transition.
+    pub fn reset_idle_identity(&mut self, tab_title: &str, updated_at: DateTime<Utc>) {
+        let title = tab_title.trim();
+        self.title = if title.is_empty() {
+            "Project Work".to_string()
+        } else {
+            format!("{title} Work")
+        };
+        self.summary = None;
+        self.owner = None;
+        self.git_details = None;
+        self.board_refs.clear();
+        self.transition_to_idle(updated_at);
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): clear the git execution
+    /// details (after a worktree cleanup) and apply the Idle transition.
+    pub fn clear_git_details_to_idle(&mut self, updated_at: DateTime<Utc>) {
+        self.git_details = None;
+        self.transition_to_idle(updated_at);
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): the assign rule. Marks the
+    /// agent session as assigned to `workspace_id` and Active, merging the
+    /// optional identity fields only when provided. Returns false when the
+    /// session is unknown.
+    pub fn assign_agent(
+        &mut self,
+        session_id: &str,
+        workspace_id: &str,
+        current_focus: Option<String>,
+        title_summary: Option<String>,
+        updated_at: DateTime<Utc>,
+    ) -> bool {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .find(|agent| agent.session_id == session_id)
+        else {
+            return false;
+        };
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some(workspace_id.to_string());
+        agent.status_category = WorkspaceStatusCategory::Active;
+        if current_focus.is_some() {
+            agent.current_focus = current_focus;
+        }
+        if title_summary.is_some() {
+            agent.title_summary = title_summary;
+        }
+        agent.updated_at = updated_at;
+        true
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): reflect an agent launch
+    /// (Start Work / Resume) into the projection — the Active transition,
+    /// agent assignment, running-agents status text, and git details
+    /// composition with base-branch fallback.
+    pub fn apply_launch(
+        &mut self,
+        launch: WorkspaceLaunchUpdate,
+        mut agent: WorkspaceAgentSummary,
+        now: DateTime<Utc>,
+    ) {
+        if let Some(work_id) = launch.work_id {
+            self.id = work_id;
+        }
+        self.title = launch.title.unwrap_or_else(|| "Start Work".to_string());
+        self.status_category = WorkspaceStatusCategory::Active;
+        self.next_action = launch
+            .next_action
+            .or_else(|| Some("Check Board for latest updates".to_string()));
+        if let Some(summary) = launch.summary {
+            self.summary = Some(summary);
+        }
+        if let Some(owner) = launch.owner {
+            self.owner = Some(owner);
+        }
+        let display_name = agent.display_name.clone();
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some(self.id.clone());
+        self.upsert_agent_summary(agent);
+        let active_agents = self
+            .assigned_agents()
+            .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
+            .count();
+        self.status_text = if active_agents == 1 {
+            format!("{display_name} is running")
+        } else {
+            format!("{active_agents} active agents")
+        };
+        let previous_base_branch = self
+            .git_details
+            .as_ref()
+            .and_then(|details| details.base_branch.clone());
+        self.git_details = Some(GitDetails {
+            branch: Some(launch.branch),
+            worktree_path: Some(launch.worktree_path),
+            base_branch: launch.base_branch.or(previous_base_branch),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: launch.created_by_start_work,
+            created_at: now,
+        });
+        self.updated_at = now;
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): apply the Active identity of a
+    /// newly started Work (the CLI `workspace create` / `ensure` paths).
+    pub fn start_work(&mut self, start: WorkspaceStartUpdate, now: DateTime<Utc>) {
+        self.id = start.workspace_id;
+        self.title = start.title;
+        self.status_category = WorkspaceStatusCategory::Active;
+        self.status_text = start
+            .status_text
+            .unwrap_or_else(|| "Workspace created".to_string());
+        self.summary = start.summary;
+        self.owner = start.owner;
+        self.next_action = Some(start.next_action);
+        self.updated_at = now;
+    }
+
+    /// SPEC-2359 Phase W-14 (US-70 / FR-375): point the projection at an
+    /// existing Work item (the CLI `workspace join` / selection paths).
+    pub fn apply_work_item(&mut self, item: &WorkspaceWorkItem, updated_at: DateTime<Utc>) {
+        self.id = item.id.clone();
+        self.title = item.title.clone();
+        self.status_category = item.status_category;
+        self.status_text = item
+            .summary
+            .clone()
+            .or_else(|| item.intent.clone())
+            .unwrap_or_else(|| "Workspace selected".to_string());
+        self.summary = item.summary.clone().or_else(|| item.intent.clone());
+        self.owner = item.owner.clone();
+        self.updated_at = updated_at;
     }
 
     pub fn cleanup_candidate(
@@ -839,6 +1094,8 @@ impl WorkspaceProjection {
     }
 }
 
+/// Partial update applied to a [`WorkspaceProjection`] (e.g. from
+/// `gwtd workspace update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceProjectionUpdate {
     pub title: Option<String>,
@@ -852,6 +1109,42 @@ pub struct WorkspaceProjectionUpdate {
     pub agent_title_summary: Option<String>,
 }
 
+/// SPEC-2359 Phase W-14 (US-70 / FR-375): parameters for
+/// [`WorkspaceProjection::apply_launch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLaunchUpdate {
+    /// Canonical work id; `None` keeps the current projection id.
+    pub work_id: Option<String>,
+    /// Resume title; `None` falls back to "Start Work".
+    pub title: Option<String>,
+    /// Resume summary; `None` keeps the current summary.
+    pub summary: Option<String>,
+    /// Owner label (resume owner or "Issue #N"); `None` keeps the current owner.
+    pub owner: Option<String>,
+    /// Next action; `None` falls back to "Check Board for latest updates".
+    pub next_action: Option<String>,
+    pub branch: String,
+    pub worktree_path: PathBuf,
+    /// Launch base branch; `None` falls back to the previous git details.
+    pub base_branch: Option<String>,
+    pub created_by_start_work: bool,
+}
+
+/// SPEC-2359 Phase W-14 (US-70 / FR-375): parameters for
+/// [`WorkspaceProjection::start_work`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceStartUpdate {
+    pub workspace_id: String,
+    pub title: String,
+    /// Display status; `None` falls back to "Workspace created".
+    pub status_text: Option<String>,
+    pub summary: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: String,
+}
+
+/// One append-only journal record of a Workspace update, kept alongside the
+/// projection so state changes remain auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceJournalEntry {
     pub id: String,
@@ -868,6 +1161,7 @@ pub struct WorkspaceJournalEntry {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Reference from a Work item to one agent session that worked on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkAgentRef {
     pub session_id: String,
@@ -878,6 +1172,7 @@ pub struct WorkspaceWorkAgentRef {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Reference from a Work item to the branch / worktree / PR it executed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceExecutionContainerRef {
     #[serde(default)]
@@ -892,6 +1187,8 @@ pub struct WorkspaceExecutionContainerRef {
     pub pr_state: Option<String>,
 }
 
+/// Lifecycle event kind in a Work item's history (start, claim, update,
+/// pause, done, ...). Each kind maps to one [`WorkspaceWorkEvent`] record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceWorkEventKind {
@@ -916,6 +1213,8 @@ pub enum WorkspaceWorkEventKind {
     Discard,
 }
 
+/// One append-only event in a Work item's lifecycle. Events are folded into
+/// [`WorkspaceWorkItem`]s by [`WorkspaceWorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkEvent {
     pub id: String,
@@ -975,6 +1274,9 @@ impl WorkspaceWorkEvent {
     }
 }
 
+/// One unit of work on the Work surface: title, status, participating
+/// agents, execution containers, and its event history. Built by folding
+/// [`WorkspaceWorkEvent`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkItem {
     pub id: String,
@@ -1023,6 +1325,8 @@ impl WorkspaceWorkItem {
     }
 }
 
+/// Materialized collection of all Work items for one project, rebuilt by
+/// folding the Work event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkItemsProjection {
     pub updated_at: DateTime<Utc>,
@@ -5525,5 +5829,430 @@ mod tests {
             WorkspaceStatusCategory::Done,
             "Done terminal state recovered via repo-local replay"
         );
+    }
+
+    // --- SPEC-2359 Phase W-14 (US-70 / FR-375, SC-251): transition service ---
+
+    fn us70_agent(
+        session_id: &str,
+        status_category: WorkspaceStatusCategory,
+        affiliation_status: WorkspaceAgentAffiliationStatus,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status,
+            workspace_id: None,
+            updated_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn upsert_agent_summary_preserves_blocked_status_and_merges_fields() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut blocked = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Blocked,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        blocked.current_focus = Some("blocked focus".to_string());
+        projection.agents.push(blocked);
+
+        let mut incoming = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        incoming.display_name = "Codex 2".to_string();
+        incoming.updated_at = Utc.timestamp_opt(2_000, 0).unwrap();
+        projection.upsert_agent_summary(incoming);
+
+        let agent = &projection.agents[0];
+        assert_eq!(
+            agent.status_category,
+            WorkspaceStatusCategory::Blocked,
+            "Blocked must not be overwritten by a non-Blocked upsert"
+        );
+        assert_eq!(agent.display_name, "Codex 2");
+        assert_eq!(
+            agent.current_focus.as_deref(),
+            Some("blocked focus"),
+            "a None incoming focus must not clear the stored focus"
+        );
+        assert_eq!(agent.updated_at, Utc.timestamp_opt(2_000, 0).unwrap());
+    }
+
+    #[test]
+    fn upsert_agent_summary_inserts_new_sessions_and_never_rewinds_updated_at() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut first = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        first.updated_at = Utc.timestamp_opt(2_000, 0).unwrap();
+        projection.upsert_agent_summary(first);
+        assert_eq!(projection.agents.len(), 1);
+
+        let mut stale = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        stale.updated_at = Utc.timestamp_opt(500, 0).unwrap();
+        projection.upsert_agent_summary(stale);
+        assert_eq!(
+            projection.agents[0].updated_at,
+            Utc.timestamp_opt(2_000, 0).unwrap(),
+            "an older upsert must not rewind updated_at"
+        );
+    }
+
+    #[test]
+    fn retain_live_agents_transitions_to_idle_when_no_assigned_agent_remains() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection.status_text = "Codex is running".to_string();
+        projection.next_action = Some("Keep going".to_string());
+        projection.agents.push(us70_agent(
+            "dead",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+
+        let now = Utc.timestamp_opt(3_000, 0).unwrap();
+        projection.retain_live_agents(["live-other"], now);
+
+        assert!(projection.agents.is_empty());
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(projection.status_text, "No active work");
+        assert_eq!(projection.next_action, None);
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn retain_live_agents_keeps_active_state_while_assigned_agent_lives() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let before = projection.updated_at;
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection.status_text = "Codex is running".to_string();
+        projection.agents.push(us70_agent(
+            "live",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+
+        projection.retain_live_agents(["live"], Utc.timestamp_opt(3_000, 0).unwrap());
+
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(projection.status_text, "Codex is running");
+        assert_eq!(
+            projection.updated_at, before,
+            "a live projection must not be touched by retain"
+        );
+    }
+
+    #[test]
+    fn assign_agent_marks_assigned_active_and_merges_identity() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Idle,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        ));
+
+        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        assert!(projection.assign_agent(
+            "sess-1",
+            "work-abc",
+            Some("focus".to_string()),
+            None,
+            now
+        ));
+        let agent = &projection.agents[0];
+        assert!(agent.is_assigned());
+        assert_eq!(agent.workspace_id.as_deref(), Some("work-abc"));
+        assert_eq!(agent.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(agent.current_focus.as_deref(), Some("focus"));
+        assert_eq!(
+            agent.title_summary, None,
+            "a None title_summary must not overwrite"
+        );
+        assert_eq!(agent.updated_at, now);
+
+        assert!(
+            !projection.assign_agent("unknown", "work-abc", None, None, now),
+            "assigning an unknown session must report false"
+        );
+    }
+
+    #[test]
+    fn apply_launch_composes_active_projection_with_defaults() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/old".to_string()),
+            worktree_path: None,
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: false,
+            created_at: Utc.timestamp_opt(10, 0).unwrap(),
+        });
+
+        let agent = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-foo-12345678".to_string()),
+                title: None,
+                summary: None,
+                owner: Some("Issue #42".to_string()),
+                next_action: None,
+                branch: "work/foo".to_string(),
+                worktree_path: PathBuf::from("/wt"),
+                base_branch: None,
+                created_by_start_work: true,
+            },
+            agent,
+            now,
+        );
+
+        assert_eq!(projection.id, "work-foo-12345678");
+        assert_eq!(projection.title, "Start Work");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Check Board for latest updates")
+        );
+        assert_eq!(projection.owner.as_deref(), Some("Issue #42"));
+        assert_eq!(projection.status_text, "Codex is running");
+        let details = projection.git_details.as_ref().expect("git details");
+        assert_eq!(details.branch.as_deref(), Some("work/foo"));
+        assert_eq!(details.worktree_path.as_deref(), Some(Path::new("/wt")));
+        assert_eq!(
+            details.base_branch.as_deref(),
+            Some("origin/develop"),
+            "base branch must fall back to the previous git details"
+        );
+        assert!(details.created_by_start_work);
+        let stored = &projection.agents[0];
+        assert!(stored.is_assigned());
+        assert_eq!(stored.workspace_id.as_deref(), Some("work-foo-12345678"));
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn apply_launch_reports_multiple_active_agents() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut resident = us70_agent(
+            "sess-0",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        resident.workspace_id = Some("work-foo-12345678".to_string());
+        projection.agents.push(resident);
+
+        let agent = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-foo-12345678".to_string()),
+                title: Some("Resume Work".to_string()),
+                summary: Some("resume summary".to_string()),
+                owner: None,
+                next_action: Some("Pick up review".to_string()),
+                branch: "work/foo".to_string(),
+                worktree_path: PathBuf::from("/wt"),
+                base_branch: Some("origin/main".to_string()),
+                created_by_start_work: false,
+            },
+            agent,
+            Utc.timestamp_opt(6_000, 0).unwrap(),
+        );
+
+        assert_eq!(projection.title, "Resume Work");
+        assert_eq!(projection.summary.as_deref(), Some("resume summary"));
+        assert_eq!(projection.next_action.as_deref(), Some("Pick up review"));
+        assert_eq!(projection.status_text, "2 active agents");
+        assert_eq!(
+            projection
+                .git_details
+                .as_ref()
+                .and_then(|details| details.base_branch.as_deref()),
+            Some("origin/main")
+        );
+    }
+
+    #[test]
+    fn start_work_applies_active_identity_with_defaults() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let now = Utc.timestamp_opt(7_000, 0).unwrap();
+        projection.start_work(
+            WorkspaceStartUpdate {
+                workspace_id: "workspace-1".to_string(),
+                title: "New Work".to_string(),
+                status_text: None,
+                summary: Some("focus text".to_string()),
+                owner: Some("SPEC-1".to_string()),
+                next_action: "Coordinate on Board before implementation".to_string(),
+            },
+            now,
+        );
+
+        assert_eq!(projection.id, "workspace-1");
+        assert_eq!(projection.title, "New Work");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(projection.status_text, "Workspace created");
+        assert_eq!(projection.summary.as_deref(), Some("focus text"));
+        assert_eq!(projection.owner.as_deref(), Some("SPEC-1"));
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Coordinate on Board before implementation")
+        );
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn apply_work_item_copies_status_fields() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let now = Utc.timestamp_opt(8_000, 0).unwrap();
+        let item = WorkspaceWorkItem {
+            id: "item-1".to_string(),
+            title: "Item Title".to_string(),
+            intent: Some("intent text".to_string()),
+            summary: None,
+            status_category: WorkspaceStatusCategory::Blocked,
+            owner: Some("Issue #7".to_string()),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            agents: Vec::new(),
+            execution_containers: Vec::new(),
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+            discarded: false,
+        };
+
+        projection.apply_work_item(&item, now);
+
+        assert_eq!(projection.id, "item-1");
+        assert_eq!(projection.title, "Item Title");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Blocked);
+        assert_eq!(projection.status_text, "intent text");
+        assert_eq!(projection.summary.as_deref(), Some("intent text"));
+        assert_eq!(projection.owner.as_deref(), Some("Issue #7"));
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn reset_idle_identity_clears_identity_and_transitions_to_idle() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection.status_text = "Codex is running".to_string();
+        projection.summary = Some("summary".to_string());
+        projection.owner = Some("owner".to_string());
+        projection.next_action = Some("next".to_string());
+        projection.board_refs.push("board-1".to_string());
+
+        let now = Utc.timestamp_opt(9_000, 0).unwrap();
+        projection.reset_idle_identity("My Repo", now);
+
+        assert_eq!(projection.title, "My Repo Work");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(projection.status_text, "No active work");
+        assert_eq!(projection.summary, None);
+        assert_eq!(projection.owner, None);
+        assert_eq!(projection.next_action, None);
+        assert_eq!(projection.git_details, None);
+        assert!(projection.board_refs.is_empty());
+        assert_eq!(projection.updated_at, now);
+
+        projection.reset_idle_identity("  ", now);
+        assert_eq!(
+            projection.title, "Project Work",
+            "a blank tab title must fall back to Project Work"
+        );
+    }
+
+    #[test]
+    fn clear_git_details_to_idle_clears_details_and_transitions() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection.status_text = "Codex is running".to_string();
+        projection.next_action = Some("next".to_string());
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/foo".to_string()),
+            worktree_path: None,
+            base_branch: None,
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: false,
+            created_at: Utc.timestamp_opt(10, 0).unwrap(),
+        });
+
+        let now = Utc.timestamp_opt(10_000, 0).unwrap();
+        projection.clear_git_details_to_idle(now);
+
+        assert_eq!(projection.git_details, None);
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(projection.status_text, "No active work");
+        assert_eq!(projection.next_action, None);
+        assert_eq!(projection.updated_at, now);
+    }
+
+    #[test]
+    fn has_current_agents_requires_assigned_active_or_blocked() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        assert!(!projection.has_current_agents());
+
+        projection.agents.push(us70_agent(
+            "unassigned",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        ));
+        assert!(
+            !projection.has_current_agents(),
+            "unassigned agents must not count"
+        );
+
+        projection.agents.push(us70_agent(
+            "idle",
+            WorkspaceStatusCategory::Idle,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+        assert!(
+            !projection.has_current_agents(),
+            "assigned idle agents must not count"
+        );
+
+        projection.agents.push(us70_agent(
+            "blocked",
+            WorkspaceStatusCategory::Blocked,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+        assert!(projection.has_current_agents());
     }
 }

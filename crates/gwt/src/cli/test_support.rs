@@ -3,6 +3,11 @@
 //! sample fixtures so each family's `tests` mod can drop them in without
 //! duplicating the substantial fake-binary source.
 //!
+//! Division of labor (SPEC-3016 FR-003): generic, crate-agnostic helpers
+//! (`env_lock`, `ScopedEnvVar`) live in `gwt_core::test_support` and are
+//! re-exported here; gwt-only machinery (fake `gh`, CLI fixtures) stays in
+//! this module.
+//!
 //! `#[cfg(test)]` only — never compiled into the production library.
 
 #![cfg(test)]
@@ -193,10 +198,10 @@ fn main() -> ExitCode {
     // process-wide CWD to a tempdir that gets dropped, and rustc refuses to
     // start from a deleted CWD ("Current directory is invalid", #3006).
     let status = std::process::Command::new("rustc")
-        .current_dir(bin_dir)
         .arg(&source_path)
         .arg("-o")
         .arg(&output_path)
+        .current_dir(bin_dir)
         .status()
         .expect("compile fake gh");
     assert!(status.success(), "fake gh compilation failed");
@@ -287,34 +292,10 @@ pub fn sample_pr_status() -> gwt_git::PrStatus {
     }
 }
 
-pub struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ScopedEnvVar {
-    pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = env::var_os(key);
-        env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    pub(crate) fn unset(key: &'static str) -> Self {
-        let previous = env::var_os(key);
-        env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.as_ref() {
-            env::set_var(self.key, previous);
-        } else {
-            env::remove_var(self.key);
-        }
-    }
-}
+// SPEC-3016 FR-003: the env-var guard is shared infrastructure; its
+// canonical home is gwt-core (`test-support` feature). Re-exported so cli
+// tests keep one import path.
+pub use gwt_core::test_support::ScopedEnvVar;
 
 pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<&'a str> {
     value["hooks"][event]
