@@ -3884,13 +3884,15 @@ mod tests {
         mgr.write_restart_args_file(&args_path, vec!["--version".to_string()])
             .expect("write restart args");
 
-        assert!(is_process_running(std::process::id()));
-        assert!(!is_process_running(999_999));
+        let executor = SystemProcessExecutor;
+        assert!(is_process_running(std::process::id(), &executor));
+        assert!(!is_process_running(999_999, &executor));
 
         let timeout_err =
-            wait_for_pid_exit(std::process::id(), StdDuration::from_millis(1)).unwrap_err();
+            wait_for_pid_exit(std::process::id(), StdDuration::from_millis(1), &executor)
+                .unwrap_err();
         assert!(timeout_err.contains("Timed out waiting for process"));
-        assert!(wait_for_pid_exit(999_999, StdDuration::from_millis(1)).is_ok());
+        assert!(wait_for_pid_exit(999_999, StdDuration::from_millis(1), &executor).is_ok());
 
         let mac_pkg_err = internal_run_installer(
             999_999,
