@@ -1151,6 +1151,11 @@ mod tests {
         let status_probe_calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
+            let expected_request = if status_probe_calls.load(Ordering::SeqCst) == 0 {
+                super::ProjectIndexBootstrapRequest::Spawned
+            } else {
+                super::ProjectIndexBootstrapRequest::AlreadyRunning
+            };
             let status_probe_calls_for_closure = status_probe_calls.clone();
             let request = service.spawn_full_status_refresh_with_retry(
                 proxy.clone(),
@@ -1165,11 +1170,6 @@ mod tests {
                 }),
                 Duration::from_millis(5),
             );
-            let expected_request = if status_probe_calls.load(Ordering::SeqCst) == 0 {
-                super::ProjectIndexBootstrapRequest::Spawned
-            } else {
-                super::ProjectIndexBootstrapRequest::AlreadyRunning
-            };
             assert_eq!(request, expected_request);
             wait_for_project_status_detail(&events, &expected_project_root, "unchanged full table");
             for _ in 0..100 {

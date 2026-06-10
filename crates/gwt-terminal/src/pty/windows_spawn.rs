@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -20,18 +21,14 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
         config.cwd = Some(gwt_core::paths::normalize_windows_child_process_path(cwd));
     }
 
-    let resolved = resolve_spawn_target(&config.command, &config.env, &config.remove_env)
-        .unwrap_or_else(|| WindowsSpawnTarget {
-            command: config.command.clone(),
-            args_prefix: Vec::new(),
-        });
-
-    match spawn_wrapper(
-        Path::new(&resolved.command),
+    let (command, args) = normalize_host_shell_command(
+        &config.command,
         &config.args,
         &config.env,
         &config.remove_env,
-    ) {
+    );
+
+    match spawn_wrapper(Path::new(&command), &args, &config.env, &config.remove_env) {
         Some((command, args, expression)) => {
             config.command = command;
             config.args = args;
@@ -40,14 +37,28 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
                 .insert(CMD_WRAPPER_EXPRESSION_ENV.to_string(), expression);
         }
         None => {
-            let mut args = resolved.args_prefix;
-            args.extend(config.args);
-            config.command = resolved.command;
+            config.command = command;
             config.args = args;
         }
     }
 
     config
+}
+
+pub(super) fn normalize_host_shell_command(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> (String, Vec<String>) {
+    let command = normalize_command_token(command);
+    let resolved = resolve_spawn_target(&command, env, remove_env).unwrap_or(WindowsSpawnTarget {
+        command,
+        args_prefix: Vec::new(),
+    });
+    let mut normalized_args = resolved.args_prefix;
+    normalized_args.extend(args.iter().cloned());
+    (resolved.command, normalized_args)
 }
 
 fn normalize_command_token(command: &str) -> String {
@@ -152,7 +163,7 @@ fn resolve_path_candidate(
         }
         for ext in windows_path_extensions(env, remove_env) {
             let with_ext = candidate.with_extension(ext.trim_start_matches('.'));
-            if let Some(target) = resolve_existing_path(&with_ext) {
+            if let Some(target) = resolve_path_candidate(&with_ext, env, remove_env) {
                 return Some(target);
             }
         }
@@ -384,6 +395,25 @@ fn is_bun_managed_pe_shim(candidate: &Path) -> bool {
     })
 }
 
+fn bun_global_node_modules_from_bin_shim(candidate: &Path) -> Option<PathBuf> {
+    let bin_dir = candidate.parent()?;
+    if !path_file_name_eq(bin_dir, "bin") {
+        return None;
+    }
+    let bun_root = bin_dir.parent()?;
+    if !path_file_name_eq(bun_root, ".bun") {
+        return None;
+    }
+    Some(bun_root.join("install").join("global").join("node_modules"))
+}
+
+fn path_file_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
 // Walk up at most 5 levels from `<bin>/<name>.exe` to find the directory that
 // owns `package.json`. Both flat (`node_modules/<pkg>/`) and scoped
 // (`node_modules/@scope/<pkg>/`) layouts settle within this limit.
@@ -423,6 +453,131 @@ fn resolve_bin_entry_from_package_json(package_root: &Path, desired_name: &str) 
     Some(PathBuf::from(relative))
 }
 
+fn resolve_bin_entry_from_package_json_for_global(
+    package_root: &Path,
+    desired_name: &str,
+) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(package_root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let bin = json.get("bin")?;
+    let relative = match bin {
+        serde_json::Value::String(value) => {
+            let package_name = package_root.file_name()?.to_str()?;
+            package_name
+                .eq_ignore_ascii_case(desired_name)
+                .then_some(value.as_str())?
+        }
+        serde_json::Value::Object(map) => {
+            let entry = map
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(desired_name))
+                .map(|(_, value)| value)?;
+            entry.as_str()?
+        }
+        _ => return None,
+    };
+    Some(PathBuf::from(relative))
+}
+
+fn resolve_bun_package_bin(
+    package_root: &Path,
+    desired_name: &str,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<WindowsSpawnTarget> {
+    let cli_relative = resolve_bin_entry_from_package_json(package_root, desired_name)?;
+    resolve_bun_package_entry(package_root, desired_name, &cli_relative, env, remove_env)
+}
+
+fn resolve_bun_global_package_bin(
+    package_root: &Path,
+    desired_name: &str,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<WindowsSpawnTarget> {
+    let cli_relative = resolve_bin_entry_from_package_json_for_global(package_root, desired_name)?;
+    resolve_bun_package_entry(package_root, desired_name, &cli_relative, env, remove_env)
+}
+
+fn resolve_bun_package_entry(
+    package_root: &Path,
+    desired_name: &str,
+    cli_relative: &Path,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<WindowsSpawnTarget> {
+    let cli_absolute = package_root.join(cli_relative);
+    if !cli_absolute.is_file() {
+        return None;
+    }
+    if let Some(target) =
+        resolve_bun_placeholder_target(package_root, desired_name, &cli_absolute, env, remove_env)
+    {
+        return Some(target);
+    }
+    let runtime = locate_bun_runtime(env, remove_env);
+    Some(WindowsSpawnTarget {
+        command: runtime,
+        args_prefix: vec![cli_absolute.display().to_string()],
+    })
+}
+
+fn resolve_bun_placeholder_target(
+    package_root: &Path,
+    desired_name: &str,
+    cli_absolute: &Path,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<WindowsSpawnTarget> {
+    if !is_bun_text_placeholder_stub(cli_absolute) {
+        return None;
+    }
+
+    let cli_wrapper = package_root.join("cli-wrapper.cjs");
+    if cli_wrapper.is_file() {
+        return Some(WindowsSpawnTarget {
+            command: locate_node_runtime(env, remove_env),
+            args_prefix: vec![cli_wrapper.display().to_string()],
+        });
+    }
+
+    optional_windows_native_binary(package_root, desired_name).map(|native| WindowsSpawnTarget {
+        command: native.display().to_string(),
+        args_prefix: Vec::new(),
+    })
+}
+
+fn is_bun_text_placeholder_stub(path: &Path) -> bool {
+    if !has_executable_extension(path) {
+        return false;
+    }
+    let Some(prefix) = read_file_prefix(path, 4096) else {
+        return false;
+    };
+    if prefix.starts_with(b"MZ") {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&prefix).to_ascii_lowercase();
+    text.contains("native binary not installed")
+}
+
+fn read_file_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0; limit];
+    let len = file.read(&mut buf).ok()?;
+    buf.truncate(len);
+    Some(buf)
+}
+
+fn optional_windows_native_binary(package_root: &Path, desired_name: &str) -> Option<PathBuf> {
+    let package_name = package_root.file_name()?.to_str()?;
+    let package_parent = package_root.parent()?;
+    let candidate = package_parent
+        .join(format!("{package_name}-win32-x64"))
+        .join(format!("{desired_name}.exe"));
+    candidate.is_file().then_some(candidate)
+}
+
 // Locate a runtime that can execute the JS entry. Preference order:
 //   1. `bun.exe` on PATH
 //   2. `%USERPROFILE%\.bun\bin\bun.exe`
@@ -446,6 +601,10 @@ fn locate_bun_runtime(env: &HashMap<String, String>, remove_env: &[String]) -> S
     "bun".to_string()
 }
 
+fn locate_node_runtime(env: &HashMap<String, String>, remove_env: &[String]) -> String {
+    find_executable_on_path("node.exe", env, remove_env).unwrap_or_else(|| "node".to_string())
+}
+
 fn find_executable_on_path(
     name: &str,
     env: &HashMap<String, String>,
@@ -464,26 +623,57 @@ fn find_executable_on_path(
     None
 }
 
+fn collect_bun_global_package_roots(node_modules: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let Ok(entries) = std::fs::read_dir(node_modules) else {
+        return roots;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.starts_with('@') {
+            if let Ok(scoped_entries) = std::fs::read_dir(&path) {
+                for scoped_entry in scoped_entries.flatten() {
+                    let scoped_path = scoped_entry.path();
+                    if scoped_path.join("package.json").is_file() {
+                        roots.push(scoped_path);
+                    }
+                }
+            }
+        } else if path.join("package.json").is_file() {
+            roots.push(path);
+        }
+    }
+    roots.sort();
+    roots
+}
+
 fn parse_bun_pe_shim(
     candidate: &Path,
     env: &HashMap<String, String>,
     remove_env: &[String],
 ) -> Option<WindowsSpawnTarget> {
-    if !is_bun_managed_pe_shim(candidate) {
-        return None;
-    }
     let stem = candidate.file_stem()?.to_str()?;
-    let package_root = locate_bun_package_root(candidate)?;
-    let cli_relative = resolve_bin_entry_from_package_json(&package_root, stem)?;
-    let cli_absolute = package_root.join(&cli_relative);
-    if !cli_absolute.is_file() {
-        return None;
+    if is_bun_managed_pe_shim(candidate) {
+        let package_root = locate_bun_package_root(candidate)?;
+        return resolve_bun_package_bin(&package_root, stem, env, remove_env);
     }
-    let runtime = locate_bun_runtime(env, remove_env);
-    Some(WindowsSpawnTarget {
-        command: runtime,
-        args_prefix: vec![cli_absolute.display().to_string()],
-    })
+
+    if let Some(node_modules) = bun_global_node_modules_from_bin_shim(candidate) {
+        for package_root in collect_bun_global_package_roots(&node_modules) {
+            if let Some(target) =
+                resolve_bun_global_package_bin(&package_root, stem, env, remove_env)
+            {
+                return Some(target);
+            }
+        }
+    }
+    None
 }
 
 fn has_executable_extension(path: &Path) -> bool {
@@ -1057,6 +1247,100 @@ mod tests {
             normalized.command,
         );
         assert_eq!(normalized.args, vec![cli_js.display().to_string()]);
+    }
+
+    #[test]
+    fn claude_placeholder_stub_resolves_to_cli_wrapper_instead_of_direct_exe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bin_exe, _pkg_root, cli_wrapper) = fake_bun_install(
+            temp.path(),
+            "@anthropic-ai/claude-code",
+            "claude",
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+            "cli-wrapper.cjs",
+        );
+        std::fs::write(
+            &bin_exe,
+            "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+        )
+        .expect("write placeholder stub");
+        let nodejs_dir = temp.path().join("nodejs");
+        std::fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
+        let node_exe = nodejs_dir.join("node.exe");
+        std::fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), nodejs_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config(
+            bin_exe.display().to_string().as_str(),
+            vec!["--version".to_string()],
+            env,
+        );
+
+        assert_eq!(normalized.command, node_exe.display().to_string());
+        assert_eq!(normalized.args.len(), 2);
+        assert_eq!(
+            PathBuf::from(&normalized.args[0]),
+            cli_wrapper,
+            "expected cli-wrapper.cjs as first arg"
+        );
+        assert_eq!(normalized.args[1], "--version");
+    }
+
+    #[test]
+    fn bun_global_bin_shim_resolves_package_before_direct_exe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bin_exe, _pkg_root, cli_wrapper) = fake_bun_install(
+            temp.path(),
+            "@anthropic-ai/claude-code",
+            "claude",
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+            "cli-wrapper.cjs",
+        );
+        std::fs::write(
+            &bin_exe,
+            "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+        )
+        .expect("write placeholder stub");
+        let bun_bin_dir = temp.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&bun_bin_dir).expect("bun bin");
+        let bun_global_shim = bun_bin_dir.join("claude.exe");
+        std::fs::write(&bun_global_shim, b"MZ\x00\x00bun-global-shim").expect("global shim");
+        let nodejs_dir = temp.path().join("nodejs");
+        std::fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
+        let node_exe = nodejs_dir.join("node.exe");
+        std::fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            std::env::join_paths([bun_bin_dir.as_path(), nodejs_dir.as_path()])
+                .expect("join PATH")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config("claude", vec!["--print".to_string()], env);
+
+        assert_eq!(normalized.command, node_exe.display().to_string());
+        assert_eq!(normalized.args.len(), 2);
+        assert_eq!(
+            PathBuf::from(&normalized.args[0]),
+            cli_wrapper,
+            "expected cli-wrapper.cjs as first arg"
+        );
+        assert_eq!(normalized.args[1], "--print");
     }
 
     #[test]
