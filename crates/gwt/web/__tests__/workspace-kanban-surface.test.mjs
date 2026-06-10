@@ -755,3 +755,57 @@ test("sessionless Workspace offers a Launch control that opens the launch wizard
   assert.equal(sent[0].kind, "open_active_work_launch_wizard");
   assert.equal(sent[0].branch_name, "work/foo");
 });
+
+// Layout feedback (2026-06-10 user verification): the Launch control must sit
+// in the flex empty-state row (same as the Resume placeholder), not overlap
+// the "No Work yet" text; and a backfilled row whose title IS the branch name
+// must not repeat the same string as subtitle meta.
+test("Launch control uses the flex empty-state row and duplicate branch meta is suppressed", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/foo",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/foo",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "Launch control must exist");
+  assert.ok(
+    launch.parentElement.classList.contains("workspace-detail-session-empty"),
+    "Launch must sit in the flex empty-state row so it does not overlap the text",
+  );
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  const title = row.querySelector(".workspace-overview-row-title").textContent.trim();
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.equal(title, "work/foo");
+  assert.ok(
+    !metaTexts.includes("work/foo"),
+    `branch meta must be suppressed when identical to the title: ${JSON.stringify(metaTexts)}`,
+  );
+});

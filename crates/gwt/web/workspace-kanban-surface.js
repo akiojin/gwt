@@ -240,7 +240,12 @@ export function createWorkspaceKanbanSurface({
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
-    appendMetaText(meta, item.branch);
+    // A backfilled Workspace is titled by its branch name; repeating the same
+    // string as subtitle meta is noise, so only show the branch when it adds
+    // information beyond the title.
+    if (item.branch !== item.title) {
+      appendMetaText(meta, item.branch);
+    }
     const prMeta = createWorkspacePrMeta?.(item);
     if (prMeta) {
       meta.appendChild(prMeta);
@@ -326,7 +331,13 @@ export function createWorkspaceKanbanSurface({
   function appendWorks(container, works, workspace) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
-      const empty = createNode("div", "workspace-overview-empty", "No Work yet");
+      // The flex empty-state row (shared with the Resume placeholder) keeps
+      // the Launch control beside the text instead of overlapping it.
+      const empty = createNode(
+        "div",
+        "workspace-overview-empty workspace-detail-session-empty",
+        "No Work yet",
+      );
       // SPEC-2359 W-15 (FR-379 follow-up): a record without any Work (e.g. a
       // backfilled worktree) must stay actionable — offer a Launch control
       // that opens the launch wizard prefilled with the Workspace's branch.
