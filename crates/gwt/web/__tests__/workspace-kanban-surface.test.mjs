@@ -710,3 +710,48 @@ function createNode(document, tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+
+// SPEC-2359 W-15 (FR-379 follow-up, user verification 2026-06-10): a
+// Workspace whose record has no Work (e.g. a backfilled worktree) must stay
+// actionable — the detail offers a Launch control that opens the launch
+// wizard prefilled with the Workspace's branch (a new Work joining this
+// Workspace), instead of a dead "No Work yet" placeholder.
+test("sessionless Workspace offers a Launch control that opens the launch wizard for its branch", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/foo",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/foo",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "sessionless Workspace detail must offer a Launch control");
+  launch.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "open_active_work_launch_wizard");
+  assert.equal(sent[0].branch_name, "work/foo");
+});

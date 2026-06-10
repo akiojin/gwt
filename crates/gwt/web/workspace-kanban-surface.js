@@ -323,10 +323,29 @@ export function createWorkspaceKanbanSurface({
   // heading only appears when the Workspace has more than one Work. Persistent
   // Works always render (no live-only filtering), so Paused Workspaces are not
   // mislabelled "No assigned agents".
-  function appendWorks(container, works) {
+  function appendWorks(container, works, workspace) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
-      container.appendChild(createNode("div", "workspace-overview-empty", "No Work yet"));
+      const empty = createNode("div", "workspace-overview-empty", "No Work yet");
+      // SPEC-2359 W-15 (FR-379 follow-up): a record without any Work (e.g. a
+      // backfilled worktree) must stay actionable — offer a Launch control
+      // that opens the launch wizard prefilled with the Workspace's branch.
+      // The new launch becomes a new Work joining this Workspace.
+      const branch = workspace && workspace.branch ? String(workspace.branch) : "";
+      if (branch) {
+        const launch = createNode("button", "wizard-button is-compact", "Launch");
+        launch.type = "button";
+        launch.dataset.action = "launch-workspace";
+        launch.addEventListener("click", () => {
+          send({
+            kind: "open_active_work_launch_wizard",
+            branch_name: branch,
+            linked_issue_number: null,
+          });
+        });
+        empty.appendChild(launch);
+      }
+      container.appendChild(empty);
       return;
     }
     const wrap = createNode("div", "workspace-detail-work-list");
@@ -719,7 +738,7 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Work", (body) => {
-        appendWorks(body, workspace.agents);
+        appendWorks(body, workspace.agents, workspace);
       }),
     );
     container.appendChild(
