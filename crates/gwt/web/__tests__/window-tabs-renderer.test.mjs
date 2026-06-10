@@ -23,7 +23,7 @@ function setupDom() {
 }
 
 function render(deps = {}) {
-  const { strip = setupDom().strip, sends = [], drags = [] } = deps;
+  const { strip = setupDom().strip, sends = [], drags = [], closes = [] } = deps;
   renderWindowTabs({
     strip,
     tabs: deps.tabs ?? DEFAULT_TABS,
@@ -31,13 +31,14 @@ function render(deps = {}) {
     tooltipForWindow:
       deps.tooltipForWindow ?? ((tab) => `Tooltip for ${tab.title}`),
     send: deps.send ?? ((payload) => sends.push(payload)),
+    requestClose: deps.requestClose ?? ((id) => closes.push(id)),
     onTabDragStart:
       deps.onTabDragStart ?? ((event, id) => drags.push(["start", id])),
     onTabDrag: deps.onTabDrag ?? ((event, id) => drags.push(["drag", id])),
     onTabDragEnd:
       deps.onTabDragEnd ?? ((event, id) => drags.push(["end", id])),
   });
-  return { strip, sends, drags };
+  return { strip, sends, drags, closes };
 }
 
 test("renderWindowTabs preserves tab DOM across active-tab changes", () => {
@@ -92,10 +93,11 @@ test("renderWindowTabs preserves tab DOM across active-tab changes", () => {
 test("renderWindowTabs keeps one activate/close binding per stable tab node", () => {
   const { strip } = setupDom();
   const sends = [];
+  const closes = [];
 
-  render({ strip, sends });
-  render({ strip, sends, activeWindowId: "win-2" });
-  render({ strip, sends, activeWindowId: "win-1" });
+  render({ strip, sends, closes });
+  render({ strip, sends, closes, activeWindowId: "win-2" });
+  render({ strip, sends, closes, activeWindowId: "win-1" });
 
   const firstButton = strip.querySelector(
     '[data-window-tab-id="win-1"] .window-tab',
@@ -115,10 +117,34 @@ test("renderWindowTabs keeps one activate/close binding per stable tab node", ()
     }),
   );
 
-  assert.deepEqual(sends, [
-    { kind: "activate_window_tab", id: "win-1" },
-    { kind: "close_window", id: "win-2" },
-  ]);
+  assert.deepEqual(sends, [{ kind: "activate_window_tab", id: "win-1" }]);
+  assert.deepEqual(
+    closes,
+    ["win-2"],
+    "tab × must route through the close-confirm callback exactly once",
+  );
+});
+
+test("tab close button never sends close_window directly (SPEC-3038 US-3)", () => {
+  // The Close Guard owns the actual close: the renderer only reports intent.
+  const { strip } = setupDom();
+  const sends = [];
+  const closes = [];
+
+  render({ strip, sends, closes });
+  const close = strip.querySelector(
+    '[data-window-tab-id="win-1"] .window-tab-close',
+  );
+  close.dispatchEvent(
+    new close.ownerDocument.defaultView.Event("click", { bubbles: true }),
+  );
+
+  assert.deepEqual(closes, ["win-1"]);
+  assert.equal(
+    sends.some((message) => message?.kind === "close_window"),
+    false,
+    "no direct close_window message may leave the renderer",
+  );
 });
 
 test("renderWindowTabs reorders and removes tabs without rebuilding kept nodes", () => {

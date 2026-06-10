@@ -1222,6 +1222,54 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
 });
 
+test("window close always routes through the Close Guard confirm modal (SPEC-3038 US-3)", () => {
+  // index.html ships the modal scaffold.
+  const modal = document.getElementById("window-close-confirm-modal");
+  assert.ok(modal, "expected #window-close-confirm-modal backdrop");
+  assert.ok(
+    modal.classList.contains("modal-backdrop"),
+    "close guard reuses the shared .modal-backdrop primitive",
+  );
+  assert.ok(
+    modal.querySelector(".modal-shell.window-close-confirm-shell"),
+    "close guard reuses the shared .modal-shell primitive",
+  );
+  // app.js wires both close paths through requestCloseWindow.
+  assert.match(
+    appSource,
+    /from\s+"\/window-close-confirm-modal\.js"/,
+    "app.js must import the close-confirm renderer module",
+  );
+  assert.match(
+    appSource,
+    /function\s+requestCloseWindow\(windowId\)/,
+    "expected a requestCloseWindow entrypoint",
+  );
+  assert.match(
+    appSource,
+    /closeButton\.addEventListener\("click",\s*\(event\)\s*=>\s*\{\s*event\.stopPropagation\(\);\s*requestCloseWindow\(windowData\.id\);/,
+    "titlebar × must route through requestCloseWindow",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /closeButton\.addEventListener\("click",[\s\S]{0,120}?send\(\{\s*kind:\s*"close_window"/,
+    "titlebar × must not send close_window directly",
+  );
+  // The tab strip passes the same entrypoint into the renderer.
+  const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
+  assert.match(
+    renderTabsBody,
+    /requestClose:\s*requestCloseWindow/,
+    "tab × must route through requestCloseWindow",
+  );
+  // The renderer itself must not own a direct close_window send anymore.
+  assert.doesNotMatch(
+    windowTabsRendererSource,
+    /close_window/,
+    "window-tabs-renderer must not send close_window directly",
+  );
+});
+
 test("window tabs receive agent telemetry from runtime state (SPEC-3038 US-2)", () => {
   // SPEC-3038 AS-2.1: tabs carry the same telemetry the window chrome shows.
   assert.match(

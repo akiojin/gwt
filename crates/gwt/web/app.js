@@ -40,6 +40,8 @@
       } from "/project-tabs-renderer.js";
       import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
+      // SPEC-3038 US-3: Close Guard confirm modal renderer.
+      import { renderWindowCloseConfirmModal } from "/window-close-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -4560,6 +4562,59 @@
         });
       }
 
+      // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
+      // tab x) confirms through one modal regardless of agent state
+      // (user-confirmed decision, 2026-06-10).
+      let windowCloseConfirmState = { open: false, windowId: null };
+
+      function renderWindowCloseConfirm() {
+        const modalEl = document.getElementById("window-close-confirm-modal");
+        const dialogEl = modalEl?.querySelector(".window-close-confirm-shell");
+        if (!modalEl || !dialogEl) return;
+        renderWindowCloseConfirmModal({
+          modalEl,
+          dialogEl,
+          state: windowCloseConfirmState,
+          createNode,
+          onCancel: () => closeWindowCloseConfirm(),
+          onConfirm: () => {
+            const id = windowCloseConfirmState.windowId;
+            closeWindowCloseConfirm();
+            if (id) send({ kind: "close_window", id });
+          },
+        });
+      }
+
+      function closeWindowCloseConfirm() {
+        windowCloseConfirmState = { open: false, windowId: null };
+        renderWindowCloseConfirm();
+      }
+
+      function requestCloseWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          // The window already left the workspace state; closing is pure
+          // housekeeping and needs no confirmation.
+          send({ kind: "close_window", id: windowId });
+          return;
+        }
+        const isAgentWindow = shouldShowRuntimeStatus(windowData);
+        const runtimeState =
+          windowRuntimeStateMap.get(windowId) ||
+          normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        windowCloseConfirmState = {
+          open: true,
+          windowId,
+          windowTitle: windowDisplayTitle(windowData),
+          agentLabel: isAgentWindow
+            ? agentRoleLabel(windowData)
+            : presetRoleLabel(windowData.preset),
+          runtimeLabel: isAgentWindow ? windowRuntimeLabel(runtimeState) : "",
+          running: isAgentWindow && runtimeState === "running",
+        };
+        renderWindowCloseConfirm();
+      }
+
       // SPEC-3038 US-2: tabs carry the same Living Telemetry the window chrome
       // shows. Only agent panes (terminal surface) report a state; other
       // surfaces render plain tabs.
@@ -4594,6 +4649,7 @@
           activeWindowId: windowData.id,
           tooltipForWindow: windowTitleTooltip,
           send,
+          requestClose: requestCloseWindow,
           onTabDragStart: (event, tabId) => {
             windowTabDragState = {
               id: tabId,
@@ -13283,7 +13339,7 @@
 
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            send({ kind: "close_window", id: windowData.id });
+            requestCloseWindow(windowData.id);
           });
 
           titlebar.addEventListener("pointerdown", (event) => {

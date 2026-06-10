@@ -2260,6 +2260,66 @@ kbd.op-kbd {
   margin-top: 6px;
 }
 
+/* SPEC-3038 US-3 — Close Guard modal. Shares the project-tab confirm
+   vocabulary; adds an identity row (agent + live state chip) and a
+   destructive warning shown only while the agent is running. */
+.window-close-confirm__title {
+  margin: 0;
+  font-size: var(--type-base);
+  font-weight: 600;
+}
+
+.window-close-confirm__subtitle {
+  margin: var(--space-1) 0 0 0;
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-close-confirm__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0 0;
+  font-size: var(--type-sm);
+}
+
+.window-close-confirm__state {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.window-close-confirm__state--running {
+  color: var(--color-state-active);
+  border-color: color-mix(in oklab, var(--color-state-active) 45%, transparent);
+}
+
+.window-close-confirm__warning {
+  margin: var(--space-3) 0 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--color-state-blocked) 45%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-state-blocked) 10%, transparent);
+  color: var(--color-state-blocked);
+  font-size: var(--type-sm);
+}
+
+.window-close-confirm__footer.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: var(--space-4);
+}
+
 /* Floating window chrome */
 :root[data-theme] .window {
   background: var(--color-surface);

@@ -619,6 +619,23 @@
           tabindex="-1"
         ></div>
       </div>
+      <!-- SPEC-3038 US-3: Close Guard — every window close (titlebar × and
+           tab ×) confirms through this modal regardless of agent state.
+           Renderer lives in /window-close-confirm-modal.js; wiring in
+           /app.js (requestCloseWindow). -->
+      <div
+        class="modal-backdrop"
+        id="window-close-confirm-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell window-close-confirm-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close window"
+          tabindex="-1"
+        ></div>
+      </div>
       <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
            window. Renderer lives in /app.js (frontendUnits.worktreePicker).
            Opens once per File Tree window open; selection routes the tree

@@ -76,7 +76,9 @@ function createCloseButton(document, item) {
   button.addEventListener("click", (event) => {
     event.stopPropagation();
     const id = tabIdFromItem(item);
-    itemActions(item).send?.({ kind: "close_window", id });
+    // SPEC-3038 US-3: the renderer only reports close intent; the Close
+    // Guard confirm modal (app.js requestCloseWindow) owns the actual close.
+    itemActions(item).requestClose?.(id);
   });
   return button;
 }
@@ -159,6 +161,7 @@ export function renderWindowTabs({
   activeWindowId,
   tooltipForWindow,
   send,
+  requestClose,
   onTabDragStart,
   onTabDrag,
   onTabDragEnd,
@@ -171,6 +174,7 @@ export function renderWindowTabs({
   const nextIds = new Set(nextTabs.map((tab) => tab.id));
   const actions = {
     send,
+    requestClose,
     onTabDragStart,
     onTabDrag,
     onTabDragEnd,
