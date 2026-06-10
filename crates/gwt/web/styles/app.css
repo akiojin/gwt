@@ -1380,6 +1380,8 @@ body {
 
 .index-run-button {
   min-width: 88px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--color-state-active);
   border-radius: var(--radius-sm);
   background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface));
@@ -1408,7 +1410,8 @@ body {
 .index-search-input {
   width: 100%;
   min-width: 0;
-  padding: 7px 10px;
+  height: 32px;
+  padding: 0 10px;
 }
 
 .index-worktree-select {
@@ -1534,7 +1537,8 @@ body {
 }
 
 .index-result-row.is-suggestion {
-  background: color-mix(in oklab, var(--color-surface-elevated) 72%, var(--color-surface));
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 .index-result-scope {
@@ -2567,9 +2571,12 @@ body {
   border: none;
   border-radius: var(--radius-md);
   background: transparent;
-  font-family: var(--font-mono);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
@@ -2668,15 +2675,19 @@ body {
   box-shadow: var(--shadow-1);
 }
 
+.board-message:hover {
+  border-color: var(--color-border-strong);
+}
+
 .board-message.user {
   align-self: flex-end;
-  border-bottom-right-radius: 5px;
+  border-bottom-right-radius: var(--radius-sm);
   background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
 }
 
 .board-message.agent {
   align-self: flex-start;
-  border-bottom-left-radius: 5px;
+  border-bottom-left-radius: var(--radius-sm);
 }
 
 .board-message.system {
@@ -2732,9 +2743,9 @@ body {
   align-items: center;
   min-height: 18px;
   padding: 2px 6px;
-  border: 1px solid color-mix(in oklab, var(--color-state-warning) 52%, var(--color-border));
+  border: 1px solid color-mix(in oklab, var(--agent-claude) 52%, var(--color-border));
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--color-state-warning) 12%, var(--color-surface));
+  background: color-mix(in oklab, var(--agent-claude) 12%, var(--color-surface));
   color: var(--color-text);
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
@@ -2805,9 +2816,9 @@ body {
 }
 
 .board-origin-button {
-  border-color: color-mix(in oklab, var(--color-state-warning) 48%, var(--color-border));
+  border-color: color-mix(in oklab, var(--agent-claude) 48%, var(--color-border));
   color: var(--color-text);
-  background: color-mix(in oklab, var(--color-state-warning) 10%, var(--color-surface));
+  background: color-mix(in oklab, var(--agent-claude) 10%, var(--color-surface));
 }
 
 .board-reply-button:hover,
@@ -2850,7 +2861,7 @@ body {
 
 .board-title-input {
   width: 100%;
-  padding: 9px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-strong);
   font: inherit;
@@ -2870,7 +2881,7 @@ body {
   min-height: 76px;
   width: 100%;
   resize: none;
-  padding: 11px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-strong);
   font: inherit;
@@ -3179,7 +3190,7 @@ body {
 }
 
 .file-tree-row:hover {
-  background: color-mix(in oklab, var(--color-state-active) 10%, transparent);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
 }
 
 .file-tree-row.selected {
@@ -4574,6 +4585,11 @@ body {
 .start-method-button:hover:not(:disabled) {
   border-color: var(--color-border-strong);
   background: var(--color-surface-elevated);
+}
+
+.start-method-button.selected {
+  border-color: var(--color-focus-ring);
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
 }
 
 .start-method-button:disabled {

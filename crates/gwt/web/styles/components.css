@@ -1805,19 +1805,21 @@ kbd.op-kbd {
   min-height: 0;
   overflow: auto;
   border-right: 1px solid var(--color-border);
-  padding: 12px;
-  background: color-mix(in oklab, var(--color-surface) 92%, var(--color-canvas));
+  padding: var(--space-3);
+  background: var(--color-surface);
 }
 
 .workspace-overview-detail-pane {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 16px 18px 24px;
+  padding: var(--space-4);
   font-family: var(--font-body);
-  background: var(--color-surface);
+  background: var(--color-surface-elevated);
 }
 
+/* SPEC-2359 Quiet Work UI: the Work surface deliberately stays on body
+   typography — no display/condensed voice here (quiet-work-ui-contract). */
 .workspace-overview-section-label {
   margin: 0 0 8px;
   font-family: var(--font-body);
@@ -4277,7 +4279,7 @@ kbd.op-kbd {
    - hex cells become focusable buttons so keyboard activation matches the
      mouse click flow. */
 :root[data-theme] .file-tree-viewer-dirty {
-  color: var(--color-state-warning, #d97706);
+  color: var(--agent-claude);
   font-weight: 700;
   font-size: var(--type-sm);
   margin-right: 4px;
