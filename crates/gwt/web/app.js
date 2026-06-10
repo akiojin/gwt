@@ -28,6 +28,8 @@
       } from "/board-surface.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createLaunchPendingController } from "/launch-pending-controller.js";
+      import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
@@ -1655,7 +1657,13 @@
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
 
+      // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
+      // WebSocket bridge is down — a tiny status-strip label alone reads as
+      // a frozen app when every click needs the socket.
+      const connectionOverlay = createConnectionOverlay({ document });
+
       function setConnectionState(connected) {
+        connectionOverlay.setConnected(connected);
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
         // SPEC-2356 — propagate connection state to the Operator Status Strip
@@ -7375,12 +7383,35 @@
       // resumable agents; the response opens this modal so the user can
       // pick which previously-assigned agent to restart in-place
       // (without going through the Launch Wizard).
+      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
+      // requests. Settled by the dispatcher on workspace_resume_agent_started
+      // / *_error; the timeout re-enables the UI when no reply ever arrives.
+      const launchPending = createLaunchPendingController({
+        onChange: () => {
+          try {
+            workspaceOverviewSurface.renderWindows();
+          } catch {
+            // Surface may not be mounted yet during bootstrap.
+          }
+          try {
+            workspaceResumePicker.render();
+          } catch {
+            // Picker may not be mounted yet during bootstrap.
+          }
+          const notice = launchPending.consumeTimeoutNotice();
+          if (notice) {
+            console.warn("[launch-pending]", notice);
+          }
+        },
+      });
+
       const workspaceResumePicker = createWorkspaceResumePickerController({
         modalEl: document.getElementById("workspace-resume-picker-modal"),
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
         createNode,
         send,
         getResumeBounds: () => visibleBounds(),
+        launchPending,
       });
 
       const workspaceOverviewSurface = createWorkspaceOverviewSurface({
@@ -7396,6 +7427,7 @@
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         getResumeBounds: () => visibleBounds(),
+        launchPending,
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -10231,6 +10263,11 @@
         };
         const resume = () => {
           select();
+          // SPEC-2359 W-17 (FR-398): guard double-clicks while the backend
+          // materializes the resume; settled by the started ack / branch_error.
+          if (!launchPending.begin(`branch:${branchName}`, "Resume")) {
+            return;
+          }
           send({
             kind: "resume_branch_latest_agent",
             id: windowId,
@@ -14453,6 +14490,9 @@
             break;
           }
           case "branch_error": {
+            // SPEC-2359 W-17 (FR-398): a failed branch resume must re-enable
+            // its pending Resume control immediately (not via timeout).
+            launchPending.settleWhere("branch:");
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
@@ -14683,7 +14723,14 @@
             workspaceResumePicker.handleAgentsList(event);
             break;
           case "workspace_resume_agent_error":
+            launchPending.settleAck(event);
             workspaceResumePicker.handleError(event);
+            break;
+          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
+          // accepted — settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            launchPending.settleAck(event);
+            workspaceResumePicker.handleStarted(event);
             break;
           case "launch_wizard_state":
             // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.

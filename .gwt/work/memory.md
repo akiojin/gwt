@@ -6850,3 +6850,11 @@ Type: lesson
 Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
+
+## 2026-06-10 — GUI フリーズ調査は WebSocket eviction ログ（evicting lagging websocket clients）を最初に疑う
+
+Type: lesson
+Context: Start Work/Resume 後の無表示・操作不能・無反応の報告。フロントの pending UI 欠如だけでは説明できない完全フリーズが含まれていた。
+Learning: 原因は per-client outbound queue(64) 溢れでクライアントを即切断する ClientHub の eviction 設計。エージェント起動直後の TerminalOutput broadcast 洪水で操作したクライアント自身が evict され、再接続時の全 pane snapshot 一括 replay が再バーストを生んで storm 化する。~/.gwt/projects/<hash>/logs/gwt.log.* の 'evicting lagging websocket clients' と frontend user action の時刻相関（今回 open_start_work 10/10 で一致）が決定的証拠になる。切断中の frontend send() は黙ってキューされるため UI は無反応に見える。
+Future Action: GUI の無反応・取りこぼし系バグはコード読みの前に該当時間帯の gwt.log で eviction / frontend_ready 再接続 / client_id 変化（ユーザーのリロード痕跡）を確認する。修正は SPEC-2359 Phase W-17（lossy/lossless 分離・replay 分割・pending UI・スキャン抑止）を参照。
+
