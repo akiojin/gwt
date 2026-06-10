@@ -9007,9 +9007,8 @@ impl AppRuntime {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
         // Process Console lines into the agent terminal. Host launches keep
-        // their immediate-PTY behavior untouched (FR-142). The guard's Drop
-        // performs a final drain when preparation finishes or fails.
-        let _docker_output_mirror =
+        // their immediate-PTY behavior untouched (FR-142).
+        let docker_output_mirror =
             (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
                 launch_output_mirror::DockerLaunchOutputMirror::start(
                     proxy.clone(),
@@ -9180,6 +9179,12 @@ impl AppRuntime {
                 agent_project_root,
             ))
         })();
+
+        // Drop (= final drain + join) BEFORE dispatching the result so the
+        // tail of the mirrored docker output lands in the terminal ahead of
+        // the success transition or the `[gwt] Launch failed` summary —
+        // otherwise the failure summary gets buried mid-stream.
+        drop(docker_output_mirror);
 
         match result {
             Ok((
