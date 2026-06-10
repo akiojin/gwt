@@ -3785,6 +3785,18 @@ pub struct AppRuntime {
     pub(crate) usage_refresh: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowLaunchErrorLogFields {
+    stage: &'static str,
+    window_id: String,
+    tab_id: String,
+    raw_window_id: String,
+    session_id: String,
+    agent_id: String,
+    branch: String,
+    error: String,
+}
+
 impl ProjectTabRuntime {
     pub(crate) fn from_persisted(
         tab: gwt::PersistedSessionTabState,
@@ -10166,7 +10178,34 @@ impl AppRuntime {
         );
     }
 
-    fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
+    fn log_window_launch_error(
+        &self,
+        stage: &'static str,
+        window_id: &str,
+        error: &str,
+    ) -> WindowLaunchErrorLogFields {
+        let fields = self.window_launch_error_log_fields(stage, window_id, error);
+        tracing::error!(
+            target: "gwt::agent_launch",
+            stage = %fields.stage,
+            window_id = %fields.window_id,
+            tab_id = %fields.tab_id,
+            raw_window_id = %fields.raw_window_id,
+            session_id = %fields.session_id,
+            agent_id = %fields.agent_id,
+            branch = %fields.branch,
+            error = %fields.error,
+            "window launch failed"
+        );
+        fields
+    }
+
+    fn window_launch_error_log_fields(
+        &self,
+        stage: &'static str,
+        window_id: &str,
+        error: &str,
+    ) -> WindowLaunchErrorLogFields {
         let (tab_id, raw_window_id) = self
             .window_lookup
             .get(window_id)
@@ -10183,18 +10222,16 @@ impl AppRuntime {
             .map(|session| session.branch_name.as_str())
             .unwrap_or("unknown");
         let sanitized_error = Self::sanitize_launch_log_error(error);
-        tracing::error!(
-            target: "gwt::agent_launch",
-            stage = %stage,
-            window_id = %window_id,
-            tab_id = %tab_id,
-            raw_window_id = %raw_window_id,
-            session_id = %session_id,
-            agent_id = %agent_id,
-            branch = %branch_name,
-            error = %sanitized_error,
-            "window launch failed"
-        );
+        WindowLaunchErrorLogFields {
+            stage,
+            window_id: window_id.to_string(),
+            tab_id: tab_id.to_string(),
+            raw_window_id: raw_window_id.to_string(),
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            branch: branch_name.to_string(),
+            error: sanitized_error,
+        }
     }
 
     fn sanitize_launch_log_error(error: &str) -> String {
@@ -10917,6 +10954,7 @@ mod tests {
     }
 
     fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
+        let _guard = tracing_capture_lock().lock().expect("tracing capture lock");
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureTracingLayer {
             events: Arc::clone(&events),
@@ -10924,6 +10962,11 @@ mod tests {
         tracing::subscriber::with_default(subscriber, run);
         let captured_events = events.lock().expect("captured tracing events").clone();
         captured_events
+    }
+
+    fn tracing_capture_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     struct ScopedEnvVar {
@@ -14966,7 +15009,7 @@ exit 1
     }
 
     #[test]
-    fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
+    fn app_runtime_agent_launch_completion_failure_log_fields_are_structured() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
             "tab-1",
@@ -14974,36 +15017,20 @@ exit 1
             WindowPreset::Agent,
             WindowProcessStatus::Running,
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
 
-        let events = capture_tracing_events(|| {
-            let _ = runtime.handle_launch_complete(
-                window_id.clone(),
-                Err("launch failed before process spawn".to_string()),
-            );
-        });
+        let event = runtime.log_window_launch_error(
+            "launch_complete",
+            &window_id,
+            "launch failed before process spawn",
+        );
 
-        let event = events
-            .iter()
-            .find(|event| {
-                event.level == Level::ERROR
-                    && event.target == "gwt::agent_launch"
-                    && event.fields.get("stage").map(String::as_str) == Some("launch_complete")
-            })
-            .expect("agent launch completion failure log");
-        assert_eq!(
-            event.fields.get("window_id").map(String::as_str),
-            Some(window_id.as_str())
-        );
-        assert_eq!(
-            event.fields.get("tab_id").map(String::as_str),
-            Some("tab-1")
-        );
-        assert_eq!(
-            event.fields.get("error").map(String::as_str),
-            Some("launch failed before process spawn")
-        );
+        assert_eq!(event.stage, "launch_complete");
+        assert_eq!(event.window_id, window_id);
+        assert_eq!(event.tab_id, "tab-1");
+        assert_eq!(event.raw_window_id, "agent-1");
+        assert_eq!(event.error, "launch failed before process spawn");
     }
 
     #[test]
@@ -16521,25 +16548,16 @@ exit 1
             WindowPreset::Agent,
             WindowProcessStatus::Running,
         );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = combined_window_id("tab-1", "agent-1");
 
-        let events = capture_tracing_events(|| {
-            let _ = runtime.handle_launch_complete(
-                window_id,
-                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
-            );
-        });
+        let event = runtime.log_window_launch_error(
+            "launch_complete",
+            &window_id,
+            "failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token",
+        );
 
-        let event = events
-            .iter()
-            .find(|event| {
-                event.level == Level::ERROR
-                    && event.target == "gwt::agent_launch"
-                    && event.fields.get("stage").map(String::as_str) == Some("launch_complete")
-            })
-            .expect("redacted launch completion failure log");
-        let error = event.fields.get("error").expect("error field");
+        let error = &event.error;
         assert!(!error.contains("sk-test"));
         assert!(!error.contains("sk-other"));
         assert!(!error.contains("hook-secret"));
