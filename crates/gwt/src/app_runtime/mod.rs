@@ -8114,6 +8114,10 @@ fn spawn_branch_cleanup_async(
                                 id: window_id.clone(),
                                 phase: BranchEntriesPhase::Hydrated,
                                 entries,
+                                // SPEC-2009 FR-067: fresh load id from the shared
+                                // sequence so the post-cleanup reload is never
+                                // dropped as stale by the frontend.
+                                load_id: gwt::next_branch_load_id(),
                             },
                         )),
                         Err(error) => events.push(OutboundEvent::reply(

@@ -286,6 +286,13 @@ impl WorktreeManager {
         local_branch: &str,
         upstream: Option<&str>,
     ) -> Result<RemoteDeleteOutcome> {
+        // SPEC-2009 FR-071: defense in depth — refuse to delete a protected base
+        // branch (main/master/develop) from the remote even if a caller asks.
+        if crate::is_protected_branch(local_branch) {
+            return Err(GwtError::Git(format!(
+                "refusing to delete protected remote branch: {local_branch}"
+            )));
+        }
         let remote_ref = upstream
             .map(normalize_remote_ref)
             .unwrap_or_else(|| format!("origin/{local_branch}"));
@@ -1480,6 +1487,31 @@ prunable gitdir file points to non-existent location
         assert!(!manager
             .remote_branch_exists("origin/feature/prune-me")
             .unwrap());
+    }
+
+    #[test]
+    fn delete_remote_branch_refuses_protected_branch() {
+        // SPEC-2009 FR-071: deleting a protected base branch from the remote is
+        // refused even when the remote ref exists.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        let remote_path = tmp.path().join("origin.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        init_bare_git_repo(&remote_path);
+        git_add_remote(&repo_path, "origin", &remote_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+        git_push_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        manager.fetch_origin().unwrap();
+
+        assert!(manager
+            .delete_remote_branch("develop", Some("origin/develop"))
+            .is_err());
+        // The protected remote branch must still exist.
+        assert!(manager.remote_branch_exists("origin/develop").unwrap());
     }
 
     #[test]

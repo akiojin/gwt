@@ -66,6 +66,10 @@ fn dispatch_branch_load_progressive(
     active_session_branches: &HashSet<String>,
     resume_sessions: &[gwt_agent::Session],
 ) {
+    // SPEC-2009 FR-067: one load id shared by this load's inventory + hydrated
+    // events so the frontend can drop a stale earlier load delivered out of
+    // order after an evict/reconnect.
+    let load_id = gwt::next_branch_load_id();
     match list_branch_inventory(project_root) {
         Ok(mut entries) => {
             apply_branch_resume_availability(project_root, &mut entries, resume_sessions);
@@ -75,6 +79,7 @@ fn dispatch_branch_load_progressive(
                     id: window_id.to_string(),
                     phase: BranchEntriesPhase::Inventory,
                     entries: entries.clone(),
+                    load_id,
                 })],
             );
             match hydrate_branch_entries_with_active_sessions(
@@ -90,6 +95,7 @@ fn dispatch_branch_load_progressive(
                             id: window_id.to_string(),
                             phase: BranchEntriesPhase::Hydrated,
                             entries,
+                            load_id,
                         })],
                     )
                 }

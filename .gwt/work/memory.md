@@ -6761,6 +6761,19 @@ Context: Issue #2995: Branches/Work からの Resume が「ときどき」でき
 Learning: 真因は launch_wizard_cache.sessions（起動時1回ロード、spawn 時のみ per-window 部分更新、sessions_dir watcher 無し）の陳腐化。hook CLI (cli/hook/runtime_state.rs → persist_agent_session_id) が agent 起動後に書く agent_session_id を GUI cache が観測しないため、同一プロセス内で launch→stop したセッションが Branches から resume 不可になる。Work picker は projection+disk 都度ロードのため影響が小さく「Branches が多い」と一致。gwt は daemon/tray 常駐（SPEC-2077/2920）でプロセスが生き続けるため window 再起動では cache が再ロードされず「再起動でも直らない」とも一致。修正は availability(spawn_branch_load_async) と resolution(latest_resumable_branch_session) を sessions_dir から disk-fresh に読むだけ（既存の正しい QuickStartRepoScope を再利用）。
 Future Action: 「resume できない」系バグでは matching を疑う前に (1) どの関数が実ゲートか call graph を確定（wrapper が後段 scope をバイパスしていないか）、(2) 実データ・実 git レイアウトで matching が本当に false になるか empirical に検証、(3) データソースの鮮度（in-memory cache vs disk、watcher 有無、常駐プロセス寿命）を疑う。推測で大改修に入る前に再現を取る。
 
+## 2026-06-08 — Branches degraded banner の真因は WS queue-overflow eviction + branch list が reconnect replay から欠落
+
+Type: lesson
+Context: Branches で 'BRANCH DETAIL CHECK INTERRUPTED / SAFETY UNKNOWN' が頻発し読めない、を調査。WebView↔localhost の WS で heartbeat 無し。
+Learning: 切断はネットワーク断ではなく、各 client の 64-slot 送信キュー(embedded_server.rs CLIENT_QUEUE_CAPACITY)が terminal output 等で飽和→try_send 失敗→サーバーが client を evict することで発生(設計通りの backpressure)。failLoadingBranchesOnConnectionLoss(app.js) が interrupted notice を立て全 row を Safety unknown 化。核心の欠陥は build_frontend_sync_events(app_runtime/mod.rs) が Workspace/Terminal/LaunchWizard を reconnect replay するのに branch_entries を含めないため Branches だけ自己回復できず手動 Refresh まで固まる点。Branches/cleanup の SPEC owner は SPEC-2009(新規作成不要)。
+Future Action: GUI surface が切断後に固まる/古いままの不具合は (1) build_frontend_sync_events の replay 対象に当該 surface が含まれるか (2) 切断トリガは embedded_server.rs の queue-overflow eviction を疑う。SPEC routing は gwt-search で既存 owner(SPEC-2009 等)を必ず確認してから新規作成を検討する。
+
+## 2026-06-08 — 検証中にユーザーの実 repo で git branch -d main を実行し local main を誤削除した
+
+Type: lesson
+Context: Phase C 視覚検証中、main が BLOCKED な理由を確認するため 'git が refuse するはず' と誤想定して git branch -d main を実 repo で実行した。
+Learning: git branch -d は merged branch を実際に削除する（refuse しない）。bare repo の HEAD→main は worktree checkout ではないため git は main の削除をブロックしない（実際に削除された）。よって Phase C の current_head ブロックは bare repo の symbolic HEAD を誤検出している。復元は元 SHA で 'git branch main <sha>' により可能（origin/main とは別 commit だったため exact SHA 復元が必須だった）。
+Future Action: 調査/検証中はユーザーの実 repo で破壊的 git コマンド（branch -d/-D, push --delete, worktree remove 等）を絶対に実行しない。ブランチ削除可否は read-only 検査（git worktree list で checkout 有無、symbolic-ref で HEAD、show-ref）だけで判定する。branch_list の current_head 判定は bare symbolic HEAD と実 worktree checkout を区別すべき。
 ## 2026-06-08 — 概念変更要望では SPEC 末尾の最新 Phase を実読してから設計判断する
 
 Type: lesson
