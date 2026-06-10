@@ -452,11 +452,11 @@ mod tests {
     fn legacy_launch_agent_path_is_user_scoped() {
         let home = std::path::Path::new("/Users/example");
         let path = legacy_launch_agent_path(home);
-        assert!(
-            path.to_string_lossy()
-                .ends_with("Library/LaunchAgents/GWT.plist"),
-            "got {path:?}"
-        );
+        assert!(path.ends_with(
+            std::path::Path::new("Library")
+                .join("LaunchAgents")
+                .join("GWT.plist")
+        ));
     }
 
     #[test]
