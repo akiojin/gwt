@@ -468,18 +468,20 @@ Slack の Bot は参加済みのチャンネルしか読み書きできません
 `ChannelMessage.Send` / `ChannelMessage.Read.All` / `Channel.ReadBasic.All` /
 `offline_access`。テナントが要求する場合は管理者の同意を付与。
 
-#### 3. team_id / channel_id を取得
+#### 3. チャンネルリンクをコピー
 
-Teams でチャンネル → **チャンネルへのリンクを取得**。URL の `groupId=<GUID>` が
-**team_id**、`/channel/` 直後の URL デコードした `19:...@thread.tacv2` が
-**channel_id**。gwt の **Default channel** は `<team_id>/<channel_id>`。
-（または Graph Explorer: `GET /me/joinedTeams` → `GET /teams/{id}/channels`。）
+Teams でチャンネル → **チャンネルへのリンクを取得**し、リンクをコピーします。gwt は
+保存時に `groupId=<GUID>` と `/channel/` 直後の URL デコードした
+`19:...@thread.tacv2` を解析します。Teams リンクを取得できない場合は Graph Explorer
+（`GET /me/joinedTeams` → `GET /teams/{id}/channels`）で同じ値を取得し、
+`config.toml` に `[board.teams].default_channel = "team_id/channel_id"` を設定します。
 
 #### 4. gwt で設定 → サインイン
 
-**Settings → Board provider → Teams** に **Application (client) ID** /
-**Tenant ID** / **Default channel**（`team_id/channel_id`）を入力 → **Save** →
-**Sign in**。投稿はサインインユーザー名義（Graph 委任。app-only 投稿は非対応）。
+**Settings → Board provider → Teams** に **Application (client) ID** と
+**Tenant ID** を入力し、**Teams channel link** にリンクを貼り付けて
+**Save** → **Sign in**。gwt は内部的には既存互換の `team_id/channel_id` 形式で
+保存します。投稿はサインインユーザー名義（Graph 委任。app-only 投稿は非対応）。
 対象 team/channel に**参加している**必要があります（未参加だと Graph が `403` を返し、
 gwt が対処メッセージを表示）。
 

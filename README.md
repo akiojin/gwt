@@ -484,21 +484,23 @@ Board.
 `ChannelMessage.Send`, `ChannelMessage.Read.All`, `Channel.ReadBasic.All`,
 `offline_access`. Grant admin consent if your tenant requires it.
 
-#### 3. Find the team_id / channel_id
+#### 3. Copy the channel link
 
-In Teams, open the channel → **Get link to channel**. In the URL,
-`groupId=<GUID>` is the **team_id**, and the URL-decoded `19:...@thread.tacv2`
-(after `/channel/`) is the **channel_id**. gwt's **Default channel** is
-`<team_id>/<channel_id>`. (Alternatively, Graph Explorer:
-`GET /me/joinedTeams`, then `GET /teams/{id}/channels`.)
+In Teams, open the channel -> **Get link to channel** and copy the link. gwt
+parses `groupId=<GUID>` and the URL-decoded `19:...@thread.tacv2` segment after
+`/channel/` when you save the form. If the Teams link is unavailable, use Graph
+Explorer (`GET /me/joinedTeams`, then `GET /teams/{id}/channels`) and set
+`[board.teams].default_channel = "team_id/channel_id"` in `config.toml`.
 
 #### 4. Configure gwt and sign in
 
-**Settings → Board provider → Teams** → enter **Application (client) ID**,
-**Tenant ID**, and **Default channel** (`team_id/channel_id`) → **Save** →
-**Sign in**. Posts appear as the signed-in user (Graph delegated; app-only
-channel posting is not supported). You must be a **member** of the target team
-and channel — otherwise Graph returns `403` and gwt shows an actionable hint.
+**Settings → Board provider → Teams** → enter **Application (client) ID** and
+**Tenant ID**, paste the Teams link into **Teams channel link**, then
+**Save** → **Sign in**. gwt stores the channel internally as the existing
+`team_id/channel_id` format. Posts appear as the signed-in user (Graph
+delegated; app-only channel posting is not supported). You must be a
+**member** of the target team and channel — otherwise Graph returns `403` and
+gwt shows an actionable hint.
 
 ## Canvas Operations
 

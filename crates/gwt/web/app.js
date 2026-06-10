@@ -12660,6 +12660,63 @@
         });
       }
 
+      function composeTeamsDefaultChannel(teamId, channelId) {
+        const team = String(teamId || "").trim();
+        const channel = String(channelId || "").trim();
+        if (!team && !channel) return "";
+        if (!team) return channel;
+        if (!channel) return team;
+        return `${team}/${channel}`;
+      }
+
+      function parseTeamsDefaultChannel(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return { teamId: "", channelId: "" };
+        const slash = raw.indexOf("/");
+        if (slash === -1) return { teamId: "", channelId: raw };
+        return {
+          teamId: raw.slice(0, slash).trim(),
+          channelId: raw.slice(slash + 1).trim(),
+        };
+      }
+
+      function formatTeamsChannelLink(defaultChannel, tenantId) {
+        const { teamId, channelId } = parseTeamsDefaultChannel(defaultChannel);
+        if (!teamId || !channelId) return "";
+        const tenant = String(tenantId || "").trim();
+        const params = new URLSearchParams({ groupId: teamId });
+        if (tenant) params.set("tenantId", tenant);
+        return `https://teams.microsoft.com/l/channel/${encodeURIComponent(channelId)}/configured-channel?${params.toString()}`;
+      }
+
+      function parseTeamsChannelLink(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        let url;
+        try {
+          url = new URL(raw);
+        } catch (_) {
+          return null;
+        }
+        const teamId = (url.searchParams.get("groupId") || "").trim();
+        const segments = url.pathname.split("/").filter(Boolean);
+        const channelIndex = segments.findIndex(
+          (segment) => segment.toLowerCase() === "channel",
+        );
+        const encodedChannel =
+          channelIndex >= 0 ? segments[channelIndex + 1] || "" : "";
+        let channelId = encodedChannel.trim();
+        if (channelId) {
+          try {
+            channelId = decodeURIComponent(channelId);
+          } catch (_) {
+            // Keep the raw segment; it is still a better hint than clearing it.
+          }
+        }
+        if (!teamId && !channelId) return null;
+        return { teamId, channelId };
+      }
+
       function renderSystemPanel(panel) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
@@ -12817,6 +12874,7 @@
           let clientIdInput;
           let defaultChannelInput;
           let tenantIdInput;
+          let teamsChannelLinkInput;
           let secretInput;
           if (selectedProvider === "slack") {
             clientIdInput = makeField(
@@ -12868,12 +12926,23 @@
               cfg.teamsTenantId,
               { placeholder: "tenant id / common / organizations" },
             );
-            defaultChannelInput = makeField(
-              "settings-board-teams-channel",
-              "Default channel",
-              cfg.teamsDefaultChannel,
-              { placeholder: "team_id/channel_id" },
+            teamsChannelLinkInput = makeField(
+              "settings-board-teams-channel-link",
+              "Teams channel link",
+              formatTeamsChannelLink(
+                cfg.teamsDefaultChannel,
+                cfg.teamsTenantId,
+              ),
+              { placeholder: "https://teams.microsoft.com/l/channel/..." },
             );
+            const teamsChannelHelp = createNode(
+              "p",
+              "settings-help",
+              cfg.teamsDefaultChannel
+                ? "Saved channel link is shown here. Paste a new channel link to change it."
+                : "Paste the link from Teams > Get link to channel. gwt extracts the team and channel IDs when saving.",
+            );
+            configForm.appendChild(teamsChannelHelp);
           }
 
           const saveBtn = createNode(
@@ -12883,6 +12952,40 @@
           );
           saveBtn.type = "button";
           saveBtn.addEventListener("click", () => {
+            if (selectedProvider === "teams") {
+              const teamsChannelLinkValue = teamsChannelLinkInput
+                ? teamsChannelLinkInput.value.trim()
+                : "";
+              let nextTeamsDefaultChannel = cfg.teamsDefaultChannel || "";
+              if (teamsChannelLinkValue) {
+                const parsedTeamsChannel = parseTeamsChannelLink(
+                  teamsChannelLinkValue,
+                );
+                if (
+                  !parsedTeamsChannel ||
+                  !parsedTeamsChannel.teamId ||
+                  !parsedTeamsChannel.channelId
+                ) {
+                  systemSettingsState.statusMessage =
+                    "Paste a valid Teams channel link with groupId and /channel/...";
+                  systemSettingsState.statusKind = "error";
+                  renderSystemPanelStatus(panel);
+                  return;
+                }
+                nextTeamsDefaultChannel = composeTeamsDefaultChannel(
+                  parsedTeamsChannel.teamId,
+                  parsedTeamsChannel.channelId,
+                );
+              }
+              send({
+                kind: "update_board_provider_config",
+                provider: selectedProvider,
+                client_id: clientIdInput ? clientIdInput.value.trim() : "",
+                default_channel: nextTeamsDefaultChannel,
+                tenant_id: tenantIdInput ? tenantIdInput.value.trim() : "",
+              });
+              return;
+            }
             const payload = {
               kind: "update_board_provider_config",
               provider: selectedProvider,
@@ -12891,9 +12994,6 @@
                 ? defaultChannelInput.value.trim()
                 : "",
             };
-            if (selectedProvider === "teams") {
-              payload.tenant_id = tenantIdInput ? tenantIdInput.value.trim() : "";
-            }
             if (selectedProvider === "slack" && secretInput) {
               // Only send the secret when the user typed one, so an empty box
               // does not clear an already-configured secret.
