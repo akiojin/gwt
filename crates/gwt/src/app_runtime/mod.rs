@@ -3632,6 +3632,15 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
                 &tab.project_root,
             );
+            // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
+            // (pre-W-12 records keyed to one projection UUID fusing dozens of
+            // branches) into canonical branch-keyed items so each branch row
+            // shows its real title / sessions. Idempotent; must run before
+            // the worktree reconcile so decomposed branches are not
+            // redundantly backfilled.
+            let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
+                &tab.project_root,
+            );
             // SPEC-2359 Phase W-15 (FR-379/FR-382): reconcile locally existing
             // worktrees with the Work records so every real worktree surfaces
             // on the Workspace list (union of existing worktrees and unclosed

@@ -1948,6 +1948,86 @@ pub fn reconcile_worktree_work_items_paths(
     Ok(pending.len())
 }
 
+/// SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items. The pre-W-12
+/// implementation keyed journal/board events to the projection's single UUID
+/// (or `workspace-<millis>`), fusing dozens of branches and thousands of
+/// sessions into one Work record. Each event still carries its own
+/// `execution_container.branch`, so any item whose events span two or more
+/// canonical branch identities is re-keyed here: its events are replayed per
+/// branch into canonical branch-derived items (`canonical_work_id`), titles
+/// and agents follow each branch's events, and the legacy shell (including
+/// branchless heartbeat events) is dropped. Canonical/per-session items have
+/// a single branch, so a second run finds nothing to decompose (idempotent —
+/// no marker file needed). Returns the number of decomposed legacy items.
+pub fn decompose_legacy_multi_branch_work_items_paths(
+    work_items_path: &Path,
+    project_root: &Path,
+) -> Result<usize> {
+    let Some(mut projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(0);
+    };
+    let mut decomposed = 0usize;
+    let mut replacement: Vec<WorkspaceWorkItem> = Vec::new();
+    let mut pending_events: Vec<WorkspaceWorkEvent> = Vec::new();
+    for item in projection.work_items.drain(..) {
+        let mut branch_identities: Vec<String> = Vec::new();
+        for event in &item.events {
+            if let Some(branch) = event
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+                .map(canonical_work_branch_identity)
+            {
+                if !branch_identities.contains(&branch) {
+                    branch_identities.push(branch);
+                }
+            }
+        }
+        if branch_identities.len() < 2 {
+            replacement.push(item);
+            continue;
+        }
+        decomposed += 1;
+        for event in &item.events {
+            let Some(branch) = event
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+            else {
+                // Branchless heartbeat of the legacy shell — dropped with it.
+                continue;
+            };
+            let Some(work_id) = canonical_work_id(project_root, Some(branch), None) else {
+                continue;
+            };
+            let mut event = event.clone();
+            event.work_item_id = work_id;
+            pending_events.push(event);
+        }
+    }
+    if decomposed == 0 {
+        projection.work_items = replacement;
+        return Ok(0);
+    }
+    pending_events.sort_by_key(|event| event.updated_at);
+    projection.work_items = replacement;
+    for event in pending_events {
+        projection.apply_event(event);
+    }
+    projection.updated_at = chrono::Utc::now();
+    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    Ok(decomposed)
+}
+
+/// Convenience wrapper resolving the home works projection for `repo_path`
+/// (with the legacy migration applied), then delegating to
+/// [`decompose_legacy_multi_branch_work_items_paths`].
+pub fn decompose_legacy_multi_branch_work_items(repo_path: &Path) -> Result<usize> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    decompose_legacy_multi_branch_work_items_paths(&work_items_path, repo_path)
+}
+
 /// Convenience wrapper resolving the home works projection for `repo_path`
 /// (with the legacy migration applied), then delegating to
 /// [`reconcile_worktree_work_items_paths`].
@@ -6667,5 +6747,145 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
         assert!(projection.has_current_agents());
+    }
+
+    fn legacy_event(
+        work_item_id: &str,
+        branch: Option<&str>,
+        title: Option<&str>,
+        session: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> WorkspaceWorkEvent {
+        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, at);
+        event.title = title.map(str::to_string);
+        event.agent_session_id = session.map(str::to_string);
+        event.execution_container = branch.map(|branch| WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        event
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-393): a legacy mega-item whose events span
+    /// multiple branches is decomposed into canonical branch-keyed items.
+    /// Titles/agents follow each branch's events; the legacy item disappears;
+    /// a second run is a no-op (idempotent).
+    #[test]
+    fn legacy_multi_branch_work_item_is_decomposed_per_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let work_items_path = temp.path().join("works.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 10, 11, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let mega_id = "0c14f2ab-9f9a-4e79-94ab-db590cf88343";
+        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("develop"),
+            Some("develop での調査"),
+            Some("sess-dev-1"),
+            t0,
+        ));
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("work/foo"),
+            Some("foo の実装"),
+            Some("sess-foo-1"),
+            t1,
+        ));
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("origin/develop"),
+            Some("develop PR 監視"),
+            Some("sess-dev-2"),
+            t2,
+        ));
+        // Branchless heartbeat: dropped with the legacy shell on decomposition.
+        projection.apply_event(legacy_event(mega_id, None, None, None, t2));
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let decomposed =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("decompose");
+        assert_eq!(decomposed, 1, "one legacy mega-item decomposed");
+
+        let reloaded = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        let develop_id = canonical_work_id(&project_root, Some("develop"), None).unwrap();
+        let foo_id = canonical_work_id(&project_root, Some("work/foo"), None).unwrap();
+        assert!(
+            reloaded.work_items.iter().all(|item| item.id != mega_id),
+            "legacy mega-item must be removed"
+        );
+        let develop = reloaded
+            .work_items
+            .iter()
+            .find(|item| item.id == develop_id)
+            .expect("develop item");
+        assert_eq!(
+            develop.title, "develop PR 監視",
+            "last develop event title wins (origin/develop normalizes to develop)"
+        );
+        assert_eq!(develop.events.len(), 2);
+        let develop_sessions: Vec<_> = develop
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect();
+        assert!(develop_sessions.contains(&"sess-dev-1"));
+        assert!(develop_sessions.contains(&"sess-dev-2"));
+        let foo = reloaded
+            .work_items
+            .iter()
+            .find(|item| item.id == foo_id)
+            .expect("work/foo item");
+        assert_eq!(foo.title, "foo の実装");
+        assert_eq!(foo.agents.len(), 1);
+
+        let second =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("second run");
+        assert_eq!(
+            second, 0,
+            "idempotent: canonical items are not re-decomposed"
+        );
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-393): single-branch items (the normal
+    /// work-session shape) are left untouched by the decomposition.
+    #[test]
+    fn single_branch_work_items_are_not_decomposed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let work_items_path = temp.path().join("works.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        projection.apply_event(legacy_event(
+            "work-session-abc",
+            Some("work/bar"),
+            Some("bar の作業"),
+            Some("sess-bar"),
+            t0,
+        ));
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let decomposed =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("decompose");
+        assert_eq!(decomposed, 0);
+        let reloaded = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(reloaded.work_items.len(), 1);
+        assert_eq!(reloaded.work_items[0].id, "work-session-abc");
     }
 }
