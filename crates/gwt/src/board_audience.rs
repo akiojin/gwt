@@ -208,7 +208,7 @@ mod tests {
     use gwt_core::workspace_projection::{
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceStatusCategory,
     };
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn agent(
@@ -250,28 +250,7 @@ mod tests {
         }
     }
 
-    struct ScopedEnvVar {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
+    use gwt_core::test_support::ScopedEnvVar;
 
     fn isolate_gwt_home() -> (tempfile::TempDir, ScopedEnvVar, ScopedEnvVar) {
         let home = tempdir().unwrap();

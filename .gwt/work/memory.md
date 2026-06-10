@@ -6843,3 +6843,10 @@ Type: decision
 Context: Windows 自動更新で helper exe (gwt-update-helper.exe) の spawn が os error 740 で失敗 (#3018)。manifest 無しの exe は名前に update/setup/install/patch を含むと UAC Installer Detection で昇格要求され、CreateProcess は昇格できず ERROR_ELEVATION_REQUIRED になる。EnableInstallerDetection は Windows Home 既定有効でマシン依存再現。
 Learning: rustc は exe にデフォルト manifest を埋め込まない。winresource も set_manifest 明示時のみ。Microsoft 規定の対処は requestedExecutionLevel=asInvoker の manifest 埋め込みで、これが installer detection の off-switch になる。
 Future Action: Windows 向けバイナリを追加・リネームする際は (1) build.rs の set_manifest が適用されるか、(2) exe / 一時コピーの名前に installer-detection キーワードを含めないかを確認する。自己更新系の修正は実行中バイナリ側に効くため E2E は 2 リリース跨ぎになる前提で検証計画を立てる。
+
+## 2026-06-10 — worktree-local な coordination 状態は worktree 削除で消えて重複を再生産する
+
+Type: lesson
+Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
+Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
+Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。

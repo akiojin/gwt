@@ -320,8 +320,19 @@ pub fn apply_windows_host_shell_wrapper(
         return Ok(());
     };
 
-    let (command, args) =
-        wrap_windows_host_shell_command(shell, &config.command, &config.args, &mut config.env_vars);
+    let (normalized_command, normalized_args) =
+        gwt_terminal::pty::normalize_command_for_windows_host_shell(
+            &config.command,
+            &config.args,
+            &config.env_vars,
+            &config.remove_env,
+        );
+    let (command, args) = wrap_windows_host_shell_command(
+        shell,
+        &normalized_command,
+        &normalized_args,
+        &mut config.env_vars,
+    );
     config.command = command;
     config.args = args;
     Ok(())
@@ -1622,6 +1633,88 @@ mod tests {
         assert!(expression.contains("[gwt] command:"));
         assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
         assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_prompt_agent_wrapper_normalizes_bun_claude_stub_before_shell_expression() {
+        let temp = tempdir().expect("tempdir");
+        let bun_bin_dir = temp.path().join(".bun").join("bin");
+        fs::create_dir_all(&bun_bin_dir).expect("bun bin");
+        let global_shim = bun_bin_dir.join("claude.exe");
+        fs::write(&global_shim, b"MZ\x00\x00bun-global-shim").expect("global shim");
+
+        let package_root = temp
+            .path()
+            .join(".bun")
+            .join("install")
+            .join("global")
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let package_bin_dir = package_root.join("bin");
+        fs::create_dir_all(&package_bin_dir).expect("package bin");
+        let placeholder_stub = package_bin_dir.join("claude.exe");
+        fs::write(
+            &placeholder_stub,
+            "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+        )
+        .expect("placeholder stub");
+        let cli_wrapper = package_root.join("cli-wrapper.cjs");
+        fs::write(&cli_wrapper, "console.log('wrapper');\n").expect("cli wrapper");
+        fs::write(
+            package_root.join("package.json"),
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .expect("package.json");
+
+        let nodejs_dir = temp.path().join("nodejs");
+        fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
+        let node_exe = nodejs_dir.join("node.exe");
+        fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+
+        let mut config = sample_versioned_launch_config();
+        config.command = "claude".to_string();
+        config.args = vec!["--print".to_string()];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+        config.env_vars.insert(
+            "PATH".to_string(),
+            std::env::join_paths([bun_bin_dir.as_path(), nodejs_dir.as_path()])
+                .expect("join PATH")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        config
+            .env_vars
+            .insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        config.env_vars.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap command prompt");
+
+        assert_eq!(config.command, "cmd.exe");
+        let expression = config
+            .env_vars
+            .get(WINDOWS_HOST_SHELL_EXPRESSION_ENV)
+            .expect("cmd wrapper expression");
+        assert!(
+            expression.contains(&node_exe.display().to_string()),
+            "expected resolved node.exe in wrapper expression, got: {expression}"
+        );
+        assert!(
+            expression.contains(&cli_wrapper.display().to_string()),
+            "expected cli-wrapper.cjs in wrapper expression, got: {expression}"
+        );
+        assert!(
+            !expression.contains("call claude --print"),
+            "wrapper must not direct-launch claude from PATH: {expression}"
+        );
+        assert!(
+            !expression.contains(&placeholder_stub.display().to_string()),
+            "wrapper must not direct-launch the placeholder stub: {expression}"
+        );
     }
 
     #[test]

@@ -36,14 +36,14 @@ pub mod protocol;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod web_protocol_enums;
 pub mod window_state;
 pub mod workspace;
 pub mod worktree_inventory;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    gwt_core::test_support::env_lock()
 }
 
 pub use branch_cleanup::{

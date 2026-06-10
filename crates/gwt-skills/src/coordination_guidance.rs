@@ -117,6 +117,20 @@ Do not manually create, switch, or delete branches/worktrees:
 - Existing branch switching, deletion, and renaming should happen only
   through human-driven operations
 
+## Persisted Work files
+
+The tracked `.gwt/work/` directory is the persistent Work core
+(SPEC-2359 W-15, FR-383). When you commit your work, include the
+changed tracked files under `.gwt/work/` (`events.jsonl`, `memory.md`,
+`discussions.md`) in the regular commit so they reach the base branch
+through the PR:
+
+- `.gwt/work/events.jsonl` is an append-only log joined across branches
+  via the `merge=union` gitattribute. Never hand-edit, truncate, or
+  revert it
+- Do not commit it separately from the work it describes; ride the
+  normal work commit
+
 ## Language
 
 Write narrative Board bodies and Work summaries in Japanese.
@@ -219,6 +233,18 @@ branch / worktree の手動作成、切替、削除は禁止です:
 - Git 環境の作成は **gwt Start Work / Launch materialization** が担当
 - 既存 branch への切替・削除・名称変更も人間操作経由のみ
 
+## Persisted Work files
+
+追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
+（SPEC-2359 W-15, FR-383）。作業を commit する際は、`.gwt/work/` 配下の
+追跡ファイル（`events.jsonl`、`memory.md`、`discussions.md`）の変更を
+通常の commit に含め、PR 経由で base branch に届けます:
+
+- `.gwt/work/events.jsonl` は append-only ログで、`merge=union`
+  gitattribute により branch を跨いで結合されます。手編集・切詰め・
+  revert をしないでください
+- 作業内容と切り離して単独 commit にせず、通常の作業 commit に乗せます
+
 ## Language
 
 Board 投稿本文と Work summary は narrative outputs として
@@ -313,6 +339,9 @@ mod tests {
             "--kind handoff",
             "git checkout -b",
             "git worktree add/remove",
+            ".gwt/work/",
+            "events.jsonl",
+            "merge=union",
             "AGENTS.md or CLAUDE.md",
             "PR check in progress",
             "verifying tests",
