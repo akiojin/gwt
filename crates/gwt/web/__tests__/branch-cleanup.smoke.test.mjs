@@ -210,6 +210,51 @@ test("confirm stage: deleteRemote toggle appears when any entry has upstream", (
   assert.equal(toggledTo, true);
 });
 
+test("confirm stage: remote-delete toggle is forced off for protected base branches", () => {
+  // SPEC-2009 FR-070: selecting a protected base branch (e.g. develop) must
+  // disable the remote-delete toggle and force it off — local cleanup only.
+  const { modalEl, dialogEl, createNode } = mount();
+  const state = makeState({ cleanupModal: { deleteRemote: true } });
+  const entries = [
+    makeEntry("develop", {
+      cleanup: {
+        availability: "risky",
+        upstream: "origin/develop",
+        risks: ["protected_base"],
+      },
+    }),
+  ];
+
+  renderBranchCleanupModal({
+    modalEl,
+    dialogEl,
+    windowId: "win-1",
+    state,
+    selectedEntries: entries,
+    createNode,
+    resultSummary,
+    mergeTargetText,
+    riskLabels,
+    onCancel: () => {},
+    onSubmit: () => {},
+    onDeleteRemoteToggle: () => {},
+  });
+
+  const checkbox = dialogEl.querySelector(
+    ".branch-cleanup-toggle-row input[type='checkbox']",
+  );
+  assert.ok(checkbox, "expected the remote-delete toggle row to render");
+  assert.equal(checkbox.disabled, true, "remote-delete must be disabled for protected base");
+  assert.equal(checkbox.checked, false, "remote-delete must be forced off for protected base");
+  const noteTexts = Array.from(
+    dialogEl.querySelectorAll(".branch-cleanup-toggle-row span"),
+  ).map((node) => node.textContent);
+  assert.ok(
+    noteTexts.some((text) => /protected/i.test(text)),
+    "expected a protected-remote explanation note",
+  );
+});
+
 test("confirm stage: force filesystem delete toggle is explicit opt-in", () => {
   const { dialogEl, modalEl, createNode } = mount();
   const state = makeState();

@@ -3,6 +3,7 @@ set -euo pipefail
 
 node --check crates/gwt/web/app.js
 node --check crates/gwt/web/branch-cleanup-modal.js
+node --check crates/gwt/web/branch-list-state.js
 node --check crates/gwt/web/migration-modal.js
 node --check crates/gwt/web/project-clone-modal.js
 node --check crates/gwt/web/board-surface.js
