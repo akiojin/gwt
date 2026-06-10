@@ -24,6 +24,8 @@ pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 const EVENT_MANIFEST_VERSION: u32 = 1;
 
+/// Who authored a Board entry: the human operator, an agent session, or
+/// gwt itself (system notices).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorKind {
@@ -32,6 +34,9 @@ pub enum AuthorKind {
     System,
 }
 
+/// Semantic kind of a Board post (request / status / claim / ...). The kind
+/// taxonomy is defined by the coordination guidance in
+/// `crates/gwt-skills/src/coordination_guidance.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BoardEntryKind {
@@ -83,6 +88,8 @@ impl BoardEntryKind {
     }
 }
 
+/// What a [`BoardMention`] points at (user, agent, session, branch, or
+/// workspace). Serialized into Board entries and used for mention matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BoardMentionTargetKind {
@@ -122,6 +129,8 @@ impl BoardMentionTargetKind {
     }
 }
 
+/// One `@mention` carried by a [`BoardEntry`]: a typed target plus an
+/// optional display label. Written by the posting side (`gwtd board post`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardMention {
     pub target_kind: BoardMentionTargetKind,
@@ -207,6 +216,8 @@ pub fn normalize_board_audience(values: Vec<String>) -> Vec<String> {
     normalize_audience(values)
 }
 
+/// Visibility filter used when reading the Board: everything, broadcast-only
+/// entries (empty audience), or entries addressed to one workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardAudienceScope {
     All,
@@ -263,6 +274,9 @@ pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bo
             .any(|mention| match_keys.iter().any(|key| key == &mention.typed_key()))
 }
 
+/// One immutable post on the shared coordination Board. Appended by agents
+/// and the user via `gwtd board post`, persisted to the repo-local event log
+/// (`.gwt/coordination/`), and projected into [`BoardProjection`] for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardEntry {
     pub id: String,
@@ -430,6 +444,8 @@ pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
     out
 }
 
+/// One record in the append-only coordination event log. Currently only
+/// Board posts; new variants extend the timeline without breaking readers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationEvent {
@@ -437,6 +453,9 @@ pub enum CoordinationEvent {
     MessageAppended { entry: BoardEntry },
 }
 
+/// Materialized "hot" view of the newest Board entries
+/// (`board.latest.json`). Rebuilt from the event log by gwt; older history is
+/// loaded on demand as [`BoardHistoryPage`]s.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardProjection {
     #[serde(default)]
@@ -465,6 +484,8 @@ impl Default for BoardProjection {
     }
 }
 
+/// One backward pagination page of Board history read from the event log
+/// segments.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardHistoryPage {
     #[serde(default)]
@@ -507,6 +528,8 @@ struct EventSegmentMeta {
     last_entry_id: Option<String>,
 }
 
+/// Snapshot of the whole coordination state handed to consumers (currently
+/// just the Board projection).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoordinationSnapshot {
     pub board: BoardProjection,

@@ -29,34 +29,7 @@ fn env_test_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        if let Some(previous) = self.previous.as_ref() {
-            std::env::set_var(self.key, previous);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
+use gwt_core::test_support::ScopedEnvVar;
 
 #[test]
 fn unknown_hook_name_exits_two() {

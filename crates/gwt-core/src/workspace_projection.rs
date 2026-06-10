@@ -52,6 +52,8 @@ pub enum WorkspaceStatusCategory {
     Unknown,
 }
 
+/// Whether an agent session is attached to a Workspace. `Unassigned` agents
+/// were launched outside Start Work and wait for the user to adopt them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceAgentAffiliationStatus {
@@ -141,6 +143,9 @@ fn canonical_work_slug(value: &str) -> String {
     }
 }
 
+/// Git execution context of a Workspace: branch, worktree path, base branch,
+/// and the linked PR snapshot. Populated by Start Work / Launch
+/// materialization and refreshed when PR state is polled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDetails {
     pub branch: Option<String>,
@@ -342,6 +347,8 @@ pub fn workspace_projection_default_created_at() -> DateTime<Utc> {
     DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now)
 }
 
+/// Why a branch/worktree pair is offered for cleanup: its Workspace reached
+/// Done, or its PR merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceCleanupReason {
@@ -358,6 +365,8 @@ impl WorkspaceCleanupReason {
     }
 }
 
+/// One branch/worktree pair proposed to the cleanup UI, with the reason and
+/// the default remote-delete decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCleanupCandidate {
     pub branch: String,
@@ -414,6 +423,9 @@ impl Default for WorkspaceRetentionConfig {
     }
 }
 
+/// Per-agent slice of a [`WorkspaceProjection`]: session identity, runtime
+/// status, current focus, and Board linkage. Updated from agent session
+/// events and `gwtd workspace update`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
@@ -449,6 +461,10 @@ impl WorkspaceAgentSummary {
     }
 }
 
+/// Materialized "current state" view of one Workspace (title, status,
+/// agents, git details). Persisted per project and consumed by the GUI; the
+/// Board stays the coordination/history log while this projection tracks the
+/// present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceProjection {
     pub id: String,
@@ -1078,6 +1094,8 @@ impl WorkspaceProjection {
     }
 }
 
+/// Partial update applied to a [`WorkspaceProjection`] (e.g. from
+/// `gwtd workspace update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceProjectionUpdate {
     pub title: Option<String>,
@@ -1125,6 +1143,8 @@ pub struct WorkspaceStartUpdate {
     pub next_action: String,
 }
 
+/// One append-only journal record of a Workspace update, kept alongside the
+/// projection so state changes remain auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceJournalEntry {
     pub id: String,
@@ -1141,6 +1161,7 @@ pub struct WorkspaceJournalEntry {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Reference from a Work item to one agent session that worked on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkAgentRef {
     pub session_id: String,
@@ -1151,6 +1172,7 @@ pub struct WorkspaceWorkAgentRef {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Reference from a Work item to the branch / worktree / PR it executed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceExecutionContainerRef {
     #[serde(default)]
@@ -1165,6 +1187,8 @@ pub struct WorkspaceExecutionContainerRef {
     pub pr_state: Option<String>,
 }
 
+/// Lifecycle event kind in a Work item's history (start, claim, update,
+/// pause, done, ...). Each kind maps to one [`WorkspaceWorkEvent`] record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceWorkEventKind {
@@ -1189,6 +1213,8 @@ pub enum WorkspaceWorkEventKind {
     Discard,
 }
 
+/// One append-only event in a Work item's lifecycle. Events are folded into
+/// [`WorkspaceWorkItem`]s by [`WorkspaceWorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkEvent {
     pub id: String,
@@ -1248,6 +1274,9 @@ impl WorkspaceWorkEvent {
     }
 }
 
+/// One unit of work on the Work surface: title, status, participating
+/// agents, execution containers, and its event history. Built by folding
+/// [`WorkspaceWorkEvent`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkItem {
     pub id: String,
@@ -1296,6 +1325,8 @@ impl WorkspaceWorkItem {
     }
 }
 
+/// Materialized collection of all Work items for one project, rebuilt by
+/// folding the Work event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWorkItemsProjection {
     pub updated_at: DateTime<Utc>,
