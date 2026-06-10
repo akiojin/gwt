@@ -151,29 +151,5 @@ mod tests {
 
     /// Minimal scoped env-var helper used by tests in this module to
     /// avoid pulling in the workspace-wide test_support graph.
-    struct ScopedEnvVar {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &'static str, value: impl AsRef<std::path::Path>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value.as_ref());
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
+    use gwt_core::test_support::ScopedEnvVar;
 }

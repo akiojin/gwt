@@ -228,6 +228,24 @@ export async function createBranch(
 }
 ```
 
+### Rust API Naming (verb prefixes)
+
+新規の Rust 公開 API には以下の動詞 prefix 規約を適用します（SPEC-3016 FR-004）。
+既存 API の一括 rename は行いません（規約は新規コードから適用します）。
+
+| Prefix | 操作種別 | 例 |
+| ------ | ------- | -- |
+| `load_*` | ディスクからの読み込み（ファイル・キャッシュ） | `load_config()` |
+| `get_*` | メモリ上の値への参照・取得（I/O なし） | `get_active_session()` |
+| `fetch_*` | ネットワーク経由の取得（GitHub API など） | `fetch_issue_snapshot()` |
+| `read_*` | ストリーム・外部入力からの読み取り（stdin、プロセス出力など） | `read_hook_payload()` |
+
+### Rust Documentation
+
+- 新規の公開型（`pub struct` / `pub enum`）・公開関数には doc comment（`///`）を付けます
+- 内容は「その型・関数が何を表すか」「誰が（どの経路で）更新・呼び出すか」を簡潔に記述します
+- 実装詳細の重複説明は避け、必要なら SPEC / Issue 番号を参照として残します
+
 ## Testing Guidelines
 
 ### Test Structure
