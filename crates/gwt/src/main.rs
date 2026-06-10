@@ -933,6 +933,12 @@ enum UserEvent {
         client_id: ClientId,
         pane_ids: Vec<String>,
     },
+    /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
+    /// should be appended to the launching agent window's terminal.
+    LaunchTerminalOutput {
+        window_id: String,
+        data: Vec<u8>,
+    },
     AttachmentPromptReady {
         client_id: ClientId,
         window_id: String,
@@ -6671,6 +6677,14 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::TerminalOutput {
+                        id: window_id,
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+                    },
+                )]);
             }
             Event::UserEvent(UserEvent::AttachmentPromptReady {
                 client_id,

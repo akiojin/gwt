@@ -42,6 +42,7 @@ const ROOT_MODULES = new Set([
   "operator-shell.js",
   "project-clone-modal.js",
   "project-tabs-renderer.js",
+  "window-tabs-renderer.js",
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
   "protocol-enums.js",
