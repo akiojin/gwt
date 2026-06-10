@@ -4296,3 +4296,24 @@ test("branch_entries telemetry uses the guarded helper without the retired git l
     "branch telemetry must not call applyTelemetryCounts directly",
   );
 });
+
+// Layout regression (2026-06-10 user verification): app.css carried a stale
+// `.workspace-overview-shell { display: flex }` block that overrode the
+// canonical grid layout in components.css. Under flex, long Workspace rows
+// grow the list pane and crush the detail pane into a vertical sliver. The
+// shell's display is owned by components.css (grid) alone.
+test("app.css must not redeclare display for the Workspace overview shell", () => {
+  const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const blocks = appCss.match(/\.workspace-overview-shell[^{]*\{[^}]*\}/g) ?? [];
+  for (const block of blocks) {
+    if (/\[hidden\]/.test(block)) continue;
+    assert.doesNotMatch(
+      block,
+      /display\s*:\s*(?!none)/,
+      `app.css must not override the overview shell display (grid lives in components.css): ${block}`,
+    );
+  }
+  const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const shellBlock = componentsCss.match(/\.workspace-overview-shell\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(shellBlock, /display\s*:\s*grid/, "components.css owns the grid layout");
+});
