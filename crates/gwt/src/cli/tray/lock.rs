@@ -91,6 +91,7 @@ fn sanitize_user_id_segment(value: &str) -> String {
 #[derive(Debug)]
 pub struct TrayLockHandle {
     path: PathBuf,
+    guard_path: PathBuf,
     file: File,
 }
 
@@ -107,14 +108,12 @@ impl TrayLockHandle {
     /// after seeing the contention.
     pub fn set_url(&mut self, url: &str) -> io::Result<()> {
         let payload = build_lock_payload(std::process::id(), url);
-        self.file.set_len(0)?;
-        write_lock_contents(&self.path, &mut self.file, &payload)
+        write_lock_contents(&self.path, &payload)
     }
 }
 
 impl Drop for TrayLockHandle {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
         // Best-effort removal so subsequent launches don't trip on a
         // stale file. Failure is logged but never panics during Drop.
         if let Err(error) = fs::remove_file(&self.path) {
@@ -123,6 +122,15 @@ impl Drop for TrayLockHandle {
                 path = %self.path.display(),
                 error = %error,
                 "failed to remove tray lock file on drop"
+            );
+        }
+        let _ = self.file.unlock();
+        if let Err(error) = fs::remove_file(&self.guard_path) {
+            tracing::debug!(
+                target: "gwt_tray_lock",
+                path = %self.guard_path.display(),
+                error = %error,
+                "failed to remove tray guard file on drop"
             );
         }
     }
@@ -190,14 +198,15 @@ fn acquire_inner(
             source,
         })?;
     }
-    let mut file = OpenOptions::new()
+    let guard_path = guard_path_for_payload(&path);
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
+        .open(&guard_path)
         .map_err(|source| TrayLockError::Io {
-            path: path.clone(),
+            path: guard_path.clone(),
             source,
         })?;
     match file.try_lock_exclusive() {
@@ -215,11 +224,15 @@ fn acquire_inner(
         }
     }
     let payload = build_lock_payload(std::process::id(), "");
-    write_lock_contents(&path, &mut file, &payload).map_err(|source| TrayLockError::Io {
+    write_lock_contents(&path, &payload).map_err(|source| TrayLockError::Io {
         path: path.clone(),
         source,
     })?;
-    Ok(TrayLockHandle { path, file })
+    Ok(TrayLockHandle {
+        path,
+        guard_path,
+        file,
+    })
 }
 
 fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
@@ -231,10 +244,21 @@ fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
     }
 }
 
-fn write_lock_contents(path: &Path, file: &mut File, payload: &TrayLockFile) -> io::Result<()> {
-    use std::io::Seek;
-    file.seek(io::SeekFrom::Start(0))?;
+fn guard_path_for_payload(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| format!("{}.guard", name.to_string_lossy()))
+        .unwrap_or_else(|| "tray.lock.guard".to_string());
+    path.with_file_name(file_name)
+}
+
+fn write_lock_contents(path: &Path, payload: &TrayLockFile) -> io::Result<()> {
     let json = serde_json::to_vec(payload).map_err(io::Error::other)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
     file.write_all(&json)?;
     file.sync_all()?;
     tracing::debug!(
@@ -338,41 +362,17 @@ mod tests {
     fn second_acquire_for_same_user_reports_already_running() {
         let tmp = TempDir::new().expect("tempdir");
         let gwt_home = tmp.path();
-        let _holder = acquire(gwt_home).expect("first acquire succeeds");
+        let mut holder = acquire(gwt_home).expect("first acquire succeeds");
+        holder
+            .set_url("http://127.0.0.1:55555/")
+            .expect("set primary URL");
 
-        // The same process cannot fs2-lock the file twice on most
-        // platforms even with a different OpenOptions handle, so we
-        // emulate the contention by writing the file directly with a
-        // populated URL and then re-acquiring (which surfaces the
-        // contention against the still-held _holder).
-        let user_id = current_user_id();
-        let path = lock_path(gwt_home, &user_id);
-        let payload = TrayLockFile {
-            pid: std::process::id(),
-            url: "http://127.0.0.1:55555/".to_string(),
-            started_at: Utc::now(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        // The lock is held by _holder, but on macOS / Linux fs2 uses
-        // POSIX advisory locks which are per-process; an exclusive lock
-        // taken from the same process via a second handle behaves
-        // platform-dependently. To keep the test deterministic across
-        // POSIX and Windows we update the existing file contents (the
-        // owning handle stays alive throughout the test) and only
-        // assert that `read_lock_contents` round-trips the URL.
-        {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create(false)
-                .open(&path)
-                .expect("reopen for url overwrite");
-            f.set_len(0).expect("truncate");
-            let json = serde_json::to_vec(&payload).expect("serialize");
-            f.write_all(&json).expect("write");
-            f.sync_all().expect("sync");
+        match acquire(gwt_home).expect_err("second acquire must report contention") {
+            TrayLockError::AlreadyRunning { url, .. } => {
+                assert_eq!(url, "http://127.0.0.1:55555/");
+            }
+            other => panic!("unexpected lock error: {other:?}"),
         }
-        let read_back = read_lock_contents(&path).expect("read existing lock contents");
-        assert_eq!(read_back.url, "http://127.0.0.1:55555/");
     }
 
     #[test]

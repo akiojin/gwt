@@ -1,6 +1,7 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -82,7 +83,12 @@ impl Settings {
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| Self::global_config_path_for_home(&home))
+        resolve_home_dir(
+            std::env::var_os("HOME"),
+            std::env::var_os("USERPROFILE"),
+            dirs::home_dir(),
+        )
+        .map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -148,9 +154,53 @@ impl Settings {
     }
 }
 
+fn resolve_home_dir(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    fallback: Option<PathBuf>,
+) -> Option<PathBuf> {
+    non_empty_os(home)
+        .or_else(|| non_empty_os(userprofile))
+        .map(PathBuf::from)
+        .or(fallback)
+}
+
+fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn default_settings_are_sane() {
@@ -179,6 +229,21 @@ mod tests {
         assert_eq!(
             Settings::global_config_path_for_home(&home),
             home.join(".gwt").join("config.toml")
+        );
+    }
+
+    #[test]
+    fn global_config_path_prefers_env_home_for_test_isolation() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path().join("other"));
+
+        assert_eq!(
+            Settings::global_config_path(),
+            Some(temp.path().join(".gwt").join("config.toml"))
         );
     }
 

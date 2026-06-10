@@ -5196,7 +5196,7 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(
-            env.contains_key("PATH"),
+            env.keys().any(|key| key.eq_ignore_ascii_case("PATH")),
             "PTY spawn env must inherit the process PATH"
         );
         assert_eq!(

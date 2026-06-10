@@ -6843,3 +6843,10 @@ Type: failure-pattern
 Context: SPEC-1921 Phase 67: Claude Code host launch showed a pre-PTY error when the fallback npx --version probe timed out, while the same npx command succeeded manually afterward.
 Learning: A Windows npx probe timeout without a verified npm _npx corruption signature can be cold install/extraction latency and should not be treated as a deterministic launch-blocking failure.
 Future Action: For package-runner probes, keep deterministic repair/error handling for corrupted _npx or immediate unrelated failures, but continue to terminal launch with npx --yes when the only fallback probe signal is timeout.
+
+## 2026-06-10 — Windows verification blockers from real config and PATH casing
+
+Type: lesson
+Context: During verification cleanup on Windows, gwt binary/integration tests read the real user Teams-backed config through gwt_config, SessionStart aborted on non-critical Board/coordination failures, and gwt-agent launch prepended PATH was masked by a coexisting Path key.
+Learning: Library cfg(test) overrides do not protect binary/integration tests that link the crate normally. Config home resolution must honor HOME/USERPROFILE isolation, boot-critical hooks should fail open for non-critical Board reminders, and Windows environment layering must merge PATH keys case-insensitively.
+Future Action: Before declaring Windows verification clean, run binary/integration tests with realistic user config present and check for both Path/PATH variants; prefer hermetic config resolution and case-insensitive env merging over test-only provider overrides.

@@ -280,11 +280,11 @@ impl LaunchEnvironment {
 
         let mut merged_env = self.base_env.clone();
         for key in &merged_remove_env {
-            merged_env.remove(key);
+            remove_env_key(&mut merged_env, key);
         }
-        merged_env.extend(self.profile_env.clone());
-        merged_env.extend(explicit_env);
-        merged_env.extend(self.override_env.clone());
+        extend_env_layer(&mut merged_env, self.profile_env.clone());
+        extend_env_layer(&mut merged_env, explicit_env);
+        extend_env_layer(&mut merged_env, self.override_env.clone());
 
         *env_vars = merged_env;
         *remove_env = merged_remove_env;
@@ -332,6 +332,23 @@ fn inherited_terminal_color_suppressor_remove_env() -> Vec<String> {
 fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
     for key in INHERITED_LAUNCH_ENV_KEYS {
         env.remove(*key);
+    }
+}
+
+fn extend_env_layer(target: &mut HashMap<String, String>, layer: HashMap<String, String>) {
+    for (key, value) in layer {
+        if key.eq_ignore_ascii_case("PATH") {
+            remove_env_key(target, &key);
+        }
+        target.insert(key, value);
+    }
+}
+
+fn remove_env_key(env: &mut HashMap<String, String>, key: &str) {
+    if key.eq_ignore_ascii_case("PATH") {
+        env.retain(|candidate, _| !candidate.eq_ignore_ascii_case("PATH"));
+    } else {
+        env.remove(key);
     }
 }
 
@@ -556,6 +573,28 @@ mod tests {
                 "SECRET".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn apply_to_parts_replaces_windows_style_path_key_case_insensitively() {
+        let launch_env = LaunchEnvironment::from_base_env(vec![
+            ("Path".to_string(), "/host/bin".to_string()),
+            ("KEEP".to_string(), "base".to_string()),
+        ]);
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/explicit/bin".to_string())]);
+        let mut remove_env = Vec::new();
+
+        launch_env.apply_to_parts(&mut env_vars, &mut remove_env);
+
+        assert_eq!(
+            env_vars.get("PATH").map(String::as_str),
+            Some("/explicit/bin")
+        );
+        assert!(
+            !env_vars.contains_key("Path"),
+            "case-variant PATH keys must not coexist: {env_vars:?}"
+        );
+        assert_eq!(env_vars.get("KEEP").map(String::as_str), Some("base"));
     }
 
     #[test]

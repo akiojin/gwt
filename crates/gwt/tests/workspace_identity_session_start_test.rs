@@ -27,6 +27,7 @@ fn env_lock() -> &'static Mutex<()> {
 struct EnvGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
     previous_home: Option<std::ffi::OsString>,
+    previous_userprofile: Option<std::ffi::OsString>,
     previous_session_id: Option<std::ffi::OsString>,
 }
 
@@ -35,6 +36,10 @@ impl Drop for EnvGuard {
         match self.previous_home.take() {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
         match self.previous_session_id.take() {
             Some(value) => std::env::set_var(GWT_SESSION_ID_ENV, value),
@@ -48,12 +53,15 @@ fn with_temp_env(home: &Path, session_id: &str) -> EnvGuard {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_home = std::env::var_os("HOME");
+    let previous_userprofile = std::env::var_os("USERPROFILE");
     let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);
     std::env::set_var("HOME", home);
+    std::env::set_var("USERPROFILE", home);
     std::env::set_var(GWT_SESSION_ID_ENV, session_id);
     EnvGuard {
         _guard: guard,
         previous_home,
+        previous_userprofile,
         previous_session_id,
     }
 }

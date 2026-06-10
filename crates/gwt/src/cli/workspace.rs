@@ -1170,27 +1170,16 @@ mod tests {
         project_state_root: &Path,
     ) {
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-        let session = format!(
-            r#"
-id = "{session_id}"
-worktree_path = "{}"
-project_state_root = "{}"
-branch = "work/20260601-0934"
-agent_id = {{ type = "Codex" }}
-status = "Running"
-launch_command = "codex"
-launch_args = []
-created_at = "2026-06-01T00:00:00Z"
-updated_at = "2026-06-01T00:00:00Z"
-last_activity_at = "2026-06-01T00:00:00Z"
-display_name = "Codex"
-"#,
-            worktree_path.display(),
-            project_state_root.display()
+        let mut session = gwt_agent::Session::new(
+            worktree_path,
+            "work/20260601-0934",
+            gwt_agent::AgentId::Codex,
         );
-        std::fs::write(sessions_dir.join(format!("{session_id}.toml")), session)
-            .expect("write session");
+        session.id = session_id.to_string();
+        session.project_state_root = Some(project_state_root.to_path_buf());
+        session.status = gwt_agent::AgentStatus::Running;
+        session.launch_command = "codex".to_string();
+        session.save(&sessions_dir).expect("write session");
     }
 
     #[test]

@@ -45,12 +45,13 @@ fn handle_session_start(event: &str, input: &str) -> Result<HookOutput, HookErro
             tracing::warn!(?error, "workspace-registration hook step failed");
         }
     });
-    run_step(event, "coordination-event", || {
+    run_optional_step(event, "coordination-event", || {
         crate::daemon_runtime::handle_coordination_event(event, input)
-    })?;
-    run_step(event, "board-reminder", || {
+    });
+    Ok(run_optional_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })
+    .unwrap_or(HookOutput::Silent))
 }
 
 fn handle_user_prompt_submit(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -158,6 +159,20 @@ fn run_step<T>(
         if result.is_ok() { "ok" } else { "error" },
     );
     result
+}
+
+fn run_optional_step<T>(
+    event: &str,
+    handler: &str,
+    operation: impl FnOnce() -> Result<T, HookError>,
+) -> Option<T> {
+    match run_step(event, handler, operation) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(handler = handler, ?error, "optional hook step failed");
+            None
+        }
+    }
 }
 
 fn run_value<T>(event: &str, handler: &str, operation: impl FnOnce() -> T) -> T {
