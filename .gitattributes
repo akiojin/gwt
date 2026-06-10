@@ -30,3 +30,4 @@ docker-compose.yaml text eol=lf
 # append-only JSONL. Use git's union merge driver so branch divergence keeps
 # every recorded event line instead of producing a conflict.
 **/.gwt/work/events.jsonl merge=union
+**/.gwt/work/board-remote-roots.jsonl merge=union
