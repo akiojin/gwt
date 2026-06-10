@@ -125,6 +125,11 @@ root_js_modules! {
     "console-window.js" => "createConsoleWindow",
     // SPEC-2014 2026-05-29 amendment — Launch Agent setting controls.
     "launch-controls.js" => "buildReasoningField",
+    // SPEC-3015 — generated protocol enum contract (wire values serde-derived
+    // from the Rust enums; see crates/gwt/src/web_protocol_enums.rs).
+    "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
+    // SPEC-3015 — window runtime state normalization extracted from app.js.
+    "window-runtime-state.js" => "normalizeWindowRuntimeState",
 }
 
 /// Embedded payload of a [`StaticAsset`].

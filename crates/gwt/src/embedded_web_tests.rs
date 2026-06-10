@@ -19,6 +19,16 @@ fn terminal_context_menu_js() -> &'static str {
     root_js_module_source("/terminal-context-menu.js")
 }
 
+/// SPEC-3015 — window runtime state helpers extracted from app.js.
+fn window_runtime_state_js() -> &'static str {
+    root_js_module_source("/window-runtime-state.js")
+}
+
+/// SPEC-3015 — generated protocol enum contract (see web_protocol_enums.rs).
+fn protocol_enums_js() -> &'static str {
+    root_js_module_source("/protocol-enums.js")
+}
+
 fn styles_components_css() -> &'static str {
     static_asset_text("/styles/components.css")
 }
@@ -1191,18 +1201,21 @@ fn embedded_web_project_bar_omits_index_status_badge() {
 #[test]
 fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
     let js = app_js();
+    // SPEC-3015: the pure runtime-state helpers moved to the extracted
+    // window-runtime-state.js root module; app.js keeps the call sites.
+    let runtime_js = window_runtime_state_js();
 
     assert!(
-        js.contains("function normalizeWindowRuntimeState(status, preset)"),
-        "expected embedded js to expose a runtime-state normalization helper",
+        runtime_js.contains("export function normalizeWindowRuntimeState(status, preset)"),
+        "expected the extracted module to expose a runtime-state normalization helper",
     );
     assert!(
         js.contains("function windowGeometryLabel(windowData)"),
         "expected embedded js to expose a dedicated geometry label helper",
     );
     assert!(
-        js.contains("function windowRuntimeLabel(status)"),
-        "expected embedded js to expose a dedicated runtime label helper",
+        runtime_js.contains("export function windowRuntimeLabel(status)"),
+        "expected the extracted module to expose a dedicated runtime label helper",
     );
     assert!(
             js.contains("const geometryLabel = windowGeometryLabel(entry);")
@@ -1280,44 +1293,55 @@ fn embedded_web_agent_color_is_bound_for_windows_wizard_and_board() {
 
 #[test]
 fn embedded_web_shell_windows_do_not_render_waiting_status() {
-    let js = app_js();
+    // SPEC-3015: the waiting-demotion contract lives in the extracted
+    // window-runtime-state.js root module.
+    let runtime_js = window_runtime_state_js();
 
     assert!(
-        js.contains("function presetSupportsWaitingStatus(preset)"),
-        "expected embedded js to isolate the waiting-capable preset contract",
+        runtime_js.contains("export function presetSupportsWaitingStatus(preset)"),
+        "expected the extracted module to isolate the waiting-capable preset contract",
     );
     assert!(
-        js.contains("if (!presetSupportsWaitingStatus(preset) && normalizedState === \"waiting\")")
-            && js.contains("return \"running\";"),
-        "expected embedded js to downgrade waiting to running for shell-like presets",
+        runtime_js.contains(
+            "if (!presetSupportsWaitingStatus(preset) && normalizedState === \"waiting\")"
+        ) && runtime_js.contains("return \"running\";"),
+        "expected the extracted module to downgrade waiting to running for shell-like presets",
     );
 }
 
 #[test]
 fn embedded_web_agent_runtime_maps_idle_to_idle_telemetry() {
-    let js = app_js();
+    // SPEC-3015: labels are now derived from the generated wire-state list
+    // (protocol-enums.js) inside the extracted window-runtime-state.js.
+    let runtime_js = window_runtime_state_js();
 
     assert!(
-        js.contains("idle: \"Idle\""),
-        "expected embedded js to expose an Idle runtime label",
+        protocol_enums_js().contains("\"idle\","),
+        "expected the generated protocol enum contract to carry the idle wire state",
     );
     assert!(
-        js.contains("case \"idle\":") && js.contains("return \"idle\";"),
-        "expected embedded js to count idle runtime states as idle telemetry",
+        runtime_js.contains("WINDOW_RUNTIME_STATES.map((state) =>"),
+        "expected runtime labels to be derived from the generated wire-state list",
+    );
+    assert!(
+        runtime_js.contains("case \"idle\":") && runtime_js.contains("return \"idle\";"),
+        "expected the extracted module to count idle runtime states as idle telemetry",
     );
 }
 
 #[test]
 fn embedded_web_agent_runtime_maps_starting_separately() {
-    let js = app_js();
+    // SPEC-3015: the starting state ships through the generated contract and
+    // the extracted window-runtime-state.js module (US-69).
+    let runtime_js = window_runtime_state_js();
     let html = frontend_styles_bundle();
 
     assert!(
-        js.contains("starting: \"Starting\""),
-        "expected embedded js to expose a Starting runtime label (US-69)",
+        protocol_enums_js().contains("\"starting\","),
+        "expected the generated protocol enum contract to carry the starting wire state (US-69)",
     );
     assert!(
-        js.contains("case \"starting\":") && js.contains("return \"not_started\";"),
+        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"not_started\";"),
         "expected the starting runtime state to map onto the separate not_started telemetry rim",
     );
     assert!(

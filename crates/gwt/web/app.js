@@ -80,6 +80,14 @@
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
+      // SPEC-3015 — window runtime state normalization extracted from app.js;
+      // backed by the generated protocol enum contract (/protocol-enums.js).
+      import {
+        mapAgentTelemetryState,
+        normalizeWindowRuntimeState,
+        presetSupportsWaitingStatus,
+        windowRuntimeLabel,
+      } from "/window-runtime-state.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -2162,41 +2170,6 @@
         return presetSurface(windowData?.preset) === "terminal";
       }
 
-      const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
-        running: "Running",
-        starting: "Starting",
-        idle: "Idle",
-        waiting: "Waiting",
-        stopped: "Stopped",
-        error: "Error",
-      });
-
-      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
-      // spellings (and the older `starting`→running conflation) normalize to it.
-      const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        not_started: "starting",
-        notstarted: "starting",
-        "not-started": "starting",
-        ready: "idle",
-        exited: "stopped",
-      });
-
-      function presetSupportsWaitingStatus(preset) {
-        return preset === "agent" || preset === "claude" || preset === "codex";
-      }
-
-      function normalizeWindowRuntimeState(status, preset) {
-        const rawState = String(status || "running").toLowerCase();
-        const normalizedState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
-        if (!presetSupportsWaitingStatus(preset) && normalizedState === "waiting") {
-          return "running";
-        }
-        if (!WINDOW_RUNTIME_STATE_LABELS[normalizedState]) {
-          return "running";
-        }
-        return normalizedState;
-      }
-
       function windowGeometryLabel(windowData) {
         if (windowData.minimized) {
           return "Minimized";
@@ -2205,10 +2178,6 @@
           return "Maximized";
         }
         return "Normal";
-      }
-
-      function windowRuntimeLabel(status) {
-        return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
       }
 
       function windowDisplayTitle(windowData) {
@@ -4387,30 +4356,6 @@
           renderBoard(windowId);
         }
         focusOrSpawnPreset("board");
-      }
-
-      // SPEC-2356 — translate legacy runtime state vocabulary to Living
-      // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
-      // intentionally narrow so future runtime states surface as
-      // `idle` until the design language explicitly handles them.
-      function mapAgentTelemetryState(runtimeState) {
-        switch (runtimeState) {
-          case "running":
-            return "active";
-          case "starting":
-            return "not_started";
-          case "ready":
-          case "idle":
-          case "waiting":
-            return "idle";
-          case "stopped":
-          case "exited":
-            return "done";
-          case "error":
-            return "blocked";
-          default:
-            return "idle";
-        }
       }
 
       function applyStatus(windowId, status, detail) {

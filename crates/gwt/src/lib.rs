@@ -36,6 +36,7 @@ pub mod protocol;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod web_protocol_enums;
 pub mod window_state;
 pub mod workspace;
 pub mod worktree_inventory;
