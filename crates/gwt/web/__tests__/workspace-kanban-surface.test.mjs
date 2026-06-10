@@ -868,7 +868,7 @@ test("Workspace rows and detail are titled by branch with the record title as me
   assert.match(subtitleText, /gwt-manage-pr/, "detail subtitle carries the record title");
 });
 
-// SPEC-2359 W-16 (FR-394): the agents list is capped on the wire; the detail
+// SPEC-2359 W-16 (FR-402): the agents list is capped on the wire; the detail
 // Work section renders "+N more sessions" from session_agent_total so the
 // user can tell more ledger sessions exist beyond the rendered ones.
 test("detail shows '+N more sessions' when session_agent_total exceeds rendered agents", () => {

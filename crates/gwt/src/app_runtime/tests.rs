@@ -13951,7 +13951,7 @@ fn repo_head_branch(repo: &Path) -> Option<String> {
     (!branch.is_empty()).then_some(branch)
 }
 
-/// SPEC-2359 Phase W-16 (FR-394, T-571): a Workspace row whose record has no
+/// SPEC-2359 Phase W-16 (FR-402, T-571): a Workspace row whose record has no
 /// agents gains them from the machine-local session ledger — sessions whose
 /// TOML carries the same repo hash and branch attach to the row with their
 /// conversation history, and `session_agent_total` reports the count.
@@ -14034,7 +14034,7 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     assert_eq!(row.session_agent_total, 1);
 }
 
-/// SPEC-2359 Phase W-16 (FR-394): the wire cap applies to the row's TOTAL
+/// SPEC-2359 Phase W-16 (FR-402): the wire cap applies to the row's TOTAL
 /// agents (record agents included), not just registry additions — a
 /// decomposed legacy row can carry hundreds of record agents and must not
 /// flood the workspace payload. The uncapped count rides
@@ -14102,7 +14102,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
-/// SPEC-2359 Phase W-16 (FR-394 follow-up, user verification 2026-06-10): on
+/// SPEC-2359 Phase W-16 (FR-402 follow-up, user verification 2026-06-10): on
 /// this machine none of the ledger TOMLs carry `session_history` (the field
 /// is newer than the sessions), but almost all carry `agent_session_id` (the
 /// latest conversation). The view must synthesize that latest conversation as

@@ -154,7 +154,7 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
-      // SPEC-2359 W-16 (FR-394): uncapped agent/session count for the
+      // SPEC-2359 W-16 (FR-402): uncapped agent/session count for the
       // "+N more sessions" label; 0 = not computed (legacy payloads).
       session_agent_total:
         Number(item?.session_agent_total) || Number(fallback.session_agent_total) || 0,
@@ -414,7 +414,7 @@ export function createWorkspaceKanbanSurface({
       wrap.appendChild(group);
     }
     container.appendChild(wrap);
-    // SPEC-2359 W-16 (FR-394): the agents list is capped on the wire; surface
+    // SPEC-2359 W-16 (FR-402): the agents list is capped on the wire; surface
     // how many more ledger sessions exist beyond the rendered ones.
     // `session_agent_total === 0` means "not computed" (legacy payload).
     const total = Number(workspace && workspace.session_agent_total) || 0;

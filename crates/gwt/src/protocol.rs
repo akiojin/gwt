@@ -1099,7 +1099,7 @@ pub struct ActiveWorkItemView {
     /// close (Done / Discarded). None while the Work is active / paused.
     #[serde(default)]
     pub closed_at: Option<String>,
-    /// SPEC-2359 Phase W-16 (FR-394): total agents known for this Workspace
+    /// SPEC-2359 Phase W-16 (FR-402): total agents known for this Workspace
     /// (record agents plus machine-local ledger sessions for its branch). The
     /// `agents` list is capped on the wire, so the frontend renders
     /// "+N more sessions" from this count. `0` means "not computed" (legacy

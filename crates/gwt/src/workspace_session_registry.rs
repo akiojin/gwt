@@ -1,4 +1,4 @@
-//! SPEC-2359 Phase W-16 (FR-394): branch-keyed registry of machine-local
+//! SPEC-2359 Phase W-16 (FR-402): branch-keyed registry of machine-local
 //! agent sessions.
 //!
 //! The Workspace surface shows the union of worktrees and Work records, but
@@ -9,7 +9,7 @@
 //! surface its sessions even when `works.json` never recorded an agent for
 //! the branch.
 //!
-//! Invariants (FR-394):
+//! Invariants (FR-402):
 //! - Only sessions whose `repo_hash` matches the active project participate;
 //!   TOMLs without a `repo_hash` are excluded to avoid cross-project
 //!   mis-attachment.
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use crate::runtime_support::normalize_branch_name;
 
-/// Maximum registry-derived agents attached to one Workspace row (FR-394).
+/// Maximum registry-derived agents attached to one Workspace row (FR-402).
 pub const REGISTRY_SESSION_CAP: usize = 8;
 
 /// Group this project's sessions by canonical branch identity, newest first
@@ -109,7 +109,7 @@ mod tests {
         session
     }
 
-    /// FR-394: only sessions whose repo_hash matches the project participate;
+    /// FR-402: only sessions whose repo_hash matches the project participate;
     /// TOMLs without repo_hash are excluded; `origin/X` and `X` group together;
     /// groups are newest-first.
     #[test]
@@ -136,7 +136,7 @@ mod tests {
         );
     }
 
-    /// FR-394: dedup against record agents, cap the wire payload, and report
+    /// FR-402: dedup against record agents, cap the wire payload, and report
     /// the uncapped addition count for `session_agent_total`.
     #[test]
     fn selection_dedupes_caps_and_reports_total() {

@@ -2658,7 +2658,7 @@ fn workspace_work_agent_view_from_ref(
             let mut entries: Vec<_> = session.session_history.iter().collect();
             entries.sort_by_key(|entry| entry.started_at);
             if entries.is_empty() {
-                // SPEC-2359 W-16 (FR-394 follow-up): `session_history` is newer
+                // SPEC-2359 W-16 (FR-402 follow-up): `session_history` is newer
                 // than most ledger TOMLs (zero coverage on long-lived machines),
                 // but the latest conversation pointer still exists. Synthesize
                 // it as the single Session row instead of "No session yet".
@@ -2950,7 +2950,7 @@ fn active_work_agent_view_from_summary(
 /// Convert a persisted Work's agent (a launch, carrying its Session history) to
 /// the active-surface agent view so Paused Workspaces render their Work →
 /// Session list instead of an empty agent list.
-/// SPEC-2359 Phase W-16 (FR-394): attach machine-local ledger sessions to
+/// SPEC-2359 Phase W-16 (FR-402): attach machine-local ledger sessions to
 /// each Workspace (branch) row. Sessions whose TOML carries this project's
 /// repo hash and the row's branch join the row's agents (deduped by gwt
 /// session id, capped per [`crate::workspace_session_registry`]); the
@@ -5442,7 +5442,7 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
-            // SPEC-2359 Phase W-16 (FR-394): attach the machine-local session
+            // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
             // ledger to each Workspace (branch) row so sessions surface even
             // when works.json never recorded an agent for the branch.
             attach_registry_sessions_to_active_works(
