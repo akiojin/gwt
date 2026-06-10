@@ -23,7 +23,20 @@ pub use container::{
     ComposeServiceStatus, ContainerInfo, ContainerStatus,
 };
 pub use detect::{
-    compose_available, daemon_running, detect_docker_files, docker_available, DockerFiles,
+    compose_available, daemon_running, detect_docker_files, docker_available, launch_preflight,
+    DockerFiles,
 };
 pub use devcontainer::DevContainerConfig;
 pub use port::{check_port_available, PortAllocator, PortMapping};
+
+/// Crate-wide lock for tests that mutate the process-global
+/// `GWT_DOCKER_BIN` / docker timeout env vars. `detect` and `container`
+/// tests previously used module-local locks, which let tests in
+/// different modules race on the same env var under the parallel test
+/// runner (the suspected source of the #2349 / #3021 fake-docker
+/// flakes).
+#[cfg(test)]
+pub(crate) fn docker_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}

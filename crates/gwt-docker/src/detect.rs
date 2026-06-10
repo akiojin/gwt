@@ -30,6 +30,13 @@ impl DockerFiles {
 
 /// Run a docker sub-command and return whether it succeeded.
 fn docker_probe(args: &[&str], label: &str) -> bool {
+    docker_probe_diagnostics(args, label).is_ok()
+}
+
+/// Run a docker sub-command, returning failure diagnostics (probe stderr
+/// or the spawn error) so preflight errors can explain *why* a probe
+/// failed instead of only that it failed (Issue #3029).
+fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(), String> {
     // SPEC-2809 / SPEC-1924 Phase D-docker — route docker probes through
     // `spawn_logged_blocking` so the docker tab of the Console window /
     // Logs Process facet sees them. The `binary` may be a `GWT_DOCKER_BIN`
@@ -57,20 +64,27 @@ fn docker_probe(args: &[&str], label: &str) -> bool {
                 ok = ok,
                 "docker probe"
             );
-            if !ok {
-                let stderr = output.stderr.trim();
-                if !stderr.is_empty() {
-                    debug!(
-                        target: "gwt::launch::probe",
-                        category = "docker",
-                        label = label,
-                        attempted_binary = %attempted_binary,
-                        stderr = %stderr,
-                        "docker probe stderr"
-                    );
-                }
+            if ok {
+                return Ok(());
             }
-            ok
+            let stderr = output.stderr.trim();
+            if stderr.is_empty() {
+                Err(format!(
+                    "docker {} exited with status {:?}",
+                    args.join(" "),
+                    output.exit_code
+                ))
+            } else {
+                debug!(
+                    target: "gwt::launch::probe",
+                    category = "docker",
+                    label = label,
+                    attempted_binary = %attempted_binary,
+                    stderr = %stderr,
+                    "docker probe stderr"
+                );
+                Err(stderr.to_string())
+            }
         }
         Err(e) => {
             info!(
@@ -82,9 +96,37 @@ fn docker_probe(args: &[&str], label: &str) -> bool {
                 error = %e,
                 "docker probe failed"
             );
-            false
+            Err(e.to_string())
         }
     }
+}
+
+fn preflight_message(summary: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        summary.to_string()
+    } else {
+        // Keep the hint single-line so the agent pane error stays compact.
+        let detail = detail.lines().next().unwrap_or(detail);
+        format!("{summary} ({detail})")
+    }
+}
+
+/// Docker launch preflight: CLI present, compose v2 plugin available,
+/// daemon running. On failure the message includes the probe's stderr
+/// (e.g. `docker compose is not available (docker: unknown command:
+/// docker compose)`) so environment issues like an invisible
+/// `~/.docker/cli-plugins` are distinguishable from a broken Docker
+/// install (Issue #3029).
+pub fn launch_preflight() -> std::result::Result<(), String> {
+    docker_probe_diagnostics(&["--version"], "docker CLI").map_err(|detail| {
+        preflight_message("Docker is not installed or not available on PATH", &detail)
+    })?;
+    docker_probe_diagnostics(&["compose", "version"], "docker compose")
+        .map_err(|detail| preflight_message("docker compose is not available", &detail))?;
+    docker_probe_diagnostics(&["info"], "daemon")
+        .map_err(|detail| preflight_message("Docker daemon is not running", &detail))?;
+    Ok(())
 }
 
 fn docker_binary() -> OsString {
@@ -346,7 +388,79 @@ mod tests {
     }
 
     fn docker_test_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        crate::docker_env_test_lock()
+    }
+
+    fn write_compose_failing_fake_docker(dir: &Path) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let script_path = dir.join("docker.cmd");
+            std::fs::write(
+                &script_path,
+                "@echo off\r\nif \"%1\"==\"compose\" (\r\n  echo docker: unknown command: docker compose 1>&2\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n",
+            )
+            .expect("write fake docker");
+            script_path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script_path = dir.join("docker");
+            std::fs::write(
+                &script_path,
+                "#!/bin/sh\nif [ \"$1\" = \"compose\" ]; then\n  echo 'docker: unknown command: docker compose' >&2\n  exit 1\nfi\nexit 0\n",
+            )
+            .expect("write fake docker");
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("stat fake docker")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+            script_path
+        }
+    }
+
+    #[test]
+    fn launch_preflight_includes_probe_stderr_in_failure_message() {
+        let _lock = docker_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let script_path = write_compose_failing_fake_docker(tmp.path());
+        let previous_bin = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &script_path);
+
+        let result = launch_preflight();
+
+        match previous_bin {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        let message = result.expect_err("compose probe should fail");
+        assert!(
+            message.contains("docker compose is not available"),
+            "summary missing: {message}"
+        );
+        assert!(
+            message.contains("unknown command"),
+            "stderr hint missing: {message}"
+        );
+    }
+
+    #[test]
+    fn preflight_message_appends_single_line_detail() {
+        assert_eq!(
+            preflight_message("docker compose is not available", ""),
+            "docker compose is not available"
+        );
+        assert_eq!(
+            preflight_message(
+                "docker compose is not available",
+                "docker: unknown command\nRun 'docker --help'"
+            ),
+            "docker compose is not available (docker: unknown command)"
+        );
     }
 }

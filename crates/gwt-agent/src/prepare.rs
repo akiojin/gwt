@@ -899,16 +899,7 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
 }
 
 fn run_docker_preflight() -> Result<(), String> {
-    if !gwt_docker::docker_available() {
-        return Err("Docker is not installed or not available on PATH".to_string());
-    }
-    if !gwt_docker::compose_available() {
-        return Err("docker compose is not available".to_string());
-    }
-    if !gwt_docker::daemon_running() {
-        return Err("Docker daemon is not running".to_string());
-    }
-    Ok(())
+    gwt_docker::launch_preflight()
 }
 
 fn docker_bundle_mounts_for_gwt_home(gwt_home: &Path) -> DockerBundleMounts {
