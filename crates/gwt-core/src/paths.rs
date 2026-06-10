@@ -180,6 +180,25 @@ pub fn gwt_workspace_work_events_path_for_repo_path(repo_path: &Path) -> PathBuf
     gwt_workspace_work_events_path(&repo_hash)
 }
 
+/// Return the home-scoped close-event log path for a repository hash
+/// (`~/.gwt/projects/<hash>/project-state/work-events-closed.jsonl`).
+///
+/// SPEC-2359 Phase W-15 (FR-384): close-kind work events (Pause / Done /
+/// Discard) are home-persisted only — they are recorded after the PR merged,
+/// so they can never ride the PR, and they must not enter the git-tracked
+/// repo-local log. This log is deliberately separate from
+/// `work-events.jsonl`: that file is the FR-358 migration source and would be
+/// copied wholesale into the repo-local tracked file on first migration.
+pub fn gwt_workspace_work_events_closed_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/work-events-closed.jsonl")
+}
+
+/// Return the home-scoped close-event log path for a repository path.
+pub fn gwt_workspace_work_events_closed_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_workspace_work_events_closed_path(&repo_hash)
+}
+
 /// Resolve the main worktree root (git common dir) for a repository or linked
 /// worktree path.
 ///
@@ -795,6 +814,32 @@ mod tests {
         path.to_string_lossy()
             .trim_start_matches(r"\\?\")
             .replace('\\', "/")
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-384): close-kind work events get their own
+    /// home-scoped log. It must be distinct from both the git-tracked
+    /// repo-local event log and the home in-work event log: the latter is the
+    /// FR-358 migration source, so writing close events there would copy them
+    /// into the git-tracked file on first migration.
+    #[test]
+    fn workspace_close_events_path_is_home_scoped_and_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let closed = gwt_workspace_work_events_closed_path_for_repo_path(&repo);
+        let hash = project_scope_hash(&repo);
+        assert!(closed.ends_with(gwt_home_suffix(&[
+            "projects",
+            hash.as_str(),
+            "project-state",
+            "work-events-closed.jsonl",
+        ])));
+
+        let in_work_home = gwt_workspace_work_events_path_for_repo_path(&repo);
+        let repo_local = gwt_repo_local_work_events_path(&repo);
+        assert_ne!(closed, in_work_home);
+        assert_ne!(closed, repo_local);
     }
 
     #[test]
