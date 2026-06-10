@@ -44,6 +44,7 @@ pub fn markdown_to_teams_html(markdown: &str) -> String {
     let mut raw_html = String::new();
     html::push_html(&mut raw_html, parser);
     let rewritten = rewrite_headings_to_bold(&raw_html);
+    let teams_html = normalize_teams_line_breaks(&rewritten);
 
     let tags: HashSet<&str> = [
         "p",
@@ -65,10 +66,11 @@ pub fn markdown_to_teams_html(markdown: &str) -> String {
     ]
     .into_iter()
     .collect();
-    ammonia::Builder::default()
+    let sanitized = ammonia::Builder::default()
         .tags(tags)
-        .clean(&rewritten)
-        .to_string()
+        .clean(&teams_html)
+        .to_string();
+    sanitized.replace('\n', "")
 }
 
 /// Strip all HTML tags, keeping only text. Used to keep Teams-origin HTML
@@ -88,6 +90,28 @@ fn rewrite_headings_to_bold(html: &str) -> String {
             .replace(&format!("</h{level}>"), "</strong><br>");
     }
     out
+}
+
+fn normalize_teams_line_breaks(html: &str) -> String {
+    let mut out = html.replace("\r\n", "\n").replace('\r', "\n");
+    while out.contains(">\n<") {
+        out = out.replace(">\n<", "><");
+    }
+    out = out.replace("</p><p>", "<br><br>");
+    for tag in ["ul", "ol", "blockquote", "pre"] {
+        out = out.replace(&format!("</p><{tag}"), &format!("<br><{tag}"));
+        out = out.replace(&format!("</{tag}><p>"), &format!("</{tag}><br>"));
+    }
+    out = out.replace("<p>", "").replace("</p>", "");
+    out = out.replace('\n', "<br>");
+    trim_trailing_br(out)
+}
+
+fn trim_trailing_br(mut html: String) -> String {
+    while html.ends_with("<br>") {
+        html.truncate(html.len() - "<br>".len());
+    }
+    html
 }
 
 /// Escape the three characters Slack reserves in message text.
@@ -256,6 +280,26 @@ mod tests {
         // XSS still stripped.
         let dirty = markdown_to_teams_html("<script>x</script>ok");
         assert!(!dirty.contains("<script>"), "{dirty}");
+    }
+
+    #[test]
+    fn teams_html_preserves_paragraph_breaks_without_raw_newlines() {
+        let html = markdown_to_teams_html("Current state: A\n\nReason: B\n\nNext: C");
+        assert_eq!(html, "Current state: A<br><br>Reason: B<br><br>Next: C");
+        assert!(
+            !html.contains('\n'),
+            "Teams HTML must not carry raw newlines: {html:?}"
+        );
+        assert!(
+            !html.contains("\\n"),
+            "Teams HTML must not carry escaped newlines: {html:?}"
+        );
+    }
+
+    #[test]
+    fn teams_html_preserves_soft_breaks_as_br() {
+        let html = markdown_to_teams_html("line one\nline two");
+        assert_eq!(html, "line one<br>line two");
     }
 
     #[test]
