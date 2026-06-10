@@ -15,6 +15,7 @@ use crate::{
     paths::{
         gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
         gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
+        gwt_workspace_work_events_closed_path_for_repo_path,
         gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
         project_scope_hash, resolve_current_worktree_root,
     },
@@ -1699,8 +1700,12 @@ pub fn record_workspace_work_paused_event_paths(
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): convenience wrapper resolving the
-/// project-scoped work_items and work_events paths from `repo_path` and
+/// project-scoped work_items and close-event paths from `repo_path` and
 /// invoking [`record_workspace_work_paused_event_paths`].
+///
+/// SPEC-2359 Phase W-15 (FR-384): Pause is a close-kind event, so it is
+/// home-persisted only (`work-events-closed.jsonl`) and never enters the
+/// git-tracked repo-local log.
 #[allow(clippy::too_many_arguments)]
 pub fn record_workspace_work_paused_event(
     repo_path: &Path,
@@ -1715,7 +1720,7 @@ pub fn record_workspace_work_paused_event(
 ) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
     record_workspace_work_paused_event_paths(
         &work_items_path,
         &events_path,
@@ -1754,6 +1759,8 @@ pub fn emit_workspace_done_event_if_absent_paths(
 /// SPEC-2359 US-37 / FR-117..FR-120: Convenience wrapper resolving the
 /// project-scoped work_items and work_events paths from `repo_path` and
 /// invoking [`emit_workspace_done_event_if_absent_paths`].
+/// SPEC-2359 Phase W-15 (FR-384): Done is a close-kind event — home-persisted
+/// only, never written to the git-tracked repo-local log.
 pub fn emit_workspace_done_event_if_absent(
     repo_path: &Path,
     work_item_id: &str,
@@ -1761,7 +1768,7 @@ pub fn emit_workspace_done_event_if_absent(
 ) -> Result<bool> {
     emit_workspace_done_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &repo_local_work_events_path_with_migration(repo_path)?,
+        &gwt_workspace_work_events_closed_path_for_repo_path(repo_path),
         work_item_id,
         updated_at,
     )
@@ -1808,6 +1815,8 @@ pub fn emit_workspace_discard_event_if_absent_paths(
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): Convenience wrapper resolving the
 /// project-scoped work_items and work_events paths from `repo_path` and
 /// invoking [`emit_workspace_discard_event_if_absent_paths`].
+/// SPEC-2359 Phase W-15 (FR-384): Discard is a close-kind event —
+/// home-persisted only, never written to the git-tracked repo-local log.
 pub fn emit_workspace_discard_event_if_absent(
     repo_path: &Path,
     work_item_id: &str,
@@ -1815,7 +1824,7 @@ pub fn emit_workspace_discard_event_if_absent(
 ) -> Result<bool> {
     emit_workspace_discard_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &repo_local_work_events_path_with_migration(repo_path)?,
+        &gwt_workspace_work_events_closed_path_for_repo_path(repo_path),
         work_item_id,
         updated_at,
     )
@@ -1969,6 +1978,12 @@ pub fn rebuild_work_items_from_events_paths(
 /// SPEC-2359 US-37: Convenience wrapper for the daemon bootstrap hook.
 /// Resolves the project-scoped paths and invokes
 /// [`rebuild_work_items_from_events_paths`].
+///
+/// SPEC-2359 Phase W-15 (FR-384) caveat: close-kind events recorded after
+/// W-15 live only in the home close log (`work-events-closed.jsonl`). A
+/// future marker version bump that replays solely the repo-local log would
+/// resurrect closed Work — any such replay must also merge the home close
+/// log (the W-16 intake consumer supersedes this rebuild entirely).
 pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
 ) -> Result<WorkspaceWorkItemsRebuildOutcome> {
@@ -2099,12 +2114,14 @@ pub fn reset_legacy_agent_identity_for_repo(repo_path: &Path) -> Result<bool> {
 /// SPEC-2359 US-37 / FR-119: Convenience wrapper resolving the project-scoped
 /// current, work_items, and work_events paths from `repo_path` and invoking
 /// [`retroactive_auto_done_scan_paths`].
+/// SPEC-2359 Phase W-15 (FR-384): the emitted Done events are close-kind, so
+/// they go to the home close log, never to the git-tracked repo-local log.
 pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
     retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
 
@@ -2176,7 +2193,7 @@ pub fn emit_workspace_done_event_for_branch(
     emit_workspace_done_event_for_branch_paths(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
-        &repo_local_work_events_path_with_migration(repo_path)?,
+        &gwt_workspace_work_events_closed_path_for_repo_path(repo_path),
         branch,
         now,
     )
