@@ -8,6 +8,9 @@
 //!   - Installer payload (.dmg/.pkg/.msi) => run installer with privileges/UAC, then restart
 //! - Internal helper modes (`__internal`) to safely apply updates after the parent process exits
 
+use crate::process_executor::{
+    ExecutionMode, ProcessExecutor, ProcessRequest, SystemProcessExecutor,
+};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
@@ -776,7 +779,28 @@ impl UpdateManager {
         new_exe: &Path,
         args_file: &Path,
     ) -> Result<(), String> {
-        std::process::Command::new(helper_exe)
+        self.spawn_internal_apply_update_with_executor(
+            helper_exe,
+            old_pid,
+            target_exe,
+            new_exe,
+            args_file,
+            &SystemProcessExecutor,
+        )
+    }
+
+    /// SPEC-3014 FR-002: executor-injectable variant of
+    /// [`Self::spawn_internal_apply_update`] (fire-and-forget helper spawn).
+    pub fn spawn_internal_apply_update_with_executor(
+        &self,
+        helper_exe: &Path,
+        old_pid: u32,
+        target_exe: &Path,
+        new_exe: &Path,
+        args_file: &Path,
+        executor: &dyn ProcessExecutor,
+    ) -> Result<(), String> {
+        let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("apply-update")
             .arg("--old-pid")
@@ -787,7 +811,9 @@ impl UpdateManager {
             .arg(new_exe)
             .arg("--args-file")
             .arg(args_file)
-            .spawn()
+            .mode(ExecutionMode::Spawn);
+        executor
+            .run(request)
             .map_err(|e| format!("Failed to spawn update helper: {e}"))?;
         Ok(())
     }
@@ -801,7 +827,31 @@ impl UpdateManager {
         installer_kind: InstallerKind,
         args_file: &Path,
     ) -> Result<(), String> {
-        std::process::Command::new(helper_exe)
+        self.spawn_internal_run_installer_with_executor(
+            helper_exe,
+            old_pid,
+            target_exe,
+            installer,
+            installer_kind,
+            args_file,
+            &SystemProcessExecutor,
+        )
+    }
+
+    /// SPEC-3014 FR-002: executor-injectable variant of
+    /// [`Self::spawn_internal_run_installer`] (fire-and-forget helper spawn).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_internal_run_installer_with_executor(
+        &self,
+        helper_exe: &Path,
+        old_pid: u32,
+        target_exe: &Path,
+        installer: &Path,
+        installer_kind: InstallerKind,
+        args_file: &Path,
+        executor: &dyn ProcessExecutor,
+    ) -> Result<(), String> {
+        let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("run-installer")
             .arg("--old-pid")
@@ -818,7 +868,9 @@ impl UpdateManager {
             })
             .arg("--args-file")
             .arg(args_file)
-            .spawn()
+            .mode(ExecutionMode::Spawn);
+        executor
+            .run(request)
             .map_err(|e| format!("Failed to spawn installer helper: {e}"))?;
         Ok(())
     }
@@ -1013,13 +1065,34 @@ pub fn internal_apply_update(
     source_exe: &Path,
     args_file: &Path,
 ) -> Result<(), String> {
-    wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
+    internal_apply_update_with_executor(
+        old_pid,
+        target_exe,
+        source_exe,
+        args_file,
+        &SystemProcessExecutor,
+    )
+}
+
+/// SPEC-3014 FR-002: executor-injectable variant of [`internal_apply_update`]
+/// (pid-exit probe + post-replace restart spawn).
+pub fn internal_apply_update_with_executor(
+    old_pid: u32,
+    target_exe: &Path,
+    source_exe: &Path,
+    args_file: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
+    wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
     replace_bundle_executables(target_exe, source_exe)?;
 
-    std::process::Command::new(target_exe)
-        .args(args)
-        .spawn()
+    executor
+        .run(
+            ProcessRequest::new(target_exe)
+                .args(&args)
+                .mode(ExecutionMode::Spawn),
+        )
         .map_err(|e| format!("Failed to restart: {e}"))?;
     Ok(())
 }
@@ -1031,7 +1104,27 @@ pub fn internal_run_installer(
     installer_kind: InstallerKind,
     args_file: &Path,
 ) -> Result<(), String> {
-    wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
+    internal_run_installer_with_executor(
+        old_pid,
+        target_exe,
+        installer,
+        installer_kind,
+        args_file,
+        &SystemProcessExecutor,
+    )
+}
+
+/// SPEC-3014 FR-002: executor-injectable variant of [`internal_run_installer`]
+/// (pid-exit probe + privileged installer flow + restart spawn).
+pub fn internal_run_installer_with_executor(
+    old_pid: u32,
+    target_exe: &Path,
+    installer: &Path,
+    installer_kind: InstallerKind,
+    args_file: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
+    wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -1040,7 +1133,7 @@ pub fn internal_run_installer(
                 #[cfg(target_os = "macos")]
                 {
                     let target_app =
-                        run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+                        run_macos_dmg_installer_with_privileges(installer, target_exe, executor)?;
                     app_bundle_executable_path(&target_app, target_exe)
                         .unwrap_or_else(|| target_exe.to_path_buf())
                 }
@@ -1052,7 +1145,7 @@ pub fn internal_run_installer(
             InstallerKind::MacPkg => {
                 #[cfg(target_os = "macos")]
                 {
-                    run_macos_pkg_installer_with_privileges(installer)?;
+                    run_macos_pkg_installer_with_privileges(installer, executor)?;
                     resolve_macos_restart_executable(Path::new("/Applications"), target_exe, None)
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -1063,7 +1156,7 @@ pub fn internal_run_installer(
             InstallerKind::WindowsMsi => {
                 #[cfg(target_os = "windows")]
                 {
-                    run_windows_msi_with_uac(installer)?;
+                    run_windows_msi_with_uac(installer, executor)?;
                     resolve_windows_restart_executable(target_exe)
                 }
                 #[cfg(not(target_os = "windows"))]
@@ -1075,9 +1168,12 @@ pub fn internal_run_installer(
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
         let args = UpdateManager::read_restart_args_file(args_file)?;
-        std::process::Command::new(&restart_exe)
-            .args(args)
-            .spawn()
+        executor
+            .run(
+                ProcessRequest::new(&restart_exe)
+                    .args(&args)
+                    .mode(ExecutionMode::Spawn),
+            )
             .map_err(|e| format!("Failed to restart: {e}"))?;
         Ok(())
     }
@@ -1500,9 +1596,13 @@ fn ensure_executable(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Result<(), String> {
+fn wait_for_pid_exit(
+    pid: u32,
+    timeout: Duration,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     let started = std::time::Instant::now();
-    while is_process_running(pid) {
+    while is_process_running(pid, executor) {
         if started.elapsed() > timeout {
             return Err(format!("Timed out waiting for process {pid} to exit"));
         }
@@ -1511,27 +1611,34 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
-fn is_process_running(pid: u32) -> bool {
-    #[cfg(target_os = "windows")]
-    {
+/// Build the platform-appropriate "is this PID alive?" probe.
+///
+/// `windows == true` selects the PowerShell `Get-Process` probe (hidden
+/// window, `status()` semantics, matching the pre-seam `hidden_command`
+/// usage); otherwise `kill -0` with captured output. Both request shapes are
+/// platform-independent so the cross-OS branch logic stays testable anywhere
+/// (SPEC-3014 acceptance scenario 1).
+fn process_probe_request(pid: u32, windows: bool) -> ProcessRequest {
+    if windows {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
         );
-        crate::process::hidden_command("powershell")
+        ProcessRequest::new("powershell")
             .args(["-NoProfile", "-Command", &script])
-            .status()
-            .map(|s: std::process::ExitStatus| s.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::process::Command::new("kill")
+            .mode(ExecutionMode::Status)
+            .hide_window(true)
+    } else {
+        ProcessRequest::new("kill")
             .args(["-0", &pid.to_string()])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .mode(ExecutionMode::Capture)
     }
+}
+
+fn is_process_running(pid: u32, executor: &dyn ProcessExecutor) -> bool {
+    executor
+        .run(process_probe_request(pid, cfg!(target_os = "windows")))
+        .map(|output| output.success)
+        .unwrap_or(false)
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -1543,24 +1650,33 @@ fn sh_single_quote(s: &str) -> String {
     format!("'{escaped}'")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn escape_applescript_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\"', "\\\"")
 }
 
-#[cfg(target_os = "macos")]
-fn run_shell_with_admin_privileges(shell_cmd: &str) -> Result<(), String> {
+#[cfg(any(test, target_os = "macos"))]
+fn run_shell_with_admin_privileges(
+    shell_cmd: &str,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     let applescript_cmd = format!(
         "do shell script \"{}\" with administrator privileges",
         escape_applescript_string(shell_cmd)
     );
-    let status = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(applescript_cmd)
-        .status()
+    let output = executor
+        .run(
+            ProcessRequest::new("osascript")
+                .arg("-e")
+                .arg(applescript_cmd)
+                .mode(ExecutionMode::Status),
+        )
         .map_err(|e| format!("Failed to run privileged command via osascript: {e}"))?;
-    if !status.success() {
-        return Err(format!("osascript command exited with {status}"));
+    if !output.success {
+        return Err(format!(
+            "osascript command exited with {}",
+            output.status_display
+        ));
     }
     Ok(())
 }
@@ -1681,7 +1797,7 @@ fn build_macos_dmg_install_shell_cmd(
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn macos_swap_bundle_paths(target_app: &Path) -> Result<(PathBuf, PathBuf), String> {
     let parent = target_app
         .parent()
@@ -1696,7 +1812,7 @@ fn macos_swap_bundle_paths(target_app: &Path) -> Result<(PathBuf, PathBuf), Stri
     Ok((temp_app, backup_app))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn find_first_app_bundle(root: &Path) -> Result<Option<PathBuf>, String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -1714,37 +1830,47 @@ fn find_first_app_bundle(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-#[cfg(target_os = "macos")]
-fn run_macos_pkg_installer_with_privileges(installer: &Path) -> Result<(), String> {
+#[cfg(any(test, target_os = "macos"))]
+fn run_macos_pkg_installer_with_privileges(
+    installer: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     let installer_path = installer.to_string_lossy().to_string();
     let shell_cmd = format!(
         "/usr/sbin/installer -pkg {} -target /",
         sh_single_quote(&installer_path)
     );
-    run_shell_with_admin_privileges(&shell_cmd)
+    run_shell_with_admin_privileges(&shell_cmd, executor)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn run_macos_dmg_installer_with_privileges(
     installer: &Path,
     target_exe: &Path,
+    executor: &dyn ProcessExecutor,
 ) -> Result<PathBuf, String> {
     let mount_dir = std::env::temp_dir().join(format!("gwt-update-dmg-{}", std::process::id()));
     let _ = fs::remove_dir_all(&mount_dir);
     fs::create_dir_all(&mount_dir).map_err(|e| format!("Failed to create mount dir: {e}"))?;
 
-    let attach_status = std::process::Command::new("hdiutil")
-        .arg("attach")
-        .arg(installer)
-        .arg("-nobrowse")
-        .arg("-readonly")
-        .arg("-mountpoint")
-        .arg(&mount_dir)
-        .status()
+    let attach_output = executor
+        .run(
+            ProcessRequest::new("hdiutil")
+                .arg("attach")
+                .arg(installer)
+                .arg("-nobrowse")
+                .arg("-readonly")
+                .arg("-mountpoint")
+                .arg(&mount_dir)
+                .mode(ExecutionMode::Status),
+        )
         .map_err(|e| format!("Failed to mount dmg: {e}"))?;
-    if !attach_status.success() {
+    if !attach_output.success {
         let _ = fs::remove_dir_all(&mount_dir);
-        return Err(format!("hdiutil attach exited with {attach_status}"));
+        return Err(format!(
+            "hdiutil attach exited with {}",
+            attach_output.status_display
+        ));
     }
 
     let install_result: Result<PathBuf, String> = (|| {
@@ -1759,21 +1885,27 @@ fn run_macos_dmg_installer_with_privileges(
 
         let shell_cmd =
             build_macos_dmg_install_shell_cmd(&source_app, &target_app, &temp_app, &backup_app);
-        run_shell_with_admin_privileges(&shell_cmd)?;
+        run_shell_with_admin_privileges(&shell_cmd, executor)?;
         Ok(target_app)
     })();
 
-    let detach_status = std::process::Command::new("hdiutil")
-        .arg("detach")
-        .arg(&mount_dir)
-        .arg("-force")
-        .status()
+    let detach_output = executor
+        .run(
+            ProcessRequest::new("hdiutil")
+                .arg("detach")
+                .arg(&mount_dir)
+                .arg("-force")
+                .mode(ExecutionMode::Status),
+        )
         .map_err(|e| format!("Failed to unmount dmg: {e}"))?;
     let _ = fs::remove_dir_all(&mount_dir);
 
     let target_app = install_result?;
-    if !detach_status.success() {
-        return Err(format!("hdiutil detach exited with {detach_status}"));
+    if !detach_output.success {
+        return Err(format!(
+            "hdiutil detach exited with {}",
+            detach_output.status_display
+        ));
     }
     Ok(target_app)
 }
@@ -1788,8 +1920,11 @@ fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
     ]
 }
 
-#[cfg(target_os = "windows")]
-fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
+#[cfg(any(test, target_os = "windows"))]
+fn run_windows_msi_with_uac(
+    installer: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     // Trigger UAC for msiexec via PowerShell.
     let arg_list = windows_msi_argument_list(installer)
         .into_iter()
@@ -1797,14 +1932,17 @@ fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(", ");
     let args = format!("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @({arg_list})");
-    let status = std::process::Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(args)
-        .status()
+    let output = executor
+        .run(
+            ProcessRequest::new("powershell")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg(args)
+                .mode(ExecutionMode::Status),
+        )
         .map_err(|e| format!("Failed to run msiexec: {e}"))?;
-    if !status.success() {
-        return Err(format!("msiexec exited with {status}"));
+    if !output.success {
+        return Err(format!("msiexec exited with {}", output.status_display));
     }
     Ok(())
 }
@@ -2316,6 +2454,368 @@ mod tests {
             &args_path,
         )
         .expect("spawn installer helper");
+    }
+
+    // ── SPEC-3014 FR-002: update flows through the ProcessExecutor seam ──
+
+    use crate::process_executor::{ExecutionMode, MockProcessExecutor, ProcessOutput};
+
+    /// Serializes the dmg-installer tests: the mount point is derived from
+    /// the process id, so parallel tests would otherwise share (and race on)
+    /// the same directory.
+    static DMG_MOUNT_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn spawn_internal_apply_update_records_helper_invocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let mock = MockProcessExecutor::new();
+        mock.set_default_response(ProcessOutput::spawned());
+
+        mgr.spawn_internal_apply_update_with_executor(
+            Path::new("/tmp/helper"),
+            4242,
+            Path::new("/tmp/target"),
+            Path::new("/tmp/source"),
+            Path::new("/tmp/args.json"),
+            &mock,
+        )
+        .expect("spawn apply helper");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.program, Path::new("/tmp/helper").as_os_str());
+        assert_eq!(request.mode, ExecutionMode::Spawn);
+        assert_eq!(
+            request.args_lossy(),
+            vec![
+                "__internal",
+                "apply-update",
+                "--old-pid",
+                "4242",
+                "--target",
+                "/tmp/target",
+                "--source",
+                "/tmp/source",
+                "--args-file",
+                "/tmp/args.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_internal_apply_update_propagates_spawn_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let mock = MockProcessExecutor::new();
+        mock.push_error("boom");
+
+        let err = mgr
+            .spawn_internal_apply_update_with_executor(
+                Path::new("/tmp/helper"),
+                1,
+                Path::new("/tmp/target"),
+                Path::new("/tmp/source"),
+                Path::new("/tmp/args.json"),
+                &mock,
+            )
+            .unwrap_err();
+        assert_eq!(err, "Failed to spawn update helper: boom");
+    }
+
+    #[test]
+    fn spawn_internal_run_installer_records_installer_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let mock = MockProcessExecutor::new();
+        mock.set_default_response(ProcessOutput::spawned());
+
+        mgr.spawn_internal_run_installer_with_executor(
+            Path::new("/tmp/helper"),
+            7,
+            Path::new("/tmp/target"),
+            Path::new("/tmp/gwt.dmg"),
+            InstallerKind::MacDmg,
+            Path::new("/tmp/args.json"),
+            &mock,
+        )
+        .expect("spawn installer helper");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].mode, ExecutionMode::Spawn);
+        assert_eq!(
+            requests[0].args_lossy(),
+            vec![
+                "__internal",
+                "run-installer",
+                "--old-pid",
+                "7",
+                "--target",
+                "/tmp/target",
+                "--installer",
+                "/tmp/gwt.dmg",
+                "--installer-kind",
+                "mac_dmg",
+                "--args-file",
+                "/tmp/args.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn process_probe_request_windows_uses_hidden_powershell() {
+        let request = process_probe_request(123, true);
+        assert_eq!(request.program_name(), "powershell");
+        assert!(request.hide_window);
+        assert_eq!(request.mode, ExecutionMode::Status);
+        let args = request.args_lossy();
+        assert_eq!(args[0], "-NoProfile");
+        assert_eq!(args[1], "-Command");
+        assert!(args[2].contains("Get-Process -Id 123"), "got: {}", args[2]);
+    }
+
+    #[test]
+    fn process_probe_request_unix_uses_kill_zero_capture() {
+        let request = process_probe_request(123, false);
+        assert_eq!(request.program_name(), "kill");
+        assert!(!request.hide_window);
+        assert_eq!(request.mode, ExecutionMode::Capture);
+        assert_eq!(request.args_lossy(), vec!["-0", "123"]);
+    }
+
+    #[test]
+    fn is_process_running_maps_probe_exit_status() {
+        let running = MockProcessExecutor::new();
+        running.set_default_response(ProcessOutput::succeeded());
+        assert!(is_process_running(4242, &running));
+
+        let gone = MockProcessExecutor::new();
+        gone.set_default_response(ProcessOutput::failed(1));
+        assert!(!is_process_running(4242, &gone));
+    }
+
+    #[test]
+    fn wait_for_pid_exit_returns_once_process_exits() {
+        let mock = MockProcessExecutor::new();
+        mock.set_default_response(ProcessOutput::failed(1));
+
+        wait_for_pid_exit(4242, Duration::from_secs(1), &mock).expect("pid already exited");
+        assert_eq!(mock.request_count(), 1);
+    }
+
+    #[test]
+    fn wait_for_pid_exit_times_out_while_process_runs() {
+        let mock = MockProcessExecutor::new();
+        mock.set_default_response(ProcessOutput::succeeded());
+
+        let err = wait_for_pid_exit(4242, Duration::from_millis(0), &mock).unwrap_err();
+        assert!(
+            err.contains("Timed out waiting for process 4242"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_shell_with_admin_privileges_wraps_command_in_osascript() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("osascript", ProcessOutput::succeeded());
+
+        run_shell_with_admin_privileges("echo \"hi\"", &mock).expect("privileged run");
+
+        let requests = mock.requests_for("osascript");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].mode, ExecutionMode::Status);
+        let args = requests[0].args_lossy();
+        assert_eq!(args[0], "-e");
+        assert!(
+            args[1].starts_with("do shell script \""),
+            "got: {}",
+            args[1]
+        );
+        assert!(
+            args[1].ends_with("\" with administrator privileges"),
+            "got: {}",
+            args[1]
+        );
+        assert!(args[1].contains("echo \\\"hi\\\""), "got: {}", args[1]);
+    }
+
+    #[test]
+    fn run_shell_with_admin_privileges_reports_nonzero_exit() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("osascript", ProcessOutput::failed(1));
+
+        let err = run_shell_with_admin_privileges("true", &mock).unwrap_err();
+        assert_eq!(err, "osascript command exited with exit status: 1");
+    }
+
+    #[test]
+    fn run_macos_pkg_installer_invokes_macos_installer_with_quoted_path() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("osascript", ProcessOutput::succeeded());
+
+        run_macos_pkg_installer_with_privileges(Path::new("/tmp/My Update.pkg"), &mock)
+            .expect("pkg install");
+
+        let args = mock.requests_for("osascript")[0].args_lossy();
+        assert!(
+            args[1].contains("/usr/sbin/installer -pkg '/tmp/My Update.pkg' -target /"),
+            "got: {}",
+            args[1]
+        );
+    }
+
+    #[test]
+    fn run_macos_dmg_installer_reports_attach_failure_without_detach() {
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let installer = temp.path().join("gwt.dmg");
+        fs::write(&installer, b"dmg").unwrap();
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("hdiutil", ProcessOutput::failed(1));
+
+        let err = run_macos_dmg_installer_with_privileges(
+            &installer,
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            &mock,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("hdiutil attach exited with exit status: 1"),
+            "got: {err}"
+        );
+        let hdiutil = mock.requests_for("hdiutil");
+        assert_eq!(hdiutil.len(), 1, "detach must not run after attach failure");
+        let attach_args = hdiutil[0].args_lossy();
+        assert_eq!(attach_args[0], "attach");
+        assert!(attach_args.contains(&"-nobrowse".to_string()));
+        assert!(attach_args.contains(&"-readonly".to_string()));
+        assert!(attach_args.contains(&"-mountpoint".to_string()));
+    }
+
+    #[test]
+    fn run_macos_dmg_installer_detaches_with_force_after_install_failure() {
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let installer = temp.path().join("gwt.dmg");
+        fs::write(&installer, b"dmg").unwrap();
+        let mock = MockProcessExecutor::new();
+        // attach succeeds, but the (mock) mount point stays empty so the
+        // install step fails before any privileged shell runs.
+        mock.push_program_response("hdiutil", ProcessOutput::succeeded());
+        mock.push_program_response("hdiutil", ProcessOutput::succeeded());
+
+        let err = run_macos_dmg_installer_with_privileges(
+            &installer,
+            Path::new("/usr/local/bin/gwt"),
+            &mock,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("does not contain an .app bundle"),
+            "got: {err}"
+        );
+        let hdiutil = mock.requests_for("hdiutil");
+        assert_eq!(hdiutil.len(), 2, "attach then detach");
+        let detach_args = hdiutil[1].args_lossy();
+        assert_eq!(detach_args[0], "detach");
+        assert!(detach_args.contains(&"-force".to_string()));
+        assert!(mock.requests_for("osascript").is_empty());
+    }
+
+    #[test]
+    fn run_windows_msi_with_uac_elevates_via_powershell_start_process() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("powershell", ProcessOutput::succeeded());
+
+        run_windows_msi_with_uac(Path::new("C:/temp/gwt-windows-x86_64.msi"), &mock)
+            .expect("msi install");
+
+        let requests = mock.requests_for("powershell");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].mode, ExecutionMode::Status);
+        let args = requests[0].args_lossy();
+        assert_eq!(args[0], "-NoProfile");
+        assert_eq!(args[1], "-Command");
+        assert!(
+            args[2].starts_with("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @("),
+            "got: {}",
+            args[2]
+        );
+        assert!(
+            args[2].contains(
+                "'/i', 'C:/temp/gwt-windows-x86_64.msi', '/passive', 'GWT_ALLOW_LEGACY_MIGRATION=1'"
+            ),
+            "got: {}",
+            args[2]
+        );
+    }
+
+    #[test]
+    fn run_windows_msi_with_uac_reports_nonzero_exit() {
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("powershell", ProcessOutput::failed(1603));
+
+        let err = run_windows_msi_with_uac(Path::new("C:/temp/gwt.msi"), &mock).unwrap_err();
+        assert_eq!(err, "msiexec exited with exit status: 1603");
+    }
+
+    #[test]
+    fn internal_apply_update_with_executor_replaces_binaries_and_restarts() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("install");
+        let source_dir = temp.path().join("staged");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+        let target_exe = target_dir.join("gwt");
+        let target_daemon = target_dir.join("gwtd");
+        let source_exe = source_dir.join("gwt");
+        let source_daemon = source_dir.join("gwtd");
+        fs::write(&target_exe, b"old-gwt").unwrap();
+        fs::write(&target_daemon, b"old-gwtd").unwrap();
+        fs::write(&source_exe, b"new-gwt").unwrap();
+        fs::write(&source_daemon, b"new-gwtd").unwrap();
+
+        let args_file = temp.path().join("restart-args.json");
+        write_json_atomic(
+            &args_file,
+            &RestartArgsFile {
+                args: vec!["--restored".to_string()],
+                cwd: String::new(),
+            },
+        )
+        .unwrap();
+
+        let mock = MockProcessExecutor::new();
+        // PID probe: report "already exited" for either platform's probe.
+        mock.push_program_response("kill", ProcessOutput::failed(1));
+        mock.push_program_response("powershell", ProcessOutput::failed(1));
+        // Restart spawn of the replaced executable.
+        mock.push_program_response(target_exe.to_string_lossy(), ProcessOutput::spawned());
+
+        internal_apply_update_with_executor(4242, &target_exe, &source_exe, &args_file, &mock)
+            .expect("apply update");
+
+        assert_eq!(fs::read(&target_exe).unwrap(), b"new-gwt");
+        assert_eq!(fs::read(&target_daemon).unwrap(), b"new-gwtd");
+        let restart = mock.requests().into_iter().last().expect("restart spawn");
+        assert_eq!(restart.program, target_exe.as_os_str());
+        assert_eq!(restart.mode, ExecutionMode::Spawn);
+        assert_eq!(restart.args_lossy(), vec!["--restored"]);
     }
 
     #[test]
