@@ -536,7 +536,7 @@ fn resolve_bun_placeholder_target(
     let cli_wrapper = package_root.join("cli-wrapper.cjs");
     if cli_wrapper.is_file() {
         return Some(WindowsSpawnTarget {
-            command: locate_node_runtime(env, remove_env),
+            command: locate_bun_runtime(env, remove_env),
             args_prefix: vec![cli_wrapper.display().to_string()],
         });
     }
@@ -599,10 +599,6 @@ fn locate_bun_runtime(env: &HashMap<String, String>, remove_env: &[String]) -> S
         return found;
     }
     "bun".to_string()
-}
-
-fn locate_node_runtime(env: &HashMap<String, String>, remove_env: &[String]) -> String {
-    find_executable_on_path("node.exe", env, remove_env).unwrap_or_else(|| "node".to_string())
 }
 
 fn find_executable_on_path(
@@ -1291,6 +1287,47 @@ mod tests {
             "expected cli-wrapper.cjs as first arg"
         );
         assert_eq!(normalized.args[1], "--version");
+    }
+
+    #[test]
+    fn claude_placeholder_stub_prefers_bun_runtime_when_node_is_absent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bin_exe, _pkg_root, cli_wrapper) = fake_bun_install(
+            temp.path(),
+            "@anthropic-ai/claude-code",
+            "claude",
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+            "cli-wrapper.cjs",
+        );
+        std::fs::write(
+            &bin_exe,
+            "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+        )
+        .expect("write placeholder stub");
+        let bun_bin_dir = temp.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&bun_bin_dir).expect("bun bin");
+        let bun_exe = bun_bin_dir.join("bun.exe");
+        std::fs::write(&bun_exe, b"MZ\x00").expect("bun.exe");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bun_bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config(
+            bin_exe.display().to_string().as_str(),
+            vec!["--version".to_string()],
+            env,
+        );
+
+        assert_eq!(normalized.command, bun_exe.display().to_string());
+        assert_eq!(
+            normalized.args,
+            vec![cli_wrapper.display().to_string(), "--version".to_string()]
+        );
     }
 
     #[test]
