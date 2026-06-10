@@ -214,7 +214,9 @@ the named-pipe path lands.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
    only when launch is confirmed.
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
-   and decisions while agents run.
+   and decisions while agents run. To mirror those Board posts into Slack or
+   Teams, configure a remote Board provider first; see
+   [Board providers](#board-providers-local--slack--teams).
 7. Open `Branches` only when you need Git inspection, filtering, cleanup, or
    lower-level branch/worktree details.
 
@@ -344,6 +346,35 @@ store, so the previously shown entries become invisible while the new provider
 is active (switching back restores them). Secrets and OAuth tokens are stored in
 a permission-restricted credential store under `~/.gwt/credentials/`, never in
 `config.toml`.
+
+Quick setup route: choose **Slack** or **Teams**, save the provider's
+**Default channel**, sign in, then make sure the bot or signed-in user can access
+that channel. The default channel is the primary Board association; posts that do
+not have a more specific Workspace mapping go there.
+
+### Associate Workspaces with Slack/Teams channels
+
+Remote providers resolve each Board post's channel in this order:
+
+1. A `channel_map` entry for the post's first Workspace audience.
+2. The provider's `default_channel`.
+
+Posts without a Workspace audience use `default_channel` and are placed under a
+General thread. For each Workspace/channel pair, gwt creates one remote root
+message and stores the root id in `.gwt/work/board-remote-roots.jsonl`; keep that
+file, and the matching `.gitattributes` `merge=union` rule, in git so other
+machines and agents reuse the same threads.
+
+The Settings UI edits the default channel. For Workspace-specific routing, edit
+`~/.gwt/config.toml`:
+
+```toml
+[board.slack]
+channel_map = { "workspace-id" = "C0123456789" }
+
+[board.teams]
+channel_map = { "workspace-id" = "team_id/channel_id" }
+```
 
 ### Use Slack as the Board backend
 
