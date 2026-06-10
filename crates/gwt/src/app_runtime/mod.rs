@@ -3056,49 +3056,6 @@ fn workspace_projection_owner_title(
     (!owner.is_empty()).then_some(owner)
 }
 
-fn upsert_workspace_agent(
-    agents: &mut Vec<gwt_core::workspace_projection::WorkspaceAgentSummary>,
-    summary: gwt_core::workspace_projection::WorkspaceAgentSummary,
-) {
-    use gwt_core::workspace_projection::WorkspaceStatusCategory;
-
-    if let Some(existing) = agents
-        .iter_mut()
-        .find(|agent| agent.session_id == summary.session_id)
-    {
-        existing.agent_id = summary.agent_id;
-        existing.window_id = summary.window_id;
-        existing.display_name = summary.display_name;
-        existing.worktree_path = summary.worktree_path;
-        existing.branch = summary.branch;
-        if existing.status_category != WorkspaceStatusCategory::Blocked {
-            existing.status_category = summary.status_category;
-        }
-        if summary.current_focus.is_some() {
-            existing.current_focus = summary.current_focus;
-        }
-        if summary.last_board_entry_id.is_some() {
-            existing.last_board_entry_id = summary.last_board_entry_id;
-        }
-        if summary.last_board_entry_kind.is_some() {
-            existing.last_board_entry_kind = summary.last_board_entry_kind;
-        }
-        if summary.coordination_scope.is_some() {
-            existing.coordination_scope = summary.coordination_scope;
-        }
-        if summary.title_summary.is_some() {
-            existing.title_summary = summary.title_summary;
-        }
-        existing.affiliation_status = summary.affiliation_status;
-        existing.workspace_id = summary.workspace_id;
-        if summary.updated_at > existing.updated_at {
-            existing.updated_at = summary.updated_at;
-        }
-    } else {
-        agents.push(summary);
-    }
-}
-
 fn merge_active_sessions_into_projection<'a>(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
     sessions: impl IntoIterator<Item = &'a ActiveAgentSession>,
@@ -3129,7 +3086,7 @@ fn merge_active_sessions_into_projection<'a>(
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
             summary.workspace_id = None;
         }
-        upsert_workspace_agent(&mut projection.agents, summary);
+        projection.upsert_agent_summary(summary);
     }
 }
 
@@ -3138,60 +3095,10 @@ fn retain_live_workspace_agents(
     sessions: &[&ActiveAgentSession],
     updated_at: chrono::DateTime<chrono::Utc>,
 ) {
-    let live_session_ids = sessions
-        .iter()
-        .map(|session| session.session_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    projection
-        .agents
-        .retain(|agent| live_session_ids.contains(agent.session_id.as_str()));
-    if !projection.agents.iter().any(|agent| {
-        agent.is_assigned()
-            && matches!(
-                agent.status_category,
-                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
-                    | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
-            )
-    }) {
-        projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
-        projection.status_text = "No active work".to_string();
-        projection.next_action = None;
-        projection.updated_at = updated_at;
-    }
-}
-
-fn workspace_projection_has_current_agents(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
-) -> bool {
-    projection.agents.iter().any(|agent| {
-        agent.is_assigned()
-            && matches!(
-                agent.status_category,
-                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
-                    | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
-            )
-    })
-}
-
-fn reset_idle_workspace_current_identity(
-    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
-    tab_title: &str,
-    updated_at: chrono::DateTime<chrono::Utc>,
-) {
-    let title = tab_title.trim();
-    projection.title = if title.is_empty() {
-        "Project Work".to_string()
-    } else {
-        format!("{title} Work")
-    };
-    projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
-    projection.status_text = "No active work".to_string();
-    projection.summary = None;
-    projection.owner = None;
-    projection.next_action = None;
-    projection.git_details = None;
-    projection.board_refs.clear();
-    projection.updated_at = updated_at;
+    projection.retain_live_agents(
+        sessions.iter().map(|session| session.session_id.as_str()),
+        updated_at,
+    );
 }
 
 fn workspace_projection_for_current_resume(
@@ -3202,8 +3109,8 @@ fn workspace_projection_for_current_resume(
 ) -> gwt_core::workspace_projection::WorkspaceProjection {
     merge_active_sessions_into_projection(&mut projection, sessions.iter().copied(), updated_at);
     retain_live_workspace_agents(&mut projection, sessions, updated_at);
-    if !workspace_projection_has_current_agents(&projection) {
-        reset_idle_workspace_current_identity(&mut projection, tab_title, updated_at);
+    if !projection.has_current_agents() {
+        projection.reset_idle_identity(tab_title, updated_at);
     }
     projection
 }
@@ -3226,8 +3133,6 @@ fn save_workspace_launch_projection(
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     created_by_start_work: bool,
 ) -> Result<(), String> {
-    use gwt_core::workspace_projection::{GitDetails, WorkspaceStatusCategory};
-
     let now = chrono::Utc::now();
     let mut projection =
         gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
@@ -3237,58 +3142,29 @@ fn save_workspace_launch_projection(
         project_root,
         Some(session.branch_name.as_str()),
         Some(session.worktree_path.as_path()),
-    )
-    .unwrap_or_else(|| projection.id.clone());
-    projection.id = work_id;
-    projection.title = workspace_resume_context
-        .and_then(|context| non_empty_workspace_text(context.title.as_deref()))
-        .unwrap_or_else(|| "Start Work".to_string());
-    projection.status_category = WorkspaceStatusCategory::Active;
-    projection.next_action = workspace_resume_context
-        .and_then(|context| non_empty_workspace_text(context.next_action.as_deref()))
-        .or_else(|| Some("Check Board for latest updates".to_string()));
-    if let Some(summary) = workspace_resume_context
-        .and_then(|context| non_empty_workspace_text(context.summary.as_deref()))
-    {
-        projection.summary = Some(summary);
-    }
-    if let Some(owner) = workspace_resume_context
+    );
+    let owner = workspace_resume_context
         .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
-    {
-        projection.owner = Some(owner);
-    } else if let Some(issue_number) = linked_issue_number {
-        projection.owner = Some(format!("Issue #{issue_number}"));
-    }
-    let mut agent = active_agent_summary_from_session(session, now);
-    agent.affiliation_status =
-        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
-    agent.workspace_id = Some(projection.id.clone());
-    upsert_workspace_agent(&mut projection.agents, agent);
-    let active_agents = projection
-        .assigned_agents()
-        .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
-        .count();
-    projection.status_text = if active_agents == 1 {
-        format!("{} is running", session.display_name)
-    } else {
-        format!("{active_agents} active agents")
-    };
-    let previous_base_branch = projection
-        .git_details
-        .as_ref()
-        .and_then(|details| details.base_branch.clone());
-    projection.git_details = Some(GitDetails {
-        branch: Some(session.branch_name.clone()),
-        worktree_path: Some(session.worktree_path.clone()),
-        base_branch: base_branch.map(str::to_string).or(previous_base_branch),
-        pr_number: None,
-        pr_state: None,
-        pr_url: None,
-        pr_created_at: None,
-        created_by_start_work,
-        created_at: now,
-    });
-    projection.updated_at = now;
+        .or_else(|| linked_issue_number.map(|issue_number| format!("Issue #{issue_number}")));
+    let agent = active_agent_summary_from_session(session, now);
+    projection.apply_launch(
+        gwt_core::workspace_projection::WorkspaceLaunchUpdate {
+            work_id,
+            title: workspace_resume_context
+                .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
+            summary: workspace_resume_context
+                .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
+            owner,
+            next_action: workspace_resume_context
+                .and_then(|context| non_empty_workspace_text(context.next_action.as_deref())),
+            branch: session.branch_name.clone(),
+            worktree_path: session.worktree_path.clone(),
+            base_branch: base_branch.map(str::to_string),
+            created_by_start_work,
+        },
+        agent,
+        now,
+    );
 
     gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
         .map_err(|error| error.to_string())?;
@@ -5577,8 +5453,8 @@ impl AppRuntime {
             );
             let updated_at = chrono::Utc::now();
             retain_live_workspace_agents(&mut projection, &sessions, updated_at);
-            if had_saved_agents && !workspace_projection_has_current_agents(&projection) {
-                reset_idle_workspace_current_identity(&mut projection, &tab.title, updated_at);
+            if had_saved_agents && !projection.has_current_agents() {
+                projection.reset_idle_identity(&tab.title, updated_at);
             }
             let journal_entries =
                 gwt_core::workspace_projection::load_recent_workspace_journal_entries(
@@ -8220,11 +8096,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     let mut projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
         .ok()
         .flatten()?;
-    projection.git_details = None;
-    projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
-    projection.status_text = "No active work".to_string();
-    projection.next_action = None;
-    projection.updated_at = chrono::Utc::now();
+    projection.clear_git_details_to_idle(chrono::Utc::now());
     if let Err(error) =
         gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
     {
