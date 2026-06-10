@@ -76,7 +76,6 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
     format!(
         concat!(
             "{header}\n",
-            "version: '3.8'\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",

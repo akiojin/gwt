@@ -38,6 +38,7 @@
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
@@ -4553,46 +4554,28 @@
       function renderWindowTabs(windowData, element) {
         const strip = element.querySelector(".window-tab-strip");
         if (!strip) return;
-        const tabs = windowTabsFor(windowData);
-        strip.innerHTML = "";
-        for (const tab of tabs) {
-          const tabItem = document.createElement("div");
-          tabItem.className = "window-tab-item";
-          const tabButton = document.createElement("button");
-          tabButton.type = "button";
-          tabButton.className = "window-tab";
-          tabButton.draggable = true;
-          tabButton.dataset.windowTabId = tab.id;
-          tabButton.setAttribute("aria-label", `Activate ${tab.title}`);
-          if (tab.id === windowData.id || tab.tab_group_active) {
-            tabButton.classList.add("active");
-            tabButton.setAttribute("aria-current", "page");
-          }
-          tabButton.textContent = tab.title;
-          // Native tooltip with the full window title (or dynamic detail) so a
-          // tab truncated by max-width still reveals its title on hover. Mirrors
-          // the titlebar (titleText.title) and window-list row tooltips.
-          tabButton.title = windowTitleTooltip(tab);
-          tabButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "activate_window_tab", id: tab.id });
-          });
-          tabButton.addEventListener("dragstart", (event) => {
+        renderWindowTabsView({
+          strip,
+          tabs: windowTabsFor(windowData),
+          activeWindowId: windowData.id,
+          tooltipForWindow: windowTitleTooltip,
+          send,
+          onTabDragStart: (event, tabId) => {
             windowTabDragState = {
-              id: tab.id,
+              id: tabId,
               docked: false,
               lastClientPoint: clientPointFromDragEvent(
                 event,
                 canvas.getBoundingClientRect(),
               ),
             };
-            event.dataTransfer?.setData("text/plain", tab.id);
+            event.dataTransfer?.setData("text/plain", tabId);
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
             }
-          });
-          tabButton.addEventListener("drag", trackWindowTabDragPoint);
-          tabButton.addEventListener("dragend", (event) => {
+          },
+          onTabDrag: trackWindowTabDragPoint,
+          onTabDragEnd: (event) => {
             const drag = windowTabDragState;
             trackWindowTabDragPoint(event);
             windowTabDragState = null;
@@ -4606,20 +4589,8 @@
               id: drag.id,
               geometry,
             });
-          });
-          const closeButton = document.createElement("button");
-          closeButton.type = "button";
-          closeButton.className = "window-tab-close";
-          closeButton.setAttribute("aria-label", `Close ${tab.title}`);
-          closeButton.textContent = "×";
-          closeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "close_window", id: tab.id });
-          });
-          tabItem.appendChild(tabButton);
-          tabItem.appendChild(closeButton);
-          strip.appendChild(tabItem);
-        }
+          },
+        });
       }
 
       function handleTitlebarClick(windowId) {
