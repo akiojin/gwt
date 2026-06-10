@@ -1690,6 +1690,7 @@ fn sample_runtime_with_events(
         launch_wizard_cache,
         launch_wizard: None,
         pending_workspace_resume_contexts: HashMap::new(),
+        inflight_launches: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
@@ -13828,5 +13829,98 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
             );
         }
         other => panic!("expected TerminalSnapshot, got {other:?}"),
+    }
+}
+
+// SPEC-2359 W-17 (FR-398, Issue #3034): a second spawn for the same Work
+// while the first launch is still materializing (window registered, agent
+// session not yet live) must focus the pending window, not spawn a duplicate.
+#[test]
+fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let build_config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260610-inflight")
+            .build()
+    };
+
+    runtime
+        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .expect("first spawn");
+    runtime
+        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .expect("second spawn");
+
+    let tab = runtime.tab("tab-1").expect("tab");
+    let agent_windows = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+    assert_eq!(
+        agent_windows, 1,
+        "in-flight re-click must not spawn a duplicate agent window"
+    );
+}
+
+// SPEC-2359 W-17 (FR-398): a successful Resume replies a client-scoped
+// `workspace_resume_agent_started` ack so pending UI settles deterministically.
+#[test]
+fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let session = gwt_agent::Session::new(&repo, "feature/resume-ack", gwt_agent::AgentId::Codex);
+    session.save(&sessions_dir).expect("save session");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.resume_workspace_agent_events(
+        "client-7",
+        session.id.clone(),
+        None,
+        canvas_bounds(),
+    );
+
+    let ack = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::WorkspaceResumeAgentStarted { session_id, .. }
+                    if session_id == &session.id
+            )
+        })
+        .expect("started ack present");
+    assert!(
+        matches!(&ack.target, DispatchTarget::Client(id) if id == "client-7"),
+        "ack is scoped to the requesting client"
+    );
+    match &ack.event {
+        BackendEvent::WorkspaceResumeAgentStarted { branch, .. } => {
+            assert_eq!(branch.as_deref(), Some("feature/resume-ack"));
+        }
+        other => panic!("expected started ack, got {other:?}"),
     }
 }

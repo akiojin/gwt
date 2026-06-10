@@ -2140,6 +2140,7 @@ mod tests {
             launch_wizard: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_workspace_resume_contexts: HashMap::new(),
+            inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),

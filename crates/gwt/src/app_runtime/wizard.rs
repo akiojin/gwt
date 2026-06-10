@@ -499,6 +499,17 @@ impl AppRuntime {
                 },
             )]
         };
+        // SPEC-2359 W-17 (FR-398): client-scoped ack so the requesting
+        // frontend can settle its pending Resume UI deterministically.
+        let started_ack = |session_id: &str, branch: Option<String>| {
+            OutboundEvent::reply(
+                client_id.to_string(),
+                BackendEvent::WorkspaceResumeAgentStarted {
+                    session_id: session_id.to_string(),
+                    branch,
+                },
+            )
+        };
 
         let Some(tab_id) = self.active_tab_id.clone() else {
             return reply_error("Open a project before resuming an agent".to_string());
@@ -542,7 +553,9 @@ impl AppRuntime {
                     "This Work is currently running a different conversation; stop it before resuming an older Session.".to_string(),
                 );
             }
-            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            let mut events = self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            events.push(started_ack(&session_id, None));
+            return events;
         }
 
         let sessions_dir = self.sessions_dir.clone();
@@ -578,7 +591,12 @@ impl AppRuntime {
                 );
                 }
             }
-            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            let mut events = self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            events.push(started_ack(
+                &session_id,
+                (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
+            ));
+            return events;
         }
 
         // SPEC-2359 D2: a Session persisted on another machine (or whose worktree
@@ -665,7 +683,13 @@ impl AppRuntime {
                 .map(|projection| workspace_resume_context_from_projection(&projection));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
-            Ok(events) => events,
+            Ok(mut events) => {
+                events.push(started_ack(
+                    &session_id,
+                    (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
+                ));
+                events
+            }
             Err(error) => reply_error(error),
         }
     }
@@ -744,10 +768,29 @@ impl AppRuntime {
         let tab_id = address.tab_id.clone();
         let project_root = tab.project_root.clone();
         let normalized_branch_name = normalize_branch_name(branch_name);
+        // SPEC-2359 W-17 (FR-398): client-scoped ack so the requesting
+        // frontend can settle its pending Resume UI deterministically.
+        let started_ack = |session_id: String, branch: String| {
+            OutboundEvent::reply(
+                client_id.to_string(),
+                BackendEvent::WorkspaceResumeAgentStarted {
+                    session_id,
+                    branch: Some(branch),
+                },
+            )
+        };
         if let Some(window_id) =
             self.live_agent_window_for_work(&tab_id, Some(&normalized_branch_name), None)
         {
-            return self.focus_existing_live_work_agent_events(&window_id, Some(bounds.clone()));
+            let live_session_id = self
+                .active_agent_sessions
+                .get(&window_id)
+                .map(|session| session.session_id.clone())
+                .unwrap_or_default();
+            let mut events =
+                self.focus_existing_live_work_agent_events(&window_id, Some(bounds.clone()));
+            events.push(started_ack(live_session_id, normalized_branch_name.clone()));
+            return events;
         }
         let Some(session) =
             self.latest_resumable_branch_session(&project_root, &normalized_branch_name)
@@ -769,8 +812,12 @@ impl AppRuntime {
             let mut events = self.restore_window_events(&window_id);
             events.extend(self.focus_window_events(&window_id, Some(bounds)));
             if events.is_empty() {
-                return vec![self.workspace_state_broadcast()];
+                events.push(self.workspace_state_broadcast());
             }
+            events.push(started_ack(
+                session.id.clone(),
+                normalized_branch_name.clone(),
+            ));
             return events;
         }
 
@@ -787,7 +834,13 @@ impl AppRuntime {
                 .map(|projection| workspace_resume_context_from_projection(&projection));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
-            Ok(events) => events,
+            Ok(mut events) => {
+                events.push(started_ack(
+                    session.id.clone(),
+                    normalized_branch_name.clone(),
+                ));
+                events
+            }
             Err(error) => branch_error(error),
         }
     }

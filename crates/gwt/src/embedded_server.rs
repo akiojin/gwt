@@ -209,7 +209,15 @@ impl ClientQueue {
         if state.dead {
             return true;
         }
-        match message.class {
+        // Snapshot-class kinds without an extracted pane identity (file
+        // trees, resume acks, release notes) must not replace each other by
+        // kind alone — different windows would clobber one another. They get
+        // lossless append semantics instead.
+        let effective_class = match message.class {
+            QueueClass::SnapshotLatest if message.pane_id.is_none() => QueueClass::Lossless,
+            other => other,
+        };
+        match effective_class {
             QueueClass::IdempotentLatest => {
                 if let Some(entry) = state
                     .entries
@@ -1503,6 +1511,28 @@ mod tests {
             queue_class_for_kind("release_notes_error"),
             QueueClass::Lossless
         );
+    }
+
+    // SPEC-2359 W-17 (FR-394): Snapshot-class kinds without an extracted pane
+    // id (file trees, release notes, resume acks) must append — replacing by
+    // kind alone would let unrelated windows clobber each other's payloads.
+    #[test]
+    fn client_queue_appends_snapshot_kinds_without_pane_id() {
+        let queue = ClientQueue::default();
+
+        let payload_for = |id: &str| BackendEvent::ReleaseNotesPayload {
+            id: id.to_string(),
+            entries: Vec::new(),
+            focus_version: None,
+            current_version: "1.0.0".to_string(),
+        };
+        queue.enqueue(&prepare_outbound(&payload_for("window-1")));
+        queue.enqueue(&prepare_outbound(&payload_for("window-2")));
+
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 2, "distinct windows must both be delivered");
+        assert!(payloads.iter().any(|payload| payload.contains("window-1")));
+        assert!(payloads.iter().any(|payload| payload.contains("window-2")));
     }
 
     // SPEC-2359 W-17 (FR-395/SC-263): the dispatch path keeps clients
