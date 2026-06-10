@@ -36,3 +36,8 @@ serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+# Exposes `gwt_core::test_support` (env lock + ScopedEnvVar) to dependent
+# crates' tests. Enable from dev-dependencies only (SPEC-3016 FR-003).
+test-support = []

@@ -1,3 +1,7 @@
+// SPEC-3015 — shared legacy runtime-state alias table (was a hand-written
+// duplicate of the app.js copy before the extraction).
+import { LEGACY_WINDOW_RUNTIME_STATE_ALIASES } from "./window-runtime-state.js";
+
 function ensureChild(parent, selector, create) {
   const existing = parent.querySelector(selector);
   if (existing) {
@@ -58,14 +62,6 @@ function createTabButton(document, send, requestCloseProjectTab) {
 }
 
 const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
-
-const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-  not_started: "starting",
-  notstarted: "starting",
-  "not-started": "starting",
-  ready: "idle",
-  exited: "stopped",
-});
 
 function normalizeProjectTabRuntimeState(status) {
   const rawState = String(status || "").toLowerCase();

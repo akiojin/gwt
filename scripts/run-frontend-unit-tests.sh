@@ -50,4 +50,5 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/release-notes-window.test.mjs \
   crates/gwt/web/__tests__/console-window.test.mjs \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
-  crates/gwt/web/__tests__/logs-process-facet.test.mjs
+  crates/gwt/web/__tests__/logs-process-facet.test.mjs \
+  crates/gwt/web/__tests__/window-runtime-state.test.mjs
