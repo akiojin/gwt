@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLAYWRIGHT_VERSION="${GWT_PLAYWRIGHT_VERSION:-1.49.1}"
 PLAYWRIGHT_DEPS_DIR="${GWT_PLAYWRIGHT_DEPS_DIR:-${TMPDIR:-/tmp}/gwt-playwright-${PLAYWRIGHT_VERSION}}"
 PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_DEPS_DIR}/node_modules"
-PLAYWRIGHT_BIN="${PLAYWRIGHT_NODE_MODULES}/.bin/playwright"
 PLAYWRIGHT_RESOLVER="${PLAYWRIGHT_DEPS_DIR}/resolve-playwright.cjs"
 RUN_DIR="$(mktemp -d)"
 
@@ -16,14 +15,41 @@ trap cleanup EXIT
 
 mkdir -p "${PLAYWRIGHT_DEPS_DIR}"
 
-if [[ ! -x "${PLAYWRIGHT_BIN}" ]]; then
+resolve_playwright_bin() {
+  local base="${PLAYWRIGHT_NODE_MODULES}/.bin/playwright"
+  local candidate
+  for candidate in "$base" "${base}.exe" "${base}.cmd"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_playwright_deps() {
+  if command -v bun >/dev/null 2>&1 && bun install --silent; then
+    return 0
+  fi
+  npm install --silent --no-audit --no-fund --package-lock=false
+}
+
+PLAYWRIGHT_BIN="$(resolve_playwright_bin || true)"
+
+if [[ -z "${PLAYWRIGHT_BIN}" ]]; then
   cat >"${PLAYWRIGHT_DEPS_DIR}/package.json" <<JSON
 {"private":true,"dependencies":{"@playwright/test":"${PLAYWRIGHT_VERSION}"}}
 JSON
   (
     cd "${PLAYWRIGHT_DEPS_DIR}"
-    bun install --silent
+    install_playwright_deps
   )
+  PLAYWRIGHT_BIN="$(resolve_playwright_bin || true)"
+fi
+
+if [[ -z "${PLAYWRIGHT_BIN}" ]]; then
+  echo "[FAIL] Playwright binary was not installed in ${PLAYWRIGHT_NODE_MODULES}/.bin" >&2
+  exit 1
 fi
 
 cat >"${PLAYWRIGHT_RESOLVER}" <<'JS'

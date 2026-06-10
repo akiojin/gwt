@@ -281,7 +281,6 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
 
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::env_test_lock()
@@ -289,34 +288,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    struct ScopedEnvVar {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
+    use gwt_core::test_support::ScopedEnvVar;
 
     #[test]
     fn loopback_target_rejects_remote_hosts() {

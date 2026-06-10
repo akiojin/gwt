@@ -51,8 +51,7 @@ mod usage_poller;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    gwt_core::test_support::env_lock()
 }
 
 #[cfg(test)]
@@ -926,6 +925,12 @@ enum UserEvent {
     LaunchProgress {
         window_id: String,
         message: String,
+    },
+    /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
+    /// should be appended to the launching agent window's terminal.
+    LaunchTerminalOutput {
+        window_id: String,
+        data: Vec<u8>,
     },
     AttachmentPromptReady {
         client_id: ClientId,
@@ -6659,6 +6664,14 @@ fn main() -> std::io::Result<()> {
                     BackendEvent::LaunchProgress {
                         id: window_id,
                         message,
+                    },
+                )]);
+            }
+            Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::TerminalOutput {
+                        id: window_id,
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(data),
                     },
                 )]);
             }

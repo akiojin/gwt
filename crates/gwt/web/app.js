@@ -38,6 +38,7 @@
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
@@ -86,6 +87,14 @@
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
+      // SPEC-3015 — window runtime state normalization extracted from app.js;
+      // backed by the generated protocol enum contract (/protocol-enums.js).
+      import {
+        mapAgentTelemetryState,
+        normalizeWindowRuntimeState,
+        presetSupportsWaitingStatus,
+        windowRuntimeLabel,
+      } from "/window-runtime-state.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -2177,41 +2186,6 @@
         return presetSurface(windowData?.preset) === "terminal";
       }
 
-      const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
-        running: "Running",
-        starting: "Starting",
-        idle: "Idle",
-        waiting: "Waiting",
-        stopped: "Stopped",
-        error: "Error",
-      });
-
-      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
-      // spellings (and the older `starting`→running conflation) normalize to it.
-      const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        not_started: "starting",
-        notstarted: "starting",
-        "not-started": "starting",
-        ready: "idle",
-        exited: "stopped",
-      });
-
-      function presetSupportsWaitingStatus(preset) {
-        return preset === "agent" || preset === "claude" || preset === "codex";
-      }
-
-      function normalizeWindowRuntimeState(status, preset) {
-        const rawState = String(status || "running").toLowerCase();
-        const normalizedState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
-        if (!presetSupportsWaitingStatus(preset) && normalizedState === "waiting") {
-          return "running";
-        }
-        if (!WINDOW_RUNTIME_STATE_LABELS[normalizedState]) {
-          return "running";
-        }
-        return normalizedState;
-      }
-
       function windowGeometryLabel(windowData) {
         if (windowData.minimized) {
           return "Minimized";
@@ -2220,10 +2194,6 @@
           return "Maximized";
         }
         return "Normal";
-      }
-
-      function windowRuntimeLabel(status) {
-        return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
       }
 
       function windowDisplayTitle(windowData) {
@@ -4404,30 +4374,6 @@
         focusOrSpawnPreset("board");
       }
 
-      // SPEC-2356 — translate legacy runtime state vocabulary to Living
-      // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
-      // intentionally narrow so future runtime states surface as
-      // `idle` until the design language explicitly handles them.
-      function mapAgentTelemetryState(runtimeState) {
-        switch (runtimeState) {
-          case "running":
-            return "active";
-          case "starting":
-            return "not_started";
-          case "ready":
-          case "idle":
-          case "waiting":
-            return "idle";
-          case "stopped":
-          case "exited":
-            return "done";
-          case "error":
-            return "blocked";
-          default:
-            return "idle";
-        }
-      }
-
       function applyStatus(windowId, status, detail) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
@@ -4608,46 +4554,28 @@
       function renderWindowTabs(windowData, element) {
         const strip = element.querySelector(".window-tab-strip");
         if (!strip) return;
-        const tabs = windowTabsFor(windowData);
-        strip.innerHTML = "";
-        for (const tab of tabs) {
-          const tabItem = document.createElement("div");
-          tabItem.className = "window-tab-item";
-          const tabButton = document.createElement("button");
-          tabButton.type = "button";
-          tabButton.className = "window-tab";
-          tabButton.draggable = true;
-          tabButton.dataset.windowTabId = tab.id;
-          tabButton.setAttribute("aria-label", `Activate ${tab.title}`);
-          if (tab.id === windowData.id || tab.tab_group_active) {
-            tabButton.classList.add("active");
-            tabButton.setAttribute("aria-current", "page");
-          }
-          tabButton.textContent = tab.title;
-          // Native tooltip with the full window title (or dynamic detail) so a
-          // tab truncated by max-width still reveals its title on hover. Mirrors
-          // the titlebar (titleText.title) and window-list row tooltips.
-          tabButton.title = windowTitleTooltip(tab);
-          tabButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "activate_window_tab", id: tab.id });
-          });
-          tabButton.addEventListener("dragstart", (event) => {
+        renderWindowTabsView({
+          strip,
+          tabs: windowTabsFor(windowData),
+          activeWindowId: windowData.id,
+          tooltipForWindow: windowTitleTooltip,
+          send,
+          onTabDragStart: (event, tabId) => {
             windowTabDragState = {
-              id: tab.id,
+              id: tabId,
               docked: false,
               lastClientPoint: clientPointFromDragEvent(
                 event,
                 canvas.getBoundingClientRect(),
               ),
             };
-            event.dataTransfer?.setData("text/plain", tab.id);
+            event.dataTransfer?.setData("text/plain", tabId);
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
             }
-          });
-          tabButton.addEventListener("drag", trackWindowTabDragPoint);
-          tabButton.addEventListener("dragend", (event) => {
+          },
+          onTabDrag: trackWindowTabDragPoint,
+          onTabDragEnd: (event) => {
             const drag = windowTabDragState;
             trackWindowTabDragPoint(event);
             windowTabDragState = null;
@@ -4661,20 +4589,8 @@
               id: drag.id,
               geometry,
             });
-          });
-          const closeButton = document.createElement("button");
-          closeButton.type = "button";
-          closeButton.className = "window-tab-close";
-          closeButton.setAttribute("aria-label", `Close ${tab.title}`);
-          closeButton.textContent = "×";
-          closeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "close_window", id: tab.id });
-          });
-          tabItem.appendChild(tabButton);
-          tabItem.appendChild(closeButton);
-          strip.appendChild(tabItem);
-        }
+          },
+        });
       }
 
       function handleTitlebarClick(windowId) {

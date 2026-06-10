@@ -40,6 +40,11 @@ const ROOT_MODULES = new Set([
   "operator-shell.js",
   "project-clone-modal.js",
   "project-tabs-renderer.js",
+  "window-tabs-renderer.js",
+  // SPEC-3015 — generated protocol enum contract + extracted window runtime
+  // state helpers.
+  "protocol-enums.js",
+  "window-runtime-state.js",
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",
   // SPEC-2809 — Console window per-kind tab live tail.

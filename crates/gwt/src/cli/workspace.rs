@@ -6,10 +6,9 @@ use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, record_workspace_work_event,
     save_workspace_projection, update_workspace_projection_with_journal, ClassifiedProjection,
-    PruneAction, PruneSkipReason, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
-    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
-    WorkspaceRetentionConfig, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
-    WorkspaceWorkItem,
+    PruneAction, PruneSkipReason, WorkspaceAgentSummary, WorkspaceExecutionContainerRef,
+    WorkspaceProjection, WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
+    WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind, WorkspaceWorkItem,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -476,6 +475,7 @@ pub(super) fn run<E: CliEnv>(
                     "agent session not found: {agent_session}"
                 )));
             };
+            let agent_display_name = agent.display_name.clone();
             let workspace_id = format!("workspace-{}", Utc::now().timestamp_millis());
             let owner = spec
                 .map(|number| format!("SPEC-{number}"))
@@ -509,29 +509,29 @@ pub(super) fn run<E: CliEnv>(
                 event.next_action = Some(format!("Boundary: {boundary}"));
             }
             record_workspace_work_event(env.repo_path(), event).map_err(core_error)?;
-            projection.id = workspace_id.clone();
-            projection.title = title_summary.clone();
-            projection.status_category = WorkspaceStatusCategory::Active;
-            projection.status_text = current_focus
-                .clone()
-                .unwrap_or_else(|| "Workspace created".to_string());
-            // SPEC-2359 Phase U-6 (FR-134): when current_focus is omitted,
-            // fall back to title_summary so the Workspace Overview Summary
-            // section never renders empty for newly-created workspaces.
-            // Previously summary stayed None whenever the caller did not
-            // pass --current-focus, leaving the Detail pane stuck on the
-            // "No Workspace summary yet" placeholder.
-            projection.summary = current_focus
-                .clone()
-                .or_else(|| Some(title_summary.clone()));
-            projection.owner = owner;
-            projection.next_action = Some("Coordinate on Board before implementation".to_string());
+            projection.start_work(
+                WorkspaceStartUpdate {
+                    workspace_id: workspace_id.clone(),
+                    title: title_summary.clone(),
+                    status_text: current_focus.clone(),
+                    // SPEC-2359 Phase U-6 (FR-134): when current_focus is
+                    // omitted, fall back to title_summary so the Workspace
+                    // Overview Summary section never renders empty for
+                    // newly-created workspaces.
+                    summary: current_focus
+                        .clone()
+                        .or_else(|| Some(title_summary.clone())),
+                    owner,
+                    next_action: "Coordinate on Board before implementation".to_string(),
+                },
+                now,
+            );
             // SPEC-2359 Phase U-6 (FR-131, FR-135): record creation metadata
             // and initial lifecycle stage so the new Card preview / Detail
             // pane has informative chips from Day-0 without waiting for
             // retroactive migration.
             projection.created_at = now;
-            projection.creator = Some(agent.display_name.clone());
+            projection.creator = Some(agent_display_name);
             projection.lifecycle_stage =
                 gwt_core::workspace_projection::WorkspaceLifecycleStage::Active;
             assign_agent_to_workspace(
@@ -887,21 +887,20 @@ fn create_workspace_for_agent(
     event.execution_container = Some(workspace_execution_container_from_agent(agent));
     record_workspace_work_event(repo_path, event).map_err(core_error)?;
 
-    projection.id = workspace_id.clone();
-    projection.title = input.title_summary.clone();
-    projection.status_category = WorkspaceStatusCategory::Active;
-    projection.status_text = input
-        .current_focus
-        .clone()
-        .unwrap_or_else(|| "Workspace created".to_string());
-    projection.summary = input.current_focus.clone();
-    projection.owner = owner;
-    projection.next_action = Some(
-        input
-            .boundary
-            .as_deref()
-            .map(|boundary| format!("Boundary: {boundary}"))
-            .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
+    projection.start_work(
+        WorkspaceStartUpdate {
+            workspace_id: workspace_id.clone(),
+            title: input.title_summary.clone(),
+            status_text: input.current_focus.clone(),
+            summary: input.current_focus.clone(),
+            owner,
+            next_action: input
+                .boundary
+                .as_deref()
+                .map(|boundary| format!("Boundary: {boundary}"))
+                .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
+        },
+        now,
     );
     assign_agent_to_workspace(
         projection,
@@ -910,7 +909,6 @@ fn create_workspace_for_agent(
         input.current_focus.clone(),
         Some(input.title_summary.clone()),
     )?;
-    projection.updated_at = now;
     Ok(workspace_id)
 }
 
@@ -977,17 +975,7 @@ fn apply_workspace_item_to_projection(
     projection: &mut WorkspaceProjection,
     item: &WorkspaceWorkItem,
 ) {
-    projection.id = item.id.clone();
-    projection.title = item.title.clone();
-    projection.status_category = item.status_category;
-    projection.status_text = item
-        .summary
-        .clone()
-        .or_else(|| item.intent.clone())
-        .unwrap_or_else(|| "Workspace selected".to_string());
-    projection.summary = item.summary.clone().or_else(|| item.intent.clone());
-    projection.owner = item.owner.clone();
-    projection.updated_at = Utc::now();
+    projection.apply_work_item(item, Utc::now());
 }
 
 fn assign_agent_to_workspace(
@@ -997,25 +985,17 @@ fn assign_agent_to_workspace(
     current_focus: Option<String>,
     title_summary: Option<String>,
 ) -> Result<(), SpecOpsError> {
-    let Some(agent) = projection
-        .agents
-        .iter_mut()
-        .find(|agent| agent.session_id == agent_session)
-    else {
+    if !projection.assign_agent(
+        agent_session,
+        workspace_id,
+        current_focus,
+        title_summary,
+        Utc::now(),
+    ) {
         return Err(string_error(format!(
             "agent session not found: {agent_session}"
         )));
-    };
-    agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
-    agent.workspace_id = Some(workspace_id.to_string());
-    agent.status_category = WorkspaceStatusCategory::Active;
-    if current_focus.is_some() {
-        agent.current_focus = current_focus;
     }
-    if title_summary.is_some() {
-        agent.title_summary = title_summary;
-    }
-    agent.updated_at = Utc::now();
     Ok(())
 }
 
@@ -1094,7 +1074,8 @@ mod tests {
     use crate::cli::env::TestEnv;
     use gwt_core::workspace_projection::{
         load_workspace_projection, load_workspace_work_items, record_workspace_work_event,
-        save_workspace_projection, WorkspaceAgentSummary, WorkspaceProjection,
+        save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+        WorkspaceProjection,
     };
     use std::ffi::OsString;
 
