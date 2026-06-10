@@ -6871,3 +6871,10 @@ Type: lesson
 Context: Start Work/Resume 後の無表示・操作不能・無反応の報告。フロントの pending UI 欠如だけでは説明できない完全フリーズが含まれていた。
 Learning: 原因は per-client outbound queue(64) 溢れでクライアントを即切断する ClientHub の eviction 設計。エージェント起動直後の TerminalOutput broadcast 洪水で操作したクライアント自身が evict され、再接続時の全 pane snapshot 一括 replay が再バーストを生んで storm 化する。~/.gwt/projects/<hash>/logs/gwt.log.* の 'evicting lagging websocket clients' と frontend user action の時刻相関（今回 open_start_work 10/10 で一致）が決定的証拠になる。切断中の frontend send() は黙ってキューされるため UI は無反応に見える。
 Future Action: GUI の無反応・取りこぼし系バグはコード読みの前に該当時間帯の gwt.log で eviction / frontend_ready 再接続 / client_id 変化（ユーザーのリロード痕跡）を確認する。修正は SPEC-2359 Phase W-17（lossy/lossless 分離・replay 分割・pending UI・スキャン抑止）を参照。
+
+## 2026-06-10 — 検証コマンドと後続アクションを ; で連結すると検証が形骸化する
+
+Type: lesson
+Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
+Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
+Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
