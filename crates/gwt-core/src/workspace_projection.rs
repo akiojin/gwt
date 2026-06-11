@@ -1955,13 +1955,21 @@ pub fn reconcile_worktree_work_items_paths(
             continue;
         };
         let events_path = gwt_repo_local_work_events_path(&source.worktree_path);
+        // FR-403: the baseline timestamp is the worktree's last real activity
+        // (directory mtime), not "now" — a freshly materialized old worktree
+        // must not outrank genuinely recent Workspaces in the recency sort.
+        let baseline = fs::metadata(&source.worktree_path)
+            .and_then(|metadata| metadata.modified())
+            .map(DateTime::<Utc>::from)
+            .unwrap_or(now)
+            .min(now);
         record_workspace_backfill_event_paths(
             work_items_path,
             &events_path,
             work_id,
             branch,
             &source.worktree_path,
-            now,
+            baseline,
         )?;
     }
     Ok(pending.len())
@@ -6949,5 +6957,44 @@ mod tests {
             .find(|item| item.id == "work-new")
             .expect("new item");
         assert_eq!(fresh_item.updated_at, t_backfill);
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): a backfilled worktree's
+    /// baseline timestamp is the worktree directory's mtime (its last real
+    /// activity), not "now" — otherwise every freshly materialized old
+    /// worktree floods the top of the recency-sorted list.
+    #[test]
+    fn backfill_uses_worktree_mtime_as_baseline_timestamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-old");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000); // 2025-06-15ish
+        let dir = fs::File::open(&worktree).expect("open dir");
+        dir.set_times(fs::FileTimes::new().set_modified(old))
+            .expect("set mtime");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[WorktreeReconcileSource {
+                branch: Some("work/old".to_string()),
+                worktree_path: worktree.clone(),
+            }],
+            now,
+        )
+        .expect("reconcile");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        let item = &projection.work_items[0];
+        assert!(
+            item.updated_at < Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            "baseline must be the worktree mtime (2025), not now: {}",
+            item.updated_at
+        );
     }
 }
