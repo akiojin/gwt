@@ -629,6 +629,18 @@ cargo bundle -p gwt --format osx
 cargo test -p gwt-core -p gwt --all-features
 ```
 
+### Releasing
+
+To cut a release, trigger the **Prepare Release** workflow from GitHub
+Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
+and bumps the version, regenerates the `CHANGELOG`, and opens a
+`develop → main` Release PR — so you can release from any branch without
+switching to `develop` locally. The `bump` input is `auto` (default),
+`patch`, `minor`, or `major`. Review and merge the generated Release PR;
+merging to `main` then runs the release pipeline (tag, GitHub Release,
+cross‑platform binaries). The manual fallback procedure lives in
+`.claude/commands/release.md`.
+
 ### Release Asset Contract
 
 ```bash

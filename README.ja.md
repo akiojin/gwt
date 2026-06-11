@@ -610,6 +610,17 @@ cargo bundle -p gwt --format osx
 cargo test -p gwt-core -p gwt --all-features
 ```
 
+### リリース手順
+
+リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →
+`Prepare Release` → `Run workflow`）で起動します。CI が `develop` を対象に
+バージョン更新・`CHANGELOG` 再生成・`develop → main` の Release PR 作成まで
+を実行するため、ローカルで `develop` に切り替えずにどのブランチからでも
+リリースできます。`bump` 入力は `auto`（既定）/ `patch` / `minor` / `major`。
+生成された Release PR をレビューしてマージすると、`main` 側でリリース
+パイプライン（タグ・GitHub Release・各プラットフォームのバイナリ）が走り
+ます。手動フォールバック手順は `.claude/commands/release.md` にあります。
+
 ### Release Asset Contract
 
 ```bash
