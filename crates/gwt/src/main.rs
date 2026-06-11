@@ -46,6 +46,7 @@ mod launch_runtime;
 mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_support;
+mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
 mod workspace_session_registry;
@@ -2145,6 +2146,9 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            session_ledger_cache: std::cell::RefCell::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            ),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,

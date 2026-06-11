@@ -1695,6 +1695,9 @@ fn sample_runtime_with_events(
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
+        session_ledger_cache: std::cell::RefCell::new(
+            crate::session_ledger_cache::SessionLedgerCache::new(),
+        ),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,

@@ -2576,23 +2576,6 @@ fn workspace_journal_entry_view_from_entry(
     }
 }
 
-/// Load all persisted agent sessions from `sessions_dir` (used to enrich the
-/// Workspace history view with the Session list under each Work). Mirrors the
-/// runtime's own session loader but is callable from free functions.
-fn load_agent_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
-}
-
 /// Index agent sessions by their gwt session id (the Work / launch id) so the
 /// view builder can attach each Work's Session history.
 fn work_session_index(
@@ -3562,6 +3545,12 @@ pub struct AppRuntime {
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
     pub(crate) work_merged_branches: HashMap<PathBuf, std::collections::HashSet<String>>,
+    /// Incremental loader for the machine-local session ledger; keeps
+    /// projection rebuilds from re-parsing thousands of unchanged TOMLs
+    /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
+    /// the single event-loop thread and the projection builder takes `&self`.
+    pub(crate) session_ledger_cache:
+        std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3670,6 +3659,9 @@ impl AppRuntime {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            session_ledger_cache: std::cell::RefCell::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            ),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -5541,7 +5533,10 @@ impl AppRuntime {
                 .iter()
                 .map(workspace_journal_entry_view_from_entry)
                 .collect::<Vec<_>>();
-            let agent_sessions = load_agent_sessions(&self.sessions_dir);
+            let agent_sessions = self
+                .session_ledger_cache
+                .borrow_mut()
+                .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
             let workspaces =
                 gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
