@@ -173,9 +173,14 @@ fn detect_cleanable_target_for_remote(
 /// (develop / main / master) into which `branch` is fully merged —
 /// squash-aware via [`is_branch_merged_into`] (`git cherry`) and independent
 /// of the branch's upstream configuration. `None` when unmerged or no
-/// canonical base ref exists. Used by the Workspace surface "safe to delete"
-/// badge; run it off the UI hot path (background scan).
+/// canonical base ref exists. Protected base branches (develop / main /
+/// master) are never reported — they are trivially merged into themselves
+/// but must not look "safe to delete". Used by the Workspace surface
+/// "safe to delete" badge; run it off the UI hot path (background scan).
 pub fn merged_base_target(repo_path: &Path, branch: &str) -> Result<Option<MergeTargetRef>> {
+    if is_protected_branch(branch) {
+        return Ok(None);
+    }
     let (_, target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
     Ok(target)
 }
@@ -735,6 +740,24 @@ mod tests {
         run(&["checkout", "-b", "work/unmerged", "main"], repo);
         make_commit(repo, "b.txt", "b\n", "feat: b");
         assert!(merged_base_target(repo, "work/unmerged").unwrap().is_none());
+    }
+
+    /// SPEC-2359 W-15 (FR-386): a protected base branch is trivially merged
+    /// into its own remote ref, but must never be reported "safe to delete".
+    #[test]
+    fn merged_base_target_excludes_protected_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        make_commit(repo, "a.txt", "a\n", "feat: a");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
+        assert!(merged_base_target(repo, "develop").unwrap().is_none());
+        assert!(merged_base_target(repo, "main").unwrap().is_none());
     }
 
     #[test]
