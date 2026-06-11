@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 22
       - name: Run Clippy
-        run: cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check rustdoc warnings

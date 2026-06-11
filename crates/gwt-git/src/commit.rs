@@ -100,6 +100,19 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Set committer identity on the fixture repo; CI runners have no
+    /// global git config, so `git commit` fails silently without this.
+    fn set_test_identity(path: &std::path::Path) {
+        for (key, value) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(["config", key, value])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git config {key} failed");
+        }
+    }
+
     #[test]
     fn recent_commits_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
@@ -108,6 +121,7 @@ mod tests {
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
+        set_test_identity(path);
         gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "first commit"])
             .current_dir(path)
@@ -133,6 +147,7 @@ mod tests {
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
+        set_test_identity(path);
         for i in 0..5 {
             gwt_core::process::hidden_command("git")
                 .args(["commit", "--allow-empty", "-m", &format!("commit {i}")])
