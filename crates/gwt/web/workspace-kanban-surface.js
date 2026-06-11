@@ -335,6 +335,26 @@ export function createWorkspaceKanbanSurface({
   // heading only appears when the Workspace has more than one Work. Persistent
   // Works always render (no live-only filtering), so Paused Workspaces are not
   // mislabelled "No assigned agents".
+  // SPEC-2359 W-15 (FR-379 follow-up): Launch opens the launch wizard
+  // prefilled with the Workspace's branch; the new launch becomes a new Work
+  // joining this Workspace. Available both for empty Workspaces and ones
+  // with existing Works (user verification 2026-06-11).
+  function renderLaunchWorkspaceButton(workspace) {
+    const branch = workspace && workspace.branch ? String(workspace.branch) : "";
+    if (!branch) return null;
+    const launch = createNode("button", "wizard-button is-compact", "Launch");
+    launch.type = "button";
+    launch.dataset.action = "launch-workspace";
+    launch.addEventListener("click", () => {
+      send({
+        kind: "open_active_work_launch_wizard",
+        branch_name: branch,
+        linked_issue_number: null,
+      });
+    });
+    return launch;
+  }
+
   function appendWorks(container, works, workspace) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
@@ -345,22 +365,8 @@ export function createWorkspaceKanbanSurface({
         "workspace-overview-empty workspace-detail-session-empty",
         "No Work yet",
       );
-      // SPEC-2359 W-15 (FR-379 follow-up): a record without any Work (e.g. a
-      // backfilled worktree) must stay actionable — offer a Launch control
-      // that opens the launch wizard prefilled with the Workspace's branch.
-      // The new launch becomes a new Work joining this Workspace.
-      const branch = workspace && workspace.branch ? String(workspace.branch) : "";
-      if (branch) {
-        const launch = createNode("button", "wizard-button is-compact", "Launch");
-        launch.type = "button";
-        launch.dataset.action = "launch-workspace";
-        launch.addEventListener("click", () => {
-          send({
-            kind: "open_active_work_launch_wizard",
-            branch_name: branch,
-            linked_issue_number: null,
-          });
-        });
+      const launch = renderLaunchWorkspaceButton(workspace);
+      if (launch) {
         empty.appendChild(launch);
       }
       container.appendChild(empty);
@@ -426,6 +432,19 @@ export function createWorkspaceKanbanSurface({
           `+${total - list.length} more sessions`,
         ),
       );
+    }
+    // A new agent can always be launched on this Workspace's branch — the
+    // launch becomes a new Work joining the Workspace.
+    const launch = renderLaunchWorkspaceButton(workspace);
+    if (launch) {
+      const row = createNode(
+        "div",
+        "workspace-detail-session-empty workspace-detail-launch-row",
+        "",
+      );
+      row.appendChild(createNode("span", "", "Start a new agent"));
+      row.appendChild(launch);
+      container.appendChild(row);
     }
   }
 
