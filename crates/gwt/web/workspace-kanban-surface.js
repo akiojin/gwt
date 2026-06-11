@@ -355,14 +355,15 @@ export function createWorkspaceKanbanSurface({
   // mislabelled "No assigned agents".
   // SPEC-2359 W-15 (FR-379 follow-up): Launch opens the launch wizard
   // prefilled with the Workspace's branch; the new launch becomes a new Work
-  // joining this Workspace. Available both for empty Workspaces and ones
-  // with existing Works (user verification 2026-06-11).
+  // joining this Workspace. Lives in the detail header actions as the primary
+  // action — one fixed home, never after the variable-length Work list
+  // (placement feedback, user verification 2026-06-11).
   function renderLaunchWorkspaceButton(workspace, windowId) {
     const branch = workspace && workspace.branch ? String(workspace.branch) : "";
     if (!branch) return null;
     // Same entry as the Branches surface "Launch Agent": opens the launch
     // wizard for this Workspace's existing branch (user wording 2026-06-11).
-    const launch = createNode("button", "wizard-button is-compact", "Launch Agent");
+    const launch = createNode("button", "wizard-button primary", "Launch Agent");
     launch.type = "button";
     launch.dataset.action = "launch-workspace";
     launch.addEventListener("click", () => {
@@ -375,21 +376,14 @@ export function createWorkspaceKanbanSurface({
     return launch;
   }
 
-  function appendWorks(container, works, workspace, windowId) {
+  function appendWorks(container, works, workspace) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
-      // The flex empty-state row (shared with the Resume placeholder) keeps
-      // the Launch control beside the text instead of overlapping it.
-      const empty = createNode(
-        "div",
-        "workspace-overview-empty workspace-detail-session-empty",
-        "No Work yet",
+      // Launching lives in the detail header (one canonical home), so the
+      // empty state is a plain placeholder.
+      container.appendChild(
+        createNode("div", "workspace-overview-empty", "No Work yet"),
       );
-      const launch = renderLaunchWorkspaceButton(workspace, windowId);
-      if (launch) {
-        empty.appendChild(launch);
-      }
-      container.appendChild(empty);
       return;
     }
     const wrap = createNode("div", "workspace-detail-work-list");
@@ -452,19 +446,6 @@ export function createWorkspaceKanbanSurface({
           `+${total - list.length} more sessions`,
         ),
       );
-    }
-    // A new agent can always be launched on this Workspace's branch — the
-    // launch becomes a new Work joining the Workspace.
-    const launch = renderLaunchWorkspaceButton(workspace, windowId);
-    if (launch) {
-      const row = createNode(
-        "div",
-        "workspace-detail-session-empty workspace-detail-launch-row",
-        "",
-      );
-      row.appendChild(createNode("span", "", "Start a new agent"));
-      row.appendChild(launch);
-      container.appendChild(row);
     }
   }
 
@@ -771,9 +752,14 @@ export function createWorkspaceKanbanSurface({
 
     const actions = createNode("div", "workspace-detail-actions");
     // SPEC-2359: Resume is a per-Work (launch) operation, so the Resume control
-    // lives on each Work row (see appendWorks / renderWorkResumeButton), not on
-    // the Workspace header. The Workspace header keeps only Workspace-level
-    // lifecycle actions (Done / Discard / Clean Up).
+    // lives on each Work row (see appendWorks / renderWorkResumeButton). The
+    // Workspace header carries Launch Agent (the primary Workspace action —
+    // a new Work joining this Workspace) plus the lifecycle closes
+    // (Done / Discard / Clean Up).
+    const launchAction = renderLaunchWorkspaceButton(workspace, windowId);
+    if (launchAction) {
+      actions.appendChild(launchAction);
+    }
     // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
     // closing. Done / Discard are explicit user closes (FR-350 — agent stop
     // alone never closes a Work). The actual cleanup is a follow-up slice, so
@@ -817,7 +803,7 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Work", (body) => {
-        appendWorks(body, workspace.agents, workspace, windowId);
+        appendWorks(body, workspace.agents, workspace);
       }),
     );
     container.appendChild(

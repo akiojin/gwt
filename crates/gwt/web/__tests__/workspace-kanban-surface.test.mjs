@@ -757,11 +757,11 @@ test("sessionless Workspace offers a Launch control that opens the launch wizard
   assert.equal(sent[0].branch_name, "work/foo");
 });
 
-// Layout feedback (2026-06-10 user verification): the Launch control must sit
-// in the flex empty-state row (same as the Resume placeholder), not overlap
-// the "No Work yet" text; and a backfilled row whose title IS the branch name
-// must not repeat the same string as subtitle meta.
-test("Launch control uses the flex empty-state row and duplicate branch meta is suppressed", () => {
+// Placement feedback (2026-06-11 user verification): the Launch Agent control
+// has one canonical home — the detail header actions — never an arbitrary
+// position after a variable-length Work list. A backfilled row whose title IS
+// the branch name must not repeat the same string as subtitle meta.
+test("Launch control lives in the detail header actions and duplicate branch meta is suppressed", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -795,8 +795,8 @@ test("Launch control uses the flex empty-state row and duplicate branch meta is 
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
   assert.ok(launch, "Launch Agent control must exist");
   assert.ok(
-    launch.parentElement.classList.contains("workspace-detail-session-empty"),
-    "Launch must sit in the flex empty-state row so it does not overlap the text",
+    launch.parentElement.classList.contains("workspace-detail-actions"),
+    "Launch Agent belongs to the detail header actions",
   );
 
   const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
@@ -967,6 +967,26 @@ test("Workspace with existing Works still offers a Launch control", () => {
   launch.click();
   assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
   assert.equal(sent.at(-1)?.branch_name, "develop");
+
+  // Placement feedback (2026-06-11): one fixed home in the header actions —
+  // first action, before Done / Discard — and no floating row after the list.
+  const actions = fixture.body.querySelector(".workspace-detail-actions");
+  assert.ok(actions, "detail header actions container must exist");
+  assert.equal(
+    actions.firstElementChild?.dataset?.action,
+    "launch-workspace",
+    "Launch Agent is the first (primary) header action",
+  );
+  assert.equal(
+    fixture.body.querySelectorAll('[data-action="launch-workspace"]').length,
+    1,
+    "exactly one Launch control — no duplicate after the Work list",
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-launch-row"),
+    null,
+    "the post-list 'Start a new agent' row is gone",
+  );
 });
 
 // User request (2026-06-11): ArrowUp / ArrowDown switches the Workspace list
