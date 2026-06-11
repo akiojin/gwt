@@ -11,6 +11,19 @@ Update the version and changelog on `develop`, then create or update the Release
 
 Follow the release flow defined in `.claude/commands/release.md`. Treat that command file as the canonical procedure for branch checks, version classification, approval, file mutation, issue reference collection, and PR creation.
 
+### Recommended: Prepare Release workflow (any branch, zero friction)
+
+When you cannot or do not want to switch to `develop` (e.g. running inside a
+work worktree), do NOT run the manual steps locally. Instead trigger the
+GitHub Actions **Prepare Release** workflow (Actions → `Prepare Release` →
+`Run workflow`). It checks out `develop` in CI and performs the version bump
+(`scripts/compute_release_version.py` latest-tag-relative calc, `cargo
+set-version`, `cargo update -w`, git-cliff), the `chore(release): vX.Y.Z`
+commit, and the `develop -> main` Release PR. Inputs: `bump`
+= `auto` (default; fails on breaking so major is explicit) / `patch` / `minor`
+/ `major`. Approval happens by reviewing and merging the generated Release PR.
+The manual steps below are a fallback for interactive runs on `develop`.
+
 ## Quick Reference
 
 ### Flow

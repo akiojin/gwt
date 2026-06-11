@@ -45,7 +45,7 @@ if [ ! -f "$PREPARE" ]; then
   echo "[FAIL] prepare-release.yml workflow is missing"
   fail=1
 else
-  if grep -qE "create-release-pr" "$PREPARE"; then
+  if grep -qE "uses:.*create-release-pr" "$PREPARE"; then
     echo "[FAIL] prepare-release.yml reintroduced the external create-release-pr action"
     fail=1
   fi
@@ -65,6 +65,11 @@ fi
 
 if ! python3 "$ROOT/scripts/test_compute_release_version.py" >/dev/null 2>&1; then
   echo "[FAIL] compute_release_version unit tests failed"
+  fail=1
+fi
+
+if ! python3 "$ROOT/scripts/test_release_issue_refs.py" >/dev/null 2>&1; then
+  echo "[FAIL] release_issue_refs unit tests failed"
   fail=1
 fi
 

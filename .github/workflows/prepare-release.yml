@@ -186,7 +186,7 @@ jobs:
             fi
           } > "$BODY_FILE"
 
-          EXISTING=$(gh pr list --base main --head develop --state open --json number -q '.[0].number')
+          EXISTING=$(gh pr list --base main --head develop --state open --json number -q '.[0].number // empty')
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "chore(release): ${TAG_NAME}" --add-label release --body-file "$BODY_FILE"
             PR_URL=$(gh pr view "$EXISTING" --json url -q '.url')

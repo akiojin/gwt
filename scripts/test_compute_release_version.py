@@ -35,6 +35,15 @@ class ClassifyBumpTests(unittest.TestCase):
     def test_docs_chore_only_is_patch(self):
         self.assertEqual(crv.classify_bump(["docs: x", "chore: y"], "docs: x\nchore: y\n"), "patch")
 
+    def test_breaking_prose_in_body_is_not_major(self):
+        # "BREAKING CHANGE" appearing mid-line as prose must NOT trigger major.
+        body = "feat: doc\n\nThis change documents BREAKING CHANGE behavior in the guide.\n"
+        self.assertEqual(crv.classify_bump(["feat: doc"], body), "minor")
+
+    def test_breaking_change_hyphen_footer_is_major(self):
+        body = "fix: thing\n\nBREAKING-CHANGE: drops Y\n"
+        self.assertEqual(crv.classify_bump(["fix: thing"], body), "major")
+
 
 class NextVersionTests(unittest.TestCase):
     def test_major(self):
@@ -91,11 +100,34 @@ class GitWiringTests(unittest.TestCase):
         def runner(cmd):
             if cmd[:3] == ["git", "tag", "--list"]:
                 return "v9.54.0\n"
-            if "--no-merges" in cmd:
-                return "feat: new thing\nfix: a bug\n"
+            if cmd[:3] == ["git", "rev-list", "--count"]:
+                return "2\n"
             return "feat: new thing\nfix: a bug\n"
 
         self.assertEqual(crv.compute("auto", runner=runner), "9.55.0")
+
+    def test_compute_zero_commits_raises(self):
+        def runner(cmd):
+            if cmd[:3] == ["git", "tag", "--list"]:
+                return "v9.54.0\n"
+            if cmd[:3] == ["git", "rev-list", "--count"]:
+                return "0\n"
+            return ""
+
+        with self.assertRaises(crv.ReleaseVersionError):
+            crv.compute("auto", runner=runner)
+
+    def test_gather_commits_excludes_merges_from_both_queries(self):
+        calls: list[list[str]] = []
+
+        def runner(cmd):
+            calls.append(list(cmd))
+            return "feat: x\n"
+
+        crv.gather_commits("v1..HEAD", runner)
+        # Both the subject query and the body query must pass --no-merges.
+        self.assertTrue(all("--no-merges" in c for c in calls))
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
