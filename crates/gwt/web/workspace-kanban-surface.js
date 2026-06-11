@@ -930,6 +930,39 @@ export function createWorkspaceKanbanSurface({
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
     });
+
+    // Keyboard navigation: ArrowUp / ArrowDown move the Workspace selection
+    // (user request 2026-06-11). Delegated from the mount root so the
+    // listener survives row re-renders; the existing row click path handles
+    // selection + re-render, then focus returns to the selected row so the
+    // user can keep navigating.
+    parent.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const list = parent.querySelector(".workspace-overview-list");
+      if (!list) return;
+      const rows = Array.from(
+        list.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+      );
+      if (rows.length === 0) return;
+      event.preventDefault?.();
+      const current = rows.findIndex(
+        (row) => row.getAttribute("aria-selected") === "true",
+      );
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      const targetIndex = Math.min(
+        rows.length - 1,
+        Math.max(0, current === -1 ? 0 : current + delta),
+      );
+      const target = rows[targetIndex];
+      if (!target || target.getAttribute("aria-selected") === "true") return;
+      target.click();
+      const renewed = parent.querySelector(
+        '.workspace-overview-row[aria-selected="true"]',
+      );
+      renewed?.focus?.();
+      renewed?.scrollIntoView?.({ block: "nearest" });
+    });
+
     renderWorkspaceOverviewWindow(windowData.id);
   }
 

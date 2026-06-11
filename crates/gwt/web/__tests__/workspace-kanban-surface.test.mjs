@@ -967,3 +967,63 @@ test("Workspace with existing Works still offers a Launch control", () => {
   assert.equal(sent.at(-1)?.kind, "open_active_work_launch_wizard");
   assert.equal(sent.at(-1)?.branch_name, "develop");
 });
+
+// User request (2026-06-11): ArrowUp / ArrowDown switches the Workspace list
+// selection from the keyboard, updating the detail pane.
+test("ArrowDown / ArrowUp move the Workspace list selection", () => {
+  const fixture = createFixture();
+  const works = ["work/a", "work/b", "work/c"].map((branch, index) => ({
+    id: `work-${index}`,
+    title: branch,
+    status_category: "idle",
+    lifecycle_state: "paused",
+    branch,
+    active_agents: 0,
+    blocked_agents: 0,
+    agents: [],
+  }));
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: works.length,
+      active_works: works,
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const pressOnList = (key) => {
+    const list = fixture.body.querySelector(".workspace-overview-list");
+    const event = new fixture.document.defaultView.Event("keydown", { bubbles: true });
+    event.key = key;
+    list.dispatchEvent(event);
+  };
+
+  const selectedTitle = () =>
+    fixture.body
+      .querySelector('.workspace-overview-row[aria-selected="true"] .workspace-overview-row-title')
+      ?.textContent.trim();
+
+  assert.equal(selectedTitle(), "work/a", "first row selected by default");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/b", "ArrowDown selects the next row");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/c");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/c", "clamped at the last row");
+  pressOnList("ArrowUp");
+  assert.equal(selectedTitle(), "work/b", "ArrowUp selects the previous row");
+  assert.match(
+    fixture.body.querySelector(".workspace-detail-title").textContent,
+    /work\/b/,
+    "detail follows the keyboard selection",
+  );
+});
