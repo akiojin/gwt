@@ -1956,11 +1956,18 @@ pub fn reconcile_worktree_work_items_paths(
         };
         let events_path = gwt_repo_local_work_events_path(&source.worktree_path);
         // FR-403: the baseline timestamp is the worktree's last real activity
-        // (directory mtime), not "now" — a freshly materialized old worktree
-        // must not outrank genuinely recent Workspaces in the recency sort.
-        let baseline = fs::metadata(&source.worktree_path)
-            .and_then(|metadata| metadata.modified())
-            .map(DateTime::<Utc>::from)
+        // — the HEAD committer time for git worktrees (directory mtime is
+        // polluted by unrelated writes such as the backfill itself creating
+        // `.gwt/`), falling back to the directory mtime and finally to `now`.
+        // Reconciliation runs at bootstrap/open (not on the projection build
+        // hot path), so one git spawn per newly backfilled worktree is fine.
+        let baseline = worktree_head_commit_time(&source.worktree_path)
+            .or_else(|| {
+                fs::metadata(&source.worktree_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map(DateTime::<Utc>::from)
+                    .ok()
+            })
             .unwrap_or(now)
             .min(now);
         record_workspace_backfill_event_paths(
@@ -1973,6 +1980,25 @@ pub fn reconcile_worktree_work_items_paths(
         )?;
     }
     Ok(pending.len())
+}
+
+/// HEAD committer time of a git worktree (`git log -1 --format=%ct`).
+/// Returns `None` for non-repositories or unborn branches.
+fn worktree_head_commit_time(worktree_path: &Path) -> Option<DateTime<Utc>> {
+    let output = crate::process::hidden_command("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let seconds: i64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    DateTime::<Utc>::from_timestamp(seconds, 0)
 }
 
 /// SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items. The pre-W-12
@@ -6995,6 +7021,59 @@ mod tests {
             item.updated_at < Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             "baseline must be the worktree mtime (2025), not now: {}",
             item.updated_at
+        );
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): for a git worktree the
+    /// backfill baseline is the HEAD committer time — directory mtime is
+    /// polluted by unrelated writes (e.g. the backfill itself creating
+    /// `.gwt/`), which collapsed mid-list ordering onto one instant.
+    #[test]
+    fn backfill_uses_head_commit_time_for_git_worktrees() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "T"].as_slice(),
+        ] {
+            let output = crate::process::hidden_command("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+            assert!(output.status.success());
+        }
+        let mut commit = crate::process::hidden_command("git");
+        commit
+            .args(["commit", "--allow-empty", "-m", "old"])
+            .env("GIT_COMMITTER_DATE", "2025-06-15T00:00:00Z")
+            .env("GIT_AUTHOR_DATE", "2025-06-15T00:00:00Z")
+            .current_dir(&worktree);
+        assert!(commit.output().expect("commit").status.success());
+
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[WorktreeReconcileSource {
+                branch: Some("work/old".to_string()),
+                worktree_path: worktree.clone(),
+            }],
+            now,
+        )
+        .expect("reconcile");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(
+            projection.work_items[0].updated_at,
+            Utc.with_ymd_and_hms(2025, 6, 15, 0, 0, 0).unwrap(),
+            "git worktree baseline is the HEAD committer time"
         );
     }
 }
