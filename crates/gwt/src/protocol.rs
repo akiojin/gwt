@@ -1112,6 +1112,12 @@ pub struct ActiveWorkItemView {
     /// touched branch is on top. Empty string for legacy payloads.
     #[serde(default)]
     pub updated_at: String,
+    /// SPEC-2359 Phase W-15 (FR-386): true when the Workspace's branch is
+    /// fully merged into a canonical base on origin (background scan via
+    /// `git cherry`) or its PR state is merged — i.e. the worktree/branch is
+    /// safe to delete. Display-only; no automatic close (US-61).
+    #[serde(default)]
+    pub merged_into_base: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2721,6 +2727,7 @@ mod tests {
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
                     session_agent_total: 0,
+                    merged_into_base: false,
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {

@@ -154,6 +154,9 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
+      // — the "safe to delete" signal. Display-only.
+      merged_into_base: Boolean(item?.merged_into_base),
       // SPEC-2359 W-16 (FR-402): uncapped agent/session count for the
       // "+N more sessions" label; 0 = not computed (legacy payloads).
       session_agent_total:
@@ -245,6 +248,10 @@ export function createWorkspaceKanbanSurface({
     );
     lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
     titleRow.appendChild(lifecycleBadge);
+    if (item.merged_into_base) {
+      // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
+      titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
+    }
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
@@ -264,8 +271,19 @@ export function createWorkspaceKanbanSurface({
     row.addEventListener("click", () => {
       state.selectedId = item.id;
       renderWorkspaceOverviewWindow(windowId, true);
+      // The re-render replaced this row, dropping focus to <body> — restore
+      // it onto the freshly rendered selected row so ArrowUp / ArrowDown
+      // keyboard navigation keeps working after a mouse selection.
+      focusSelectedWorkspaceRow(windowId);
     });
     return row;
+  }
+
+  function focusSelectedWorkspaceRow(windowId) {
+    const host = windowMap.get(windowId);
+    const row = host?.querySelector?.('.workspace-overview-row[aria-selected="true"]');
+    row?.focus?.();
+    row?.scrollIntoView?.({ block: "nearest" });
   }
 
   function renderUnassignedQueue(container, agents) {
@@ -339,23 +357,25 @@ export function createWorkspaceKanbanSurface({
   // prefilled with the Workspace's branch; the new launch becomes a new Work
   // joining this Workspace. Available both for empty Workspaces and ones
   // with existing Works (user verification 2026-06-11).
-  function renderLaunchWorkspaceButton(workspace) {
+  function renderLaunchWorkspaceButton(workspace, windowId) {
     const branch = workspace && workspace.branch ? String(workspace.branch) : "";
     if (!branch) return null;
-    const launch = createNode("button", "wizard-button is-compact", "Launch");
+    // Same entry as the Branches surface "Launch Agent": opens the launch
+    // wizard for this Workspace's existing branch (user wording 2026-06-11).
+    const launch = createNode("button", "wizard-button is-compact", "Launch Agent");
     launch.type = "button";
     launch.dataset.action = "launch-workspace";
     launch.addEventListener("click", () => {
       send({
-        kind: "open_active_work_launch_wizard",
+        kind: "open_launch_wizard",
+        id: windowId,
         branch_name: branch,
-        linked_issue_number: null,
       });
     });
     return launch;
   }
 
-  function appendWorks(container, works, workspace) {
+  function appendWorks(container, works, workspace, windowId) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
       // The flex empty-state row (shared with the Resume placeholder) keeps
@@ -365,7 +385,7 @@ export function createWorkspaceKanbanSurface({
         "workspace-overview-empty workspace-detail-session-empty",
         "No Work yet",
       );
-      const launch = renderLaunchWorkspaceButton(workspace);
+      const launch = renderLaunchWorkspaceButton(workspace, windowId);
       if (launch) {
         empty.appendChild(launch);
       }
@@ -435,7 +455,7 @@ export function createWorkspaceKanbanSurface({
     }
     // A new agent can always be launched on this Workspace's branch — the
     // launch becomes a new Work joining the Workspace.
-    const launch = renderLaunchWorkspaceButton(workspace);
+    const launch = renderLaunchWorkspaceButton(workspace, windowId);
     if (launch) {
       const row = createNode(
         "div",
@@ -722,7 +742,7 @@ export function createWorkspaceKanbanSurface({
     });
   }
 
-  function renderWorkspaceDetail(container, workspace) {
+  function renderWorkspaceDetail(container, workspace, windowId) {
     container.innerHTML = "";
     if (!workspace) {
       const empty = createNode("div", "workspace-overview-empty", "No Workspace selected");
@@ -739,6 +759,9 @@ export function createWorkspaceKanbanSurface({
     const subtitle = createNode("div", "workspace-detail-subtitle");
     if (workspace.title && workspace.title !== detailTitle) {
       appendMetaText(subtitle, workspace.title);
+    }
+    if (workspace.merged_into_base) {
+      appendMetaText(subtitle, "Merged — safe to delete");
     }
     appendMetaText(subtitle, statusLabel(workspace.status_category));
     appendMetaText(subtitle, workspace.owner);
@@ -794,7 +817,7 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Work", (body) => {
-        appendWorks(body, workspace.agents, workspace);
+        appendWorks(body, workspace.agents, workspace, windowId);
       }),
     );
     container.appendChild(
@@ -873,7 +896,7 @@ export function createWorkspaceKanbanSurface({
     queue.innerHTML = "";
     renderUnassignedQueue(queue, unassignedAgents);
 
-    renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected);
+    renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected, windowId);
   }
 
   function mountWorkSurface(parent) {
@@ -956,11 +979,7 @@ export function createWorkspaceKanbanSurface({
       const target = rows[targetIndex];
       if (!target || target.getAttribute("aria-selected") === "true") return;
       target.click();
-      const renewed = parent.querySelector(
-        '.workspace-overview-row[aria-selected="true"]',
-      );
-      renewed?.focus?.();
-      renewed?.scrollIntoView?.({ block: "nearest" });
+      focusSelectedWorkspaceRow(windowData.id);
     });
 
     renderWorkspaceOverviewWindow(windowData.id);

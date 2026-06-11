@@ -2404,6 +2404,7 @@ fn active_work_items_from_projection(
                 .to_string(),
                 closed_at: None,
                 session_agent_total: 0,
+                merged_into_base: false,
                 updated_at: row_updated_at,
             }
         })
@@ -2487,6 +2488,7 @@ fn append_paused_work_items(
             .to_string(),
             closed_at: None,
             session_agent_total: 0,
+            merged_into_base: false,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -3026,6 +3028,28 @@ fn attach_registry_sessions_to_active_works(
     active_works.sort_by_key(|work| std::cmp::Reverse(row_sort_key(work)));
 }
 
+/// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
+/// origin (background scan cache) or whose recorded PR state is merged — the
+/// "safe to delete" signal. Display-only; no automatic close (US-61).
+fn mark_merged_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    merged_branches: Option<&std::collections::HashSet<String>>,
+) {
+    for work in active_works.iter_mut() {
+        let by_cache = work
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .map(|branch| merged_branches.is_some_and(|set| set.contains(&branch)))
+            .unwrap_or(false);
+        let by_pr = work
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+        work.merged_into_base = by_cache || by_pr;
+    }
+}
+
 fn paused_work_agent_view_from_history(
     agent: &gwt::WorkspaceHistoryAgentView,
 ) -> gwt::ActiveWorkAgentView {
@@ -3534,6 +3558,10 @@ pub struct AppRuntime {
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
+    /// fully merged into a base on origin, filled by the background merge
+    /// scan. Runtime-only; never persisted.
+    pub(crate) work_merged_branches: HashMap<PathBuf, std::collections::HashSet<String>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3641,6 +3669,7 @@ impl AppRuntime {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            work_merged_branches: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -3657,6 +3686,74 @@ impl AppRuntime {
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
         Ok(app)
+    }
+
+    /// SPEC-2359 W-15 (FR-386): store the background merged-branch scan
+    /// result and rebroadcast the Workspace projection so the "safe to
+    /// delete" badge appears. Display-only; never records a close (US-61).
+    pub(crate) fn apply_work_merge_status(
+        &mut self,
+        project_root: &Path,
+        merged_branches: std::collections::HashSet<String>,
+    ) -> Vec<OutboundEvent> {
+        self.work_merged_branches
+            .insert(project_root.to_path_buf(), merged_branches);
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-2359 W-15 (FR-386): scan the project's unclosed Workspace
+    /// branches for merge-into-base off the UI thread (one `git cherry` per
+    /// branch). Sends [`UserEvent::WorkMergeStatus`] when anything merged is
+    /// found; silent otherwise so stub-proxy tests stay quiet.
+    pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let Ok(projection) =
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                    &project_root,
+                )
+            else {
+                return;
+            };
+            let mut branches: Vec<String> = Vec::new();
+            for item in &projection.work_items {
+                if item.is_terminal() {
+                    continue;
+                }
+                for container in &item.execution_containers {
+                    if let Some(branch) = container
+                        .branch
+                        .as_deref()
+                        .map(crate::runtime_support::normalize_branch_name)
+                    {
+                        if !branch.is_empty() && !branches.contains(&branch) {
+                            branches.push(branch);
+                        }
+                    }
+                }
+            }
+            if branches.is_empty() {
+                return;
+            }
+            let mut merged = std::collections::HashSet::new();
+            for branch in branches {
+                if matches!(
+                    gwt_git::branch::merged_base_target(&project_root, &branch),
+                    Ok(Some(_))
+                ) {
+                    merged.insert(branch);
+                }
+            }
+            if merged.is_empty() {
+                return;
+            }
+            proxy.send(UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches: merged,
+            });
+        });
     }
 
     /// SPEC-2359 Phase W-15 (FR-379/FR-380/FR-382): reconcile locally existing
@@ -3743,6 +3840,9 @@ impl AppRuntime {
             // records). Runs after the rebuild above so already-recorded
             // branches are not redundantly backfilled.
             self.reconcile_workspace_worktrees(&tab.project_root);
+            // SPEC-2359 W-15 (FR-386): kick the background merge scan that
+            // feeds the "safe to delete" badge.
+            self.spawn_work_merge_status_scan(tab.project_root.clone());
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -5472,6 +5572,12 @@ impl AppRuntime {
                 gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
                 &session_index,
             );
+            // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
+            // background merge-scan cache plus the recorded PR state.
+            mark_merged_active_works(
+                &mut view.active_works,
+                self.work_merged_branches.get(&tab.project_root),
+            );
             return Some(view);
         }
 
@@ -5522,6 +5628,7 @@ impl AppRuntime {
             .to_string(),
             closed_at: None,
             session_agent_total: 0,
+            merged_into_base: false,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {
@@ -5675,6 +5782,7 @@ impl AppRuntime {
                     .map(|tab| tab.project_root.clone())
                 {
                     self.reconcile_workspace_worktrees(&project_root);
+                    self.spawn_work_merge_status_scan(project_root);
                 }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);

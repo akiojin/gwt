@@ -918,6 +918,13 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
+    /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
+    /// The runtime caches the set and rebroadcasts the Workspace projection
+    /// so rows can show the "safe to delete" badge.
+    WorkMergeStatus {
+        project_root: PathBuf,
+        merged_branches: std::collections::HashSet<String>,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -2137,6 +2144,7 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            work_merged_branches: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -6647,6 +6655,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches,
+            }) => {
+                let events = app.apply_work_merge_status(&project_root, merged_branches);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {

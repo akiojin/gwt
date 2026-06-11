@@ -1694,6 +1694,7 @@ fn sample_runtime_with_events(
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+        work_merged_branches: HashMap::new(),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,
@@ -14081,6 +14082,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
+        merged_into_base: false,
         updated_at: String::new(),
     }];
 
@@ -14165,6 +14167,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
+        merged_into_base: false,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14206,4 +14209,103 @@ fn active_works_are_sorted_by_latest_update_descending() {
         vec!["work-mid", "work-new", "work-old"],
         "rows sort by max(record updated_at, agents updated_at) descending"
     );
+}
+
+/// SPEC-2359 W-15 (FR-386): rows flagged merged ("safe to delete") via the
+/// background scan cache (canonical branch match) or the recorded PR state.
+#[test]
+fn mark_merged_active_works_flags_cache_and_pr_state() {
+    let row = |branch: Option<&str>, pr_state: Option<&str>| gwt::ActiveWorkItemView {
+        id: "w".to_string(),
+        title: "t".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: branch.map(str::to_string),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: pr_state.map(str::to_string),
+        board_refs: Vec::new(),
+        agents: Vec::new(),
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        updated_at: String::new(),
+    };
+    let mut works = vec![
+        row(Some("origin/work/merged"), None),
+        row(Some("work/open"), None),
+        row(None, Some("MERGED")),
+    ];
+    let merged: std::collections::HashSet<String> =
+        ["work/merged".to_string()].into_iter().collect();
+
+    super::mark_merged_active_works(&mut works, Some(&merged));
+
+    assert!(
+        works[0].merged_into_base,
+        "cache match (origin/ normalized)"
+    );
+    assert!(
+        !works[1].merged_into_base,
+        "unmerged branch stays unflagged"
+    );
+    assert!(works[2].merged_into_base, "PR state merged flags the row");
+}
+
+/// SPEC-2359 W-15 (FR-386): apply_work_merge_status stores the scan result
+/// and the next projection build flags the matching rows.
+#[test]
+fn apply_work_merge_status_caches_and_flags_rows() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let now = chrono::Utc::now();
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Update,
+            "work-merged-row",
+            now,
+        );
+        event.title = Some("merged work".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/merged".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let merged: std::collections::HashSet<String> =
+        ["work/merged".to_string()].into_iter().collect();
+    let _ = runtime.apply_work_merge_status(&repo, merged);
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-merged-row")
+        .expect("row");
+    assert!(row.merged_into_base, "cached merge scan flags the row");
 }

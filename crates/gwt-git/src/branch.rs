@@ -169,6 +169,17 @@ fn detect_cleanable_target_for_remote(
     Ok((has_canonical_base, None))
 }
 
+/// SPEC-2359 W-15 (FR-386): the canonical base target on `origin`
+/// (develop / main / master) into which `branch` is fully merged —
+/// squash-aware via [`is_branch_merged_into`] (`git cherry`) and independent
+/// of the branch's upstream configuration. `None` when unmerged or no
+/// canonical base ref exists. Used by the Workspace surface "safe to delete"
+/// badge; run it off the UI hot path (background scan).
+pub fn merged_base_target(repo_path: &Path, branch: &str) -> Result<Option<MergeTargetRef>> {
+    let (_, target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
+    Ok(target)
+}
+
 /// Returns the set of local branch names whose upstream tracking ref is
 /// `[gone]` (FR-018a). Used to flag branches whose remote was deleted but
 /// which still exist locally.
@@ -696,6 +707,34 @@ mod tests {
         make_commit(repo, "a.txt", "unmerged", "feat: unmerged");
 
         assert!(!is_branch_merged_into(repo, "feature/unmerged", "main").unwrap());
+    }
+
+    /// SPEC-2359 W-15 (FR-386): `merged_base_target` detects a squash merge
+    /// into origin/develop without requiring an upstream, and stays `None`
+    /// for unmerged branches.
+    #[test]
+    fn merged_base_target_detects_squash_merge_into_origin_develop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        run(&["checkout", "-b", "work/sq"], repo);
+        make_commit(repo, "a.txt", "a\n", "feat: a");
+        run(&["checkout", "develop"], repo);
+        run(&["merge", "--squash", "work/sq"], repo);
+        run(&["commit", "-m", "feat: squashed a"], repo);
+        // Simulate the fetched remote ref the scan consults.
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
+        let target = merged_base_target(repo, "work/sq").unwrap();
+        assert!(target.is_some(), "squash-merged branch must resolve a base");
+
+        run(&["checkout", "-b", "work/unmerged", "main"], repo);
+        make_commit(repo, "b.txt", "b\n", "feat: b");
+        assert!(merged_base_target(repo, "work/unmerged").unwrap().is_none());
     }
 
     #[test]

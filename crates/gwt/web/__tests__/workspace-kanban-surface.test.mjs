@@ -752,7 +752,8 @@ test("sessionless Workspace offers a Launch control that opens the launch wizard
   assert.ok(launch, "sessionless Workspace detail must offer a Launch control");
   launch.click();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].kind, "open_active_work_launch_wizard");
+  assert.equal(sent[0].kind, "open_launch_wizard");
+  assert.equal(sent[0].id, fixture.windowData.id);
   assert.equal(sent[0].branch_name, "work/foo");
 });
 
@@ -792,7 +793,7 @@ test("Launch control uses the flex empty-state row and duplicate branch meta is 
   });
 
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
-  assert.ok(launch, "Launch control must exist");
+  assert.ok(launch, "Launch Agent control must exist");
   assert.ok(
     launch.parentElement.classList.contains("workspace-detail-session-empty"),
     "Launch must sit in the flex empty-state row so it does not overlap the text",
@@ -964,7 +965,7 @@ test("Workspace with existing Works still offers a Launch control", () => {
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
   assert.ok(launch, "Launch control must exist even when Works are present");
   launch.click();
-  assert.equal(sent.at(-1)?.kind, "open_active_work_launch_wizard");
+  assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
   assert.equal(sent.at(-1)?.branch_name, "develop");
 });
 
@@ -1025,5 +1026,73 @@ test("ArrowDown / ArrowUp move the Workspace list selection", () => {
     fixture.body.querySelector(".workspace-detail-title").textContent,
     /work\/b/,
     "detail follows the keyboard selection",
+  );
+});
+
+// SPEC-2359 W-15 (FR-386): the "safe to delete" signal — a merged Workspace
+// shows a Merged badge on its row and the detail subtitle says so.
+test("merged Workspace shows the safe-to-delete badge", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 2,
+      active_works: [
+        {
+          id: "work-merged",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-open",
+          title: "work/open",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/open",
+          merged_into_base: false,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const rows = Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  );
+  const mergedRow = rows.find((row) => row.dataset.workspaceId === "work-merged");
+  const openRow = rows.find((row) => row.dataset.workspaceId === "work-open");
+  assert.ok(
+    mergedRow.querySelector(".workspace-overview-merged"),
+    "merged row carries the Merged badge",
+  );
+  assert.equal(
+    openRow.querySelector(".workspace-overview-merged"),
+    null,
+    "unmerged row has no badge",
+  );
+
+  mergedRow.click();
+  assert.match(
+    fixture.body.querySelector(".workspace-detail-subtitle").textContent,
+    /Merged — safe to delete/,
+    "detail subtitle carries the safe-to-delete signal",
   );
 });
