@@ -989,6 +989,119 @@ test("Workspace with existing Works still offers a Launch control", () => {
   );
 });
 
+// Design pass (2026-06-11, frontend-design): the branch name renders with a
+// dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
+// the full text content stays the verbatim branch for copy / a11y.
+test("row title splits the branch namespace prefix from the leaf", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/20260610-0120-4",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260610-0120-4",
+          updated_at: "2026-06-11T05:00:00Z",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const title = fixture.body.querySelector(".workspace-overview-row-title");
+  assert.equal(title.textContent, "work/20260610-0120-4", "verbatim branch text is preserved");
+  assert.equal(
+    title.querySelector(".workspace-branch-prefix")?.textContent,
+    "work/",
+    "namespace prefix is split for dimming",
+  );
+  assert.equal(
+    title.querySelector(".workspace-branch-leaf")?.textContent,
+    "20260610-0120-4",
+    "leaf is split for emphasis",
+  );
+  // The row carries its relative updated time, right-aligned via CSS.
+  assert.ok(
+    fixture.body.querySelector(".workspace-overview-row-time"),
+    "row shows the relative updated time",
+  );
+});
+
+// Design pass (2026-06-11): each Work group carries the agent color keyword so
+// the existing [data-agent-color] → --current-agent CSS identity system colors
+// the group rail and agent dot (SPEC-2133 agent colors).
+test("work groups carry the agent identity color keyword", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "develop",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "sess-claude",
+              agent_id: "claude",
+              display_name: "Claude Code",
+              affiliation_status: "assigned",
+              status_category: "idle",
+              updated_at: "2026-06-10T12:00:00Z",
+              sessions: [],
+            },
+            {
+              session_id: "sess-codex",
+              agent_id: "codex",
+              display_name: "Codex",
+              affiliation_status: "assigned",
+              status_category: "idle",
+              updated_at: "2026-06-10T11:00:00Z",
+              sessions: [],
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const groups = [...fixture.body.querySelectorAll(".workspace-detail-work-group")];
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].dataset.agentColor, "yellow", "Claude maps to the claude color");
+  assert.equal(groups[1].dataset.agentColor, "cyan", "Codex maps to the codex color");
+});
+
 // User request (2026-06-11): ArrowUp / ArrowDown switches the Workspace list
 // selection from the keyboard, updating the detail pane.
 test("ArrowDown / ArrowUp move the Workspace list selection", () => {

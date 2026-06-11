@@ -223,6 +223,38 @@ export function createWorkspaceKanbanSurface({
     appendMeta(container, value);
   }
 
+  // Design pass (2026-06-11): branch names render as a dimmed namespace
+  // prefix + strong leaf ("work/" + "20260610-0120-4") so long branch lists
+  // scan by leaf. textContent stays the verbatim branch.
+  function appendBranchLabel(container, value) {
+    const branch = String(value || "");
+    const cut = branch.lastIndexOf("/");
+    if (cut > 0 && cut < branch.length - 1) {
+      container.appendChild(
+        createNode("span", "workspace-branch-prefix", branch.slice(0, cut + 1)),
+      );
+      container.appendChild(
+        createNode("span", "workspace-branch-leaf", branch.slice(cut + 1)),
+      );
+    } else {
+      container.appendChild(createNode("span", "workspace-branch-leaf", branch));
+    }
+  }
+
+  // Map an agent name onto the established [data-agent-color] identity system
+  // (SPEC-2133) so Work groups inherit --current-agent from existing CSS.
+  function agentColorKeyword(work) {
+    const name = String(
+      (work && (work.display_name || work.agent_id)) || "",
+    ).toLowerCase();
+    if (name.includes("claude")) return "yellow";
+    if (name.includes("codex")) return "cyan";
+    if (name.includes("gemini")) return "magenta";
+    if (name.includes("opencode")) return "green";
+    if (name.includes("copilot")) return "blue";
+    return "gray";
+  }
+
   function renderWorkspaceRow(windowId, state, item) {
     const row = createNode("button", "workspace-overview-row");
     row.type = "button";
@@ -237,7 +269,9 @@ export function createWorkspaceKanbanSurface({
     // a branch list — the row is titled by the branch (the place); the
     // record's own title (work summary) moves to the meta line below.
     const rowTitle = item.branch || item.title;
-    titleRow.appendChild(createNode("span", "workspace-overview-row-title", rowTitle));
+    const titleNode = createNode("span", "workspace-overview-row-title");
+    appendBranchLabel(titleNode, rowTitle);
+    titleRow.appendChild(titleNode);
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
     // so the Work surface is the single home for Work lifecycle.
@@ -251,6 +285,12 @@ export function createWorkspaceKanbanSurface({
     if (item.merged_into_base) {
       // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
       titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
+    }
+    const rowRelative = formatRelativeTime(item.updated_at);
+    if (rowRelative) {
+      const time = createNode("span", "workspace-overview-row-time", rowRelative);
+      time.title = String(item.updated_at);
+      titleRow.appendChild(time);
     }
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
@@ -389,6 +429,7 @@ export function createWorkspaceKanbanSurface({
     const wrap = createNode("div", "workspace-detail-work-list");
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
+      group.dataset.agentColor = agentColorKeyword(work);
       // Each Work is one Agent (a launch). The Agent header names the agent
       // (tool); the Work's Sessions (its conversation history) are listed under
       // it as sub-rows, and Resume lives on each Session row (a single list
@@ -736,7 +777,10 @@ export function createWorkspaceKanbanSurface({
     // SPEC-2359 W-15 (user design decision 2026-06-10): the detail heading is
     // the branch (the place); the record's title joins the subtitle line.
     const detailTitle = workspace.branch || workspace.title;
-    titleWrap.appendChild(createNode("h2", "workspace-detail-title", detailTitle));
+    titleWrap.classList.add("has-brackets");
+    const detailTitleNode = createNode("h2", "workspace-detail-title");
+    appendBranchLabel(detailTitleNode, detailTitle);
+    titleWrap.appendChild(detailTitleNode);
     const subtitle = createNode("div", "workspace-detail-subtitle");
     if (workspace.title && workspace.title !== detailTitle) {
       appendMetaText(subtitle, workspace.title);
