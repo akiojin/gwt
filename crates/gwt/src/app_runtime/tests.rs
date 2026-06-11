@@ -1698,6 +1698,9 @@ fn sample_runtime_with_events(
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
+        work_items_cache: std::cell::RefCell::new(
+            gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+        ),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,

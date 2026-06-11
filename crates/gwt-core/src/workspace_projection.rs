@@ -10,6 +10,7 @@
 //! is not allowed in new code, so the transition rules stay single-source.
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -1826,6 +1827,93 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
     synthesize_workspace_work_items_from_legacy_paths(current_path, journal_path, project_root)
 }
 
+/// SPEC-2359 (close-latency root fix, 2026-06-11): mtime+size-keyed cache in
+/// front of [`load_or_synthesize_workspace_work_items`]. The home works.json
+/// grows to megabytes (hundreds of Work items × thousands of events) and the
+/// UI event loop rebuilds the Workspace projection on every broadcast-bearing
+/// action; re-parsing the file each time stalls the queue. A cache hit clones
+/// the parsed projection instead. Synthesized fallbacks (works.json absent)
+/// are never cached — they must observe legacy-file changes.
+#[derive(Default)]
+pub struct WorkspaceWorkItemsCache {
+    entries: HashMap<PathBuf, CachedWorkItemsProjection>,
+    /// Lifetime parse counter; tests assert the steady state stops parsing.
+    pub parse_count: u64,
+}
+
+struct CachedWorkItemsProjection {
+    mtime: std::time::SystemTime,
+    size: u64,
+    projection: WorkspaceWorkItemsProjection,
+}
+
+impl WorkspaceWorkItemsCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cached equivalent of [`load_or_synthesize_workspace_work_items`].
+    pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkspaceWorkItemsProjection> {
+        let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+        if let Some(hit) = self.lookup(&work_items_path) {
+            return Ok(hit);
+        }
+        let projection = load_or_synthesize_workspace_work_items(repo_path)?;
+        self.store(&work_items_path, &projection);
+        Ok(projection)
+    }
+
+    /// Paths-injected variant for tests and path-explicit callers (#3022).
+    pub fn load_or_synthesize_from_paths(
+        &mut self,
+        work_items_path: &Path,
+        current_path: &Path,
+        journal_path: &Path,
+        project_root: &Path,
+    ) -> Result<WorkspaceWorkItemsProjection> {
+        if let Some(hit) = self.lookup(work_items_path) {
+            return Ok(hit);
+        }
+        let projection = load_or_synthesize_workspace_work_items_from_paths(
+            work_items_path,
+            current_path,
+            journal_path,
+            project_root,
+        )?;
+        self.store(work_items_path, &projection);
+        Ok(projection)
+    }
+
+    fn lookup(&self, work_items_path: &Path) -> Option<WorkspaceWorkItemsProjection> {
+        let meta = fs::metadata(work_items_path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let hit = self.entries.get(work_items_path)?;
+        (hit.mtime == mtime && hit.size == meta.len()).then(|| hit.projection.clone())
+    }
+
+    fn store(&mut self, work_items_path: &Path, projection: &WorkspaceWorkItemsProjection) {
+        self.parse_count += 1;
+        let Ok(meta) = fs::metadata(work_items_path) else {
+            // works.json absent: the result was synthesized from legacy
+            // sources — do not cache it against a missing file.
+            self.entries.remove(work_items_path);
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            self.entries.remove(work_items_path);
+            return;
+        };
+        self.entries.insert(
+            work_items_path.to_path_buf(),
+            CachedWorkItemsProjection {
+                mtime,
+                size: meta.len(),
+                projection: projection.clone(),
+            },
+        );
+    }
+}
+
 pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
     projection: &WorkspaceWorkItemsProjection,
@@ -3390,6 +3478,120 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    // SPEC-2359 close-latency root fix: the works.json cache must stop
+    // re-parsing unchanged files, observe content changes, and never cache a
+    // synthesized fallback against a missing works.json.
+    #[test]
+    fn work_items_cache_reuses_unchanged_file_and_reparses_on_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = tmp.path().join("works.json");
+        let current_path = tmp.path().join("current.json");
+        let journal_path = tmp.path().join("journal.jsonl");
+        let project_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let now = chrono::Utc::now();
+        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        projection.apply_event(sample_work_event("work-1", now));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works.json");
+
+        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let first = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("first load");
+        assert_eq!(first.work_items.len(), 1);
+        assert_eq!(cache.parse_count, 1);
+
+        let second = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("second load");
+        assert_eq!(second.work_items.len(), 1);
+        assert_eq!(
+            cache.parse_count, 1,
+            "unchanged works.json must not re-parse"
+        );
+
+        // Grow the file (extra item) so mtime granularity cannot mask the change.
+        projection.apply_event(sample_work_event(
+            "work-2",
+            now + chrono::Duration::seconds(1),
+        ));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("resave works.json");
+        let third = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("third load");
+        assert_eq!(third.work_items.len(), 2, "changed works.json must reload");
+        assert_eq!(cache.parse_count, 2);
+    }
+
+    #[test]
+    fn work_items_cache_never_caches_synthesized_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = tmp.path().join("works.json");
+        let current_path = tmp.path().join("current.json");
+        let journal_path = tmp.path().join("journal.jsonl");
+        let project_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let synthesized = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("synthesized load");
+        assert!(synthesized.work_items.is_empty());
+
+        // works.json appears afterwards: the next load must see it.
+        let now = chrono::Utc::now();
+        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        projection.apply_event(sample_work_event("work-1", now));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works.json");
+        let loaded = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("post-create load");
+        assert_eq!(loaded.work_items.len(), 1);
+    }
+
+    fn sample_work_event(
+        work_id: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> super::WorkspaceWorkEvent {
+        let mut event = super::WorkspaceWorkEvent::new(
+            super::WorkspaceWorkEventKind::Start,
+            work_id,
+            updated_at,
+        );
+        event.status_category = Some(super::WorkspaceStatusCategory::Active);
+        event.title = Some(format!("title {work_id}"));
+        event
+    }
+
     use chrono::TimeZone;
 
     use super::*;

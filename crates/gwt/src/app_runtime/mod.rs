@@ -3551,6 +3551,10 @@ pub struct AppRuntime {
     /// the single event-loop thread and the projection builder takes `&self`.
     pub(crate) session_ledger_cache:
         std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
+    /// Same root fix for the home works.json (megabytes of Work items +
+    /// events): cache hit clones instead of re-parsing per projection event.
+    pub(crate) work_items_cache:
+        std::cell::RefCell<gwt_core::workspace_projection::WorkspaceWorkItemsCache>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3661,6 +3665,9 @@ impl AppRuntime {
             work_merged_branches: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
+            ),
+            work_items_cache: std::cell::RefCell::new(
+                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
             ),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -5498,16 +5505,16 @@ impl AppRuntime {
         // project) but Work records exist (e.g. worktree backfill), synthesize
         // a default projection so the records still surface.
         let loaded_projection = saved_projection.or_else(|| {
-            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                &tab.project_root,
-            )
-            .ok()
-            .filter(|works| !works.work_items.is_empty())
-            .map(|_| {
-                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
-                    &tab.project_root,
-                )
-            })
+            self.work_items_cache
+                .borrow_mut()
+                .load_or_synthesize(&tab.project_root)
+                .ok()
+                .filter(|works| !works.work_items.is_empty())
+                .map(|_| {
+                    gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                        &tab.project_root,
+                    )
+                })
         });
         if let Some(projection) = loaded_projection {
             let mut projection = projection;
@@ -5538,10 +5545,10 @@ impl AppRuntime {
                 .borrow_mut()
                 .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
-            let workspaces =
-                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                    &tab.project_root,
-                )
+            let workspaces = self
+                .work_items_cache
+                .borrow_mut()
+                .load_or_synthesize(&tab.project_root)
                 .unwrap_or_else(
                     |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
                         updated_at,
@@ -9173,9 +9180,11 @@ impl AppRuntime {
     /// `None` when the Work has no recorded worktree, in which case the close is
     /// recorded without filesystem cleanup.
     fn resolve_work_worktree_path(&self, project_root: &Path, work_id: &str) -> Option<PathBuf> {
-        let projection =
-            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
-                .ok()?;
+        let projection = self
+            .work_items_cache
+            .borrow_mut()
+            .load_or_synthesize(project_root)
+            .ok()?;
         let item = projection
             .work_items
             .iter()
