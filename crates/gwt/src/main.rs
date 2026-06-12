@@ -49,6 +49,7 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+mod work_events_ingest;
 mod workspace_session_registry;
 
 #[cfg(test)]
@@ -925,6 +926,14 @@ enum UserEvent {
     WorkMergeStatus {
         project_root: PathBuf,
         merged_branches: std::collections::HashSet<String>,
+    },
+    /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
+    /// The handler runs the worktree reconcile AFTER the intake (so branches
+    /// already recorded elsewhere are not redundantly backfilled) and
+    /// rebroadcasts the Workspace projection when anything was applied.
+    WorkEventsIngested {
+        project_root: PathBuf,
+        changed: bool,
     },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -2166,6 +2175,7 @@ mod tests {
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
             ),
+            last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -6672,6 +6682,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkEventsIngested {
+                project_root,
+                changed,
+            }) => {
+                let events = app.handle_work_events_ingested(project_root, changed);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {

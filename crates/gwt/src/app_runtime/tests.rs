@@ -1702,6 +1702,7 @@ fn sample_runtime_with_events(
         work_items_cache: std::cell::RefCell::new(
             gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
         ),
+        last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,
@@ -14848,4 +14849,76 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(recorded, "Paused Work record must land in works.json");
+}
+
+/// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
+/// once per 30s per project; bootstrap / project-open callers bypass it.
+#[test]
+fn work_events_ingest_attempt_is_throttled_per_project() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_events_ingest_attempt(&root, false));
+    assert!(
+        !runtime.note_work_events_ingest_attempt(&root, false),
+        "second attempt within 30s is throttled"
+    );
+    assert!(
+        runtime.note_work_events_ingest_attempt(&root, true),
+        "force bypasses the throttle"
+    );
+    let other = temp.path().join("other");
+    assert!(
+        runtime.note_work_events_ingest_attempt(&other, false),
+        "throttle is per project root"
+    );
+}
+
+/// SPEC-2359 W-16 (FR-387): the ingest completion handler runs the worktree
+/// reconcile AFTER the intake (intake → reconcile order) and rebroadcasts
+/// the projection only when the intake applied events.
+#[test]
+fn handle_work_events_ingested_broadcasts_only_on_change() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    // Seed one Work record so the projection broadcast has content.
+    let mut seed = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+        gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+        "work-session-ingest-seed",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    seed.title = Some("seed".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+        .expect("seed work record");
+
+    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+    assert!(
+        unchanged.is_empty(),
+        "no-op ingest must not rebroadcast the projection"
+    );
+
+    let changed = runtime.handle_work_events_ingested(repo, true);
+    assert!(
+        changed
+            .iter()
+            .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
+        "changed ingest rebroadcasts the projection"
+    );
 }

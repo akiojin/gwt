@@ -25,6 +25,7 @@ pub mod skill_state;
 pub mod test_support;
 pub mod update;
 pub mod usage;
+pub mod work_events_intake;
 pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;

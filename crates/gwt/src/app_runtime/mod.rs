@@ -3700,6 +3700,9 @@ pub struct AppRuntime {
     /// events): cache hit clones instead of re-parsing per projection event.
     pub(crate) work_items_cache:
         std::cell::RefCell<gwt_core::workspace_projection::WorkspaceWorkItemsCache>,
+    /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
+    /// 30s throttle for tab-change / post-launch triggers.
+    pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3815,6 +3818,7 @@ impl AppRuntime {
             work_items_cache: std::cell::RefCell::new(
                 gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
             ),
+            last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -3852,6 +3856,60 @@ impl AppRuntime {
     /// branches for merge-into-base off the UI thread (one `git cherry` per
     /// branch). Sends [`UserEvent::WorkMergeStatus`] when anything merged is
     /// found; silent otherwise so stub-proxy tests stay quiet.
+    /// SPEC-2359 W-16 (FR-387): note an ingest attempt for `project_root`;
+    /// returns false while the 30s throttle window is still open. Bootstrap
+    /// and project-open callers pass `force` to bypass the window.
+    pub(crate) fn note_work_events_ingest_attempt(&self, project_root: &Path, force: bool) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_work_events_ingest.borrow_mut();
+        if !force {
+            if let Some(previous) = last.get(project_root) {
+                if now.duration_since(*previous) < Duration::from_secs(30) {
+                    return false;
+                }
+            }
+        }
+        last.insert(project_root.to_path_buf(), now);
+        true
+    }
+
+    /// SPEC-2359 W-16 (FR-387): run the cross-machine work events ingest on a
+    /// background thread, then hand control back to the event loop via
+    /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
+    /// intake → reconcile order (plan decision 9).
+    pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
+        if !self.note_work_events_ingest_attempt(&project_root, force) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let summary = crate::work_events_ingest::ingest_project_work_events(&project_root);
+            proxy.send(UserEvent::WorkEventsIngested {
+                project_root,
+                changed: summary.changed(),
+            });
+        });
+    }
+
+    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]:
+    /// reconcile worktrees after the intake, kick the merge scan, and
+    /// rebroadcast the projection when the intake applied anything.
+    pub(crate) fn handle_work_events_ingested(
+        &mut self,
+        project_root: PathBuf,
+        changed: bool,
+    ) -> Vec<OutboundEvent> {
+        self.reconcile_workspace_worktrees(&project_root);
+        self.spawn_work_merge_status_scan(project_root);
+        if changed {
+            self.active_work_projection_broadcast_for_active_tab()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
         let proxy = self.proxy.clone();
         thread::spawn(move || {
@@ -3961,33 +4019,22 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
                 &tab.project_root,
             );
-            // SPEC-2359 US-37: One-shot rebuild of work_items.json from the
-            // event log. Recovers legacy installations whose work_items.json
-            // shows status=active/idle for items that already have a Done
-            // event in work_events.jsonl (caused by the old apply_event
-            // semantics that regressed Done on subsequent update events).
-            // Idempotent via `work_items.migration.json` marker.
-            let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
-                &tab.project_root,
-            );
             // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
             // (pre-W-12 records keyed to one projection UUID fusing dozens of
             // branches) into canonical branch-keyed items so each branch row
             // shows its real title / sessions. Idempotent; must run before
-            // the worktree reconcile so decomposed branches are not
+            // the intake/reconcile chain so decomposed branches are not
             // redundantly backfilled.
             let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
                 &tab.project_root,
             );
-            // SPEC-2359 Phase W-15 (FR-379/FR-382): reconcile locally existing
-            // worktrees with the Work records so every real worktree surfaces
-            // on the Workspace list (union of existing worktrees and unclosed
-            // records). Runs after the rebuild above so already-recorded
-            // branches are not redundantly backfilled.
-            self.reconcile_workspace_worktrees(&tab.project_root);
-            // SPEC-2359 W-15 (FR-386): kick the background merge scan that
-            // feeds the "safe to delete" badge.
-            self.spawn_work_merge_status_scan(tab.project_root.clone());
+            // SPEC-2359 W-16 (FR-387): cross-machine work events intake.
+            // Supersedes the one-shot `rebuild_work_items_from_events_for_repo`
+            // migration gate — the intake is a permanently-installed idempotent
+            // consumer over the same (and more) sources. Runs on a background
+            // thread; its completion event then runs the worktree reconcile
+            // (intake → reconcile order) and the merge scan.
+            self.spawn_work_events_ingest(tab.project_root.clone(), true);
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -5950,17 +5997,17 @@ impl AppRuntime {
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
                 }
-                // SPEC-2359 Phase W-15 (FR-379): reconcile the opened
-                // project's worktrees before the first Workspace broadcast so
-                // backfilled rows are part of the initial list.
+                // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
+                // the opened project; its completion event reconciles the
+                // worktrees (intake → reconcile order) and kicks the merge
+                // scan, then rebroadcasts the projection.
                 if let Some(project_root) = self
                     .active_tab_id
                     .as_ref()
                     .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
                     .map(|tab| tab.project_root.clone())
                 {
-                    self.reconcile_workspace_worktrees(&project_root);
-                    self.spawn_work_merge_status_scan(project_root);
+                    self.spawn_work_events_ingest(project_root, true);
                 }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);
@@ -6169,6 +6216,16 @@ impl AppRuntime {
         }
         let wizard_closed = self.set_active_tab(tab_id.to_string());
         let _ = self.persist();
+        // SPEC-2359 W-16 (FR-387): tab changes piggyback the cross-machine
+        // intake, throttled to once per 30s per project.
+        if let Some(project_root) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.project_root.clone())
+        {
+            self.spawn_work_events_ingest(project_root, false);
+        }
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
             events.push(event);
@@ -8419,6 +8476,10 @@ impl AppRuntime {
                         launch_feedback_context.clone(),
                     );
                 };
+                // SPEC-2359 W-16 (FR-387): a launch fetches origin refs, so
+                // piggyback the cross-machine intake (30s throttle keeps
+                // launch bursts cheap).
+                self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
                     return self.launch_error_events(
                         window_id,

@@ -1344,14 +1344,14 @@ pub struct WorkspaceWorkItemsProjection {
 }
 
 impl WorkspaceWorkItemsProjection {
-    fn empty(updated_at: DateTime<Utc>) -> Self {
+    pub fn empty(updated_at: DateTime<Utc>) -> Self {
         Self {
             updated_at,
             work_items: Vec::new(),
         }
     }
 
-    fn apply_event(&mut self, event: WorkspaceWorkEvent) {
+    pub fn apply_event(&mut self, event: WorkspaceWorkEvent) {
         let existing_index = self
             .work_items
             .iter()
@@ -2500,15 +2500,18 @@ pub fn rebuild_work_items_from_events_paths(
     Ok(WorkspaceWorkItemsRebuildOutcome::Applied)
 }
 
-/// SPEC-2359 US-37: Convenience wrapper for the daemon bootstrap hook.
-/// Resolves the project-scoped paths and invokes
-/// [`rebuild_work_items_from_events_paths`].
+/// SPEC-2359 US-37 — SUPERSEDED by the W-16 intake consumer
+/// (`work_events_intake` + the gwt-side `work_events_ingest` orchestrator).
+/// The bootstrap no longer calls this; the permanently-installed idempotent
+/// intake covers the same repo-local source plus worktree filesystems and
+/// fetched `origin/*` refs. The `work_items.migration.json` marker file is
+/// no longer read but is intentionally left on disk. Kept for tests and as
+/// a manual recovery tool.
 ///
 /// SPEC-2359 Phase W-15 (FR-384) caveat: close-kind events recorded after
 /// W-15 live only in the home close log (`work-events-closed.jsonl`). A
-/// future marker version bump that replays solely the repo-local log would
-/// resurrect closed Work — any such replay must also merge the home close
-/// log (the W-16 intake consumer supersedes this rebuild entirely).
+/// replay of solely the repo-local log would resurrect closed Work — any
+/// such replay must also merge the home close log.
 pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
 ) -> Result<WorkspaceWorkItemsRebuildOutcome> {
@@ -3215,7 +3218,7 @@ fn first_nonempty_line(value: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
