@@ -671,7 +671,7 @@ fn spawn_workspace_projection_watcher(
                             project_root = %project_root.display(),
                             "workspace projection watcher detected current.json change"
                         );
-                        let _ = proxy.send_event(UserEvent::WorkProjectionChanged {
+                        let _ = proxy.send_event(UserEvent::WorkspaceProjectionChanged {
                             project_root: project_root.clone(),
                         });
                     }
@@ -824,7 +824,7 @@ fn daemon_broadcast_user_event(
         });
     }
     if channel == "workspace" {
-        return Some(UserEvent::WorkProjectionChanged {
+        return Some(UserEvent::WorkspaceProjectionChanged {
             project_root: project_root.to_path_buf(),
         });
     }
@@ -935,7 +935,7 @@ enum UserEvent {
         project_root: PathBuf,
         changed: bool,
     },
-    WorkProjectionChanged {
+    WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
@@ -1901,7 +1901,7 @@ mod tests {
         }));
         assert!(matches!(
             &events[0].event,
-            gwt::BackendEvent::WorkState { .. }
+            gwt::BackendEvent::WorkspaceState { .. }
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
@@ -2246,7 +2246,7 @@ mod tests {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
-                gwt_core::work_projection::WorkItemsCache::new(),
+                gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -2475,7 +2475,7 @@ mod tests {
             events.first(),
             Some(event)
                 if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                    && matches!(event.event, BackendEvent::WorkState { .. })
+                    && matches!(event.event, BackendEvent::WorkspaceState { .. })
         ));
         assert!(events.iter().any(|event| {
             matches!(
@@ -6772,7 +6772,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.apply_work_merge_status(&project_root, merged_branches);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::WorkProjectionChanged { project_root }) => {
+            Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
                 let events = app.handle_workspace_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }

@@ -191,9 +191,6 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "build" => super::parse_build_args(&rest),
         "register" => super::register::parse_args(&rest),
         "daemon" => super::parse_daemon_args(&rest),
-        // SPEC-2359 US-66 (T-527): `work` is the canonical verb; `workspace`
-        // stays as the legacy adapter alias.
-        "work" => super::parse_workspace_args(&rest),
         "workspace" => super::parse_workspace_args(&rest),
         "pane" => parse_pane_args(&rest),
         "open" => super::open::parse_args(&rest),

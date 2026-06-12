@@ -26,13 +26,7 @@ pub mod test_support;
 pub mod update;
 pub mod usage;
 pub mod work_events_intake;
-pub mod work_projection;
-/// SPEC-2359 US-66 (T-526): legacy adapter module — the canonical module is
-/// [`work_projection`]. Re-exports everything so staged migration never
-/// breaks call sites; new code must use the Work spelling.
-pub mod workspace_projection {
-    pub use crate::work_projection::*;
-}
+pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
@@ -40,18 +34,16 @@ pub use error::{GwtError, Result};
 
 #[cfg(test)]
 mod canonical_naming_tests {
-    //! SPEC-2359 US-66 (T-525): canonical names are Work-based; the legacy
-    //! `workspace_projection` module / `WorkProjection` type survive
-    //! only as adapter aliases.
+    //! SPEC-2359 US-66 (user decision 2026-06-12): `WorkspaceProjection` in
+    //! the `workspace_projection` module is the canonical current-state type
+    //! (the Workspace is the branch-level place). The per-launch record
+    //! family keeps its Work-era aliases until the terminology settles.
 
     #[test]
-    fn work_projection_is_canonical_and_legacy_names_are_aliases() {
-        // Canonical module + type.
-        let canonical = crate::work_projection::WorkProjection::default_for_project(
+    fn workspace_projection_is_canonical() {
+        let projection = crate::workspace_projection::WorkspaceProjection::default_for_project(
             std::path::Path::new("/tmp/repo"),
         );
-        // Legacy adapter spellings resolve to the SAME type.
-        let legacy: crate::work_projection::WorkProjection = canonical;
-        let _ = legacy;
+        let _ = projection;
     }
 }

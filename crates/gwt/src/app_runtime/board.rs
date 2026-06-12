@@ -20,7 +20,7 @@ use std::path::Path;
 use gwt_agent::{AgentId, AgentLaunchBuilder, LaunchConfig, SessionMode};
 use gwt_core::{
     coordination::{self, BoardEntryKind, BoardMention},
-    work_projection,
+    workspace_projection,
 };
 
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
@@ -367,7 +367,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let _ = tab_id;
         let mut projection =
-            match work_projection::load_or_default_workspace_projection(project_root) {
+            match workspace_projection::load_or_default_workspace_projection(project_root) {
                 Ok(projection) => projection,
                 Err(error) => {
                     tracing::warn!(
@@ -379,7 +379,9 @@ impl AppRuntime {
                 }
             };
         projection.record_board_milestone(entry);
-        if let Err(error) = work_projection::save_workspace_projection(project_root, &projection) {
+        if let Err(error) =
+            workspace_projection::save_workspace_projection(project_root, &projection)
+        {
             tracing::warn!(
                 error = %error,
                 project_root = %project_root.display(),
@@ -389,9 +391,9 @@ impl AppRuntime {
         }
         if board_entry_origin_can_record_workspace_work_event(&projection, entry) {
             let work_event =
-                work_projection::workspace_work_event_from_board_entry(&projection, entry);
+                workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
             if let Err(error) =
-                work_projection::record_workspace_work_event(project_root, work_event)
+                workspace_projection::record_workspace_work_event(project_root, work_event)
             {
                 tracing::warn!(
                     error = %error,
@@ -406,7 +408,7 @@ impl AppRuntime {
 }
 
 fn board_entry_origin_can_record_workspace_work_event(
-    projection: &work_projection::WorkProjection,
+    projection: &workspace_projection::WorkspaceProjection,
     entry: &coordination::BoardEntry,
 ) -> bool {
     let Some(session_id) = entry.origin_session_id.as_deref() else {

@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result};
 use crate::paths::gwt_workspace_projection_path_for_repo_path;
 #[cfg(test)]
-use crate::work_projection::WorkProjection;
-use crate::work_projection::{
+use crate::workspace_projection::WorkspaceProjection;
+use crate::workspace_projection::{
     load_workspace_projection_from_path, save_workspace_projection_to_path,
     workspace_projection_default_created_at, WorkspaceLifecycleStage, WorkspaceStatusCategory,
 };
@@ -141,7 +141,7 @@ pub fn migrate_workspace_projection_path(
 /// root path, resolves the canonical Workspace projection JSON path via
 /// [`gwt_workspace_projection_path_for_repo_path`], and runs the Phase U-6
 /// migration. Mirrors the signature of
-/// `work_projection::retroactive_auto_done_scan` (peer SPEC-2359 US-37)
+/// `workspace_projection::retroactive_auto_done_scan` (peer SPEC-2359 US-37)
 /// so the two scans can be called from `AppRuntime::bootstrap` side by
 /// side.
 pub fn migrate_workspace_projection_for_repo(
@@ -233,7 +233,7 @@ mod tests {
             migrate_workspace_projection_path(&projection_path).expect("migrate legacy projection");
 
         assert_eq!(outcome, WorkspaceProjectionMigrationOutcome::Applied);
-        let migrated: WorkProjection =
+        let migrated: WorkspaceProjection =
             serde_json::from_slice(&fs::read(&projection_path).expect("read migrated"))
                 .expect("parse migrated");
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
         let workspace_dir = temp.path().join("workspace");
         fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let projection_path = workspace_dir.join("current.json");
-        let fresh = WorkProjection {
+        let fresh = WorkspaceProjection {
             id: "fresh-1".to_string(),
             project_root: PathBuf::from("/repo"),
             title: "Fresh workspace".to_string(),

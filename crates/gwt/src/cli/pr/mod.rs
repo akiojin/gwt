@@ -179,7 +179,7 @@ pub(super) fn run<E: CliEnv>(
 
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
     let Ok(Some(mut projection)) =
-        gwt_core::work_projection::load_workspace_projection(env.repo_path())
+        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
     else {
         return;
     };
@@ -199,13 +199,13 @@ fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head:
     details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
     details.pr_created_at = pr.created_at;
     projection.updated_at = chrono::Utc::now();
-    let _ = gwt_core::work_projection::save_workspace_projection(env.repo_path(), &projection);
+    let _ = gwt_core::workspace_projection::save_workspace_projection(env.repo_path(), &projection);
 
     // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
     // when the PR transitions to merged. The helper is idempotent per work_item_id,
     // so repeated polling does not duplicate Done events.
     if pr.state.to_string().eq_ignore_ascii_case("merged") {
-        let _ = gwt_core::work_projection::emit_workspace_done_event_if_absent(
+        let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
             env.repo_path(),
             &projection.id,
             chrono::Utc::now(),
@@ -525,8 +525,9 @@ mod tests {
             merge_state_status: "UNKNOWN".to_string(),
             review_status: "REVIEW_REQUIRED".to_string(),
         }));
-        let mut projection = gwt_core::work_projection::WorkProjection::default_for_project(&repo);
-        projection.git_details = Some(gwt_core::work_projection::GitDetails {
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260507-0808".to_string()),
             worktree_path: Some(repo.join("work/20260507-0808")),
             base_branch: Some("origin/develop".to_string()),
@@ -537,7 +538,7 @@ mod tests {
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
-        gwt_core::work_projection::save_workspace_projection(&repo, &projection)
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
         let mut out = String::new();
@@ -545,7 +546,7 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("#2538 [OPEN] Active Work title"));
-        let projection = gwt_core::work_projection::load_workspace_projection(&repo)
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
         let details = projection.git_details.expect("git details");
@@ -587,8 +588,9 @@ mod tests {
             merge_state_status: "UNKNOWN".to_string(),
             review_status: "REVIEW_REQUIRED".to_string(),
         });
-        let mut projection = gwt_core::work_projection::WorkProjection::default_for_project(&repo);
-        projection.git_details = Some(gwt_core::work_projection::GitDetails {
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260507-0808".to_string()),
             worktree_path: Some(repo.join("work/20260507-0808")),
             base_branch: Some("origin/develop".to_string()),
@@ -599,7 +601,7 @@ mod tests {
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
-        gwt_core::work_projection::save_workspace_projection(&repo, &projection)
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
         let mut out = String::new();
@@ -619,7 +621,7 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(out.contains("#2540 [OPEN] Other branch PR"));
-        let projection = gwt_core::work_projection::load_workspace_projection(&repo)
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
         let details = projection.git_details.expect("git details");
@@ -904,9 +906,10 @@ mod tests {
             review_status: "APPROVED".to_string(),
         }));
 
-        let mut projection = gwt_core::work_projection::WorkProjection::default_for_project(&repo);
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.id = "wi-pr-merge-auto-done".to_string();
-        projection.git_details = Some(gwt_core::work_projection::GitDetails {
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
             branch: Some("work/20260513-0500".to_string()),
             worktree_path: Some(repo.join("work/20260513-0500")),
             base_branch: Some("origin/develop".to_string()),
@@ -917,24 +920,25 @@ mod tests {
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
-        gwt_core::work_projection::save_workspace_projection(&repo, &projection)
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
-        let mut start = gwt_core::work_projection::WorkEvent::new(
-            gwt_core::work_projection::WorkEventKind::Start,
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
             "wi-pr-merge-auto-done",
             chrono::Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
         );
         start.title = Some("Auto-done PR work".to_string());
-        start.status_category = Some(gwt_core::work_projection::WorkspaceStatusCategory::Active);
-        gwt_core::work_projection::record_workspace_work_event(&repo, start)
+        start.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
             .expect("seed start event");
 
         let mut out = String::new();
         let code = run(&mut env, PrCommand::Current, &mut out).expect("run pr current");
         assert_eq!(code, 0);
 
-        let projection_after = gwt_core::work_projection::load_workspace_projection(&repo)
+        let projection_after = gwt_core::workspace_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
         assert_eq!(
@@ -947,7 +951,7 @@ mod tests {
             Some("MERGED")
         );
 
-        let work_items = gwt_core::work_projection::load_workspace_work_items(&repo)
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
             .expect("load work items")
             .expect("work items");
         let item = work_items
@@ -957,7 +961,7 @@ mod tests {
             .expect("work item");
         assert_eq!(
             item.status_category,
-            gwt_core::work_projection::WorkspaceStatusCategory::Done,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
             "PR merge must auto-emit Done for the linked Workspace WorkItem",
         );
     }
