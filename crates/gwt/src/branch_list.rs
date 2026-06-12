@@ -9,6 +9,19 @@ use serde::{Deserialize, Serialize};
 
 type RemoteBaseBranchRanks = HashMap<String, u8>;
 
+// SPEC-2009 FR-067: monotonic id for one Branches detail-check load. The
+// inventory and the matching hydrated event of a single load share the id; the
+// frontend ignores any branch_entries event whose load_id is older than the
+// newest it has applied, so an evict/reconnect cannot let a stale in-flight
+// load overwrite fresh data. `Ordering` here is `cmp::Ordering` (imported
+// above), so the atomic ordering is fully qualified to avoid the name clash.
+static BRANCH_LOAD_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Returns the next monotonic Branches detail-check load id (SPEC-2009 FR-067).
+pub fn next_branch_load_id() -> u64 {
+    BRANCH_LOAD_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchCleanupAvailability {
@@ -33,6 +46,9 @@ pub enum BranchCleanupBlockedReason {
 pub enum BranchCleanupRisk {
     Unmerged,
     RemoteTracking,
+    // SPEC-2009 FR-070: a protected base branch (main/master/develop) selectable
+    // for LOCAL cleanup only — its remote counterpart is always protected.
+    ProtectedBase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,11 +145,22 @@ pub fn hydrate_branch_entries_with_active_sessions(
     let gone_branches = gwt_git::list_gone_branches(&git_root)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let cleanup_targets = build_cleanup_targets(&git_root, &entries, &gone_branches)?;
+    // SPEC-2009 FR-070: a bare repo's symbolic HEAD (e.g. main) is NOT a real
+    // worktree checkout — gwt resolves the default branch from origin/HEAD — so
+    // it must not block its branch from local cleanup.
+    let head_is_real_checkout = !repo_root_is_bare(&git_root);
     Ok(hydrate_branch_entries(
         entries,
         active_session_branches,
         &cleanup_targets,
+        head_is_real_checkout,
     ))
+}
+
+fn repo_root_is_bare(git_root: &Path) -> bool {
+    gwt_git::Repository::open(git_root)
+        .map(|repo| repo.is_bare())
+        .unwrap_or(false)
 }
 
 pub fn list_branch_entries_with_active_sessions(
@@ -203,11 +230,19 @@ fn hydrate_branch_entries(
     entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
     cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
+    head_is_real_checkout: bool,
 ) -> Vec<BranchListEntry> {
-    let current_head_branch = entries
-        .iter()
-        .find(|branch| branch.scope == BranchScope::Local && branch.is_head)
-        .map(|branch| branch.name.clone());
+    // Only a real worktree checkout blocks cleanup as the current HEAD. In a
+    // bare repository the symbolic HEAD is not a checkout, so it must not block
+    // its branch (SPEC-2009 FR-070).
+    let current_head_branch = if head_is_real_checkout {
+        entries
+            .iter()
+            .find(|branch| branch.scope == BranchScope::Local && branch.is_head)
+            .map(|branch| branch.name.clone())
+    } else {
+        None
+    };
     let local_upstreams: HashMap<String, Option<String>> = entries
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
@@ -261,13 +296,8 @@ fn build_cleanup_info(
         .cloned()
         .flatten();
 
-    if gwt_git::is_protected_branch(execution_branch_name) {
-        return blocked_cleanup_info(
-            execution_branch,
-            upstream,
-            BranchCleanupBlockedReason::ProtectedBranch,
-        );
-    }
+    // CurrentHead / ActiveSession take precedence over the protected-base
+    // policy below: a checked-out or in-use protected branch stays Blocked.
     if current_head_branch.is_some_and(|head| head == execution_branch_name) {
         return blocked_cleanup_info(
             execution_branch,
@@ -281,6 +311,25 @@ fn build_cleanup_info(
             upstream,
             BranchCleanupBlockedReason::ActiveSession,
         );
+    }
+    // SPEC-2009 FR-070: protected base branches (main/master/develop) are
+    // selectable for LOCAL cleanup as Risky — remote deletion stays protected
+    // (enforced in branch_cleanup execution and gwt-git delete_remote_branch).
+    // They are Risky (not Safe), so "Select all safe" never sweeps them up
+    // (FR-072).
+    if gwt_git::is_protected_branch(execution_branch_name) {
+        let merge_target = cleanup_targets
+            .get(execution_branch_name)
+            .cloned()
+            .flatten();
+        return BranchCleanupInfo {
+            availability: BranchCleanupAvailability::Risky,
+            execution_branch,
+            merge_target,
+            upstream,
+            blocked_reason: None,
+            risks: vec![BranchCleanupRisk::ProtectedBase],
+        };
     }
     let merge_target = cleanup_targets
         .get(execution_branch_name)
@@ -444,6 +493,17 @@ fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_branch_load_id_is_strictly_increasing() {
+        // SPEC-2009 FR-067: ids must be monotonic so the frontend can drop a
+        // stale (older) load delivered out of order after an evict/reconnect.
+        let a = next_branch_load_id();
+        let b = next_branch_load_id();
+        let c = next_branch_load_id();
+        assert!(a < b, "expected {a} < {b}");
+        assert!(b < c, "expected {b} < {c}");
+    }
 
     fn make_branch(
         name: &str,
@@ -663,7 +723,7 @@ mod tests {
             )),
         )]);
 
-        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
+        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets, true);
 
         assert!(hydrated[0].cleanup_ready);
         assert_eq!(
@@ -678,5 +738,106 @@ mod tests {
                 .map(|target| target.reference.as_str()),
             Some("origin/develop")
         );
+    }
+
+    fn local_entry(name: &str, is_head: bool) -> BranchListEntry {
+        BranchListEntry {
+            name: name.to_string(),
+            scope: BranchScope::Local,
+            is_head,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: Some("2026-05-20 08:30:00 +0000".to_string()),
+            cleanup_ready: false,
+            cleanup: BranchCleanupInfo::default(),
+            resume: BranchResumeInfo::unavailable(),
+        }
+    }
+
+    #[test]
+    fn protected_local_branch_is_risky_selectable_and_remote_protected() {
+        // SPEC-2009 FR-070: local main/develop are selectable for LOCAL cleanup
+        // as Risky (not Blocked), so they can be deleted while the remote stays
+        // protected.
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", false)],
+            &HashSet::new(),
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Risky
+        );
+        assert_eq!(hydrated[0].cleanup.blocked_reason, None);
+        assert!(hydrated[0]
+            .cleanup
+            .risks
+            .contains(&BranchCleanupRisk::ProtectedBase));
+    }
+
+    #[test]
+    fn protected_branch_checked_out_stays_blocked() {
+        // FR-070: a checked-out protected branch is still Blocked (git refuses
+        // to delete a branch checked out in a worktree).
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", true)],
+            &HashSet::new(),
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Blocked
+        );
+        assert_eq!(
+            hydrated[0].cleanup.blocked_reason,
+            Some(BranchCleanupBlockedReason::CurrentHead)
+        );
+    }
+
+    #[test]
+    fn protected_branch_with_active_session_stays_blocked() {
+        // FR-070: an in-use protected branch is still Blocked.
+        let sessions = HashSet::from(["develop".to_string()]);
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("develop", false)],
+            &sessions,
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Blocked
+        );
+        assert_eq!(
+            hydrated[0].cleanup.blocked_reason,
+            Some(BranchCleanupBlockedReason::ActiveSession)
+        );
+    }
+
+    #[test]
+    fn bare_repo_symbolic_head_does_not_block_protected_base() {
+        // SPEC-2009 FR-070: in a bare repo the symbolic HEAD (e.g. main) is not
+        // a real worktree checkout — gwt resolves the default branch from
+        // origin/HEAD — so main must be Risky-selectable for LOCAL cleanup, not
+        // Blocked as the current HEAD. `head_is_real_checkout = false` models a
+        // bare root.
+        let hydrated = hydrate_branch_entries(
+            vec![local_entry("main", true)],
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Risky
+        );
+        assert_eq!(hydrated[0].cleanup.blocked_reason, None);
+        assert!(hydrated[0]
+            .cleanup
+            .risks
+            .contains(&BranchCleanupRisk::ProtectedBase));
     }
 }

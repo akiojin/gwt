@@ -1047,7 +1047,7 @@ fn load_linked_branches(repo_path: &Path) -> HashMap<u64, Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ffi::OsString, fs};
+    use std::{collections::HashMap, fs};
 
     #[cfg(unix)]
     use std::path::PathBuf;
@@ -1059,28 +1059,7 @@ mod tests {
 
     use super::*;
 
-    struct ScopedEnvVar {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
+    use gwt_core::test_support::ScopedEnvVar;
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");

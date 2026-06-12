@@ -326,6 +326,27 @@ fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
     }
 }
 
+/// Resolve a Windows command exactly as the PTY spawn path would, without
+/// applying PTY-specific shell wrappers. Host-shell launchers use this before
+/// embedding the command into `cmd.exe` / PowerShell scripts.
+pub fn normalize_command_for_windows_host_shell(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        windows_spawn::normalize_host_shell_command(command, args, env, remove_env)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (env, remove_env);
+        (command.to_string(), args.to_vec())
+    }
+}
+
 fn spawn_diagnostic(config: &SpawnConfig) -> SpawnDiagnostic {
     SpawnDiagnostic {
         path_entry_count: env_path_value(&config.env)

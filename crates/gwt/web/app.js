@@ -28,6 +28,8 @@
       } from "/board-surface.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createLaunchPendingController } from "/launch-pending-controller.js";
+      import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
@@ -38,6 +40,7 @@
         renderProjectTabs as renderProjectTabsView,
         updateProjectTabDot as updateProjectTabDotView,
       } from "/project-tabs-renderer.js";
+      import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
@@ -73,6 +76,12 @@
       } from "/window-geometry-sync.js";
       import { createSocketReceiveDispatcher } from "/socket-receive-dispatcher.js";
       import { createTerminalOutputBatcher } from "/terminal-output-buffer.js";
+      import {
+        markBranchDetailInterrupted,
+        branchWindowNeedsResync,
+        applyBranchEntriesEvent,
+        branchLoadStatusSummary,
+      } from "/branch-list-state.js";
       import { createInteractionGuard } from "/interaction-guard.js";
       import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
@@ -80,6 +89,14 @@
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
+      // SPEC-3015 — window runtime state normalization extracted from app.js;
+      // backed by the generated protocol enum contract (/protocol-enums.js).
+      import {
+        mapAgentTelemetryState,
+        normalizeWindowRuntimeState,
+        presetSupportsWaitingStatus,
+        windowRuntimeLabel,
+      } from "/window-runtime-state.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -1640,7 +1657,13 @@
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
 
+      // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
+      // WebSocket bridge is down — a tiny status-strip label alone reads as
+      // a frozen app when every click needs the socket.
+      const connectionOverlay = createConnectionOverlay({ document });
+
       function setConnectionState(connected) {
+        connectionOverlay.setConnected(connected);
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
         // SPEC-2356 — propagate connection state to the Operator Status Strip
@@ -1672,6 +1695,15 @@
             }
             if (shouldRenderBranches) {
               renderBranches(windowId);
+            }
+          }
+        } else {
+          // FR-064: reconnect self-heal. Re-hydrate any open Branches window
+          // whose detail check was interrupted by an evict/reconnect so the
+          // interrupted notice clears automatically — without a manual Refresh.
+          for (const [windowId, state] of branchListStateMap.entries()) {
+            if (branchWindowNeedsResync(state)) {
+              requestBranches(windowId);
             }
           }
         }
@@ -2162,41 +2194,6 @@
         return presetSurface(windowData?.preset) === "terminal";
       }
 
-      const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
-        running: "Running",
-        starting: "Starting",
-        idle: "Idle",
-        waiting: "Waiting",
-        stopped: "Stopped",
-        error: "Error",
-      });
-
-      // US-69: the pre-lifecycle state is now `starting`. Legacy `not_started`
-      // spellings (and the older `starting`→running conflation) normalize to it.
-      const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
-        not_started: "starting",
-        notstarted: "starting",
-        "not-started": "starting",
-        ready: "idle",
-        exited: "stopped",
-      });
-
-      function presetSupportsWaitingStatus(preset) {
-        return preset === "agent" || preset === "claude" || preset === "codex";
-      }
-
-      function normalizeWindowRuntimeState(status, preset) {
-        const rawState = String(status || "running").toLowerCase();
-        const normalizedState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
-        if (!presetSupportsWaitingStatus(preset) && normalizedState === "waiting") {
-          return "running";
-        }
-        if (!WINDOW_RUNTIME_STATE_LABELS[normalizedState]) {
-          return "running";
-        }
-        return normalizedState;
-      }
-
       function windowGeometryLabel(windowData) {
         if (windowData.minimized) {
           return "Minimized";
@@ -2205,10 +2202,6 @@
           return "Maximized";
         }
         return "Normal";
-      }
-
-      function windowRuntimeLabel(status) {
-        return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
       }
 
       function windowDisplayTitle(windowData) {
@@ -4389,30 +4382,6 @@
         focusOrSpawnPreset("board");
       }
 
-      // SPEC-2356 — translate legacy runtime state vocabulary to Living
-      // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
-      // intentionally narrow so future runtime states surface as
-      // `idle` until the design language explicitly handles them.
-      function mapAgentTelemetryState(runtimeState) {
-        switch (runtimeState) {
-          case "running":
-            return "active";
-          case "starting":
-            return "not_started";
-          case "ready":
-          case "idle":
-          case "waiting":
-            return "idle";
-          case "stopped":
-          case "exited":
-            return "done";
-          case "error":
-            return "blocked";
-          default:
-            return "idle";
-        }
-      }
-
       function applyStatus(windowId, status, detail) {
         return traceMeasure(
           UI_TRACE_EVENT.applyStatus,
@@ -4593,46 +4562,28 @@
       function renderWindowTabs(windowData, element) {
         const strip = element.querySelector(".window-tab-strip");
         if (!strip) return;
-        const tabs = windowTabsFor(windowData);
-        strip.innerHTML = "";
-        for (const tab of tabs) {
-          const tabItem = document.createElement("div");
-          tabItem.className = "window-tab-item";
-          const tabButton = document.createElement("button");
-          tabButton.type = "button";
-          tabButton.className = "window-tab";
-          tabButton.draggable = true;
-          tabButton.dataset.windowTabId = tab.id;
-          tabButton.setAttribute("aria-label", `Activate ${tab.title}`);
-          if (tab.id === windowData.id || tab.tab_group_active) {
-            tabButton.classList.add("active");
-            tabButton.setAttribute("aria-current", "page");
-          }
-          tabButton.textContent = tab.title;
-          // Native tooltip with the full window title (or dynamic detail) so a
-          // tab truncated by max-width still reveals its title on hover. Mirrors
-          // the titlebar (titleText.title) and window-list row tooltips.
-          tabButton.title = windowTitleTooltip(tab);
-          tabButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "activate_window_tab", id: tab.id });
-          });
-          tabButton.addEventListener("dragstart", (event) => {
+        renderWindowTabsView({
+          strip,
+          tabs: windowTabsFor(windowData),
+          activeWindowId: windowData.id,
+          tooltipForWindow: windowTitleTooltip,
+          send,
+          onTabDragStart: (event, tabId) => {
             windowTabDragState = {
-              id: tab.id,
+              id: tabId,
               docked: false,
               lastClientPoint: clientPointFromDragEvent(
                 event,
                 canvas.getBoundingClientRect(),
               ),
             };
-            event.dataTransfer?.setData("text/plain", tab.id);
+            event.dataTransfer?.setData("text/plain", tabId);
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
             }
-          });
-          tabButton.addEventListener("drag", trackWindowTabDragPoint);
-          tabButton.addEventListener("dragend", (event) => {
+          },
+          onTabDrag: trackWindowTabDragPoint,
+          onTabDragEnd: (event) => {
             const drag = windowTabDragState;
             trackWindowTabDragPoint(event);
             windowTabDragState = null;
@@ -4646,20 +4597,8 @@
               id: drag.id,
               geometry,
             });
-          });
-          const closeButton = document.createElement("button");
-          closeButton.type = "button";
-          closeButton.className = "window-tab-close";
-          closeButton.setAttribute("aria-label", `Close ${tab.title}`);
-          closeButton.textContent = "×";
-          closeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            send({ kind: "close_window", id: tab.id });
-          });
-          tabItem.appendChild(tabButton);
-          tabItem.appendChild(closeButton);
-          strip.appendChild(tabItem);
-        }
+          },
+        });
       }
 
       function handleTitlebarClick(windowId) {
@@ -6848,6 +6787,11 @@
             filter: "local",
             cleanupSelected: new Set(),
             notice: "",
+            // SPEC-2009 Phase 7 (FR-064..FR-067): detail-check reconnect state.
+            lastHydratedByName: new Map(),
+            lastLoadId: 0,
+            detailCheckStale: false,
+            needsResync: false,
             cleanupModal: {
               open: false,
               stage: "confirm",
@@ -7439,12 +7383,35 @@
       // resumable agents; the response opens this modal so the user can
       // pick which previously-assigned agent to restart in-place
       // (without going through the Launch Wizard).
+      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
+      // requests. Settled by the dispatcher on workspace_resume_agent_started
+      // / *_error; the timeout re-enables the UI when no reply ever arrives.
+      const launchPending = createLaunchPendingController({
+        onChange: () => {
+          try {
+            workspaceOverviewSurface.renderWindows();
+          } catch {
+            // Surface may not be mounted yet during bootstrap.
+          }
+          try {
+            workspaceResumePicker.render();
+          } catch {
+            // Picker may not be mounted yet during bootstrap.
+          }
+          const notice = launchPending.consumeTimeoutNotice();
+          if (notice) {
+            console.warn("[launch-pending]", notice);
+          }
+        },
+      });
+
       const workspaceResumePicker = createWorkspaceResumePickerController({
         modalEl: document.getElementById("workspace-resume-picker-modal"),
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
         createNode,
         send,
         getResumeBounds: () => visibleBounds(),
+        launchPending,
       });
 
       const workspaceOverviewSurface = createWorkspaceOverviewSurface({
@@ -7460,6 +7427,7 @@
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         getResumeBounds: () => visibleBounds(),
+        launchPending,
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -10295,6 +10263,11 @@
         };
         const resume = () => {
           select();
+          // SPEC-2359 W-17 (FR-398): guard double-clicks while the backend
+          // materializes the resume; settled by the started ack / branch_error.
+          if (!launchPending.begin(`branch:${branchName}`, "Resume")) {
+            return;
+          }
           send({
             kind: "resume_branch_latest_agent",
             id: windowId,
@@ -11132,17 +11105,26 @@
         return "Select for cleanup";
       }
 
+      function cleanupInfoDetailText(cleanup) {
+        if (cleanup.availability === "blocked") {
+          return cleanupBlockedReasonText(cleanup.blocked_reason);
+        }
+        if (cleanup.risks?.length) {
+          return cleanupRiskLabels(cleanup.risks).join(", ");
+        }
+        return cleanupMergeTargetText(cleanup.merge_target);
+      }
+
       function cleanupDetailText(entry, state) {
         if (!entry.cleanup_ready) {
+          // FR-065: keep the last verified detail visible while re-checking.
+          if (entry.cleanup_stale && entry.cleanup) {
+            const base = cleanupInfoDetailText(entry.cleanup);
+            return base ? `${base} · re-checking` : "Re-checking cleanup safety";
+          }
           return branchCleanupPendingText(state);
         }
-        if (entry.cleanup.availability === "blocked") {
-          return cleanupBlockedReasonText(entry.cleanup.blocked_reason);
-        }
-        if (entry.cleanup.risks?.length) {
-          return cleanupRiskLabels(entry.cleanup.risks).join(", ");
-        }
-        return cleanupMergeTargetText(entry.cleanup.merge_target);
+        return cleanupInfoDetailText(entry.cleanup);
       }
 
       function cleanupBlockedReasonText(reason) {
@@ -11169,6 +11151,8 @@
               return "remote-tracking";
             case "unmerged":
               return "unmerged";
+            case "protected_base":
+              return "protected base (remote kept)";
             default:
               return "warning";
           }
@@ -11183,47 +11167,6 @@
             return "upstream is gone";
         }
         return target.reference ? `merged to ${target.reference}` : "";
-      }
-
-      const BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE = "Branch detail check interrupted";
-
-      function branchLoadStatusSummary(state) {
-        if (!state) {
-          return null;
-        }
-        if (state.error) {
-          return {
-            kind: "error",
-            title: "Branches unavailable",
-            detail: state.error,
-            hint: "Refresh to try again.",
-          };
-        }
-        if (state.loading && state.entries.length > 0) {
-          return {
-            kind: "checking",
-            title: "Checking branch details",
-            detail: "Loading branch details while cleanup safety is checked.",
-            hint: "Cleanup selection unlocks after verification.",
-          };
-        }
-        if (state.notice === BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE) {
-          return {
-            kind: "interrupted",
-            title: BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE,
-            detail: "Branch names are available, but cleanup safety was not verified.",
-            hint: "Refresh to verify cleanup safety.",
-          };
-        }
-        if (state.notice) {
-          return {
-            kind: "notice",
-            title: "Branch notice",
-            detail: state.notice,
-            hint: "",
-          };
-        }
-        return null;
       }
 
       function renderBranchLoadStatusSummary(notice, summary) {
@@ -11259,28 +11202,30 @@
       }
 
       function failLoadingBranchesOnConnectionLoss(windowId, state) {
-        if (!state || !state.loading) {
-          return false;
+        // FR-064/FR-065: keep the rows + last-known cleanup badges, flag the
+        // window for auto re-hydration on reconnect, and stop the spinner —
+        // never collapse every row to "Safety unknown" or a manual-refresh-only
+        // banner. markBranchDetailInterrupted owns the state transition.
+        const changed = markBranchDetailInterrupted(state);
+        if (changed) {
+          syncBranchSelectionState(state);
         }
-        state.loading = false;
-        state.receivedFreshEntries = false;
-        if (state.entries.length === 0) {
-          state.error = "Connection lost while loading branches";
-          state.notice = "";
-        } else {
-          state.error = "";
-          state.notice = BRANCH_DETAIL_CHECK_INTERRUPTED_NOTICE;
-        }
-        syncBranchSelectionState(state);
-        return true;
+        return changed;
       }
 
       function branchCleanupPendingText(state) {
-        return state.loading ? "Checking cleanup safety" : "Refresh to verify cleanup safety";
+        // FR-064/FR-066: the detail check now recovers automatically on
+        // reconnect, so we never tell the user to manually "Refresh to verify".
+        return state.loading ? "Checking cleanup safety" : "Re-checking cleanup safety";
       }
 
       function cleanupAvailabilityForRender(entry, state) {
         if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        // FR-065: show the last verified availability while a re-check is
+        // pending instead of dropping to "unknown".
+        if (entry.cleanup_stale && entry.cleanup) {
           return entry.cleanup.availability;
         }
         if (state.loading) {
@@ -11290,7 +11235,14 @@
       }
 
       function cleanupBadgeText(entry, state) {
-        return entry.cleanup_ready ? entry.cleanup.availability : state.loading ? "checking" : "Safety unknown";
+        if (entry.cleanup_ready) {
+          return entry.cleanup.availability;
+        }
+        // FR-065: keep showing the last verified badge during re-hydration.
+        if (entry.cleanup_stale && entry.cleanup) {
+          return entry.cleanup.availability;
+        }
+        return state.loading ? "checking" : "Safety unknown";
       }
 
       function toggleBranchCleanupSelection(windowId, branchName) {
@@ -12661,6 +12613,63 @@
         });
       }
 
+      function composeTeamsDefaultChannel(teamId, channelId) {
+        const team = String(teamId || "").trim();
+        const channel = String(channelId || "").trim();
+        if (!team && !channel) return "";
+        if (!team) return channel;
+        if (!channel) return team;
+        return `${team}/${channel}`;
+      }
+
+      function parseTeamsDefaultChannel(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return { teamId: "", channelId: "" };
+        const slash = raw.indexOf("/");
+        if (slash === -1) return { teamId: "", channelId: raw };
+        return {
+          teamId: raw.slice(0, slash).trim(),
+          channelId: raw.slice(slash + 1).trim(),
+        };
+      }
+
+      function formatTeamsChannelLink(defaultChannel, tenantId) {
+        const { teamId, channelId } = parseTeamsDefaultChannel(defaultChannel);
+        if (!teamId || !channelId) return "";
+        const tenant = String(tenantId || "").trim();
+        const params = new URLSearchParams({ groupId: teamId });
+        if (tenant) params.set("tenantId", tenant);
+        return `https://teams.microsoft.com/l/channel/${encodeURIComponent(channelId)}/configured-channel?${params.toString()}`;
+      }
+
+      function parseTeamsChannelLink(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        let url;
+        try {
+          url = new URL(raw);
+        } catch (_) {
+          return null;
+        }
+        const teamId = (url.searchParams.get("groupId") || "").trim();
+        const segments = url.pathname.split("/").filter(Boolean);
+        const channelIndex = segments.findIndex(
+          (segment) => segment.toLowerCase() === "channel",
+        );
+        const encodedChannel =
+          channelIndex >= 0 ? segments[channelIndex + 1] || "" : "";
+        let channelId = encodedChannel.trim();
+        if (channelId) {
+          try {
+            channelId = decodeURIComponent(channelId);
+          } catch (_) {
+            // Keep the raw segment; it is still a better hint than clearing it.
+          }
+        }
+        if (!teamId && !channelId) return null;
+        return { teamId, channelId };
+      }
+
       function renderSystemPanel(panel) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
@@ -12818,6 +12827,7 @@
           let clientIdInput;
           let defaultChannelInput;
           let tenantIdInput;
+          let teamsChannelLinkInput;
           let secretInput;
           if (selectedProvider === "slack") {
             clientIdInput = makeField(
@@ -12869,12 +12879,23 @@
               cfg.teamsTenantId,
               { placeholder: "tenant id / common / organizations" },
             );
-            defaultChannelInput = makeField(
-              "settings-board-teams-channel",
-              "Default channel",
-              cfg.teamsDefaultChannel,
-              { placeholder: "team_id/channel_id" },
+            teamsChannelLinkInput = makeField(
+              "settings-board-teams-channel-link",
+              "Teams channel link",
+              formatTeamsChannelLink(
+                cfg.teamsDefaultChannel,
+                cfg.teamsTenantId,
+              ),
+              { placeholder: "https://teams.microsoft.com/l/channel/..." },
             );
+            const teamsChannelHelp = createNode(
+              "p",
+              "settings-help",
+              cfg.teamsDefaultChannel
+                ? "Saved channel link is shown here. Paste a new channel link to change it."
+                : "Paste the link from Teams > Get link to channel. gwt extracts the team and channel IDs when saving.",
+            );
+            configForm.appendChild(teamsChannelHelp);
           }
 
           const saveBtn = createNode(
@@ -12884,6 +12905,40 @@
           );
           saveBtn.type = "button";
           saveBtn.addEventListener("click", () => {
+            if (selectedProvider === "teams") {
+              const teamsChannelLinkValue = teamsChannelLinkInput
+                ? teamsChannelLinkInput.value.trim()
+                : "";
+              let nextTeamsDefaultChannel = cfg.teamsDefaultChannel || "";
+              if (teamsChannelLinkValue) {
+                const parsedTeamsChannel = parseTeamsChannelLink(
+                  teamsChannelLinkValue,
+                );
+                if (
+                  !parsedTeamsChannel ||
+                  !parsedTeamsChannel.teamId ||
+                  !parsedTeamsChannel.channelId
+                ) {
+                  systemSettingsState.statusMessage =
+                    "Paste a valid Teams channel link with groupId and /channel/...";
+                  systemSettingsState.statusKind = "error";
+                  renderSystemPanelStatus(panel);
+                  return;
+                }
+                nextTeamsDefaultChannel = composeTeamsDefaultChannel(
+                  parsedTeamsChannel.teamId,
+                  parsedTeamsChannel.channelId,
+                );
+              }
+              send({
+                kind: "update_board_provider_config",
+                provider: selectedProvider,
+                client_id: clientIdInput ? clientIdInput.value.trim() : "",
+                default_channel: nextTeamsDefaultChannel,
+                tenant_id: tenantIdInput ? tenantIdInput.value.trim() : "",
+              });
+              return;
+            }
             const payload = {
               kind: "update_board_provider_config",
               provider: selectedProvider,
@@ -12892,9 +12947,6 @@
                 ? defaultChannelInput.value.trim()
                 : "",
             };
-            if (selectedProvider === "teams") {
-              payload.tenant_id = tenantIdInput ? tenantIdInput.value.trim() : "";
-            }
             if (selectedProvider === "slack" && secretInput) {
               // Only send the secret when the user typed one, so an empty box
               // does not clear an already-configured secret.
@@ -14112,23 +14164,25 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
-            state.entries = event.entries;
-            const phase = String(event.phase || "hydrated").toLowerCase();
-            state.phase = phase;
-            state.loading = phase !== "hydrated";
-            state.receivedFreshEntries = true;
-            state.error = "";
-            state.notice = "";
-            syncBranchSelectionState(state);
-            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            // SPEC-2356 — feed branch count into the Operator Status Strip WK
-            // cell via develop's guarded telemetry helper. The dead Sidebar
-            // Layers `git` counter was removed in the operator chrome cleanup,
-            // so only `branches` is forwarded now.
-            const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
-            applyOperatorTelemetryCounts({
-              branches: branchesCount,
-            });
+            // FR-065/FR-067: ingest via the shared state helper so a stale
+            // (older load_id) event is dropped and inventory phases keep the
+            // last verified cleanup badges instead of flashing "Safety unknown".
+            // Single trailing break (no early break) so the SPEC-2356 telemetry
+            // contract test can extract this whole case body.
+            const { applied } = applyBranchEntriesEvent(state, event);
+            if (applied) {
+              syncBranchSelectionState(state);
+              frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+              // SPEC-2356 — feed branch count into the Operator Status Strip WK
+              // cell via develop's guarded telemetry helper. The dead Sidebar
+              // Layers `git` counter was removed in the operator chrome cleanup,
+              // so only `branches` is forwarded now. Count from state.entries so
+              // the telemetry reflects the post-ingest list (FR-065 carry-over).
+              const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
+              applyOperatorTelemetryCounts({
+                branches: branchesCount,
+              });
+            }
             break;
           }
           case "profile_snapshot": {
@@ -14436,6 +14490,9 @@
             break;
           }
           case "branch_error": {
+            // SPEC-2359 W-17 (FR-398): a failed branch resume must re-enable
+            // its pending Resume control immediately (not via timeout).
+            launchPending.settleWhere("branch:");
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
@@ -14666,7 +14723,14 @@
             workspaceResumePicker.handleAgentsList(event);
             break;
           case "workspace_resume_agent_error":
+            launchPending.settleAck(event);
             workspaceResumePicker.handleError(event);
+            break;
+          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
+          // accepted — settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            launchPending.settleAck(event);
+            workspaceResumePicker.handleStarted(event);
             break;
           case "launch_wizard_state":
             // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.

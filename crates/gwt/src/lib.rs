@@ -36,14 +36,14 @@ pub mod protocol;
 pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
+pub mod web_protocol_enums;
 pub mod window_state;
 pub mod workspace;
 pub mod worktree_inventory;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    gwt_core::test_support::env_lock()
 }
 
 pub use branch_cleanup::{
@@ -56,7 +56,8 @@ pub use branch_list::{
     BranchCleanupAvailability, BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
 pub use branch_list::{
-    list_branch_entries, list_branch_inventory, BranchListEntry, BranchResumeInfo, BranchScope,
+    list_branch_entries, list_branch_inventory, next_branch_load_id, BranchListEntry,
+    BranchResumeInfo, BranchScope,
 };
 pub use custom_agents_service::{
     add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,

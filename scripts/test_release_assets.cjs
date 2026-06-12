@@ -197,19 +197,25 @@ run("frontend bundle check keeps the GUI front door explicit", () => {
   // expressed as required substrings so future modules can extend the chain
   // without rewriting the test, while still keeping the legacy SPEC-2008
   // surfaces (app, branch-cleanup-modal, migration-modal) wired up.
+  assert.ok(
+    bundleScript.includes("node --check") ||
+      bundleScript.includes("--check \"$1\""),
+    "check-frontend-bundle.sh must call node with --check"
+  );
   for (const required of [
-    "node --check crates/gwt/web/app.js",
-    "node --check crates/gwt/web/branch-cleanup-modal.js",
-    "node --check crates/gwt/web/migration-modal.js",
-    "node --check crates/gwt/web/theme-manager.js",
-    "node --check crates/gwt/web/theme-toggle.js",
-    "node --check crates/gwt/web/hotkey.js",
-    "node --check crates/gwt/web/operator-shell.js",
-    "node --check crates/gwt/web/focus-trap.js",
+    "crates/gwt/web/app.js",
+    "crates/gwt/web/branch-cleanup-modal.js",
+    "crates/gwt/web/migration-modal.js",
+    "crates/gwt/web/theme-manager.js",
+    "crates/gwt/web/theme-toggle.js",
+    "crates/gwt/web/hotkey.js",
+    "crates/gwt/web/operator-shell.js",
+    "crates/gwt/web/focus-trap.js",
   ]) {
     assert.ok(
-      bundleScript.includes(required),
-      `check-frontend-bundle.sh must include "${required}"`
+      bundleScript.includes(`node --check ${required}`) ||
+        bundleScript.includes(`node_check ${required}`),
+      `check-frontend-bundle.sh must include a node syntax check for "${required}"`
     );
   }
 });

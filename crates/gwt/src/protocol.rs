@@ -1267,6 +1267,11 @@ pub enum BackendEvent {
         id: String,
         phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
+        // SPEC-2009 FR-067: monotonic load id so the frontend can drop a stale
+        // (older) in-flight load delivered out of order after an evict/reconnect.
+        // `#[serde(default)]` keeps older payloads (load_id absent) deserializing.
+        #[serde(default)]
+        load_id: u64,
     },
     BoardEntries {
         id: String,
@@ -1441,6 +1446,15 @@ pub enum BackendEvent {
     WorkspaceResumeAgentError {
         session_id: String,
         message: String,
+    },
+    /// SPEC-2359 W-17 (FR-398): client-scoped ack that a Resume request was
+    /// accepted — a window spawn is underway or an existing live window was
+    /// focused. Lets the frontend settle its pending Resume UI
+    /// deterministically instead of guessing from broadcasts.
+    WorkspaceResumeAgentStarted {
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     LaunchProgress {
         id: String,
@@ -1990,6 +2004,13 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
+    // SPEC-2359 W-17 (FR-398): Resume started ack — one-shot, client-scoped,
+    // always-deliver (same transport guarantee as errors).
+    BackendEventPolicy::new(
+        "workspace_resume_agent_started",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
     BackendEventPolicy::new(
         "launch_progress",
         BackendEventDeliveryClass::Streamed,
@@ -2220,6 +2241,7 @@ impl BackendEvent {
             BackendEvent::LaunchWizardState { .. } => "launch_wizard_state",
             BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
             BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
+            BackendEvent::WorkspaceResumeAgentStarted { .. } => "workspace_resume_agent_started",
             BackendEvent::LaunchProgress { .. } => "launch_progress",
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
@@ -2403,6 +2425,7 @@ mod tests {
             id: "branches-1".to_string(),
             phase: BranchEntriesPhase::Inventory,
             entries: Vec::new(),
+            load_id: 7,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");
@@ -2414,6 +2437,9 @@ mod tests {
             value.get("phase"),
             Some(&Value::String("inventory".to_string()))
         );
+        // SPEC-2009 FR-067: load_id rides the wire so the frontend can drop a
+        // stale (older) load delivered out of order after an evict/reconnect.
+        assert_eq!(value.get("load_id"), Some(&Value::from(7u64)));
     }
 
     #[test]
@@ -2446,6 +2472,7 @@ mod tests {
                     reason: None,
                 },
             }],
+            load_id: 0,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");
@@ -2511,6 +2538,7 @@ mod tests {
                     reason: None,
                 },
             }],
+            load_id: 0,
         };
 
         let value = serde_json::to_value(&event).expect("serialize branch entries");
@@ -2540,6 +2568,20 @@ mod tests {
         assert_eq!(
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-398): the Resume started ack must be registered in
+    // BACKEND_EVENT_POLICIES with an always-deliver class so the transport
+    // can never drop it under queue pressure.
+    #[test]
+    fn workspace_resume_agent_started_policy_guarantees_delivery() {
+        let policy = backend_event_policy("workspace_resume_agent_started")
+            .expect("workspace_resume_agent_started registered in BACKEND_EVENT_POLICIES");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
         );
     }
 

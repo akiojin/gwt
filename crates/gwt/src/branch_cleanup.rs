@@ -139,7 +139,12 @@ pub fn cleanup_selected_branches_with_progress(
                 emit_result_progress(&mut progress, &result, index, total);
                 return result;
             }
-            if !is_gwt_workspace_branch(&target_branch) {
+            // SPEC-2009 FR-070: protected base branches (main/master/develop)
+            // are not `work/*` but are allowed for LOCAL cleanup. Everything
+            // else still must be a gwt-managed workspace branch.
+            if !is_gwt_workspace_branch(&target_branch)
+                && !gwt_git::is_protected_branch(&target_branch)
+            {
                 let result = BranchCleanupResultEntry {
                     branch: entry.name.clone(),
                     execution_branch: Some(target_branch),
@@ -157,7 +162,12 @@ pub fn cleanup_selected_branches_with_progress(
             };
             let result = match cleanup_result {
                 Ok(()) => {
-                    if options.delete_remote && entry.cleanup.upstream.is_some() {
+                    // SPEC-2009 FR-071: never delete a protected base branch
+                    // from the remote, regardless of the delete-remote flag.
+                    if options.delete_remote
+                        && entry.cleanup.upstream.is_some()
+                        && !gwt_git::is_protected_branch(&target_branch)
+                    {
                         match manager
                             .delete_remote_branch(&target_branch, entry.cleanup.upstream.as_deref())
                         {

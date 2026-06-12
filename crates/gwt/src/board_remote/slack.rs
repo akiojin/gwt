@@ -793,6 +793,88 @@ mod tests {
             .any(|(k, v)| k == "text" && v.contains("Release notes")));
     }
 
+    /// Restore an env var on drop (HOME redirect for home-store isolation).
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn init_repo_with_origin(path: &std::path::Path, url: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        for args in [vec!["init"], vec!["remote", "add", "origin", url]] {
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_from_second_worktree_reuses_general_root_via_home_store() {
+        // SPEC-2963 FR-022..024 (SC-019): worktree A mints the General root;
+        // a fresh worktree B of the same repo (no local mapping yet — git
+        // propagation is still in flight) must thread its broadcast under
+        // A's root instead of creating a second "General" card. This is the
+        // duplicate-General regression observed live (#3023 downstream).
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = ScopedEnv::set("HOME", &home);
+        let wt_a = dir.path().join("wt-a");
+        let wt_b = dir.path().join("wt-b");
+        let origin = "git@github.com:example/general-root.git";
+        init_repo_with_origin(&wt_a, origin);
+        init_repo_with_origin(&wt_b, origin);
+
+        let mock_a = RecordingPosts::new();
+        let calls_a = mock_a.handle();
+        let prov_a = SlackProvider::new("t", "CH-DEFAULT", BTreeMap::new(), Box::new(mock_a), 60);
+        prov_a.post_entry(&wt_a, entry("from worktree A")).unwrap();
+        let posts_a = post_calls(&calls_a, "chat.postMessage");
+        assert_eq!(posts_a.len(), 2, "A creates the General root + its reply");
+
+        let mock_b = RecordingPosts::new();
+        let calls_b = mock_b.handle();
+        let prov_b = SlackProvider::new("t", "CH-DEFAULT", BTreeMap::new(), Box::new(mock_b), 60);
+        prov_b.post_entry(&wt_b, entry("from worktree B")).unwrap();
+        let posts_b = post_calls(&calls_b, "chat.postMessage");
+        assert_eq!(
+            posts_b.len(),
+            1,
+            "B must not mint a second General root: {posts_b:?}"
+        );
+        assert!(
+            has_param(&posts_b[0], "thread_ts", "ts-1"),
+            "B's post threads under A's root: {posts_b:?}"
+        );
+    }
+
     #[test]
     fn rate_limited_history_surfaces_error_no_fallback() {
         let mock = MockHttp {

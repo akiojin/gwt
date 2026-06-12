@@ -71,27 +71,37 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       await model.selectOption("sonnet");
     }
 
+    // Auto is the default: the slider starts suspended and the effort is
+    // delegated to Claude Code's own per-model default.
     const range = wizard.locator(".launch-range__input");
     await expect(range).toBeVisible();
+    await expect(range).toBeDisabled();
+    await expect(effortSummaryValue(page)).toHaveText("auto");
+
+    const auto = wizard.locator('[data-reasoning-auto] input[type="checkbox"]');
+    await expect(auto).toHaveCount(1);
+    await expect(auto).toBeChecked();
+
+    // Turning Auto off re-enables the slider parked at the middle ordinal
+    // stop (Medium for Sonnet's Low / Medium / High scale).
+    await auto.setChecked(false);
     await expect(range).toBeEnabled();
     await expect(effortSummaryValue(page)).toHaveText("medium");
 
     // ArrowRight snaps from Medium to High and reports the stored value.
-    await range.focus();
-    await page.keyboard.press("ArrowRight");
+    // While the slider keeps focus, the wizardInteractionGuard (SPEC-2014
+    // 2026-05-29) defers backend re-renders so the drag/keyboard interaction
+    // is not destroyed mid-step; the coalesced state flushes on focusout.
+    // Blur the slider to release the guard before asserting the summary.
+    await range.press("ArrowRight");
+    await range.blur();
     await expect(effortSummaryValue(page)).toHaveText("high");
 
-    // Auto is a separate toggle, not a slider stop: enabling it suspends the
-    // slider and reports "auto".
-    const auto = wizard.locator('[data-reasoning-auto] input[type="checkbox"]');
-    await expect(auto).toHaveCount(1);
+    // Auto is a separate toggle, not a slider stop: re-enabling it suspends
+    // the slider and reports "auto" again.
     await auto.setChecked(true);
     await expect(range).toBeDisabled();
     await expect(effortSummaryValue(page)).toHaveText("auto");
-
-    await auto.setChecked(false);
-    await expect(range).toBeEnabled();
-    await expect(effortSummaryValue(page)).not.toHaveText("auto");
   });
 });
 

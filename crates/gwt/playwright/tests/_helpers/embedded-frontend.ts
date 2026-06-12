@@ -17,6 +17,9 @@ const ROOT_MODULES = new Set([
   "app.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
+  // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
+  // self-heal / last-known retention / stale-load guard.
+  "branch-list-state.js",
   // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
   "canvas-wheel-gesture.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
@@ -31,12 +34,19 @@ const ROOT_MODULES = new Set([
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
+  "launch-pending-controller.js",
+  "connection-overlay.js",
   // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders.
   "interaction-guard.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
   "project-tabs-renderer.js",
+  "window-tabs-renderer.js",
+  // SPEC-3015 — generated protocol enum contract + extracted window runtime
+  // state helpers.
+  "protocol-enums.js",
+  "window-runtime-state.js",
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",
   // SPEC-2809 — Console window per-kind tab live tail.

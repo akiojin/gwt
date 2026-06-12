@@ -18,8 +18,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       - name: Run tests
-        run: cargo test -p gwt-core -p gwt --all-features
-        timeout-minutes: 10
+        run: cargo test --workspace --all-features
+        timeout-minutes: 15
       - name: Voice accuracy regression (optional local dataset)
         run: |
           if [ -f tests/voice_eval/manifest.json ]; then

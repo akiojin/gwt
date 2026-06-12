@@ -15,7 +15,12 @@ const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
 );
+const windowTabsRendererSource = readFileSync(
+  resolve(here, "../window-tabs-renderer.js"),
+  "utf8",
+);
 const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
+const branchListStateSource = readFileSync(resolve(here, "../branch-list-state.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const workspaceOverviewPath = resolve(here, "../workspace-kanban-surface.js");
 const workspaceOverviewSource = existsSync(workspaceOverviewPath)
@@ -837,13 +842,15 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
     /function\s+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)/,
     "expected a dedicated Branches loading connection-loss helper",
   );
+  // SPEC-2009 FR-064/FR-065: the connection-loss transition lives in the
+  // extracted branch-list-state module (markBranchDetailInterrupted).
   assert.match(
-    appSource,
-    /failLoadingBranchesOnConnectionLoss[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
+    branchListStateSource,
+    /function\s+markBranchDetailInterrupted\(state\)[\s\S]+state\.loading\s*=\s*false[\s\S]+state\.receivedFreshEntries\s*=\s*false/,
     "expected connection loss to clear stale Branches loading flags",
   );
   assert.match(
-    appSource,
+    branchListStateSource,
     /Connection lost while loading branches/,
     "expected initial branch inventory loss to surface a retryable error",
   );
@@ -852,22 +859,48 @@ test("Branches loading state becomes recoverable when the WebSocket disconnects"
     /function\s+setConnectionState\(connected\)[\s\S]+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)[\s\S]+renderBranches\(windowId\)/,
     "expected socket disconnect to re-render Branches after clearing stale loading",
   );
-});
-
-test("Branches detail-check state explains checking and interrupted cleanup safety", () => {
+  // SPEC-2009 FR-064: reconnect self-heal re-requests interrupted Branches
+  // windows automatically — no manual Refresh needed.
   assert.match(
     appSource,
-    /function\s+branchLoadStatusSummary\(state\)/,
+    /branchWindowNeedsResync\(state\)[\s\S]+requestBranches\(windowId\)/,
+    "expected reconnect to auto re-hydrate interrupted Branches windows",
+  );
+});
+
+test("Branches detail-check state self-heals and retains last-known cleanup safety", () => {
+  assert.match(
+    branchListStateSource,
+    /export\s+function\s+branchLoadStatusSummary\(state\)/,
     "expected Branches to derive a status summary from branch load state",
   );
+  // SPEC-2009 FR-066: the interrupted detail check self-heals on reconnect, so
+  // the copy is reassuring rather than an alarming manual-refresh banner.
   for (const copy of [
     "Checking branch details",
-    "Branch detail check interrupted",
-    "Safety unknown",
-    "Refresh to verify cleanup safety",
+    "Reconnecting branch details",
+    "Recovering automatically",
   ]) {
-    assert.ok(appSource.includes(copy), `expected Branches clarity copy: ${copy}`);
+    assert.ok(
+      branchListStateSource.includes(copy),
+      `expected Branches clarity copy: ${copy}`,
+    );
   }
+  // First-load fallback only; carried-over rows keep their real badge.
+  assert.ok(appSource.includes("Safety unknown"), "expected first-load fallback copy");
+  // FR-066: the manual "Refresh to verify cleanup safety" copy is gone for good.
+  assert.ok(
+    !appSource.includes("Refresh to verify cleanup safety") &&
+      !branchListStateSource.includes("Refresh to verify cleanup safety"),
+    "expected the manual-refresh detail-check banner copy to be removed",
+  );
+  // FR-065: carried last-known badges are flagged stale so destructive
+  // selection stays gated on fresh verification.
+  assert.match(
+    branchListStateSource,
+    /cleanup_stale/,
+    "expected last-known retention to flag carried cleanup badges",
+  );
   assert.doesNotMatch(
     appSource,
     /Cleanup status unavailable/,
@@ -1148,7 +1181,7 @@ test("workspace windows expose draggable tab docking affordances", () => {
     "expected tab drag outside a group to send detach_window_tab",
   );
   assert.match(
-    appSource,
+    `${appSource}\n${windowTabsRendererSource}`,
     /kind:\s*"activate_window_tab"/,
     "expected tab click to activate a grouped window tab",
   );
@@ -1166,6 +1199,52 @@ test("workspace windows expose draggable tab docking affordances", () => {
     inlineStyle,
     /\.workspace-window\.dock-target\s+\.window-tab-strip::before/,
     "expected dockable targets to expose a tab insertion indicator",
+  );
+});
+
+test("Window tab activation updates tab chrome in place without remounting terminal body", () => {
+  assert.match(
+    appSource,
+    /from\s+"\/window-tabs-renderer\.js"/,
+    "app.js must use the extracted stable window tab renderer",
+  );
+  const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
+  assert.match(
+    renderTabsBody,
+    /renderWindowTabsView\(\{/,
+    "window tab chrome updates must be delegated to the stable renderer",
+  );
+  assert.doesNotMatch(
+    renderTabsBody,
+    /innerHTML\s*=/,
+    "window tab activation must not clear and rebuild the tab strip",
+  );
+  assert.doesNotMatch(
+    windowTabsRendererSource,
+    /innerHTML\s*=/,
+    "stable window tab renderer must update keyed tab nodes in place",
+  );
+  assert.match(
+    windowTabsRendererSource,
+    /dataset\.windowTabId/,
+    "stable window tab renderer must key DOM nodes by window id",
+  );
+
+  const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
+  const mountCalls =
+    ensureWindowBody.match(/mountWindowBody\(windowData,\s*element\)/g) || [];
+  assert.equal(
+    mountCalls.length,
+    1,
+    "terminal body mounting must remain limited to the preset-change path",
+  );
+  const mountIndex = ensureWindowBody.indexOf("mountWindowBody(windowData, element);");
+  const renderKeyIndex = ensureWindowBody.indexOf(
+    "const nextWindowElementKey = windowElementRenderKey(windowData);",
+  );
+  assert.ok(
+    mountIndex !== -1 && renderKeyIndex !== -1 && mountIndex < renderKeyIndex,
+    "window render-key updates, including tab_group_active changes, must run after the body mount guard",
   );
 });
 
@@ -2514,14 +2593,22 @@ test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-dr
 });
 
 test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", () => {
-  // app.js has a closure-scoped runtime→Living Telemetry mapper. CSS only
-  // styles `[data-agent-state]` for declared telemetry states — any drift
-  // (e.g. emitting "warn" or "exited") would silently render no rim. Pin
-  // the contract so refactors can't introduce undeclared states.
-  const mapperBlock = appSource.match(
-    /function\s+mapAgentTelemetryState\s*\([^)]*\)\s*\{[\s\S]*?\n\s{6,8}\}/,
+  // SPEC-3015 moved the runtime→Living Telemetry mapper from app.js to
+  // window-runtime-state.js. CSS only styles `[data-agent-state]` for
+  // declared telemetry states — any drift (e.g. emitting "warn" or
+  // "exited") would silently render no rim. Pin the contract so refactors
+  // can't introduce undeclared states.
+  const windowRuntimeStateSource = readFileSync(
+    resolve(here, "../window-runtime-state.js"),
+    "utf8",
   );
-  assert.ok(mapperBlock, "expected mapAgentTelemetryState to be defined in app.js");
+  const mapperBlock = windowRuntimeStateSource.match(
+    /function\s+mapAgentTelemetryState\s*\([^)]*\)\s*\{[\s\S]*?\n\}/,
+  );
+  assert.ok(
+    mapperBlock,
+    "expected mapAgentTelemetryState to be defined in window-runtime-state.js",
+  );
   const returnedStates = new Set();
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);

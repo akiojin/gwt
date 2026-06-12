@@ -4,9 +4,13 @@
 //! message (a Workspace summary card). The mapping
 //! `(provider, channel, key) -> root message id` must be shared across machines
 //! and agents so a Workspace root is created exactly once. It is stored as an
-//! append-only JSONL under the repo-local `.gwt/work/` directory (like
-//! `events.jsonl`) with a `merge=union` gitattribute, so branch-divergent
-//! appends reconcile without conflicts. The latest line per key wins.
+//! append-only JSONL in TWO stores: the repo-local `.gwt/work/` directory
+//! (like `events.jsonl`, with a `merge=union` gitattribute so branch-divergent
+//! appends reconcile without conflicts — crosses machines via PR merges) and
+//! the machine-shared `~/.gwt/projects/<repo-hash>/` home store (FR-022..024,
+//! immediate sharing across worktrees on one machine, closing the git
+//! propagation lag that minted duplicate General roots). Lookup merges both;
+//! the latest line per key wins.
 //!
 //! `key` is the Workspace id (from a Board entry's `audience`) or the literal
 //! `"general"` for broadcast / non-Workspace posts (their own General thread).
@@ -23,7 +27,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GwtError, Result},
-    paths::{gwt_board_remote_roots_path, gwt_repo_local_work_dir},
+    paths::{gwt_board_remote_roots_path, gwt_project_dir, gwt_repo_local_work_dir},
+    repo_hash::detect_repo_hash,
 };
 
 /// Reserved `key` for posts with no Workspace audience (broadcast / system).
@@ -60,19 +65,42 @@ impl RootMapping {
     }
 }
 
-/// Append a root mapping line to the repo-local JSONL store and ensure the
-/// union-merge gitattribute exists. Append-only: a later line for the same
-/// `(provider, channel, key)` supersedes earlier ones on load.
+/// The machine-shared home store for the repo at `repo_root`
+/// (`~/.gwt/projects/<repo-hash>/board-remote-roots.jsonl`), or `None` when
+/// the repo hash (normalized origin URL) cannot be resolved (FR-024). The git
+/// propagation of the worktree store crosses machines but only via PR merges;
+/// the home store closes the gap for worktrees of the same repo on one
+/// machine so a fresh worktree never re-creates an existing thread root
+/// (FR-022/FR-023, duplicate-General regression).
+fn home_roots_path(repo_root: &Path) -> Option<PathBuf> {
+    let repo_hash = detect_repo_hash(repo_root)?;
+    Some(gwt_project_dir(&repo_hash).join("board-remote-roots.jsonl"))
+}
+
+/// Append a root mapping line to the repo-local JSONL store (and best-effort
+/// to the machine-shared home store) and ensure the union-merge gitattribute
+/// exists. Append-only: a later line for the same `(provider, channel, key)`
+/// supersedes earlier ones on load.
 pub fn append_root_mapping(repo_root: &Path, mapping: &RootMapping) -> Result<()> {
     let path = gwt_board_remote_roots_path(repo_root);
     ensure_gitattributes(repo_root);
+    append_mapping_line(&path, mapping)?;
+    // FR-023: the home store write is best-effort — an unresolvable repo hash
+    // or a home I/O failure must never fail the post itself.
+    if let Some(home_path) = home_roots_path(repo_root) {
+        let _ = append_mapping_line(&home_path, mapping);
+    }
+    Ok(())
+}
+
+fn append_mapping_line(path: &Path, mapping: &RootMapping) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)?;
+        .open(path)?;
     // Serialize to a single buffer (line + trailing newline) and emit it with
     // ONE `write_all`. On POSIX an O_APPEND write of <= PIPE_BUF bytes is
     // atomic across processes, so concurrent appends from multiple agents on
@@ -88,20 +116,27 @@ pub fn append_root_mapping(repo_root: &Path, mapping: &RootMapping) -> Result<()
     Ok(())
 }
 
-/// Load all root mappings, keeping the most recent (by `updated_at`) line per
+/// Load all root mappings from the worktree store merged with the home store,
+/// keeping the most recent (by `updated_at`) line per
 /// `(provider, channel, key)`. Union-merge friendly: appends from divergent
-/// branches concatenate and the latest timestamp wins, preventing duplicate
-/// roots.
+/// branches (and from other worktrees via the home store) concatenate and the
+/// latest timestamp wins, preventing duplicate roots.
 pub fn load_root_mappings(repo_root: &Path) -> BTreeMap<(String, String, String), RootMapping> {
-    let path = gwt_board_remote_roots_path(repo_root);
-    load_root_mappings_from_path(&path)
+    let mut latest = BTreeMap::new();
+    merge_root_mappings_from_path(&gwt_board_remote_roots_path(repo_root), &mut latest);
+    if let Some(home_path) = home_roots_path(repo_root) {
+        merge_root_mappings_from_path(&home_path, &mut latest);
+    }
+    latest
 }
 
-fn load_root_mappings_from_path(path: &Path) -> BTreeMap<(String, String, String), RootMapping> {
+fn merge_root_mappings_from_path(
+    path: &Path,
+    latest: &mut BTreeMap<(String, String, String), RootMapping>,
+) {
     let Ok(content) = fs::read_to_string(path) else {
-        return BTreeMap::new();
+        return;
     };
-    let mut latest: BTreeMap<(String, String, String), RootMapping> = BTreeMap::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -119,7 +154,6 @@ fn load_root_mappings_from_path(path: &Path) -> BTreeMap<(String, String, String
             latest.insert(key, mapping);
         }
     }
-    latest
 }
 
 /// Look up the current root mapping for a `(provider, channel, key)`, if any.
@@ -278,6 +312,130 @@ mod tests {
             "every append present, none lost or merged"
         );
         assert_eq!(load_root_mappings(&root).len(), threads * per_thread);
+    }
+
+    /// `git init` + origin remote so `detect_repo_hash` resolves; no commits
+    /// are needed for the home-store path derivation.
+    fn init_repo_with_origin(path: &Path, url: &str) {
+        fs::create_dir_all(path).unwrap();
+        for args in [vec!["init"], vec!["remote", "add", "origin", url]] {
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// Redirect `$HOME` to an isolated temp dir (FR-022..024 tests must never
+    /// touch the real `~/.gwt`; #3022 isolation-leak prevention).
+    fn scoped_home(
+        home: &Path,
+    ) -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::test_support::ScopedEnvVar,
+    ) {
+        fs::create_dir_all(home).unwrap();
+        let guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scoped = crate::test_support::ScopedEnvVar::set("HOME", home);
+        (guard, scoped)
+    }
+
+    const ORIGIN: &str = "git@github.com:example/board-roots.git";
+
+    #[test]
+    fn append_writes_home_store_for_repo_with_origin() {
+        // FR-023: append lands in the worktree store AND the machine-shared
+        // home store (`~/.gwt/projects/<repo-hash>/board-remote-roots.jsonl`).
+        let dir = tempfile::tempdir().unwrap();
+        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let repo = dir.path().join("wt-a");
+        init_repo_with_origin(&repo, ORIGIN);
+
+        append_root_mapping(&repo, &mapping("ws-a", "ts-1", 100, "h1")).unwrap();
+
+        let repo_hash = crate::repo_hash::detect_repo_hash(&repo).expect("origin resolves");
+        let home_path = crate::paths::gwt_project_dir(&repo_hash).join("board-remote-roots.jsonl");
+        assert!(
+            home_path.starts_with(dir.path().join("home")),
+            "home store must live under the redirected $HOME: {home_path:?}"
+        );
+        let content = fs::read_to_string(&home_path).expect("home store written");
+        let line: RootMapping = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(line.key, "ws-a");
+        assert_eq!(line.root_id, "ts-1");
+        // The worktree store keeps its existing behavior.
+        let worktree_content =
+            fs::read_to_string(gwt_board_remote_roots_path(&repo)).expect("worktree store");
+        assert!(worktree_content.contains("ts-1"));
+    }
+
+    #[test]
+    fn home_store_shares_roots_across_worktrees_of_same_repo() {
+        // FR-022/FR-024 (SC-018): worktree B has no local mapping (fresh
+        // worktree before any git propagation) but must find the root that
+        // worktree A created, via the repo-hash-scoped home store. This is the
+        // duplicate-General-root regression.
+        let dir = tempfile::tempdir().unwrap();
+        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let wt_a = dir.path().join("wt-a");
+        let wt_b = dir.path().join("wt-b");
+        init_repo_with_origin(&wt_a, ORIGIN);
+        init_repo_with_origin(&wt_b, ORIGIN);
+
+        append_root_mapping(&wt_a, &mapping("general", "ts-root", 100, "h1")).unwrap();
+
+        let found = find_root_mapping(&wt_b, "slack", "CH", "general")
+            .expect("worktree B sees the root via the home store");
+        assert_eq!(found.root_id, "ts-root");
+    }
+
+    #[test]
+    fn latest_updated_at_wins_across_worktree_and_home_stores() {
+        // FR-022: lookup merges both stores and the newest line per
+        // (provider, channel, key) wins, regardless of which store holds it.
+        let dir = tempfile::tempdir().unwrap();
+        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let wt_a = dir.path().join("wt-a");
+        let wt_b = dir.path().join("wt-b");
+        init_repo_with_origin(&wt_a, ORIGIN);
+        init_repo_with_origin(&wt_b, ORIGIN);
+
+        append_root_mapping(&wt_a, &mapping("ws-a", "ts-old", 100, "h1")).unwrap();
+        append_root_mapping(&wt_b, &mapping("ws-a", "ts-new", 300, "h3")).unwrap();
+
+        // A's own worktree store still says ts-old, but the newer home line
+        // from B supersedes it.
+        let via_a = find_root_mapping(&wt_a, "slack", "CH", "ws-a").unwrap();
+        assert_eq!(via_a.root_id, "ts-new");
+        assert_eq!(via_a.card_hash, "h3");
+    }
+
+    #[test]
+    fn append_and_find_degrade_to_worktree_store_without_origin() {
+        // FR-023: when the repo hash cannot be resolved (no origin remote),
+        // the home store is skipped — posting still works and nothing is
+        // written under $HOME.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let (_lock, _home) = scoped_home(&home);
+        let root = dir.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+
+        append_root_mapping(&root, &mapping("ws-a", "ts-1", 100, "h1")).unwrap();
+        let found = find_root_mapping(&root, "slack", "CH", "ws-a").unwrap();
+        assert_eq!(found.root_id, "ts-1");
+        assert!(
+            !home.join(".gwt").exists(),
+            "no origin -> no home store write"
+        );
     }
 
     #[test]
