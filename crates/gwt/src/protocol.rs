@@ -275,6 +275,13 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    /// Inject one line of input into the pane bound to the given agent
+    /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
+    /// window id so the event can only target the caller's own pane.
+    PaneSendInput {
+        session_id: String,
+        text: String,
+    },
     PasteImage {
         id: String,
         data_base64: String,
@@ -1184,6 +1191,13 @@ pub enum BackendEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
+    /// (SPEC-3050 FR-005: failures must be explicit, never silent).
+    PaneSendResult {
+        ok: bool,
+        window_id: Option<String>,
+        error: Option<String>,
+    },
     AttachmentProgress {
         id: String,
         operation_id: String,
@@ -1814,6 +1828,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "pane_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "attachment_progress",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2214,6 +2233,7 @@ impl BackendEvent {
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
@@ -2364,6 +2384,45 @@ mod tests {
         IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
         UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn pane_send_input_deserializes_session_scoped_injection_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "pane_send_input",
+            "session_id": "session-1",
+            "text": "/goal all tests pass\r"
+        }))
+        .expect("deserialize pane_send_input");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::PaneSendInput { session_id, text }
+                if session_id == "session-1" && text == "/goal all tests pass\r"
+        ));
+    }
+
+    #[test]
+    fn pane_send_result_serializes_kind_and_has_delivery_policy() {
+        let event = BackendEvent::PaneSendResult {
+            ok: false,
+            window_id: None,
+            error: Some("no pane bound to session session-1".to_string()),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize pane_send_result");
+        assert_eq!(
+            value.get("kind").and_then(Value::as_str),
+            Some("pane_send_result")
+        );
+        assert_eq!(event.event_kind(), "pane_send_result");
+
+        let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
 
     #[test]
     fn update_window_geometry_deserializes_base_geometry_revision_contract() {

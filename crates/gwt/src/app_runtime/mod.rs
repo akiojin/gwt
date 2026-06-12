@@ -892,6 +892,11 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
+        // SPEC-3050: log the injection request without its text payload —
+        // the injected line lands in the PTY transcript anyway.
+        FrontendEvent::PaneSendInput { session_id, .. } => {
+            FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
+        }
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
@@ -4499,6 +4504,9 @@ impl AppRuntime {
             ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::PaneSendInput { session_id, text } => {
+                self.pane_send_input_events(client_id, &session_id, &text)
+            }
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -6229,6 +6237,68 @@ impl AppRuntime {
             events.push(self.launch_wizard_state_broadcast(None));
         }
         events
+    }
+
+    /// SPEC-3050 FR-001/FR-002: inject one line of input into the pane bound
+    /// to `session_id`. The event carries a session id instead of a window id,
+    /// so a caller can only ever reach the pane of the session it presents;
+    /// resolution + the live-runtime check both reply with an explicit
+    /// `pane_send_result` (FR-005: no silent drop, unlike `terminal_input`).
+    pub(crate) fn pane_send_input_events(
+        &mut self,
+        client_id: ClientId,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let target = self.tabs.iter().find_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session_id))
+                .map(|window| combined_window_id(&tab.id, &window.id))
+        });
+        let Some(window_id) = target else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(format!("no pane bound to session {session_id}")),
+                },
+            )];
+        };
+
+        let write_result = match self.runtimes.get(&window_id) {
+            None => Err(format!("no live runtime for pane {window_id}")),
+            Some(runtime) => runtime
+                .pane
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|pane| {
+                    pane.write_input(text.as_bytes())
+                        .map_err(|error| error.to_string())
+                }),
+        };
+
+        match write_result {
+            Ok(()) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: true,
+                    window_id: Some(window_id),
+                    error: None,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id),
+                    error: Some(error),
+                },
+            )],
+        }
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {

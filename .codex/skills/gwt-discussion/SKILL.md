@@ -399,6 +399,34 @@ This final result is the handoff point where the workflow may leave Plan Mode.
 - `Update Issue` + `No Action`
 - `Write Memory` only
 
+### Goal Start (after Action Bundle approval)
+
+Once the user approves the Action Bundle and the follow-up work should
+continue autonomously, start a runtime goal from the approved bundle
+(SPEC-3050):
+
+1. Build a goal condition from the Action Bundle: one verifiable end state
+   (tests green, lint clean, evidence bundle emitted), the check that proves
+   it, and a turn or time cap (for example "or stop after 20 turns"). The
+   condition must respect gwt's PR gate: stop at "verification handoff ready
+   with a recorded User Verification Result" — never "PR created" or "PR
+   merged".
+2. Start the goal per runtime:
+   - **Codex** (goals enabled; gwt launches Codex with `--enable goals`):
+     start the Goal directly with the condition as its objective — the goals
+     tool contract allows the model to start a Goal itself.
+   - **Claude Code** (v2.1.139 or later): the built-in `/goal` command cannot
+     be self-invoked by the agent. Queue it into your own pane instead:
+     `gwtd pane send --text '/goal <condition>'` (resolve `GWT_BIN` first per
+     the gwtd resolution section). The injected line is submitted
+     automatically when the current turn ends. `pane send` is self-only: it
+     targets the pane bound to `GWT_SESSION_ID` and rejects other panes.
+3. If the goal cannot be started (older Claude Code, trust dialog not
+   accepted, goals feature disabled, `pane send` failure), do not skip
+   silently: report the failure reason explicitly, print the assembled
+   `/goal <condition>` line so the user can run it manually, and continue
+   the exit. Goal start failures never block the discussion exit.
+
 ## Routing notes
 
 - Return `gwt-plan-spec` when design is stable but planning work remains

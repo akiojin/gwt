@@ -365,6 +365,9 @@ pub enum PaneCommand {
     Read { id: String, lines: usize },
     /// `gwtd pane close <id>` / `gwtd pane stop <id>`.
     Close { id: String },
+    /// `gwtd pane send [<id>] --text <line>` (SPEC-3050: self-only injection
+    /// into the calling agent's own pane).
+    Send { id: Option<String>, text: String },
 }
 /// Sub-action for `gwtd discuss ...` (SPEC-1935 FR-014p).
 #[derive(Debug, Clone, PartialEq, Eq)]
