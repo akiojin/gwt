@@ -47,16 +47,6 @@ impl WorkEventsIngestSummary {
     }
 }
 
-/// Run the full ingest for a project, resolving the home-projection paths
-/// from the repository (the paths-injected variant carries the logic).
-pub fn ingest_project_work_events(project_root: &Path) -> WorkEventsIngestSummary {
-    let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
-    let state_path =
-        gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(project_root);
-    ingest_project_work_events_paths(project_root, &work_items_path, &state_path)
-}
-
 /// Paths-injected ingest (#3022): all writes go to `work_items_path` /
 /// `state_path`. Source-level failures are logged and skipped — a broken
 /// worktree or unreadable ref never aborts the sweep.

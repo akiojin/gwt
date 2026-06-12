@@ -106,6 +106,33 @@ pub fn canonical_work_id(
     ))
 }
 
+/// SPEC-2359 W16-2 (FR-389): the Workspace grouping key for one Work item —
+/// derived at view-assembly time, never stored (plan decision 6). Works that
+/// share a canonical branch (any spelling: `X`, `origin/X`,
+/// `refs/remotes/origin/X`) group under one Workspace row; worktree-only
+/// items key on the canonical worktree identity; everything else (legacy
+/// `workspace-<millis>` / bare-UUID items without containers) keeps its own
+/// `item.id` as the key so old rows never vanish.
+pub fn workspace_group_key_for_item(project_root: &Path, item: &WorkspaceWorkItem) -> String {
+    let branch = item
+        .execution_containers
+        .iter()
+        .find_map(|container| container.branch.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(key) = canonical_work_id(project_root, branch, None) {
+        return key;
+    }
+    let worktree = item
+        .execution_containers
+        .iter()
+        .find_map(|container| container.worktree_path.as_deref());
+    if let Some(key) = canonical_work_id(project_root, None, worktree) {
+        return key;
+    }
+    item.id.clone()
+}
+
 fn canonical_work_branch_identity(branch: &str) -> String {
     if let Some(name) = branch.strip_prefix("refs/remotes/") {
         return name.strip_prefix("origin/").unwrap_or(name).to_string();
@@ -5912,6 +5939,61 @@ mod tests {
             "first Done timestamp must be preserved on idempotent Done re-apply"
         );
         assert_eq!(item.updated_at, t2, "updated_at should still advance");
+    }
+
+    #[test]
+    fn workspace_group_key_groups_same_branch_across_spellings_and_ids() {
+        let project_root = Path::new("/tmp/repo");
+        let now = chrono::Utc::now();
+        let mut item_a = WorkspaceWorkItem {
+            id: "work-session-aaaa".to_string(),
+            title: "a".to_string(),
+            intent: None,
+            summary: None,
+            status_category: WorkspaceStatusCategory::Active,
+            owner: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            agents: Vec::new(),
+            execution_containers: vec![WorkspaceExecutionContainerRef {
+                branch: Some("work/x".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }],
+            board_refs: Vec::new(),
+            related_work_item_ids: Vec::new(),
+            events: Vec::new(),
+            discarded: false,
+        };
+        let mut item_b = item_a.clone();
+        item_b.id = "work-session-bbbb".to_string();
+        item_b.execution_containers[0].branch = Some("origin/work/x".to_string());
+        let mut item_c = item_a.clone();
+        item_c.id = "work-x-12345678".to_string();
+        item_c.execution_containers[0].branch = Some("refs/remotes/origin/work/x".to_string());
+
+        let key_a = workspace_group_key_for_item(project_root, &item_a);
+        let key_b = workspace_group_key_for_item(project_root, &item_b);
+        let key_c = workspace_group_key_for_item(project_root, &item_c);
+        assert_eq!(key_a, key_b, "origin/X spelling groups with X");
+        assert_eq!(key_a, key_c, "refs/remotes/origin/X spelling groups with X");
+
+        // Branchless legacy items keep their own id (adapter: old rows never
+        // vanish and never merge into each other).
+        item_a.execution_containers.clear();
+        item_a.id = "workspace-1748822400000".to_string();
+        assert_eq!(
+            workspace_group_key_for_item(project_root, &item_a),
+            "workspace-1748822400000"
+        );
+        item_a.id = "0f5e2c1a-aaaa-bbbb-cccc-1234567890ab".to_string();
+        assert_eq!(
+            workspace_group_key_for_item(project_root, &item_a),
+            "0f5e2c1a-aaaa-bbbb-cccc-1234567890ab"
+        );
     }
 
     #[test]

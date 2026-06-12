@@ -442,7 +442,34 @@ pub(super) fn run<E: CliEnv>(
         } => {
             let existing =
                 load_or_synthesize_workspace_work_items(env.repo_path()).map_err(core_error)?;
-            if split_from.is_none()
+            let mut projection =
+                load_or_default_workspace_projection(env.repo_path()).map_err(core_error)?;
+            let Some(agent) = projection
+                .agents
+                .iter()
+                .find(|agent| agent.session_id == agent_session)
+            else {
+                return Err(string_error(format!(
+                    "agent session not found: {agent_session}"
+                )));
+            };
+            let agent_display_name = agent.display_name.clone();
+            // SPEC-2359 W16-2 (FR-389): mint the canonical (machine-
+            // independent, branch-keyed) Work id when the agent has a branch
+            // so every machine's records join the same Workspace.
+            let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+                env.repo_path(),
+                agent.branch.as_deref(),
+                agent.worktree_path.as_deref(),
+            );
+            let canonical_joins_existing = canonical_id.as_deref().is_some_and(|id| {
+                existing
+                    .work_items
+                    .iter()
+                    .any(|item| item.is_incomplete() && item.id == id)
+            });
+            if !canonical_joins_existing
+                && split_from.is_none()
                 && boundary
                     .as_deref()
                     .map(str::trim)
@@ -464,19 +491,8 @@ pub(super) fn run<E: CliEnv>(
                     )));
                 }
             }
-            let mut projection =
-                load_or_default_workspace_projection(env.repo_path()).map_err(core_error)?;
-            let Some(agent) = projection
-                .agents
-                .iter()
-                .find(|agent| agent.session_id == agent_session)
-            else {
-                return Err(string_error(format!(
-                    "agent session not found: {agent_session}"
-                )));
-            };
-            let agent_display_name = agent.display_name.clone();
-            let workspace_id = format!("workspace-{}", Utc::now().timestamp_millis());
+            let workspace_id = canonical_id
+                .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
             let owner = spec
                 .map(|number| format!("SPEC-{number}"))
                 .or_else(|| issue.map(|number| format!("Issue #{number}")));
@@ -758,6 +774,42 @@ pub(super) fn ensure_workspace_for_agent(
     }
 
     let existing = load_or_synthesize_workspace_work_items(repo_path).map_err(core_error)?;
+    // SPEC-2359 W16-2 (FR-389): when the canonical (branch-keyed) Work id
+    // already names an incomplete item, join it directly — the similarity
+    // guard never blocks same-branch convergence.
+    if let Some(canonical_id) = gwt_core::workspace_projection::canonical_work_id(
+        repo_path,
+        agent.branch.as_deref(),
+        agent.worktree_path.as_deref(),
+    ) {
+        if existing
+            .work_items
+            .iter()
+            .any(|item| item.is_incomplete() && item.id == canonical_id)
+        {
+            record_workspace_join_event(repo_path, &canonical_id, &input, owner.clone(), &agent)?;
+            assign_agent_to_workspace(
+                &mut projection,
+                &input.agent_session,
+                &canonical_id,
+                input.current_focus,
+                Some(input.title_summary),
+            )?;
+            if let Some(item) = existing
+                .work_items
+                .iter()
+                .find(|item| item.id == canonical_id)
+            {
+                apply_workspace_item_to_projection(&mut projection, item);
+            }
+            save_workspace_projection(repo_path, &projection).map_err(core_error)?;
+            publish_workspace_change(repo_path);
+            return Ok(WorkspaceEnsureResult {
+                workspace_id: canonical_id,
+                disposition: WorkspaceEnsureDisposition::Joined,
+            });
+        }
+    }
     let ensure_text = workspace_ensure_text(&input, owner.as_deref());
     if let Some(item) = best_workspace_candidate(&existing.work_items, &ensure_text) {
         let workspace_id = item.id.clone();
@@ -859,7 +911,14 @@ fn create_workspace_for_agent(
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
 ) -> Result<String, SpecOpsError> {
-    let workspace_id = format!("workspace-{}", Utc::now().timestamp_millis());
+    // SPEC-2359 W16-2 (FR-389): canonical, machine-independent Work id when
+    // the agent has a branch / worktree; millis fallback for branchless agents.
+    let workspace_id = gwt_core::workspace_projection::canonical_work_id(
+        repo_path,
+        agent.branch.as_deref(),
+        agent.worktree_path.as_deref(),
+    )
+    .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
     let now = Utc::now();
     let mut event =
         WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, workspace_id.clone(), now);
@@ -1605,7 +1664,7 @@ mod tests {
         .expect("create workspace");
 
         assert_eq!(code, 0);
-        assert!(out.contains("workspace created: workspace-"));
+        assert!(out.contains("workspace created: work-"), "{out}");
         let saved = load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
@@ -1815,7 +1874,8 @@ mod tests {
         .expect("explicit split boundary should create a new Workspace");
 
         assert_eq!(code, 0);
-        assert!(out.contains("workspace created: workspace-"), "{out}");
+        // SPEC-2359 W16-2: branch-bearing agents mint the canonical work- id.
+        assert!(out.contains("workspace created: work-"), "{out}");
         let saved = load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
@@ -1834,6 +1894,95 @@ mod tests {
             .iter()
             .any(|item| item.id == "workspace-existing"));
         assert!(items.work_items.iter().any(|item| item.id == saved.id));
+    }
+
+    #[test]
+    fn workspace_ensure_joins_existing_canonical_branch_workspace_bypassing_similarity() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+
+        // Existing incomplete Work keyed by the canonical branch id.
+        let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+            repo.path(),
+            Some("work/canonical"),
+            None,
+        )
+        .expect("canonical id");
+        let now = Utc::now();
+        let mut start =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, canonical_id.clone(), now);
+        start.title = Some("totally different wording".to_string());
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event(repo.path(), start).expect("seed canonical work");
+
+        // Live agent on the same branch with entirely dissimilar text.
+        let mut projection = load_or_default_workspace_projection(repo.path()).expect("projection");
+        let mut canonical_agent = unassigned_agent("session-canonical");
+        canonical_agent.branch = Some("work/canonical".to_string());
+        projection.agents.push(canonical_agent);
+        save_workspace_projection(repo.path(), &projection).expect("save projection");
+
+        let result = ensure_workspace_for_agent(
+            repo.path(),
+            WorkspaceEnsureInput {
+                agent_session: "session-canonical".to_string(),
+                title_summary: "no lexical overlap at all".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("ensure");
+        assert_eq!(result.workspace_id, canonical_id);
+        assert!(matches!(
+            result.disposition,
+            WorkspaceEnsureDisposition::Joined
+        ));
+    }
+
+    #[test]
+    fn workspace_create_for_agent_mints_canonical_id_for_branch() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+
+        let mut projection = load_or_default_workspace_projection(repo.path()).expect("projection");
+        let mut agent = unassigned_agent("session-mint");
+        agent.branch = Some("work/minted".to_string());
+        agent.worktree_path = None;
+        projection.agents.push(agent.clone());
+        let workspace_id = create_workspace_for_agent(
+            repo.path(),
+            &mut projection,
+            &WorkspaceEnsureInput {
+                agent_session: "session-mint".to_string(),
+                title_summary: "mint".to_string(),
+                current_focus: None,
+                spec: None,
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+            None,
+            &agent,
+        )
+        .expect("create");
+        let expected = gwt_core::workspace_projection::canonical_work_id(
+            repo.path(),
+            Some("work/minted"),
+            None,
+        )
+        .expect("canonical id");
+        assert_eq!(workspace_id, expected);
     }
 
     #[test]
@@ -1930,7 +2079,7 @@ mod tests {
         .expect("ensure workspace");
 
         assert_eq!(code, 0);
-        assert!(out.contains("workspace ensured: workspace-"));
+        assert!(out.contains("workspace ensured: work-"), "{out}");
         assert!(out.contains("(created)"));
         let saved = load_workspace_projection(&repo)
             .expect("load projection")

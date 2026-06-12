@@ -155,6 +155,9 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // SPEC-2359 W16-2 (FR-389): Workspace grouping key (backend merges
+      // same-key rows before the wire; carried for tooling/tests).
+      workspace_key: item?.workspace_key || null,
       // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
       // — the "safe to delete" signal. Display-only.
       merged_into_base: Boolean(item?.merged_into_base),

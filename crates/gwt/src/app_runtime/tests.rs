@@ -4939,19 +4939,25 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
-    assert_eq!(view.active_work_count, 2);
-    assert_eq!(view.active_works.len(), 2);
-    assert!(view.active_works.iter().all(|work| work.agents.len() == 1));
-    assert!(view.active_works.iter().any(|work| work
+    // SPEC-2359 W16-2 (FR-389 / SC-259) supersedes the original two-row
+    // contract here: storage still keys one Work per agent session (FR-348),
+    // but the VIEW groups same-branch Works into one Workspace row carrying
+    // both live agents.
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "same branch groups into one row"
+    );
+    let row = &view.active_works[0];
+    assert!(row
         .agents
         .iter()
-        .any(|agent| agent.session_id == "session-a")));
-    assert!(view.active_works.iter().any(|work| work
+        .any(|agent| agent.session_id == "session-a"));
+    assert!(row
         .agents
         .iter()
-        .any(|agent| agent.session_id == "session-b")));
-    // Same branch, different sessions → distinct Work ids.
-    assert_ne!(view.active_works[0].id, view.active_works[1].id);
+        .any(|agent| agent.session_id == "session-b"));
+    assert!(row.workspace_key.is_some());
 }
 
 /// SPEC-2359 Phase W-12 Slice 2 (FR-349): each `active_works` item carries a
@@ -14091,6 +14097,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: String::new(),
     }];
 
@@ -14203,6 +14210,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: String::new(),
     }];
 
@@ -14283,6 +14291,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: String::new(),
     }];
 
@@ -14401,6 +14410,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: String::new(),
     }];
 
@@ -14494,6 +14504,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14562,6 +14573,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -14920,5 +14932,92 @@ fn handle_work_events_ingested_broadcasts_only_on_change() {
             .iter()
             .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
         "changed ingest rebroadcasts the projection"
+    );
+}
+
+/// SPEC-2359 W16-2 (FR-389 / SC-259): two Works on the same canonical branch
+/// (any spelling) merge into ONE Workspace row — newest representative,
+/// agents concatenated, counts summed — while branchless legacy rows keep
+/// their own identity.
+#[test]
+fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
+    fn row(
+        id: &str,
+        branch: Option<&str>,
+        updated_at: &str,
+        agents: usize,
+    ) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: agents,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "paused".to_string(),
+            closed_at: None,
+            session_agent_total: 1,
+            merged_into_base: false,
+            workspace_key: None,
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    let mut works = vec![
+        row(
+            "work-session-aaaa",
+            Some("work/x"),
+            "2026-06-11T10:00:00Z",
+            1,
+        ),
+        row(
+            "work-session-bbbb",
+            Some("origin/work/x"),
+            "2026-06-12T10:00:00Z",
+            2,
+        ),
+        row("workspace-1748822400000", None, "2026-06-10T10:00:00Z", 0),
+    ];
+
+    super::assign_and_merge_workspace_groups(&mut works, &root);
+
+    assert_eq!(
+        works.len(),
+        2,
+        "same-branch rows merge; legacy row survives"
+    );
+    let group = works
+        .iter()
+        .find(|work| {
+            work.branch.as_deref() == Some("origin/work/x")
+                || work.branch.as_deref() == Some("work/x")
+        })
+        .expect("grouped row");
+    assert_eq!(
+        group.id, "work-session-bbbb",
+        "newest row is the representative"
+    );
+    assert_eq!(group.active_agents, 3, "agent counts sum");
+    assert_eq!(group.session_agent_total, 2, "session totals sum");
+    assert!(group.workspace_key.is_some());
+    let legacy = works
+        .iter()
+        .find(|work| work.id == "workspace-1748822400000")
+        .expect("legacy row");
+    assert_eq!(
+        legacy.workspace_key.as_deref(),
+        Some("workspace-1748822400000")
     );
 }

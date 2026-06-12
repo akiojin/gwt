@@ -2409,6 +2409,7 @@ fn active_work_items_from_projection(
                 closed_at: None,
                 session_agent_total: 0,
                 merged_into_base: false,
+                workspace_key: None,
                 updated_at: row_updated_at,
             }
         })
@@ -2493,6 +2494,7 @@ fn append_paused_work_items(
             closed_at: None,
             session_agent_total: 0,
             merged_into_base: false,
+            workspace_key: None,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -3148,6 +3150,77 @@ fn attach_registry_sessions_to_active_works(
             .unwrap_or_default()
     };
     active_works.sort_by_key(|work| std::cmp::Reverse(row_sort_key(work)));
+}
+
+/// SPEC-2359 W16-2 (FR-389 / SC-259): assign every row its Workspace
+/// grouping key (canonical branch identity → canonical worktree identity →
+/// own id) and merge rows that share a key into ONE Workspace row. The
+/// newest row is the representative; agents concatenate (the identity
+/// collapse downstream dedups), numeric counts sum, and `merged_into_base`
+/// ORs. Old branchless ids keep their own key, so legacy rows never vanish
+/// or fuse.
+fn assign_and_merge_workspace_groups(
+    active_works: &mut Vec<gwt::ActiveWorkItemView>,
+    project_root: &Path,
+) {
+    for work in active_works.iter_mut() {
+        let branch = work
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let worktree = work.worktree_path.as_deref().map(std::path::Path::new);
+        let key = gwt_core::workspace_projection::canonical_work_id(project_root, branch, None)
+            .or_else(|| {
+                gwt_core::workspace_projection::canonical_work_id(project_root, None, worktree)
+            })
+            .unwrap_or_else(|| work.id.clone());
+        work.workspace_key = Some(key);
+    }
+
+    let mut merged: Vec<gwt::ActiveWorkItemView> = Vec::with_capacity(active_works.len());
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+    for work in active_works.drain(..) {
+        let key = work
+            .workspace_key
+            .clone()
+            .unwrap_or_else(|| work.id.clone());
+        match index_by_key.get(&key) {
+            Some(&slot) => {
+                let target = &mut merged[slot];
+                let newer = work.updated_at > target.updated_at;
+                let mut agents = std::mem::take(&mut target.agents);
+                agents.extend(work.agents.iter().cloned());
+                let active_agents = target.active_agents + work.active_agents;
+                let blocked_agents = target.blocked_agents + work.blocked_agents;
+                let session_agent_total = target.session_agent_total + work.session_agent_total;
+                let merged_into_base = target.merged_into_base || work.merged_into_base;
+                if newer {
+                    let key = target.workspace_key.clone();
+                    *target = work;
+                    target.workspace_key = key;
+                }
+                target.agents = agents;
+                target.active_agents = active_agents;
+                target.blocked_agents = blocked_agents;
+                target.session_agent_total = session_agent_total;
+                target.merged_into_base = merged_into_base;
+                if target.branch.is_none() {
+                    // keep any branch the group knows about
+                    target.branch = merged_branch_fallback(&target.agents);
+                }
+            }
+            None => {
+                index_by_key.insert(key, merged.len());
+                merged.push(work);
+            }
+        }
+    }
+    *active_works = merged;
+}
+
+fn merged_branch_fallback(agents: &[gwt::ActiveWorkAgentView]) -> Option<String> {
+    agents.iter().find_map(|agent| agent.branch.clone())
 }
 
 /// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
@@ -3882,8 +3955,21 @@ impl AppRuntime {
             return;
         }
         let proxy = self.proxy.clone();
+        // Resolve the home-projection paths on the calling thread: HOME is
+        // process-global and parallel unit tests scope it per test
+        // (ScopedEnvVar, #3022) — a late resolution inside the worker would
+        // race those scopes and write into another test's home.
+        let work_items_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(
+            &project_root,
+        );
         thread::spawn(move || {
-            let summary = crate::work_events_ingest::ingest_project_work_events(&project_root);
+            let summary = crate::work_events_ingest::ingest_project_work_events_paths(
+                &project_root,
+                &work_items_path,
+                &state_path,
+            );
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
                 changed: summary.changed(),
@@ -5788,6 +5874,10 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
+            // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
+            // branch into one Workspace row before the ledger attach, so the
+            // attach / identity-collapse / cap run once per Workspace.
+            assign_and_merge_workspace_groups(&mut view.active_works, &tab.project_root);
             // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
             // ledger to each Workspace (branch) row so sessions surface even
             // when works.json never recorded an agent for the branch.
@@ -5854,6 +5944,7 @@ impl AppRuntime {
             closed_at: None,
             session_agent_total: 0,
             merged_into_base: false,
+            workspace_key: None,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {

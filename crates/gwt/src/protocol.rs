@@ -1118,6 +1118,11 @@ pub struct ActiveWorkItemView {
     /// safe to delete. Display-only; no automatic close (US-61).
     #[serde(default)]
     pub merged_into_base: bool,
+    /// SPEC-2359 W16-2 (FR-389): Workspace grouping key — Works sharing a
+    /// canonical branch (any spelling) carry the same key and merge into one
+    /// Workspace row at view assembly. `None` on legacy payloads.
+    #[serde(default)]
+    pub workspace_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2759,6 +2764,7 @@ mod tests {
                     closed_at: None,
                     session_agent_total: 0,
                     merged_into_base: false,
+                    workspace_key: None,
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
