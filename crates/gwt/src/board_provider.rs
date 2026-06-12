@@ -34,10 +34,9 @@ use crate::board_remote::token_store::{self, TokenSet};
 /// Test seam: in `#[cfg(test)]` builds the kind comes from a per-thread
 /// override that defaults to `Local`, so board unit tests run against the
 /// filesystem provider regardless of the developer machine's
-/// `~/.gwt/config.toml`. `Settings::global_config_path` resolves via
-/// `dirs::home_dir()` (which ignores `HOME`/`USERPROFILE` on Windows), so the
-/// global config cannot be isolated with env vars; the override is the
-/// race-free way to keep tests hermetic. Production builds always read config.
+/// `~/.gwt/config.toml`. The override is still the race-free way to keep tests
+/// hermetic without depending on process-global env var mutation. Production
+/// builds always read config.
 pub fn current_kind() -> BoardProviderKind {
     #[cfg(test)]
     {

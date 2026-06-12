@@ -1690,6 +1690,7 @@ fn sample_runtime_with_events(
         launch_wizard_cache,
         launch_wizard: None,
         pending_workspace_resume_contexts: HashMap::new(),
+        inflight_launches: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
@@ -13779,4 +13780,147 @@ fn os_url_open_command_keeps_oauth_query_intact_and_avoids_cmd() {
         !args.iter().any(|arg| arg.contains("start")),
         "must not use the cmd `start` builtin which splits on &: {args:?}"
     );
+}
+
+// SPEC-2359 W-17 (FR-396): when a client's queue dropped streamed output,
+// the repair path re-sends a fresh full snapshot — client-scoped, and only
+// for panes that still have a live runtime.
+#[test]
+fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+    runtime
+        .runtimes
+        .get(&shell_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane lock")
+        .process_bytes(b"hello-repair");
+
+    let events = runtime.client_pane_snapshot_repair_events(
+        "client-9",
+        &[shell_id.clone(), "tab-1::missing-pane".to_string()],
+    );
+
+    assert_eq!(events.len(), 1, "unknown panes produce no repair events");
+    assert!(
+        matches!(&events[0].target, DispatchTarget::Client(id) if id == "client-9"),
+        "repair snapshot is scoped to the requesting client"
+    );
+    match &events[0].event {
+        BackendEvent::TerminalSnapshot { id, data_base64 } => {
+            assert_eq!(id, &shell_id);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64)
+                .expect("snapshot base64");
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("hello-repair"),
+                "snapshot carries the pane's current screen content"
+            );
+        }
+        other => panic!("expected TerminalSnapshot, got {other:?}"),
+    }
+}
+
+// SPEC-2359 W-17 (FR-398, Issue #3034): a second spawn for the same Work
+// while the first launch is still materializing (window registered, agent
+// session not yet live) must focus the pending window, not spawn a duplicate.
+#[test]
+fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let build_config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260610-inflight")
+            .build()
+    };
+
+    runtime
+        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .expect("first spawn");
+    runtime
+        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .expect("second spawn");
+
+    let tab = runtime.tab("tab-1").expect("tab");
+    let agent_windows = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+    assert_eq!(
+        agent_windows, 1,
+        "in-flight re-click must not spawn a duplicate agent window"
+    );
+}
+
+// SPEC-2359 W-17 (FR-398): a successful Resume replies a client-scoped
+// `workspace_resume_agent_started` ack so pending UI settles deterministically.
+#[test]
+fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let session = gwt_agent::Session::new(&repo, "feature/resume-ack", gwt_agent::AgentId::Codex);
+    session.save(&sessions_dir).expect("save session");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.resume_workspace_agent_events(
+        "client-7",
+        session.id.clone(),
+        None,
+        canvas_bounds(),
+    );
+
+    let ack = events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::WorkspaceResumeAgentStarted { session_id, .. }
+                    if session_id == &session.id
+            )
+        })
+        .expect("started ack present");
+    assert!(
+        matches!(&ack.target, DispatchTarget::Client(id) if id == "client-7"),
+        "ack is scoped to the requesting client"
+    );
+    match &ack.event {
+        BackendEvent::WorkspaceResumeAgentStarted { branch, .. } => {
+            assert_eq!(branch.as_deref(), Some("feature/resume-ack"));
+        }
+        other => panic!("expected started ack, got {other:?}"),
+    }
 }

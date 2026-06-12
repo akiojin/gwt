@@ -1,6 +1,90 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.55.0] - 2026-06-12
+
+### Bug Fixes
+
+- **gui:** Branches detail-check を reconnect で自己回復させ最終既知の cleanup 安全性を保持
+- **gui:** Bare repo の symbolic HEAD で main を cleanup ブロックしない
+- **launch-wizard:** Claude reasoning 既定を Auto にして Claude Code 既定へ委譲
+- Prevent Windows Claude stub launch dialog
+- **update:** Windows 自動更新 helper の UAC Installer Detection による os error 740 を修正
+- **board:** Root mapping を home store 併用にして General root 重複を防止
+- **gui:** WebSocket 配信を lossy/lossless 分離し queue 溢れでの切断を廃止 (SPEC-2359 W17-1)
+- **gui:** Resume/Launch に起動フィードバックと二重実行防止・切断オーバーレイを追加 (SPEC-2359 W17-2/W17-3)
+- **gui:** Frontend_ready 再接続ごとの index bootstrap 再実行をクールダウンで抑止 (SPEC-2359 W17-4)
+- Honor HOME for gwt config path
+- Preserve Teams board message line breaks
+- Prevent window tab activation flicker
+- Harden visual test runner setup
+- **docker:** 状態参照系コマンドの timeout を 30s 化し compose ps の再試行と preflight 診断を追加 (#3029)
+- **docker:** 生成する compose override から obsolete な version 属性を除去
+- **launch:** Docker 準備出力の final drain を結果表示より先に完了させる
+- **docker:** Compose exec の env 注入から PATH を除外しコンテナ内 bunx 解決を修復
+- Prefer Bun for Claude placeholder wrappers
+- Stabilize Windows board setup verification
+
+### Documentation
+
+- **memory:** GUI フリーズ調査は WebSocket eviction ログを最初に疑う知見を記録
+- Explain remote board channel association
+- **skills:** Browser-check の隔離 HOME symlink リストに .docker を追加 (#3029)
+
+### Features
+
+- **gui:** ローカル main/develop を cleanup 選択可にしリモート base を多層保護
+- **workspace:** Backfill event kind と worktree reconcile ドメインロジックを追加
+- **workspace:** Close 系 event を home 専用ログへ分離し .gwt/work commit 導線を guidance に追加
+- Simplify Teams board channel setup
+- **launch:** Docker 起動準備の出力を agent terminal へストリーム表示 (SPEC-2014 FR-139..142)
+
+### Miscellaneous Tasks
+
+- Ignore .playwright-mcp automation artifacts
+- **memory:** Windows exe への asInvoker manifest 埋め込み判断を記録 (#3018)
+- Merge origin develop
+- Merge origin develop
+- **board:** General root mapping の union-merge 属性と正 root pin を共有
+- Merge origin develop
+- Merge origin develop
+- **memory:** Worktree-local coordination 状態の重複再生産と home store 対策を記録
+- Record workspace event log
+- Merge origin/develop into window tab fix
+- Merge origin/develop into PR 3035
+- Merge develop into Teams board setup
+- Merge origin develop
+- Merge develop into Teams board setup
+- **memory:** Llvm-cov 0% 罠と CI ゲート拡張の検証手順を記録
+- **memory:** Merge 競合マーカーの残骸を除去
+- **memory:** 検証と実行の ; 連結による検証形骸化の教訓を記録
+
+### Refactor
+
+- **workspace:** WorkspaceProjection の状態遷移を gwt-core に一元化 (SPEC-2359 US-70)
+- **core:** ProcessExecutor seam を導入し最重要経路に統合テストを追加 (SPEC-3014)
+- **app-runtime:** Workspace module 抽出とテスト領域の別ファイル化 (SPEC-2077 US-11)
+- **gwt:** Embedded_web manifest 化と test_support 統合 (SPEC-3016)
+- **frontend:** Protocol enum 契約の生成基盤と window runtime state の抽出 (SPEC-3015)
+
+### Testing
+
+- **gwt:** Fake gh compile の rustc spawn に current_dir を明示して CWD race を解消
+- **gwt:** Env tests の重複 fake gh compiler にも current_dir を明示
+- **core:** Windows 専用 update テストを ProcessExecutor シグネチャに追随
+- Stabilize full status refresh cooldown test
+- Accept module-aware frontend bundle checks
+- Gwt-config / gwt-skills に公開 API 契約の統合テストを追加
+- **gwt-git:** Fixture に committer identity を設定し CI で commit が失敗しないようにする
+- **gwt-git:** Migration fixture の initial branch を master に固定し identity を設定する
+- **gwt-docker:** Fake docker の記録を追記式にして漂着 invocation と競合しないようにする
+
+### Ci
+
+- **release:** Prepare-release ワークフローでどのブランチからでもリリース準備可能にする
+- **release:** Prepare-release の adversarial レビュー指摘を修正
+- PR の test/clippy ゲートを全クレートへ拡張し coverage を workspace 計測化
+
 ## [9.54.0] - 2026-06-09
 
 ### Bug Fixes

@@ -1447,6 +1447,15 @@ pub enum BackendEvent {
         session_id: String,
         message: String,
     },
+    /// SPEC-2359 W-17 (FR-398): client-scoped ack that a Resume request was
+    /// accepted — a window spawn is underway or an existing live window was
+    /// focused. Lets the frontend settle its pending Resume UI
+    /// deterministically instead of guessing from broadcasts.
+    WorkspaceResumeAgentStarted {
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
     LaunchProgress {
         id: String,
         message: String,
@@ -1995,6 +2004,13 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
+    // SPEC-2359 W-17 (FR-398): Resume started ack — one-shot, client-scoped,
+    // always-deliver (same transport guarantee as errors).
+    BackendEventPolicy::new(
+        "workspace_resume_agent_started",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
     BackendEventPolicy::new(
         "launch_progress",
         BackendEventDeliveryClass::Streamed,
@@ -2225,6 +2241,7 @@ impl BackendEvent {
             BackendEvent::LaunchWizardState { .. } => "launch_wizard_state",
             BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
             BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
+            BackendEvent::WorkspaceResumeAgentStarted { .. } => "workspace_resume_agent_started",
             BackendEvent::LaunchProgress { .. } => "launch_progress",
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
@@ -2551,6 +2568,20 @@ mod tests {
         assert_eq!(
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
+
+    // SPEC-2359 W-17 (FR-398): the Resume started ack must be registered in
+    // BACKEND_EVENT_POLICIES with an always-deliver class so the transport
+    // can never drop it under queue pressure.
+    #[test]
+    fn workspace_resume_agent_started_policy_guarantees_delivery() {
+        let policy = backend_event_policy("workspace_resume_agent_started")
+            .expect("workspace_resume_agent_started registered in BACKEND_EVENT_POLICIES");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
         );
     }
 

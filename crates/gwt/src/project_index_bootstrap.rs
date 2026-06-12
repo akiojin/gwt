@@ -15,10 +15,18 @@ pub enum ProjectIndexBootstrapRequest {
     Spawned,
     AlreadyRunning,
     SpawnFailed,
+    /// SPEC-2359 W-17 (FR-400): a bootstrap for this project completed within
+    /// the cooldown window — the cached status was replayed instead of
+    /// re-running the bootstrap + status sweep (reconnect-storm guard).
+    SkippedFresh,
 }
 
 const FULL_STATUS_RETRY_DELAY: Duration = Duration::from_millis(100);
 const FULL_STATUS_COOLDOWN: Duration = Duration::from_secs(10);
+/// SPEC-2359 W-17 (FR-400): how long a completed startup bootstrap satisfies
+/// repeat `frontend_ready` requests (reconnect storms replay it on every
+/// re-established socket) before a real re-run is allowed again.
+const BOOTSTRAP_STATUS_COOLDOWN: Duration = Duration::from_secs(120);
 
 type BootstrapFn = dyn Fn(&Path) -> Result<(), String> + Send + Sync + 'static;
 type StatusProbeFn = dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static;
@@ -58,6 +66,8 @@ pub struct ProjectIndexBootstrapService {
     in_flight: Arc<Mutex<HashSet<IndexInFlightKey>>>,
     last_full_status: Arc<Mutex<HashMap<PathBuf, FullStatusCacheEntry>>>,
     full_status_cooldown: Duration,
+    last_bootstrap_status: Arc<Mutex<HashMap<PathBuf, FullStatusCacheEntry>>>,
+    bootstrap_status_cooldown: Duration,
 }
 
 #[derive(Clone)]
@@ -72,6 +82,8 @@ impl Default for ProjectIndexBootstrapService {
             in_flight: Arc::default(),
             last_full_status: Arc::default(),
             full_status_cooldown: FULL_STATUS_COOLDOWN,
+            last_bootstrap_status: Arc::default(),
+            bootstrap_status_cooldown: BOOTSTRAP_STATUS_COOLDOWN,
         }
     }
 }
@@ -84,13 +96,30 @@ impl ProjectIndexBootstrapService {
 
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
-        Self::default()
+        // Legacy tests re-spawn bootstraps freely; the reconnect-storm
+        // cooldown is exercised explicitly via
+        // `new_for_test_with_bootstrap_cooldown`.
+        Self {
+            bootstrap_status_cooldown: Duration::ZERO,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_bootstrap_cooldown(
+        bootstrap_status_cooldown: Duration,
+    ) -> Self {
+        Self {
+            bootstrap_status_cooldown,
+            ..Self::default()
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn new_for_test_with_full_status_cooldown(full_status_cooldown: Duration) -> Self {
         Self {
             full_status_cooldown,
+            bootstrap_status_cooldown: Duration::ZERO,
             ..Self::default()
         }
     }
@@ -332,7 +361,8 @@ impl ProjectIndexBootstrapService {
                             );
                             return;
                         }
-                        ProjectIndexBootstrapRequest::SpawnFailed => return,
+                        ProjectIndexBootstrapRequest::SpawnFailed
+                        | ProjectIndexBootstrapRequest::SkippedFresh => return,
                         ProjectIndexBootstrapRequest::AlreadyRunning => {}
                     }
                 }
@@ -419,6 +449,51 @@ impl ProjectIndexBootstrapService {
         if let Ok(mut last) = self.last_full_status.lock() {
             last.remove(&key);
         }
+        // Rebuilds change index health — the next frontend_ready must probe
+        // for real instead of replaying a pre-rebuild bootstrap status.
+        if let Ok(mut last) = self.last_bootstrap_status.lock() {
+            last.remove(&key);
+        }
+    }
+
+    /// SPEC-2359 W-17 (FR-400): cached status of a bootstrap that completed
+    /// within `bootstrap_status_cooldown`, or `None` when a real run is due.
+    fn bootstrap_completed_recently(
+        &self,
+        project_key: &Path,
+        project_root_label: &str,
+    ) -> Option<gwt::ProjectIndexStatusView> {
+        if self.bootstrap_status_cooldown.is_zero() {
+            return None;
+        }
+        let key = normalize_project_root(project_key);
+        let last = self.last_bootstrap_status.lock().ok()?;
+        let entry = last.get(&key)?;
+        let elapsed = entry.refreshed_at.elapsed();
+        if elapsed >= self.bootstrap_status_cooldown {
+            return None;
+        }
+        tracing::debug!(
+            target: "gwt::index",
+            worktree = %project_root_label,
+            elapsed_ms = elapsed.as_millis() as u64,
+            cooldown_ms = self.bootstrap_status_cooldown.as_millis() as u64,
+            "skipping fresh project index bootstrap; replaying cached status"
+        );
+        Some(entry.status.clone())
+    }
+
+    fn record_bootstrap_status(&self, project_root: &Path, status: &gwt::ProjectIndexStatusView) {
+        let key = normalize_project_root(project_root);
+        if let Ok(mut last) = self.last_bootstrap_status.lock() {
+            last.insert(
+                key,
+                FullStatusCacheEntry {
+                    refreshed_at: Instant::now(),
+                    status: status.clone(),
+                },
+            );
+        }
     }
 
     #[cfg(test)]
@@ -451,6 +526,18 @@ impl ProjectIndexBootstrapService {
     {
         let project_key = normalize_project_root(&project_root);
         let project_root_label = project_key.display().to_string();
+        // SPEC-2359 W-17 (FR-400): reconnect storms replay frontend_ready on
+        // every re-established socket. A bootstrap that completed within the
+        // cooldown satisfies the request from cache instead of re-running the
+        // sweep — the cached status is replayed so the new page still
+        // populates its status cell.
+        if let Some(status) = self.bootstrap_completed_recently(&project_key, &project_root_label) {
+            proxy.send(UserEvent::ProjectIndexStatus {
+                project_root: project_root_label,
+                status,
+            });
+            return ProjectIndexBootstrapRequest::SkippedFresh;
+        }
         let key = IndexInFlightKey::Bootstrap {
             project_root: project_key.clone(),
         };
@@ -495,6 +582,7 @@ impl ProjectIndexBootstrapService {
                         );
                         let kick_orchestrator =
                             status.state == gwt::ProjectIndexStatusState::RepairRequired;
+                        service_for_thread.record_bootstrap_status(&project_key, &status);
                         proxy.send(UserEvent::ProjectIndexStatus {
                             project_root: project_root_label.clone(),
                             status: status.clone(),
@@ -992,6 +1080,80 @@ mod tests {
             gwt::ProjectIndexStatusState::Ready,
         );
         assert_eq!(status.detail, "ready");
+    }
+
+    // SPEC-2359 W-17 (FR-400): a reconnect storm replays frontend_ready on
+    // every re-established WebSocket; each one used to restart the whole
+    // bootstrap + status probe. Within the cooldown after a completed
+    // bootstrap, repeat requests must reuse the cached status instead.
+    #[test]
+    fn completed_bootstrap_is_not_restarted_within_cooldown() {
+        let service = super::ProjectIndexBootstrapService::new_for_test_with_bootstrap_cooldown(
+            Duration::from_secs(60),
+        );
+        let temp = tempdir().expect("tempdir");
+        let expected_project_root = dunce::canonicalize(temp.path())
+            .unwrap_or_else(|_| temp.path().to_path_buf())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let first_call_count = call_count.clone();
+
+        let first = service.spawn_with(
+            proxy.clone(),
+            temp.path().to_path_buf(),
+            move |_project_root: &Path| {
+                first_call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
+            },
+        );
+        assert_eq!(first, super::ProjectIndexBootstrapRequest::Spawned);
+        let status = wait_for_project_status(
+            &events,
+            &expected_project_root,
+            gwt::ProjectIndexStatusState::Ready,
+        );
+        assert_eq!(status.detail, "ready");
+
+        // Reconnect-storm replay: another frontend_ready right after the
+        // bootstrap completed.
+        let second = service.spawn_with(
+            proxy,
+            temp.path().to_path_buf(),
+            |_project_root| -> Result<(), String> {
+                unreachable!("bootstrap must not restart within the cooldown")
+            },
+            |_project_root| -> gwt::ProjectIndexStatusView {
+                unreachable!("status probe must not restart within the cooldown")
+            },
+        );
+
+        assert_eq!(
+            second,
+            super::ProjectIndexBootstrapRequest::SkippedFresh,
+            "repeat request within the cooldown is skipped"
+        );
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // The cached status is re-emitted so a freshly-loaded page still
+        // populates its status cell without a new sweep.
+        let ready_count = events
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::ProjectIndexStatus { project_root, status }
+                        if project_root == &expected_project_root && status.detail == "ready"
+                )
+            })
+            .count();
+        assert_eq!(ready_count, 2, "cached status replayed to the new client");
     }
 
     #[test]
