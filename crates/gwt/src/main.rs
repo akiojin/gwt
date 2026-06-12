@@ -22,8 +22,8 @@ use gwt::{
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
     BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
     FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    ShellLaunchConfig, UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset,
+    WindowProcessStatus, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -1077,7 +1077,7 @@ mod tests {
         BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
         LaunchWizardAction, LaunchWizardContext, LaunchWizardState, PersistedWindowState,
         ProjectKind, QuickStartEntry, QuickStartLaunchMode, RuntimeHookEvent, RuntimeHookEventKind,
-        ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        ShellLaunchConfig, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_config::{Profile, Settings};
@@ -1501,7 +1501,7 @@ mod tests {
             title: "Repo".to_string(),
             project_root: PathBuf::from("E:/gwt/test-repo"),
             kind: gwt::ProjectKind::Git,
-            workspace: WorkspaceState::from_persisted(persisted),
+            workspace: WindowCanvasState::from_persisted(persisted),
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
@@ -1901,7 +1901,7 @@ mod tests {
         }));
         assert!(matches!(
             &events[0].event,
-            gwt::BackendEvent::WorkspaceState { .. }
+            gwt::BackendEvent::WindowCanvasState { .. }
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
@@ -1996,7 +1996,7 @@ mod tests {
                 title: "Repo".to_string(),
                 project_root: PathBuf::from("E:/gwt/test-repo"),
                 kind: gwt::ProjectKind::Git,
-                workspace: WorkspaceState::from_persisted(persisted),
+                workspace: WindowCanvasState::from_persisted(persisted),
                 migration_pending: false,
                 main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
             }
@@ -2150,7 +2150,7 @@ mod tests {
             title: "Repo".to_string(),
             project_root: PathBuf::from("E:/gwt/test-repo"),
             kind: gwt::ProjectKind::Git,
-            workspace: WorkspaceState::from_persisted(persisted),
+            workspace: WindowCanvasState::from_persisted(persisted),
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
@@ -2177,7 +2177,7 @@ mod tests {
         kind: ProjectKind,
         presets: &[WindowPreset],
     ) -> ProjectTabRuntime {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         for preset in presets {
             let _ = workspace.add_window(*preset, canvas_bounds());
         }
@@ -2477,7 +2477,7 @@ mod tests {
             events.first(),
             Some(event)
                 if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                    && matches!(event.event, BackendEvent::WorkspaceState { .. })
+                    && matches!(event.event, BackendEvent::WindowCanvasState { .. })
         ));
         assert!(events.iter().any(|event| {
             matches!(

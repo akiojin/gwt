@@ -1181,7 +1181,7 @@ pub enum BackendEvent {
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
     #[serde(rename = "workspace_state")]
-    WorkspaceState {
+    WindowCanvasState {
         workspace: AppStateView,
     },
     ActiveWorkProjection {
@@ -2246,7 +2246,7 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
-            BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ProviderUsage { .. } => "provider_usage",

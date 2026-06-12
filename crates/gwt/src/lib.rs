@@ -37,8 +37,8 @@ pub mod runtime_daemon_events;
 pub mod start_work;
 pub mod system_settings;
 pub mod web_protocol_enums;
+pub mod window_canvas;
 pub mod window_state;
-pub mod workspace;
 pub mod worktree_inventory;
 
 #[cfg(test)]
@@ -113,8 +113,8 @@ pub use persistence::{
     legacy_workspace_state_path, load_restored_workspace_state, load_session_state,
     load_workspace_state, migrate_legacy_workspace_state, pause_process_windows_for_restore,
     project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
-    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowState,
-    PersistedWorkspaceState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
+    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
+    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
     WindowState,
 };
 pub use preset::{
@@ -133,4 +133,4 @@ pub use protocol::{
     WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
     WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
-pub use workspace::WorkspaceState;
+pub use window_canvas::WindowCanvasState;
