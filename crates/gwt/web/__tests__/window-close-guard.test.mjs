@@ -22,16 +22,21 @@ test("agent panes are detected by agent_id or agent presets", () => {
   assert.ok(!isAgentPaneWindow(null));
 });
 
-test("live agent windows require close confirmation", () => {
+test("live agent windows require close confirmation (idle agents are alive)", () => {
   const agentWindow = { preset: "agent" };
   assert.ok(shouldConfirmAgentWindowClose(agentWindow, "running"));
   assert.ok(shouldConfirmAgentWindowClose(agentWindow, "waiting"));
   assert.ok(shouldConfirmAgentWindowClose(agentWindow, "starting"));
+  // An idle agent pane is a live process holding conversation context
+  // (user verification 2026-06-12: the resumed agent sat at Idle and the
+  // × killed it without confirmation).
+  assert.ok(shouldConfirmAgentWindowClose(agentWindow, "idle"));
+  // Unknown state defaults to confirming — destroying is the unsafe path.
+  assert.ok(shouldConfirmAgentWindowClose(agentWindow, ""));
 });
 
-test("settled agent windows and non-agent windows close without confirmation", () => {
+test("dead agent windows and non-agent windows close without confirmation", () => {
   const agentWindow = { preset: "agent" };
-  assert.ok(!shouldConfirmAgentWindowClose(agentWindow, "idle"));
   assert.ok(!shouldConfirmAgentWindowClose(agentWindow, "stopped"));
   assert.ok(!shouldConfirmAgentWindowClose(agentWindow, "error"));
   assert.ok(!shouldConfirmAgentWindowClose({ preset: "work" }, "running"));

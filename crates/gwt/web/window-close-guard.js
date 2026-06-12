@@ -5,13 +5,12 @@
 // close confirm (`window_is_agent_pane` in runtime_support.rs): a window is
 // an agent pane when it carries an `agent_id` or uses an agent preset. The
 // close `×` must confirm whenever such a pane still has a live process —
-// `running`, `waiting` (alive, awaiting input), or `starting` (spawning) —
-// because closing kills the agent. Settled states (`idle`, `stopped`,
-// `error`) close silently, matching the project tab behavior of only
-// confirming when work would actually be interrupted.
+// in the runtime state vocabulary everything except `stopped` / `error`
+// (`idle` and `waiting` agents are alive and hold conversation context;
+// closing kills them). Only definitively dead panes close silently.
 
 const AGENT_PRESETS = new Set(["agent", "claude", "codex"]);
-const LIVE_RUNTIME_STATES = new Set(["running", "waiting", "starting"]);
+const DEAD_RUNTIME_STATES = new Set(["stopped", "error"]);
 
 export function isAgentPaneWindow(windowData) {
   if (!windowData) return false;
@@ -22,7 +21,7 @@ export function isAgentPaneWindow(windowData) {
 export function shouldConfirmAgentWindowClose(windowData, runtimeState) {
   return (
     isAgentPaneWindow(windowData) &&
-    LIVE_RUNTIME_STATES.has(String(runtimeState || "").toLowerCase())
+    !DEAD_RUNTIME_STATES.has(String(runtimeState || "running").toLowerCase())
   );
 }
 
