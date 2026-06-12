@@ -6821,7 +6821,7 @@ Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --j
 Type: lesson
 Context: PR #3007 で Fable 5 をモデル候補に追加した際、opus と同じ reasoning ladder (xHigh default) を共有させたが、Codex レビューで Fable 5 の Claude Code 既定 effort は high だと指摘された。検証の結果 Opus 4.8 / Sonnet 4.6 の既定も high で、gwt の xHigh/medium 既定は旧バージョン (Opus 4.7 時代) の stale な引き継ぎだった。
 Learning: Claude Code の既定 effort はモデル世代ごとに変わる (4.7=xhigh, 4.8/Fable5/Sonnet4.6=high)。モデル候補の追加・ラベル更新時にラベルだけ追従して既定値の追従が漏れると、ユーザーが意図せず高コスト effort で起動する。
-Future Action: launch_wizard のモデル一覧や既定値を更新する際は https://code.claude.com/docs/en/model-config#adjust-effort-level の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
+Future Action: launch_wizard のモデル一覧や既定値を更新する際は <https://code.claude.com/docs/en/model-config#adjust-effort-level> の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
 
 ## 2026-06-10 — effort 既定はハードコードせず Auto（非 export）で Claude Code に委譲する
 
