@@ -271,32 +271,57 @@ body {
   background: transparent;
 }
 
-.hint {
+/* SPEC-3038 AS-4.5 — empty-canvas call to action. Centered over the canvas,
+   pointer-events scoped to the card so canvas pan/zoom keep working around
+   it. */
+.canvas-empty-state {
   position: absolute;
-  left: 18px;
-  top: 16px;
+  inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  gap: var(--space-2);
+  text-align: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.canvas-empty-state[hidden] {
+  display: none;
+}
+
+.canvas-empty-state__kicker {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-state-active);
+}
+
+.canvas-empty-state__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-2xl);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.canvas-empty-state__copy {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
   color: var(--color-text-muted);
 }
 
-.connection-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--color-state-idle);
-}
-
-.connection-dot.connected {
-  background: var(--color-state-active);
+.canvas-empty-state__actions {
+  display: flex;
+  gap: var(--space-3);
+  pointer-events: auto;
 }
 
 /* SPEC-2356 operator chrome cleanup: the right-bottom floating toolbar and its
@@ -310,9 +335,10 @@ body {
 
 .window-list-panel {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
+  left: calc(100% + 10px);
+  bottom: 0;
   width: 320px;
+  z-index: 40;
   max-height: 320px;
   overflow-y: auto;
   display: flex;
@@ -551,24 +577,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.add-button {
-  width: 46px;
-  height: 46px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: var(--color-button-bg);
-  color: var(--color-button-fg);
-  font-family: var(--font-display);
-  font-size: var(--type-2xl);
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: var(--shadow-2);
-}
-
-.add-button:hover {
-  background: var(--color-button-bg-hover);
 }
 
 /* SPEC-2356 — workspace window chrome.
@@ -912,6 +920,82 @@ body {
   cursor: grab;
 }
 
+/* SPEC-3038 US-2 — Telemetry tabs. The dot + label live inside the tab
+   button; the gap separates them without breaking the title ellipsis. */
+.window-tab .window-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-tab-state {
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+  background: transparent;
+}
+
+.window-tab-state[hidden] {
+  display: none;
+}
+
+/* The window-level [data-agent-state] rules paint a rim glow + pulse meant
+   for full windows; tabs neutralize that and express telemetry through an
+   agent-colored left rim + a small state dot instead. */
+.window-tab[data-agent-state] {
+  box-shadow: none;
+  animation: none;
+  border-left: 3px solid var(--current-agent, var(--color-border-strong));
+  padding-left: 6px;
+}
+
+.window-tab[data-agent-state="active"] .window-tab-state {
+  background: var(--color-state-active);
+  animation: window-tab-state-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+.window-tab[data-agent-state="idle"] .window-tab-state {
+  background: var(--color-state-idle);
+}
+
+.window-tab[data-agent-state="not_started"] .window-tab-state {
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+}
+
+/* AS-2.3: blocked stays loud even on an inactive tab — red dot pulse plus a
+   red-tinted tab border. */
+.window-tab[data-agent-state="blocked"] .window-tab-state {
+  background: var(--color-state-blocked);
+  animation: window-tab-state-pulse calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+}
+
+.window-tab[data-agent-state="blocked"] {
+  border-color: color-mix(in oklab, var(--color-state-blocked) 55%, var(--color-border));
+}
+
+.window-tab[data-agent-state="done"] .window-tab-state {
+  background: var(--color-state-done);
+  opacity: 0.65;
+}
+
+@keyframes window-tab-state-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-tab[data-agent-state="active"] .window-tab-state,
+  .window-tab[data-agent-state="blocked"] .window-tab-state {
+    animation: none;
+  }
+}
+
+/* AS-2.4: the close button only appears on hover / keyboard focus so a tab
+   click can never be one stray pixel away from killing the window. */
 .window-tab-close {
   width: 22px;
   height: 24px;
@@ -921,6 +1005,20 @@ body {
   background: var(--color-surface);
   color: var(--color-text-muted);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--motion-curve);
+}
+
+.window-tab-item:hover .window-tab-close,
+.window-tab-item:focus-within .window-tab-close,
+.window-tab-close:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .window-tab-close {
+    opacity: 1;
+  }
 }
 
 .window-tab.active {
@@ -1279,6 +1377,8 @@ body {
 
 .index-run-button {
   min-width: 88px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--color-state-active);
   border-radius: var(--radius-sm);
   background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface));
@@ -1307,7 +1407,8 @@ body {
 .index-search-input {
   width: 100%;
   min-width: 0;
-  padding: 7px 10px;
+  height: 32px;
+  padding: 0 10px;
 }
 
 .index-worktree-select {
@@ -1433,7 +1534,8 @@ body {
 }
 
 .index-result-row.is-suggestion {
-  background: color-mix(in oklab, var(--color-surface-elevated) 72%, var(--color-surface));
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 .index-result-scope {
@@ -2466,9 +2568,12 @@ body {
   border: none;
   border-radius: var(--radius-md);
   background: transparent;
-  font-family: var(--font-mono);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
@@ -2567,15 +2672,19 @@ body {
   box-shadow: var(--shadow-1);
 }
 
+.board-message:hover {
+  border-color: var(--color-border-strong);
+}
+
 .board-message.user {
   align-self: flex-end;
-  border-bottom-right-radius: 5px;
+  border-bottom-right-radius: var(--radius-sm);
   background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
 }
 
 .board-message.agent {
   align-self: flex-start;
-  border-bottom-left-radius: 5px;
+  border-bottom-left-radius: var(--radius-sm);
 }
 
 .board-message.system {
@@ -2631,9 +2740,9 @@ body {
   align-items: center;
   min-height: 18px;
   padding: 2px 6px;
-  border: 1px solid color-mix(in oklab, var(--color-state-warning) 52%, var(--color-border));
+  border: 1px solid color-mix(in oklab, var(--agent-claude) 52%, var(--color-border));
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--color-state-warning) 12%, var(--color-surface));
+  background: color-mix(in oklab, var(--agent-claude) 12%, var(--color-surface));
   color: var(--color-text);
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
@@ -2704,9 +2813,9 @@ body {
 }
 
 .board-origin-button {
-  border-color: color-mix(in oklab, var(--color-state-warning) 48%, var(--color-border));
+  border-color: color-mix(in oklab, var(--agent-claude) 48%, var(--color-border));
   color: var(--color-text);
-  background: color-mix(in oklab, var(--color-state-warning) 10%, var(--color-surface));
+  background: color-mix(in oklab, var(--agent-claude) 10%, var(--color-surface));
 }
 
 .board-reply-button:hover,
@@ -2749,7 +2858,7 @@ body {
 
 .board-title-input {
   width: 100%;
-  padding: 9px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-strong);
   font: inherit;
@@ -2769,7 +2878,7 @@ body {
   min-height: 76px;
   width: 100%;
   resize: none;
-  padding: 11px 12px;
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-strong);
   font: inherit;
@@ -3078,7 +3187,7 @@ body {
 }
 
 .file-tree-row:hover {
-  background: color-mix(in oklab, var(--color-state-active) 10%, transparent);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
 }
 
 .file-tree-row.selected {
@@ -4473,6 +4582,11 @@ body {
 .start-method-button:hover:not(:disabled) {
   border-color: var(--color-border-strong);
   background: var(--color-surface-elevated);
+}
+
+.start-method-button.selected {
+  border-color: var(--color-focus-ring);
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
 }
 
 .start-method-button:disabled {
