@@ -6878,3 +6878,10 @@ Type: lesson
 Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
 Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
 Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
+
+## 2026-06-12 — gwtd register の placeholder --spec 0 は phase で実 ID に rebind できない
+
+Type: lesson
+Context: gwt-register-spec skill の手順は『register start --spec 0 → issue 作成後 register phase --spec <n> --label create で実 ID を bind』と記載しているが、gwtd register phase は state の owner_spec(0) と不一致の --spec を 'phase refused' で拒否する (SPEC-2784)
+Learning: skill doc と CLI 実装が乖離しており、placeholder からの rebind 経路は存在しない。register abort --spec 0 → register start --spec <実ID> で張り直すのが現状の正しい手順。また production GWT.app の gwtd (v9.55.0) は memory add を legacy の tasks/memory.md に書くため、canonical な .gwt/work/memory.md へ届いているかを確認する
+Future Action: gwt-register-spec を使う際は issue 番号確定後に abort+start で lifecycle を実 ID に張り直す。恒久対応するなら skill doc 修正か CLI の rebind 許可のどちらかに寄せる Issue を立てる
