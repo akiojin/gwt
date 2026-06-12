@@ -224,11 +224,33 @@ mod tests {
         // be invocable with the standard `TestEnv` even though Phase 6
         // does not exercise any env capabilities. Catches signature
         // drift between the public CLI dispatcher and `open::run`.
+        //
+        // Scoped HOME (#3022): with the developer's real home this test used
+        // to read the production tray lock and launch the OS browser at the
+        // running gwt URL on every `cargo test`. An isolated home has no
+        // lock, so the run deterministically exits 1 without spawning
+        // anything.
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let previous_home = std::env::var_os("HOME");
+        let previous_profile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("USERPROFILE", tmp.path());
+
         let mut env = TestEnv::new(std::path::PathBuf::from("cache-root"));
         let mut out = String::new();
         let exit = run(&mut env, OpenArgs, &mut out).unwrap();
-        // The default gwt_home may or may not have a lock; just assert
-        // the code path returned a documented exit code without panic.
-        assert!(exit == 0 || exit == 1, "unexpected exit code {exit}");
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_profile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        assert_eq!(exit, 1, "isolated home has no tray lock");
     }
 }

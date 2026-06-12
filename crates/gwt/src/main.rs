@@ -46,8 +46,10 @@ mod launch_runtime;
 mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_support;
+mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+mod workspace_session_registry;
 
 #[cfg(test)]
 pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -916,6 +918,13 @@ enum UserEvent {
     },
     BoardProjectionChanged {
         project_root: PathBuf,
+    },
+    /// SPEC-2359 W-15 (FR-386): result of the background merged-branch scan.
+    /// The runtime caches the set and rebroadcasts the Workspace projection
+    /// so rows can show the "safe to delete" badge.
+    WorkMergeStatus {
+        project_root: PathBuf,
+        merged_branches: std::collections::HashSet<String>,
     },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -2150,6 +2159,13 @@ mod tests {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            work_merged_branches: HashMap::new(),
+            session_ledger_cache: std::cell::RefCell::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            ),
+            work_items_cache: std::cell::RefCell::new(
+                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+            ),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -3247,7 +3263,14 @@ mod tests {
             WindowProcessStatus::Exited,
             Some("Process exited".to_string()),
         );
-        assert_eq!(close_events.len(), 1);
+        // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item,
+        // so the structural close now also broadcasts the work projection
+        // (the surface must update without a saved current.json).
+        assert_eq!(close_events.len(), 2);
+        assert!(matches!(
+            close_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
         assert!(!runtime.window_lookup.contains_key(&claude_two_id));
 
@@ -6649,6 +6672,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches,
+            }) => {
+                let events = app.apply_work_merge_status(&project_root, merged_branches);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
