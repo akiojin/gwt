@@ -9456,25 +9456,44 @@ impl AppRuntime {
                     .and_then(|details| details.pr_state.clone()),
             }
         });
-        if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
-            project_root,
-            &work_id,
-            title.as_deref(),
-            summary.as_deref(),
-            owner.as_deref(),
-            &board_refs,
-            execution_container,
-            Some(session_id),
-            chrono::Utc::now(),
-        ) {
-            tracing::warn!(
-                error = %error,
-                project_root = %project_root.display(),
-                session_id = %session.session_id,
-                work_id = %work_id,
-                "failed to persist Paused Work for stopped Agent session"
-            );
-        }
+        // Close-latency root fix (2026-06-12): the record loads + saves the
+        // home works.json (megabytes once a project has hundreds of Works).
+        // Doing that synchronously on the UI event loop made every agent
+        // window × stall for seconds (sampled: serde to_vec_pretty dominating
+        // the close handler). Inputs are gathered synchronously above from
+        // the in-memory projection; the file IO runs on a background thread
+        // and the workspace projection watcher broadcasts the refreshed rows
+        // once the write lands.
+        let project_root = project_root.to_path_buf();
+        let session_id = session_id.to_string();
+        let log_session_id = session.session_id.clone();
+        let record = thread::spawn(move || {
+            if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
+                &project_root,
+                &work_id,
+                title.as_deref(),
+                summary.as_deref(),
+                owner.as_deref(),
+                &board_refs,
+                execution_container,
+                Some(&session_id),
+                chrono::Utc::now(),
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    project_root = %project_root.display(),
+                    session_id = %log_session_id,
+                    work_id = %work_id,
+                    "failed to persist Paused Work for stopped Agent session"
+                );
+            }
+        });
+        // Unit tests assert the projection immediately after a stop, so the
+        // write is joined for determinism there; production detaches it.
+        #[cfg(test)]
+        let _ = record.join();
+        #[cfg(not(test))]
+        drop(record);
     }
 
     pub(crate) fn clear_agent_window_startup_restore(&self, window_id: &str) {

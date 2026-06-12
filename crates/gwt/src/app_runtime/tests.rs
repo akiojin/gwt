@@ -14459,3 +14459,75 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
         other => panic!("expected started ack, got {other:?}"),
     }
 }
+
+/// Close-latency root fix (2026-06-12): stopping an agent window records the
+/// Paused Work marker (FR-350) on a background thread — the works.json
+/// load+save must not run on the UI event loop (it reaches megabytes and the
+/// synchronous write made × clicks stall for seconds). The record itself must
+/// still land; the test polls for it.
+#[test]
+fn stop_window_runtime_records_paused_work_off_the_event_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id: window_id.clone(),
+            session_id: "session-paused-offloop".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/paused-offloop".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.clone(),
+            agent_project_root: repo.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let started = Instant::now();
+    runtime.stop_window_runtime(&window_id);
+    let stop_call = started.elapsed();
+    // The stop call itself returns promptly (no synchronous multi-MB IO).
+    assert!(
+        stop_call < Duration::from_secs(2),
+        "stop_window_runtime blocked for {stop_call:?}"
+    );
+
+    // The Paused Work record still lands (background write).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut recorded = false;
+    while Instant::now() < deadline {
+        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+            .unwrap_or_else(
+                |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
+                    updated_at: chrono::Utc::now(),
+                    work_items: Vec::new(),
+                },
+            );
+        recorded = works.work_items.iter().any(|item| {
+            item.id == "work-session-session-paused-offloop"
+                && item.status_category
+                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+        });
+        if recorded {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(recorded, "Paused Work record must land in works.json");
+}
