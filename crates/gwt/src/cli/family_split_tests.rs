@@ -201,4 +201,13 @@ fn cli_command_family_split_round_trip_parses() {
     // the public CliCommand builder to keep the family contract pinned.
     let cmd = CliCommand::Update(UpdateCommand::CheckOnly);
     assert!(matches!(cmd, CliCommand::Update(UpdateCommand::CheckOnly)));
+
+    // SPEC-1942 US-15: `gwtd search --issues "<query>"` (flag-first agent
+    // shape) round-trips through the search family.
+    let cmd = search::parse_args(&[s("--issues"), s("workspace owner")]).expect("search parse");
+    let CliCommand::Search(search) = cmd else {
+        panic!("expected CliCommand::Search");
+    };
+    assert_eq!(search.query, "workspace owner");
+    assert!(!search.json);
 }

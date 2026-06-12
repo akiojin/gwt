@@ -19,12 +19,17 @@ pub struct ProjectIndexSearchOutcome {
     pub suggestions: Vec<IndexSearchResult>,
 }
 
+/// `auto_build`: `false` for GUI interactive search (the watcher owns index
+/// builds; never block on inline rebuilds), `true` for CLI / agent search
+/// (`gwtd search`, SPEC-1942 FR-107) where no watcher exists and the runner
+/// must self-heal missing or stale indexes inline.
 pub fn search_project_index(
     project_root: &Path,
     query: &str,
     scopes: &[IndexSearchScope],
     selected_worktree_hash: Option<&str>,
     match_mode: IndexSearchMatchMode,
+    auto_build: bool,
 ) -> Result<ProjectIndexSearchOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
@@ -60,16 +65,27 @@ pub fn search_project_index(
     let mut results = Vec::new();
     let mut suggestions = Vec::new();
     let per_scope_limit = per_scope_limit(effective_scopes.len());
-    let mut file_jobs = Vec::new();
+    let mut scope_jobs = Vec::new();
     let mut repo_scopes = Vec::new();
     for scope in effective_scopes {
         if is_file_scope(scope) {
             let file_worktree = file_worktree
                 .as_ref()
                 .ok_or_else(|| "file search worktree was not resolved".to_string())?;
-            file_jobs.push(ScopeSearchJob {
+            scope_jobs.push(ScopeSearchJob {
                 search_root: file_worktree.path.clone(),
                 worktree_hash: Some(file_worktree.hash.clone()),
+                scope,
+            });
+        } else if auto_build {
+            // The runner's `search-multi` action hardcodes no_auto_build
+            // (interactive GUI contract). CLI search must self-heal missing
+            // or stale indexes (SPEC-1942 FR-107), so repo scopes go through
+            // the per-scope actions, which also surface the EMPTY_CORPUS
+            // diagnostic for agents (Issue #2979).
+            scope_jobs.push(ScopeSearchJob {
+                search_root: repo_search_root.clone(),
+                worktree_hash: None,
                 scope,
             });
         } else {
@@ -84,6 +100,7 @@ pub fn search_project_index(
             query,
             per_scope_limit,
             match_mode,
+            auto_build,
         )?;
         for scope in repo_scopes {
             append_scope_results(&mut results, scope, &payload, &board_scope);
@@ -91,12 +108,23 @@ pub fn search_project_index(
         }
     }
     for outcome in run_scope_search_jobs(
-        file_jobs,
+        scope_jobs,
         repo_hash.as_str(),
         query,
         per_scope_limit,
         match_mode,
-        run_scope_search,
+        |root, hash, worktree, scope, job_query, job_limit, job_match_mode| {
+            run_scope_search(
+                root,
+                hash,
+                worktree,
+                scope,
+                job_query,
+                job_limit,
+                job_match_mode,
+                auto_build,
+            )
+        },
     )? {
         append_scope_results(&mut results, outcome.scope, &outcome.payload, &board_scope);
         append_scope_suggestions(
@@ -277,6 +305,7 @@ fn resolve_file_search_worktree(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scope_search(
     project_root: &Path,
     repo_hash: &str,
@@ -285,6 +314,7 @@ fn run_scope_search(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
+    auto_build: bool,
 ) -> Result<Value, String> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
@@ -296,6 +326,7 @@ fn run_scope_search(
                 query,
                 limit,
                 match_mode,
+                auto_build,
             ))
             .current_dir(project_root)
             .output()
@@ -310,6 +341,7 @@ fn run_scope_search(
     Ok(payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_repo_scope_search(
     project_root: &Path,
     repo_hash: &str,
@@ -317,6 +349,7 @@ fn run_repo_scope_search(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
+    auto_build: bool,
 ) -> Result<Value, String> {
     let output =
         gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
@@ -327,6 +360,7 @@ fn run_repo_scope_search(
                 query,
                 limit,
                 match_mode,
+                auto_build,
             ))
             .current_dir(project_root)
             .output()
@@ -341,6 +375,7 @@ fn run_repo_scope_search(
     Ok(payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scope_search_command_args(
     project_root: &Path,
     repo_hash: &str,
@@ -349,6 +384,7 @@ fn scope_search_command_args(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
+    auto_build: bool,
 ) -> Vec<OsString> {
     let mut args = vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
@@ -364,8 +400,10 @@ fn scope_search_command_args(
         OsString::from(limit.to_string()),
         OsString::from("--match-mode"),
         OsString::from(match_mode.as_str()),
-        OsString::from("--no-auto-build"),
     ];
+    if !auto_build {
+        args.push(OsString::from("--no-auto-build"));
+    }
     if let Some(hash) = worktree_hash {
         args.push(OsString::from("--worktree-hash"));
         args.push(OsString::from(hash));
@@ -380,8 +418,9 @@ fn repo_scope_search_command_args(
     query: &str,
     limit: usize,
     match_mode: IndexSearchMatchMode,
+    auto_build: bool,
 ) -> Vec<OsString> {
-    vec![
+    let mut args = vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
         OsString::from("--action"),
         OsString::from("search-multi"),
@@ -403,8 +442,11 @@ fn repo_scope_search_command_args(
                 .collect::<Vec<_>>()
                 .join(","),
         ),
-        OsString::from("--no-auto-build"),
-    ]
+    ];
+    if !auto_build {
+        args.push(OsString::from("--no-auto-build"));
+    }
+    args
 }
 
 fn search_action(scope: IndexSearchScope) -> &'static str {
@@ -787,6 +829,7 @@ mod tests {
             &[],
             None,
             IndexSearchMatchMode::Semantic,
+            false,
         )
         .expect("empty query should short-circuit");
 
@@ -1077,6 +1120,7 @@ mod tests {
             "Git",
             50,
             crate::protocol::IndexSearchMatchMode::AllTerms,
+            false,
         );
 
         assert!(
@@ -1087,6 +1131,27 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair[0] == "--match-mode" && pair[1] == "all_terms"),
             "runner args should carry the requested match mode"
+        );
+    }
+
+    #[test]
+    fn scope_search_command_args_enable_auto_build_for_cli_search() {
+        // SPEC-1942 FR-107: `gwtd search` has no watcher, so the runner must
+        // self-heal missing or stale (source_cache_changed) indexes inline.
+        let args = scope_search_command_args(
+            Path::new("/repo"),
+            "repo-hash",
+            None,
+            IndexSearchScope::Issues,
+            "Git",
+            50,
+            crate::protocol::IndexSearchMatchMode::Semantic,
+            true,
+        );
+
+        assert!(
+            !args.iter().any(|arg| arg == "--no-auto-build"),
+            "CLI search must allow the runner auto-build fallback"
         );
     }
 
@@ -1105,6 +1170,7 @@ mod tests {
             "Git",
             12,
             crate::protocol::IndexSearchMatchMode::AllTerms,
+            false,
         );
 
         assert!(args.iter().any(|arg| arg == "search-multi"));
@@ -1120,6 +1186,19 @@ mod tests {
                 .any(|pair| pair[0] == "--match-mode" && pair[1] == "all_terms"),
             "repo-scoped searches should forward match mode to search-multi"
         );
+
+        // SPEC-1942 FR-107: the CLI variant drops --no-auto-build so the
+        // runner can rebuild stale repo-scope indexes inline.
+        let cli_args = repo_scope_search_command_args(
+            Path::new("/repo"),
+            "repo-hash",
+            &[IndexSearchScope::Issues],
+            "Git",
+            12,
+            crate::protocol::IndexSearchMatchMode::Semantic,
+            true,
+        );
+        assert!(!cli_args.iter().any(|arg| arg == "--no-auto-build"));
     }
 
     #[test]

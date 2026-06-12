@@ -124,6 +124,9 @@ skills, never PATH executables. Do not resolve them with `command -v`
 or `Get-Command`, and do not treat an empty PATH lookup as a missing
 command. Invoke them through the runtime's skill mechanism, or follow
 the executable commands written inside the skill's own SKILL.md.
+Semantic search runs through the `search` subcommand of the resolved
+gwtd binary (for example `gwtd search --issues "query" --json`); there
+is no standalone `gwt-search` executable.
 
 ## Persisted Work files
 
@@ -247,7 +250,10 @@ branch / worktree の手動作成、切替、削除は禁止です:
 PATH 上の実行ファイルではありません。`command -v` や `Get-Command` で
 解決を試みず、PATH に見つからないことを「コマンド欠落」と扱わないで
 ください。runtime の skill 機構で呼び出すか、skill 自身の SKILL.md に
-書かれた実行コマンドに従います。
+書かれた実行コマンドに従います。セマンティック検索は解決済み gwtd
+binary の `search` subcommand で実行します（例:
+`gwtd search --issues "query" --json`）。`gwt-search` という単体の
+実行ファイルは存在しません。
 
 ## Persisted Work files
 
@@ -361,6 +367,7 @@ mod tests {
             "AGENTS.md or CLAUDE.md",
             "skills, never PATH executables",
             "Get-Command",
+            "gwtd search --issues \"query\" --json",
             "PR check in progress",
             "verifying tests",
             "fixing bug",

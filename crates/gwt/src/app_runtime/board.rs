@@ -4,16 +4,15 @@
 //! Owns:
 //! - [`BoardPostRequest`] payload coming from the frontend
 //! - [`AppRuntime::post_board_entry_events`] impl extension (validates the
-//!   target window, sanitizes lists, and persists the entry through
+//!   target window, resolves audience, and persists the entry through
 //!   `gwt_core::coordination::post_entry`)
-//! - [`sanitize_board_list`] helper that trims and de-duplicates string
-//!   payloads
 //!
-//! SPEC-1974 Phase 9 / Phase 10 contracts (`target_owners`, `>>` marker,
-//! reminder coordination axes) flow through here unchanged — the handler
-//! still uses `BoardEntry::with_target_owners` from `gwt-core` and emits
-//! the same `BackendEvent::BoardEntries` / `BackendEvent::BoardError`
-//! responses.
+//! SPEC-3046: entry shape rules (body validation, list sanitization, origin
+//! trimming) live in `gwt_core::coordination::BoardEntryDraft::finalize`,
+//! shared with the CLI posting surface. SPEC-1974 Phase 9 / Phase 10
+//! contracts (`target_owners`, `>>` marker, reminder coordination axes)
+//! flow through here unchanged — the handler emits the same
+//! `BackendEvent::BoardEntries` / `BackendEvent::BoardError` responses.
 
 use std::path::Path;
 
@@ -111,28 +110,57 @@ impl AppRuntime {
             )];
         }
 
-        let trimmed_body = body.trim();
-        if trimmed_body.is_empty() {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Board entry body is required".to_string(),
-                },
-            )];
-        }
-
-        let parent_id = parent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let topics = sanitize_board_list(&topics);
-        let owners = sanitize_board_list(&owners);
-        let targets = sanitize_board_list(&targets);
         let mentions = coordination::normalize_board_mentions(&mentions);
+        let audience = match post_audience_for_gui(
+            &tab.project_root,
+            &mentions,
+            target_workspace.as_deref(),
+            broadcast,
+        ) {
+            Ok(audience) => audience,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardError {
+                        id,
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
 
-        if let Some(parent_id) = parent_id.as_deref() {
+        // SPEC-3046: エントリの形を決める正規化・検証は
+        // BoardEntryDraft::finalize に集約されている。GUI 側は author
+        // (User/"You") / audience 解決 / parent 存在検証 (IO) だけを担う。
+        let mut draft = coordination::BoardEntryDraft::new(
+            coordination::AuthorKind::User,
+            "You",
+            entry_kind,
+            body,
+        );
+        draft.title = title;
+        draft.parent_id = parent_id;
+        draft.related_topics = topics;
+        draft.related_owners = owners;
+        draft.target_owners = targets;
+        draft.mentions = mentions;
+        if let Some(audience) = audience {
+            draft.audience = audience;
+        }
+        let entry = match draft.finalize() {
+            Ok(entry) => entry,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardError {
+                        id,
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+
+        if let Some(parent_id) = entry.parent_id.as_deref() {
             let parent_exists =
                 match gwt::board_provider::board_entry_exists(&tab.project_root, parent_id) {
                     Ok(parent_exists) => parent_exists,
@@ -157,45 +185,6 @@ impl AppRuntime {
             }
         }
 
-        let mut entry = coordination::BoardEntry::new(
-            coordination::AuthorKind::User,
-            "You",
-            entry_kind,
-            trimmed_body,
-            None,
-            parent_id,
-            topics,
-            owners,
-        );
-        if let Some(title) = title {
-            entry = entry.with_title(title);
-        }
-        if !targets.is_empty() {
-            entry = entry.with_target_owners(targets);
-        }
-        if !mentions.is_empty() {
-            entry = entry.with_mentions(mentions);
-        }
-        let audience = match post_audience_for_gui(
-            &tab.project_root,
-            &entry.mentions,
-            target_workspace.as_deref(),
-            broadcast,
-        ) {
-            Ok(audience) => audience,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-        if let Some(audience) = audience {
-            entry = entry.with_audience(audience);
-        }
         match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
@@ -491,18 +480,6 @@ fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
 fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
     // Daemon publishing is gated on Unix; the local file watcher
     // continues to drive single-instance updates on other platforms.
-}
-
-fn sanitize_board_list(values: &[String]) -> Vec<String> {
-    let mut sanitized = Vec::new();
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || sanitized.iter().any(|item| item == trimmed) {
-            continue;
-        }
-        sanitized.push(trimmed.to_string());
-    }
-    sanitized
 }
 
 /// Populate the serialize-only `body_html` display field on each entry from its

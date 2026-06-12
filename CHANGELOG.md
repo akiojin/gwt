@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.57.0] - 2026-06-12
+
+### Bug Fixes
+
+- **board:** CLI 投稿の検証と整形を GUI と統一する（空 body 拒否・リスト整形・origin 規則）
+
+### Documentation
+
+- README のチローム説明を Command Rail / Close Guard 仕様へ更新
+
+### Features
+
+- **gui:** サイドバーを常時表示の Command Rail へ刷新 (SPEC-3038 US-1)
+- **gui:** ウィンドウタブにエージェント実行状態とエージェント色を表示 (SPEC-3038 US-2)
+- **gui:** ウィンドウ close を常時確認モーダルで保護 (SPEC-3038 US-3)
+- **gui:** チローム細部刷新 — 常時ヒントバー撤去・WORKラベル・empty state (SPEC-3038 US-4)
+- **gui:** モーダル・ウィザードのボタン階層を ghost/primary/destructive へ統一 (SPEC-3038 US-5)
+- **gui:** 全サーフェスへ共通ビジュアル語彙を適用 (SPEC-3038 US-6)
+
+### Miscellaneous Tasks
+
+- Record workspace event log
+- Stash 空振り→他 stash pop 事故の再発防止策を memory に記録
+- **gwt:** Work events / memory 追記分をコミット
+
+### Refactor
+
+- **coordination:** BoardEntryDraft を導入し GUI 投稿経路の整形規則をドメインへ移す
+
+### Testing
+
+- **gui:** Live spec のウィンドウ close を Close Guard 確認モーダル経由へ更新 (SPEC-3038 T-305)
+
+### Merge
+
+- Origin/develop を統合し UI 設計衝突を解決 (SPEC-3038 × PR #3045)
+- Origin/develop (v9.56.0) を再統合
+
 ## [9.56.0] - 2026-06-12
 
 ### Bug Fixes
