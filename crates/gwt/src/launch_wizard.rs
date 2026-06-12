@@ -2422,6 +2422,7 @@ impl LaunchWizardState {
             .any(|option| option.value == version)
         {
             self.version = version.to_string();
+            self.sync_reasoning_state();
         } else {
             self.error = Some("Version option is unavailable".to_string());
         }
@@ -8667,6 +8668,33 @@ mod tests {
         assert!(!values.contains(&"ultracode"));
         assert!(values.contains(&"xhigh"));
         assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn changing_claude_version_downgrades_stale_ultracode_selection() {
+        let agent_options = vec![AgentOption {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            available: true,
+            installed_version: Some("2.1.156 (Claude Code)".to_string()),
+            versions: vec!["2.1.153".to_string()],
+            custom_agent: None,
+        }];
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.ultracode_supported = true;
+        ctx.claude_workflows_enabled = true;
+        let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
+        state.agent_id = "claude".to_string();
+        state.model = "fable".to_string();
+        state.version = "latest".to_string();
+        state.reasoning = "ultracode".to_string();
+
+        state.apply(LaunchWizardAction::SetVersion {
+            version: "2.1.153".to_string(),
+        });
+
+        assert_eq!(state.reasoning, "auto");
+        assert_eq!(state.reasoning_level_for_launch(), Some("auto"));
     }
 
     #[test]
