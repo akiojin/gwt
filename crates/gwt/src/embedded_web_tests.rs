@@ -2834,9 +2834,9 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let profile_event_delegate = regex::Regex::new(
-            r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
-        )
-        .expect("valid regex");
+        r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
+    )
+    .expect("valid regex");
     // Issue #2698 PR 1 (B7) — wizard_state / wizard_open_error
     // defer through `wizardInteractionGuard.defer(...)` before
     // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
