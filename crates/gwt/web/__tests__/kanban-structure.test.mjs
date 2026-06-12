@@ -13,7 +13,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E6d): the Kanban renderers moved from app.js into
+// knowledge-kanban-surface.js; source-pattern asserts scan both files so
+// shared helpers kept in app.js (clamp, createKnowledgeMarkdownBody) and
+// the moved renderers stay covered.
+const appSource = [
+  readFileSync(resolve(here, "../app.js"), "utf8"),
+  readFileSync(resolve(here, "../knowledge-kanban-surface.js"), "utf8"),
+].join("\n");
 const componentsCss = readFileSync(
   resolve(here, "../styles/components.css"),
   "utf8",
@@ -342,7 +349,13 @@ test("Knowledge lifecycle parsing is exact and nullable-safe", () => {
 
 test("Kanban drawer uses the same display labels as the detail pane", () => {
   const drawerStart = appSource.indexOf("function renderKanbanDrawerBody()");
-  const drawerEnd = appSource.indexOf("function clamp(value, min)", drawerStart);
+  // SPEC-3064 Phase 3 (E6d): the drawer renderer lives at the top of the
+  // extracted knowledge surface, right before ensureKnowledgeBridgeState;
+  // clamp stays behind in app.js.
+  const drawerEnd = appSource.indexOf(
+    "function ensureKnowledgeBridgeState(",
+    drawerStart,
+  );
   assert.ok(drawerStart >= 0, "expected renderKanbanDrawerBody");
   assert.ok(drawerEnd > drawerStart, "expected drawer body boundary");
   const drawerBody = appSource.slice(drawerStart, drawerEnd);

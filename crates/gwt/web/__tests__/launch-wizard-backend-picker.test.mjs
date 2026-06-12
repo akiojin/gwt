@@ -18,6 +18,9 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E4): the Settings open path moved to the extracted
+// settings surface module; the dispatcher case bodies stay in app.js.
+const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
 
 test("frontend sends list_agent_backends on Settings open so the wizard can preselect a backend", () => {
   // The wizard's future Backend picker step reads the same
@@ -26,7 +29,7 @@ test("frontend sends list_agent_backends on Settings open so the wizard can pres
   // Start relaunch never has to spawn a fresh network round-trip just to
   // know which backend the saved session referenced.
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"list_agent_backends",\s*agent\s*\}\)/,
     "frontend must request list_agent_backends on Settings open",
   );
@@ -46,7 +49,7 @@ test("agentBackendsState provides loadingAgent tracking for the wizard picker st
   // The picker step disables the Next button while loadingAgent matches
   // the selected built-in. This field is the source of that signal.
   assert.match(
-    appSource,
+    settingsSource,
     /loadingAgent:\s*null/,
     "agentBackendsState must declare a loadingAgent field for picker loading state",
   );

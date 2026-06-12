@@ -11,6 +11,44 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E5): the Launch Wizard surface (state, interaction
+// guard, builders, renderLaunchWizard, chrome listeners) moved from app.js
+// to launch-wizard-surface.js; wizard render/source patterns are pinned
+// against the extracted module while app.js keeps thin delegates.
+const launchWizardSource = readFileSync(
+  resolve(here, "../launch-wizard-surface.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E6a): the File Tree window surface moved from app.js
+// to file-tree-surface.js.
+const fileTreeSurfaceSource = readFileSync(
+  resolve(here, "../file-tree-surface.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved from
+// app.js to branches-cleanup-surface.js.
+const branchesCleanupSource = readFileSync(
+  resolve(here, "../branches-cleanup-surface.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E6c): the Board & Logs window surface moved from
+// app.js to board-logs-surface.js.
+const boardLogsSurfaceSource = readFileSync(
+  resolve(here, "../board-logs-surface.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window surface
+// moved from app.js to knowledge-kanban-surface.js.
+const knowledgeKanbanSurfaceSource = readFileSync(
+  resolve(here, "../knowledge-kanban-surface.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E6e): the Profile window surface moved from app.js
+// to profile-window-surface.js.
+const profileWindowSurfaceSource = readFileSync(
+  resolve(here, "../profile-window-surface.js"),
+  "utf8",
+);
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
@@ -561,13 +599,15 @@ test("Board deep-linking survives the Active Works sidebar retirement (SPEC-2359
   // The sidebar Active Works command-center is removed; Board deep-linking and
   // the addressable Board timeline entries it relied on remain so the Work
   // surface and Board can still cross-reference coordination entries.
+  // SPEC-3064 Phase 3 (E6c): the Board renderers moved into the board &
+  // logs surface module.
   assert.match(
-    appSource,
+    boardLogsSurfaceSource,
     /function\s+focusBoardEntry\(/,
     "expected Board actions to deep-link to the referenced coordination entry",
   );
   assert.match(
-    appSource,
+    boardLogsSurfaceSource,
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
   );
@@ -615,12 +655,12 @@ test("Active Work sidebar title + visibility helpers are retired (SPEC-2359 W-12
 
 test("Launch Wizard focus start method renders backend-provided running session detail", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /for\s*\(\s*const method of launchWizard\.start_methods \|\| \[\]\s*\)/,
     "expected Launch Wizard to render backend-provided start methods",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /const detail = method\.enabled === false[\s\S]*?method\.disabled_reason[\s\S]*?: method\.detail;[\s\S]*?createNode\("div", "start-method-detail", detail\)/,
     "expected running-session Focus details to come from the backend start method payload",
   );
@@ -752,34 +792,36 @@ test("Work surface renders PR metadata as links via the shared renderer (SPEC-23
   );
   assert.match(
     appSource,
-    /pr_url[\s\S]+href[\s\S]+PR #/,
+    /PR #\$\{projection\.pr_number\}[\s\S]{0,200}?projection\.pr_url[\s\S]{0,160}?link\.href = projection\.pr_url/,
     "expected PR metadata to use the backend-provided URL for the link target",
   );
   assert.match(
     appSource,
-    /pr_state[\s\S]+appendMeta/,
+    /appendMeta\(item,\s*projection\.pr_state\)/,
     "expected PR state to be displayed next to the PR link",
   );
 });
 
 test("Workspace Overview exposes user-confirmed cleanup for completed workspaces", () => {
+  // SPEC-3064 Phase 3 (E6b): the cleanup entry moved into the branches
+  // cleanup surface module.
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /cleanup_candidate/,
     "expected active work projection cleanup_candidate to drive Workspace cleanup",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /function\s+openWorkspaceCleanup\(/,
     "expected Workspace Overview to open a cleanup confirmation instead of deleting automatically",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /default_delete_remote[\s\S]+deleteRemote\s*:\s*false|deleteRemote\s*:\s*false[\s\S]+default_delete_remote/,
     "expected Workspace cleanup to default remote deletion off",
   );
   assert.match(
-    `${appSource}\n${branchCleanupSource}`,
+    `${branchesCleanupSource}\n${branchCleanupSource}`,
     /Also delete matching remote branches/,
     "expected remote deletion to remain an explicit opt-in in the confirmation UI",
   );
@@ -814,8 +856,10 @@ test("Branches preset is removed — branch browsing is part of the Work surface
 });
 
 test("Branches loading state becomes recoverable when the WebSocket disconnects", () => {
+  // SPEC-3064 Phase 3 (E6b): the helper moved into the branches cleanup
+  // surface; app.js setConnectionState keeps the call sites.
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /function\s+failLoadingBranchesOnConnectionLoss\(windowId,\s*state\)/,
     "expected a dedicated Branches loading connection-loss helper",
   );
@@ -1808,24 +1852,26 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   // but couldn't pick branches or launch agents from the Branches
   // surface at all.
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /row\.tabIndex\s*=\s*0[\s\S]*row\.setAttribute\("role",\s*"button"\)[\s\S]*createBranchRow|createBranchRow[\s\S]*row\.tabIndex\s*=\s*0[\s\S]*row\.setAttribute\("role",\s*"button"\)/,
     "expected createBranchRow to set tabindex and role=button",
   );
   // The keydown handler must distinguish plain Enter/Space (select)
   // from modified Enter (activate / open wizard).
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /event\.metaKey\s*\|\|\s*event\.ctrlKey[\s\S]*activate\(\)/,
     "expected modified Enter to invoke activate (open launch wizard)",
   );
 });
 
 test("Branches separates row actions from cleanup toolbar action", () => {
-  const branchesBlock = appSource
-    .split('if (surface === "branches")')
+  // SPEC-3064 Phase 3 (E6b): the Branches mount + row renderers moved into
+  // the branches cleanup surface (mountBranchesWindow / createBranchRow).
+  const branchesBlock = branchesCleanupSource
+    .split("function mountBranchesWindow(")
     .at(1)
-    ?.split('if (surface === "profile")')
+    ?.split("function clearBranchCleanupForWindow(")
     .at(0);
 
   assert.ok(branchesBlock, "expected Branches surface render block");
@@ -1846,34 +1892,34 @@ test("Branches separates row actions from cleanup toolbar action", () => {
     "Resume and Launch must not remain toolbar-level selected-branch actions",
   );
 
-  assert.match(appSource, /branch-row-actions/, "branch rows must render action buttons");
+  assert.match(branchesCleanupSource, /branch-row-actions/, "branch rows must render action buttons");
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /setAttribute\("data-branch-row-action",\s*"resume"\)/,
     "branch rows must expose a row-level Resume action",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /setAttribute\("data-branch-row-action",\s*"launch"\)/,
     "branch rows must expose a row-level Launch action",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /entry\.resume\.available[\s\S]{0,500}?resumeButton\.disabled/,
     "Resume row action must be disabled when the branch is not resumable",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /branchName[\s\S]{0,260}?kind:\s*"resume_branch_latest_agent"|kind:\s*"resume_branch_latest_agent"[\s\S]{0,260}?branchName/,
     "row Resume action must send its own branch name",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /branchName[\s\S]{0,220}?kind:\s*"open_launch_wizard"|kind:\s*"open_launch_wizard"[\s\S]{0,220}?branchName/,
     "row Launch action must send its own branch name",
   );
   assert.match(
-    appSource,
+    branchesCleanupSource,
     /row\.addEventListener\("dblclick",\s*activate\)/,
     "branch row double-click remains a Launch Agent shortcut",
   );
@@ -1929,41 +1975,45 @@ test("Keyboard-navigable rows have :focus-visible outlines", () => {
 
 test("Launch wizard open errors render in wizard modal and close locally", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /let\s+launchWizardOpenError\s*=\s*null/,
     "expected frontend to track launch wizard open errors separately from project_open_error",
   );
-  // Issue #2698 PR 1 (B7) — the case body now defers via
+  // Issue #2698 PR 1 (B7) — the applier defers via
   // `wizardInteractionGuard.defer(...)` before mutating the error
-  // state, so the regex window between the case label and the
-  // assignment must permit the guard preamble. The intent is
-  // unchanged: this case populates `launchWizardOpenError`.
+  // state. SPEC-3064 Phase 3 (E5): the app.js case arm delegates into
+  // the surface applier, which populates `launchWizardOpenError`.
   assert.match(
     appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,600}?launchWizardOpenError\s*=/,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;/,
+    "expected launch_wizard_open_error events to delegate into the wizard surface",
+  );
+  assert.match(
+    launchWizardSource,
+    /function\s+applyLaunchWizardOpenErrorEvent\(event\)[\s\S]{0,700}?launchWizardOpenError\s*=/,
     "expected launch_wizard_open_error events to populate wizard error state",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /function\s+closeLaunchWizardLocal\(\)[\s\S]{0,300}?launchWizardOpenError\s*=\s*null/,
     "expected a local close path for error-only wizard state",
   );
   assert.match(
-    appSource,
-    /wizardModal\.classList\.contains\("open"\)[\s\S]{0,500}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendAction\(\{\s*kind:\s*"cancel"/,
+    launchWizardSource,
+    /wizardModal\.classList\.contains\("open"\)[\s\S]{0,700}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc/close to locally dismiss error-only wizard state before sending backend cancel",
   );
 });
 
 test("Launch wizard tombstone does not dismiss open-error modal state", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(deferred\.kind\s*===\s*"launch_wizard_state"\)[\s\S]{0,500}?if\s*\(deferred\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*deferred\.wizard/,
     "expected deferred launch_wizard_state tombstones to preserve launchWizardOpenError",
   );
   assert.match(
-    appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,900}?if\s*\(event\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*event\.wizard/,
+    launchWizardSource,
+    /function\s+applyLaunchWizardStateEvent\(event\)[\s\S]{0,900}?if\s*\(event\.wizard\)\s*\{[\s\S]{0,160}?launchWizardOpenError\s*=\s*null[\s\S]{0,160}?\}[\s\S]{0,240}?launchWizard\s*=\s*event\.wizard/,
     "expected launch_wizard_state tombstones to clear stale wizard state without clearing launchWizardOpenError",
   );
 });
@@ -1979,12 +2029,13 @@ test("Launch wizard removes duplicate header close button", () => {
     "Launch wizard footer dismiss button must remain available",
   );
   assert.equal(
-    appSource.includes("wizardCloseButton"),
+    appSource.includes("wizardCloseButton") ||
+      launchWizardSource.includes("wizardCloseButton"),
     false,
     "Launch wizard should not keep dead wiring for a removed header close button",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\)/,
     "expected the footer dismiss button to own the close helper",
   );
@@ -2001,12 +2052,13 @@ test("Launch wizard uses one visible dismiss control in the footer", () => {
     "Launch wizard footer dismiss button must remain available",
   );
   assert.equal(
-    appSource.includes("wizardCloseButton"),
+    appSource.includes("wizardCloseButton") ||
+      launchWizardSource.includes("wizardCloseButton"),
     false,
     "Launch wizard should not keep dead wiring for a removed header close button",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardCancelButton\.addEventListener\("click",\s*closeLaunchWizardFromChrome\)/,
     "expected the footer dismiss button to own the close helper",
   );
@@ -2018,17 +2070,17 @@ test("Launch wizard renders a backend-gated Back control in the footer", () => {
     "Launch wizard footer must expose a Back button for returning to Start methods",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /const wizardBackButton = document\.getElementById\("wizard-back-button"\)/,
-    "expected app.js to bind the footer Back button",
+    "expected the wizard surface to bind the footer Back button",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardBackButton\.hidden\s*=\s*!launchWizard\.show_back_button/,
     "expected Back visibility to be controlled by backend view state",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
     "expected Back to dispatch the canonical backend action",
   );
@@ -2040,14 +2092,14 @@ test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => 
   // keydown handler that mirrors the click handler for Enter/Space.
   // Without all three, keyboard-only users couldn't browse the file
   // tree — only mouse users could.
-  assert.match(appSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
+  assert.match(fileTreeSurfaceSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
   assert.match(
-    appSource,
+    fileTreeSurfaceSource,
     /row\.setAttribute\("role",\s*"button"\)/,
     "expected file tree row role='button'",
   );
   assert.match(
-    appSource,
+    fileTreeSurfaceSource,
     /row\.addEventListener\("keydown",[\s\S]*event\.key === "Enter" \|\| event\.key === " "[\s\S]*activate\(\)/,
     "expected file tree row keydown handler invoking the click activate path on Enter/Space",
   );
@@ -2061,12 +2113,12 @@ test("File tree directory rows expose collapse state via aria-expanded", () => {
   // explicitly removeAttribute so a row that was a directory and
   // became a file (via state change) doesn't keep the marker.
   assert.match(
-    appSource,
+    fileTreeSurfaceSource,
     /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
     "expected directory rows to set aria-expanded based on expanded state",
   );
   assert.match(
-    appSource,
+    fileTreeSurfaceSource,
     /row\.removeAttribute\("aria-expanded"\)/,
     "expected non-directory rows to remove aria-expanded",
   );
@@ -2078,7 +2130,7 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   // can't announce which option is currently chosen — they just hear
   // a button list with no selection state.
   assert.match(
-    appSource,
+    launchWizardSource,
     /button\.setAttribute\("aria-pressed",\s*selected\s*\?\s*"true"\s*:\s*"false"\)/,
     "expected createChoiceButton to set aria-pressed based on selected",
   );
@@ -2086,25 +2138,25 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
 
 test("Launch wizard separates launch settings from runtime controls", () => {
   assert.equal(
-    appSource.includes("wizardAdvancedOpen"),
+    launchWizardSource.includes("wizardAdvancedOpen"),
     false,
     "Launch wizard should not keep an Advanced disclosure state",
   );
   for (const retiredCopy of ["Advanced", "Show advanced", "Hide advanced"]) {
     assert.equal(
-      appSource.includes(`"${retiredCopy}"`),
+      launchWizardSource.includes(`"${retiredCopy}"`),
       false,
       `Launch wizard should not render ${retiredCopy}`,
     );
   }
 
-  const launchSettingsStart = appSource.indexOf(
+  const launchSettingsStart = launchWizardSource.indexOf(
     'createLaunchSection(\n            "Launch settings"',
   );
-  const linkedIssueStart = appSource.indexOf(
+  const linkedIssueStart = launchWizardSource.indexOf(
     'createLaunchSection(\n            "Linked issue"',
   );
-  const runtimeStart = appSource.indexOf(
+  const runtimeStart = launchWizardSource.indexOf(
     'createLaunchSection(\n            "Runtime"',
   );
 
@@ -2116,7 +2168,7 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     "expected Launch settings before Linked issue and Runtime after Linked issue",
   );
 
-  const launchSettingsBlock = appSource.slice(
+  const launchSettingsBlock = launchWizardSource.slice(
     launchSettingsStart,
     linkedIssueStart,
   );
@@ -2132,9 +2184,9 @@ test("Launch wizard separates launch settings from runtime controls", () => {
     "Launch settings should not contain runtime target controls",
   );
 
-  const runtimeBlock = appSource.slice(
+  const runtimeBlock = launchWizardSource.slice(
     runtimeStart,
-    appSource.indexOf("wizardBody.appendChild(panel);"),
+    launchWizardSource.indexOf("wizardBody.appendChild(panel);"),
   );
   for (const copy of ["Runtime target", "Docker service", "Docker lifecycle"]) {
     assert.ok(
@@ -2153,42 +2205,42 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 
 test("Launch wizard runtime confirmation shows summary without setup forms", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /const showConfirm = Boolean\(launchWizard\.show_confirm\);[\s\S]*?const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);[\s\S]*?const showManualSetup =\s*launchWizard\.show_manual_setup !== false\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm;[\s\S]*?const showStartMethods = Boolean\(\s*launchWizard\.show_start_methods\s*&&\s*!isRuntimeConfirmation\s*&&\s*!showConfirm[\s\S]*?const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
     "expected renderer to derive mutually exclusive Runtime/Confirm/setup gating",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /const isRuntimeConfirmation = Boolean\(\s*launchWizard\.runtime_context_resolved\s*&&\s*launchWizard\.show_runtime_confirmation\s*&&\s*!showConfirm\s*\);/,
     "expected renderer to derive a dedicated Runtime confirmation state outside Confirm",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /const showSetupForms = showManualSetup && !isRuntimeConfirmation;/,
     "expected manual setup forms to be suppressed during Runtime confirmation",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /renderWizardSummary\(\);[\s\S]*?const isRuntimeConfirmation = Boolean/,
     "expected read-only launch summary to remain visible before Runtime-only body rendering",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(\s*showStartMethods\s*\)/,
     "expected Start methods rows to be gated by backend start-method state",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_branch_controls !== false\s*\)/,
     "expected Branch controls to be part of setup forms only",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(\s*showSetupForms\s*\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch"/,
     "expected Launch controls to be part of setup forms only",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(\s*showSetupForms\s*&&[\s\S]*?launchWizard\.show_fast_mode[\s\S]*?\)\s*\{[\s\S]*?createLaunchSection\(\s*"Launch settings"/,
     "expected Launch settings controls to be part of setup forms only",
   );
@@ -2196,12 +2248,12 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   // (appendToggleField) instead of a checkbox, but stays provider-neutral —
   // wired to launchWizard.fast_mode + set_fast_mode, not Codex-only state.
   assert.match(
-    appSource,
+    launchWizardSource,
     /appendToggleField\(\s*grid,\s*"Fast mode"[\s\S]*?launchWizard\.fast_mode[\s\S]*?kind:\s*"set_fast_mode"/,
     "expected Launch settings to wire provider-neutral Fast mode controls",
   );
   assert.doesNotMatch(
-    appSource,
+    launchWizardSource,
     /Codex fast mode/,
     "expected Launch settings copy to avoid Codex-only Fast mode wording",
   );
@@ -2209,7 +2261,7 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   // dedicated `show_linked_issue` flag so it only appears when the wizard
   // was opened through the Knowledge Issue Bridge.
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(\s*showSetupForms\s*&&\s*launchWizard\.show_linked_issue\s*\)/,
     "expected Linked issue controls to be gated by show_linked_issue and setup forms",
   );
@@ -2217,14 +2269,14 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
 
 test("Launch wizard submit button uses Continue before runtime context is resolved", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /launchWizard\.primary_action_label\s*\|\|[\s\S]{0,260}?launchWizard\.runtime_context_resolved === false\s*\?\s*"Continue"\s*:/,
     "expected unresolved Launch Agent runtime context to use Continue instead of Launch",
   );
 });
 
 test("Launch wizard keeps cancel available during runtime resolution", () => {
-  const closeHelper = appSource.match(
+  const closeHelper = launchWizardSource.match(
     /function closeLaunchWizardFromChrome\(\) \{([\s\S]*?)\n      \}/,
   );
   assert.ok(closeHelper, "expected launch wizard close helper");
@@ -2234,12 +2286,12 @@ test("Launch wizard keeps cancel available during runtime resolution", () => {
     "runtime resolution pending must not block the footer Cancel button",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardCancelButton\.disabled\s*=\s*false/,
     "Cancel button must stay enabled while runtime resolution is pending",
   );
-  const escapeHandler = appSource.match(
-    /if \(wizardModal\.classList\.contains\("open"\)\) \{([\s\S]*?)event\.preventDefault\(\);\n          return;/,
+  const escapeHandler = launchWizardSource.match(
+    /if \(wizardModal\.classList\.contains\("open"\)\) \{([\s\S]*?)event\.preventDefault\(\);\s*return true;/,
   );
   assert.ok(escapeHandler, "expected launch wizard Escape handler");
   assert.equal(
@@ -2251,12 +2303,12 @@ test("Launch wizard keeps cancel available during runtime resolution", () => {
 
 test("Launch wizard disables panel controls while runtime resolution is pending", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /const selector =\n\s+"input, textarea, select, button, \[role='button'\], \[contenteditable='true'\]";[\s\S]*?querySelectorAll\(selector\)/,
     "expected a pending-state helper to disable wizard panel controls",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /panel\.classList\.toggle\(\s*"wizard-disabled"[\s\S]{0,180}?isRuntimeResolutionPending\s*\|\|\s*isLaunchActionPending/,
     "expected the launch panel to expose a disabled visual state while pending",
   );
@@ -2269,23 +2321,23 @@ test("Launch wizard disables panel controls while runtime resolution is pending"
 
 test("Launch wizard renders centered split flow without backdrop dismissal", () => {
   assert.equal(
-    appSource.includes("isStartWorkMode"),
+    launchWizardSource.includes("isStartWorkMode"),
     false,
     "Start Work should share the centered wizard modal instead of toggling drawer mode",
   );
   assert.equal(
-    appSource.includes('wizardModal.classList.toggle("is-drawer"'),
+    launchWizardSource.includes('wizardModal.classList.toggle("is-drawer"'),
     false,
     "Launch Wizard should not toggle drawer placement",
   );
   assert.ok(
-    appSource.includes("wizard-progress-rail")
-      && appSource.includes("wizard-main")
-      && appSource.includes("wizard-content-pane"),
+    launchWizardSource.includes("wizard-progress-rail")
+      && launchWizardSource.includes("wizard-main")
+      && launchWizardSource.includes("wizard-content-pane"),
     "expected the wizard body to be split into progress rail and content pane",
   );
   assert.equal(
-    /if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}/.test(appSource),
+    /if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*closeLaunchWizardFromChrome\(\);\s*\}/.test(launchWizardSource),
     false,
     "wizard backdrop clicks must not dismiss the wizard",
   );
@@ -2324,27 +2376,27 @@ test("Launch wizard pending launch feedback has stable styling hooks", () => {
 
 test("Launch wizard renders start methods as direct actions", () => {
   assert.ok(
-    appSource.includes('"Start methods"'),
+    launchWizardSource.includes('"Start methods"'),
     "expected Launch Wizard to label the first section as Start methods",
   );
   assert.ok(
-    appSource.includes("start_methods")
-      && appSource.includes("show_start_methods")
-      && appSource.includes('kind: "use_start_method"'),
+    launchWizardSource.includes("start_methods")
+      && launchWizardSource.includes("show_start_methods")
+      && launchWizardSource.includes('kind: "use_start_method"'),
     "expected start method rows to dispatch direct backend actions",
   );
   assert.equal(
-    appSource.includes('"Quick start"'),
+    launchWizardSource.includes('"Quick start"'),
     false,
     "Launch Wizard must not expose the old Quick start heading",
   );
   assert.equal(
-    appSource.includes('kind: "select_quick_start"'),
+    launchWizardSource.includes('kind: "select_quick_start"'),
     false,
     "start methods should not use the old selection-before-footer-submit model",
   );
   assert.equal(
-    appSource.includes("quick-start-actions"),
+    launchWizardSource.includes("quick-start-actions"),
     false,
     "start methods should not render multiple inline action buttons",
   );
@@ -2367,11 +2419,19 @@ test("Selected list rows mark active item with aria-current", () => {
     // The descriptive label is just for the failure message.
   }
   // Count occurrences: knowledge, profile, logs, file-tree, plus the
-  // project-tabs case from PR #2455.
+  // project-tabs case from PR #2455. SPEC-3064 Phase 3 (E6): per-window
+  // surfaces extracted from app.js count too.
+  const rowSurfacesSource = [
+    appAndProjectTabsSource,
+    fileTreeSurfaceSource,
+    boardLogsSurfaceSource,
+    knowledgeKanbanSurfaceSource,
+    profileWindowSurfaceSource,
+  ].join("\n");
   const setMatches =
-    appAndProjectTabsSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
+    rowSurfacesSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches =
-    appAndProjectTabsSource.match(/removeAttribute\("aria-current"\)/g) || [];
+    rowSurfacesSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
     setMatches.length >= 5,
     `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
@@ -2415,19 +2475,23 @@ test("Error regions declare role=\"alert\" so screen readers announce them", () 
 });
 
 test("Wizard and preset modals activate focus-trap on open and release on close (app.js inline)", () => {
-  // The wizard and preset modals are rendered inline in app.js (not in
-  // separate renderer modules), so they need closure-scoped trap-release
-  // variables. Pin both pairs.
+  // The preset modal is rendered inline in app.js; the wizard renderer
+  // moved to launch-wizard-surface.js (SPEC-3064 E5). Both need
+  // closure-scoped trap-release variables. Pin both pairs.
   assert.match(appSource, /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/);
-  // Wizard
-  assert.match(appSource, /let\s+wizardFocusTrapRelease\s*=\s*null/);
   assert.match(
-    appSource,
+    launchWizardSource,
+    /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/,
+  );
+  // Wizard
+  assert.match(launchWizardSource, /let\s+wizardFocusTrapRelease\s*=\s*null/);
+  assert.match(
+    launchWizardSource,
     /wizardFocusTrapRelease\s*=\s*createFocusTrap\(wizardDialog,\s*\{\s*document\s*\}\)/,
     "wizard must activate focus trap on the dialog",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /typeof\s+wizardFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*wizardFocusTrapRelease\(\)/,
     "wizard must release focus trap on close",
   );
@@ -2495,16 +2559,19 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // accessibility name is conveyed by the surrounding launch-field label
   // instead of a per-input aria-label. The audit entry is removed
   // accordingly.
+  // SPEC-3064 Phase 3 (E5/E6e): wizard fields render in the extracted
+  // launch wizard surface; profile editor fields render in the extracted
+  // profile window surface.
   const expected = [
-    { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
-    { selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
-    { selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
-    { selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
-    { selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
+    { source: launchWizardSource, selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
+    { source: profileWindowSurfaceSource, selector: 'keyInput\\.setAttribute\\("aria-label", `Environment variable key, row ', desc: "env var key" },
+    { source: profileWindowSurfaceSource, selector: 'modeSelect\\.setAttribute\\("aria-label", `Environment variable mode, row ', desc: "env var mode" },
+    { source: profileWindowSurfaceSource, selector: 'valueInput\\.setAttribute\\("aria-label", `Profile value, row ', desc: "profile env value" },
+    { source: launchWizardSource, selector: 'select\\.setAttribute\\("aria-label", label\\)', desc: "launch-field select reuses label" },
   ];
-  for (const { selector, desc } of expected) {
+  for (const { source, selector, desc } of expected) {
     assert.match(
-      appSource,
+      source,
       new RegExp(selector),
       `expected ${desc} field to have aria-label set`,
     );
@@ -2658,20 +2725,21 @@ test("Preset (Add Window) modal manages focus on open and restores on close", ()
 });
 
 test("Wizard modal manages focus on open and restores on close", () => {
-  // The wizard modal's renderer lives in app.js (not a separate module),
-  // so focus management is wired inline. Verify the same pattern as the
-  // drawer modals: wizardFocusReturn captures activeElement on open,
-  // wizardDialog.focus({ preventScroll: true }) moves focus into the
-  // dialog, and wizardFocusReturn.focus() restores on close.
-  assert.match(appSource, /let\s+wizardFocusReturn\s*=\s*null/);
-  assert.match(appSource, /wizardFocusReturn\s*=\s*document\.activeElement/);
+  // The wizard modal's renderer lives in launch-wizard-surface.js
+  // (SPEC-3064 E5), so focus management is wired there. Verify the same
+  // pattern as the drawer modals: wizardFocusReturn captures
+  // activeElement on open, wizardDialog.focus({ preventScroll: true })
+  // moves focus into the dialog, and wizardFocusReturn.focus() restores
+  // on close.
+  assert.match(launchWizardSource, /let\s+wizardFocusReturn\s*=\s*null/);
+  assert.match(launchWizardSource, /wizardFocusReturn\s*=\s*document\.activeElement/);
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardDialog\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
     "expected wizardDialog focus on open with preventScroll",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /wizardFocusReturn\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
     "expected wizardFocusReturn focus on close with preventScroll",
   );
@@ -2706,9 +2774,16 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModalState\.stage\s*===\s*"error"[\s\S]*migrationModalState\.open\s*=\s*false/,
     "expected Esc on the migration modal error stage to dismiss the dialog without backend skip",
   );
+  // SPEC-3064 Phase 3 (E5): the wizard Esc branch delegates into the
+  // launch wizard surface, which owns the cancel dispatch.
   assert.match(
     appSource,
-    /wizardModal\.classList\.contains\("open"\)[\s\S]*launchWizardSurface\.sendAction\(\{\s*kind:\s*"cancel"/,
+    /if\s*\(handleWizardEscapeKeydown\(event\)\)\s*\{\s*return;\s*\}/,
+    "expected the global Esc handler to delegate the wizard branch into the surface",
+  );
+  assert.match(
+    launchWizardSource,
+    /wizardModal\.classList\.contains\("open"\)[\s\S]*sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc to send cancel when wizard modal is open",
   );
   assert.match(
@@ -3166,12 +3241,12 @@ test("Start Work command opens a pending wizard before backend state arrives", (
     "expected Start Work to render a local pending wizard before sending open_start_work",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /let\s+launchWizardOpening\s*=\s*null/,
     "expected local pending wizard state",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
     "renderLaunchWizard must keep the modal open for local pending Start Work state",
   );
@@ -3179,43 +3254,45 @@ test("Start Work command opens a pending wizard before backend state arrives", (
 
 test("Start Work pending wizard clears when backend state, error, or local close wins", () => {
   assert.match(
-    appSource,
+    launchWizardSource,
     /function\s+clearLaunchWizardOpening\(\)\s*\{[\s\S]{0,120}?launchWizardOpening\s*=\s*null/,
     "expected a helper that clears pending open state",
   );
   assert.match(
-    appSource,
+    launchWizardSource,
     /function\s+closeLaunchWizardLocal\(\)[\s\S]{0,260}?clearLaunchWizardOpening\(\)/,
     "local wizard close must clear pending open state",
   );
   assert.match(
-    appSource,
-    /case\s+"launch_wizard_open_error":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,240}?launchWizardOpenError\s*=/,
+    launchWizardSource,
+    /function\s+applyLaunchWizardOpenErrorEvent\(event\)[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,240}?launchWizardOpenError\s*=/,
     "backend open errors must replace pending open state",
   );
   assert.match(
-    appSource,
-    /case\s+"launch_wizard_state":[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,260}?launchWizard\s*=\s*event\.wizard/,
+    launchWizardSource,
+    /function\s+applyLaunchWizardStateEvent\(event\)[\s\S]{0,900}?clearLaunchWizardOpening\(\)[\s\S]{0,260}?launchWizard\s*=\s*event\.wizard/,
     "backend wizard state must replace pending open state",
   );
 });
 
 test("Board workspace id sync avoids stringify and reuses active Work id cache", () => {
+  // SPEC-3064 Phase 3 (E6c): the Work-id tracking moved into the board &
+  // logs surface; app.js keeps the renderAppState / receive() call sites.
   const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
   assert.match(
-    appSource,
+    boardLogsSurfaceSource,
     /let\s+currentProjectWorkspaceKey\s*=/,
-    "app.js must track a stable key for the current Board workspace id set",
+    "the board surface must track a stable key for the current Board workspace id set",
   );
   assert.match(
-    appSource,
+    boardLogsSurfaceSource,
     /let\s+activeWorkProjectionWorkspaceIds\s*=/,
-    "app.js must cache active Work projection workspace ids",
+    "the board surface must cache active Work projection workspace ids",
   );
   assert.match(
-    appSource,
+    boardLogsSurfaceSource,
     /function\s+syncCurrentProjectWorkspaceIds\s*\(/,
-    "app.js must centralize Board workspace id synchronization",
+    "the board surface must centralize Board workspace id synchronization",
   );
   assert.doesNotMatch(
     renderAppStateBody,
@@ -3228,7 +3305,10 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "renderAppState must route Board workspace id updates through the shared sync helper",
   );
 
-  const deriveBody = extractFunctionBody(appSource, "deriveCurrentProjectWorkspaceIds");
+  const deriveBody = extractFunctionBody(
+    boardLogsSurfaceSource,
+    "deriveCurrentProjectWorkspaceIds",
+  );
   const cachedProjectionIndex = deriveBody.indexOf("activeWorkProjectionWorkspaceIds");
   const workspaceAgentsIndex = deriveBody.indexOf("workspaceState?.workspace?.agents");
   assert.ok(
@@ -3272,7 +3352,10 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "active_work_projection must not bypass the shared sync helper",
   );
 
-  const syncBody = extractFunctionBody(appSource, "syncCurrentProjectWorkspaceIds");
+  const syncBody = extractFunctionBody(
+    boardLogsSurfaceSource,
+    "syncCurrentProjectWorkspaceIds",
+  );
   assert.match(
     syncBody,
     /workIdsKey\s*\(/,

@@ -15,11 +15,15 @@ export const APP_URL = "http://gwt-playwright.local/";
 
 const ROOT_MODULES = new Set([
   "app.js",
+  // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
+  "board-logs-surface.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
   // SPEC-2009 Phase 7 (FR-064..FR-067): Branches detail-check reconnect
   // self-heal / last-known retention / stale-load guard.
   "branch-list-state.js",
+  // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface.
+  "branches-cleanup-surface.js",
   // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
   "canvas-wheel-gesture.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
@@ -29,6 +33,8 @@ const ROOT_MODULES = new Set([
   // Issue #2704 — terminal-focus guard for modal-friendly workspace renders.
   "clone-modal-focus-guard.js",
   "custom-agent-env-editor.js",
+  // SPEC-3064 Phase 3 (E6a) — File Tree window surface.
+  "file-tree-surface.js",
   "focus-trap.js",
   "hotkey.js",
   "index-settings-panel.js",
@@ -36,12 +42,18 @@ const ROOT_MODULES = new Set([
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
   "launch-pending-controller.js",
+  // SPEC-3064 Phase 3 (E5) — Launch Wizard surface.
+  "launch-wizard-surface.js",
   "connection-overlay.js",
   // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders.
   "interaction-guard.js",
+  // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window surface.
+  "knowledge-kanban-surface.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
+  // SPEC-3064 Phase 3 (E6e) — Profile window surface.
+  "profile-window-surface.js",
   // SPEC-3064 Phase 3 (E3) — Project Index window surface.
   "project-index-search-surface.js",
   "project-tabs-renderer.js",
@@ -56,6 +68,8 @@ const ROOT_MODULES = new Set([
   "release-notes-window.js",
   // SPEC-2809 — Console window per-kind tab live tail.
   "console-window.js",
+  // SPEC-3064 Phase 3 (E4) — Settings windows surface.
+  "settings-surface.js",
   "socket-receive-dispatcher.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",

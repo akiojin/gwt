@@ -336,30 +336,32 @@ test("buildChoiceOrSelectField falls back to a dropdown when options overflow", 
   assert.equal(field.querySelector('[role="radiogroup"]'), null);
 });
 
-// --- app.js wiring: interaction guard covers the slider -------------------
+// --- wizard surface wiring: interaction guard covers the slider -----------
+// SPEC-3064 Phase 3 (E5): the wizard chrome listeners moved from app.js to
+// launch-wizard-surface.js (installWizardChrome).
 
-const appSource = readFileSync(
-  resolve(dirname(fileURLToPath(import.meta.url)), "../app.js"),
+const wizardSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../launch-wizard-surface.js"),
   "utf8",
 );
 
-test("app.js extends the wizard interaction guard to the reasoning slider", () => {
+test("wizard surface extends the interaction guard to the reasoning slider", () => {
   // The guard previously covered only native <select> (Issue #2698). The
   // slider must be guarded too, or its set_reasoning re-render destroys the
   // slider mid-drag. Activation is on focusin (mouse + keyboard) and release
   // on focusout so the whole interaction is coalesced.
   assert.match(
-    appSource,
+    wizardSource,
     /isGuardedRange\s*=\s*\(el\)\s*=>[\s\S]*?launch-range__input/,
     "expected a guarded-range predicate keyed on .launch-range__input",
   );
   assert.match(
-    appSource,
+    wizardSource,
     /addEventListener\(\s*"focusin"[\s\S]*?isGuardedRange\(event\.target\)[\s\S]*?wizardInteractionGuard\.activate\(\)/,
     "expected focusin on the slider to activate the wizard interaction guard",
   );
   assert.match(
-    appSource,
+    wizardSource,
     /addEventListener\(\s*"focusout"[\s\S]*?isGuardedRange\(target\)[\s\S]*?wizardInteractionGuard\.release\(\)/,
     "expected focusout on the slider to release the wizard interaction guard",
   );

@@ -53,3 +53,10 @@ node_check crates/gwt/web/console-window.js
 node_check crates/gwt/web/provider-usage-surface.js
 node_check crates/gwt/web/terminal-attachments.js
 node_check crates/gwt/web/project-index-search-surface.js
+node_check crates/gwt/web/settings-surface.js
+node_check crates/gwt/web/launch-wizard-surface.js
+node_check crates/gwt/web/file-tree-surface.js
+node_check crates/gwt/web/branches-cleanup-surface.js
+node_check crates/gwt/web/board-logs-surface.js
+node_check crates/gwt/web/knowledge-kanban-surface.js
+node_check crates/gwt/web/profile-window-surface.js

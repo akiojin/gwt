@@ -12,7 +12,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E6c): the Logs renderers moved from app.js into
+// board-logs-surface.js; source-pattern asserts scan both files so the
+// dispatcher case arms (app.js) and the moved renderers stay covered.
+const appSource = [
+  readFileSync(resolve(here, "../app.js"), "utf8"),
+  readFileSync(resolve(here, "../board-logs-surface.js"), "utf8"),
+].join("\n");
 const indexSource = readFileSync(resolve(here, "../index.html"), "utf8");
 
 const KINDS = ["gh", "git", "docker", "agent", "runner"];

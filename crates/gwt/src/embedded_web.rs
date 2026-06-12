@@ -156,6 +156,32 @@ root_js_modules! {
     // SPEC-3064 Phase 3 (E3) — Project Index window surface (index status
     // map + search state/render + Index window mount) extracted from app.js.
     "project-index-search-surface.js" => "createProjectIndexSearchSurface",
+    // SPEC-3064 Phase 3 (E4) — Settings windows surface (tabbed Settings
+    // body, settings state stores, Teams channel converters, autostart
+    // appliers, system-settings interaction guard) extracted from app.js.
+    "settings-surface.js" => "createSettingsSurface",
+    // SPEC-3064 Phase 3 (E5) — Launch Wizard surface (wizard state +
+    // interaction guard, field builders, transitions, renderLaunchWizard,
+    // chrome listeners) extracted from app.js.
+    "launch-wizard-surface.js" => "createLaunchWizardSurface",
+    // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
+    // worktree picker + text/hex viewer + window mount) extracted from
+    // app.js.
+    "file-tree-surface.js" => "createFileTreeSurface",
+    // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface
+    // (branch list state, cleanup modal flow, window mount) extracted from
+    // app.js.
+    "branches-cleanup-surface.js" => "createBranchesCleanupSurface",
+    // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface (board/log
+    // state, chat + logs rendering, window mounts) extracted from app.js.
+    "board-logs-surface.js" => "createBoardLogsSurface",
+    // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window surface
+    // (knowledge state, Kanban rendering + drawer, window mount) extracted
+    // from app.js.
+    "knowledge-kanban-surface.js" => "createKnowledgeKanbanSurface",
+    // SPEC-3064 Phase 3 (E6e) — Profile window surface (profile state +
+    // draft editing, window mount) extracted from app.js.
+    "profile-window-surface.js" => "createProfileWindowSurface",
 }
 
 /// Embedded payload of a [`StaticAsset`].

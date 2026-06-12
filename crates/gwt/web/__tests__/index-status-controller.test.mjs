@@ -24,6 +24,13 @@ const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
 );
+// SPEC-3064 Phase 3 (E4): the Settings window renderer, the settings:open
+// dispatch listener, and requestFullIndexStatusRefresh moved into the
+// extracted settings surface module.
+const settingsSurfaceSource = readFileSync(
+  resolve(here, "../settings-surface.js"),
+  "utf8",
+);
 
 test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   const { document } = parseHTML(indexHtml);
@@ -71,27 +78,27 @@ test("project tab dots no longer wire Project Index health", () => {
 
 test("settings target=index opens the dedicated Index window", () => {
   assert.ok(
-    !appSource.includes('buildSettingsTab("index"'),
+    !settingsSurfaceSource.includes('buildSettingsTab("index"'),
     "Settings must not expose an Index tab",
   );
   assert.ok(
-    !appSource.includes('dataset.settingsPanel = "index"'),
+    !settingsSurfaceSource.includes('dataset.settingsPanel = "index"'),
     "Settings must not mount an Index panel",
   );
   assert.ok(
-    appSource.includes('if (target === "index")') &&
-      appSource.includes('focusOrSpawnPreset("index");'),
+    settingsSurfaceSource.includes('if (target === "index")') &&
+      settingsSurfaceSource.includes('focusOrSpawnPreset("index");'),
     "settings:open target=index must spawn the dedicated Index window",
   );
 });
 
 test("Index window exposes semantic search and health refresh contract", () => {
   assert.ok(
-    appSource.includes("function requestFullIndexStatusRefresh()"),
+    settingsSurfaceSource.includes("function requestFullIndexStatusRefresh()"),
     "expected a dedicated full index status refresh helper",
   );
   assert.ok(
-    appSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
+    settingsSurfaceSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
     "Index window Health tab must request the expensive all-worktree status on demand",
   );
   assert.ok(
