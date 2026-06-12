@@ -3094,6 +3094,37 @@ fn attach_registry_sessions_to_active_works(
             work.agents = kept;
             work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
         }
+        // User verification 2026-06-12 (screenshot): one group per historical
+        // gwt session rendered e.g. five identical "Claude Code" groups. Per
+        // agent identity only the latest history entry stays; live (active /
+        // running) agents are never collapsed away — two running panes are
+        // two real agents.
+        {
+            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
+            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            let mut seen_identities: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+            let mut dropped = 0usize;
+            for agent in sorted {
+                let live = matches!(
+                    agent.status_category.as_str(),
+                    "active" | "running" | "blocked"
+                );
+                let identity = if !agent.display_name.trim().is_empty() {
+                    agent.display_name.trim().to_lowercase()
+                } else {
+                    agent.agent_id.trim().to_lowercase()
+                };
+                if live || identity.is_empty() || seen_identities.insert(identity) {
+                    kept.push(agent);
+                } else {
+                    dropped += 1;
+                }
+            }
+            work.agents = kept;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
+        }
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds
         // every connected client (unbounded fan-out amplifies the WebSocket

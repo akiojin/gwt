@@ -14112,6 +14112,125 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
+/// User verification 2026-06-12 (screenshot): five identical "Claude Code"
+/// groups, one per historical gwt session, read as noise. Per agent identity
+/// only the latest entry stays; live (active) agents are never collapsed
+/// away.
+#[test]
+fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
+    fn agent_with_conv(
+        session_id: &str,
+        display_name: &str,
+        status_category: &str,
+        updated_at: &str,
+        conversation: &str,
+    ) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: String::new(),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: status_category.to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: updated_at.to_string(),
+            sessions: vec![gwt::WorkspaceHistorySessionView {
+                agent_session_id: conversation.to_string(),
+                started_at: updated_at.to_string(),
+                is_active: true,
+                resumable: true,
+            }],
+        }
+    }
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-develop-7ea5aa57".to_string(),
+        title: "develop".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("develop".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            agent_with_conv(
+                "c1",
+                "Claude Code",
+                "idle",
+                "2026-06-11T10:00:00Z",
+                "conv-c1",
+            ),
+            agent_with_conv(
+                "c2",
+                "Claude Code",
+                "idle",
+                "2026-06-12T02:00:00Z",
+                "conv-c2",
+            ),
+            agent_with_conv(
+                "c3",
+                "Claude Code",
+                "idle",
+                "2026-06-10T08:00:00Z",
+                "conv-c3",
+            ),
+            agent_with_conv("x1", "Codex", "idle", "2026-06-09T00:00:00Z", "conv-x1"),
+            // A live agent of the same identity is never collapsed away.
+            agent_with_conv(
+                "c-live",
+                "Claude Code",
+                "active",
+                "2026-06-08T00:00:00Z",
+                "conv-l",
+            ),
+        ],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        updated_at: String::new(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    );
+
+    let agents = &works[0].agents;
+    let ids: Vec<&str> = agents
+        .iter()
+        .map(|agent| agent.session_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"c2"),
+        "newest Claude Code history entry stays"
+    );
+    assert!(ids.contains(&"x1"), "the other agent identity stays");
+    assert!(
+        ids.contains(&"c-live"),
+        "live agents are never collapsed away"
+    );
+    assert!(!ids.contains(&"c1"), "older duplicates collapse");
+    assert!(!ids.contains(&"c3"), "older duplicates collapse");
+    assert_eq!(agents.len(), 3);
+}
+
 /// User verification 2026-06-12 (follow-up): a record agent whose ledger TOML
 /// is gone and that recorded no identity and no conversation renders as a
 /// dead "Agent / No session yet" group whose Resume cannot work. Such ghosts
