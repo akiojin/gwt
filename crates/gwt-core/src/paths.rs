@@ -199,6 +199,19 @@ pub fn gwt_workspace_work_events_closed_path_for_repo_path(repo_path: &Path) -> 
     gwt_workspace_work_events_closed_path(&repo_hash)
 }
 
+/// SPEC-2359 W-16 (FR-387): fingerprint cache for the cross-machine work
+/// events intake (`source → blob oid / content sha256`). Pure optimization —
+/// deleting it only costs re-reading sources (dedup is event-id based).
+pub fn gwt_workspace_work_events_intake_state_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("project-state/work-events-intake.json")
+}
+
+/// Return the intake fingerprint cache path for a repository path.
+pub fn gwt_workspace_work_events_intake_state_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_workspace_work_events_intake_state_path(&repo_hash)
+}
+
 /// Resolve the main worktree root (git common dir) for a repository or linked
 /// worktree path.
 ///
@@ -840,6 +853,15 @@ mod tests {
         let repo_local = gwt_repo_local_work_events_path(&repo);
         assert_ne!(closed, in_work_home);
         assert_ne!(closed, repo_local);
+    }
+
+    #[test]
+    fn gwt_workspace_work_events_intake_state_path_uses_project_state_dir() {
+        let repo_hash = compute_repo_hash("git@github.com:akiojin/gwt.git");
+        let path = gwt_workspace_work_events_intake_state_path(&repo_hash);
+        assert!(path
+            .to_string_lossy()
+            .ends_with("project-state/work-events-intake.json"));
     }
 
     #[test]

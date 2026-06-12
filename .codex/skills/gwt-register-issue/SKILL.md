@@ -34,10 +34,10 @@ Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
 
 1. Verify that `gwtd issue ...` can access GitHub. If auth fails, stop and ask the user to refresh GitHub authentication.
 2. Normalize the request into summary, background, expected outcome, and constraints.
-3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners, using the visible `gwt-search` surface when possible.
+3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners, using the `gwt-search` skill (a skill, not a PATH command) when possible.
 4. Decide the registration outcome with the `Spec Status` contract below before creating any new owner.
 5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with `gwtd issue create --title ... -f ...`.
-6. When the request reveals a missing or unclear owner SPEC, stop plain-Issue creation and hand off to `gwt-discussion`.
+6. When the request reveals a missing or unclear owner SPEC, stop plain-Issue creation and hand off to `gwt-discussion`. (SPEC-2784: gwt-discussion's Action Bundle now includes `Register Spec` which delegates to the `gwt-register-spec` sub-skill so the SPEC Issue is materialized safely via the canonical create→edit→roundtrip flow. This skill does not create SPEC owners itself.)
 7. Return the chosen owner and next step in the current user's language.
 
 ## Spec Status

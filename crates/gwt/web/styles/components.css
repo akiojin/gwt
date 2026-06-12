@@ -234,18 +234,16 @@ body::after {
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
    earlier split toast + persistent button flow.
-   SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
-   bottom-right corner; it mounts into the sidebar Update section anchor
-   (#update-cta-anchor) and flows with the sidebar surface. */
+   User verification 2026-06-12: the SPEC-2356 sidebar placement was hard to
+   notice — the CTA floats fixed bottom-right again. */
 .update-cta-shell {
-  display: flex;
-  width: 100%;
-  align-items: stretch;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-1);
-}
-
-.update-cta-shell .update-cta {
-  flex: 1;
+  z-index: 9999;
 }
 
 .update-cta {
@@ -706,16 +704,14 @@ body::after {
 /* SPEC-2356 operator chrome cleanup: the Windows / Palette / Update sidebar
    sections lay their controls out as a vertical stack of full-width rows. */
 .op-sidebar__section--windows,
-.op-sidebar__section--palette,
-.op-sidebar__section--update {
+.op-sidebar__section--palette {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
 
 .op-sidebar__section--windows .op-sidebar__heading,
-.op-sidebar__section--palette .op-sidebar__heading,
-.op-sidebar__section--update .op-sidebar__heading {
+.op-sidebar__section--palette .op-sidebar__heading {
   margin-bottom: var(--space-1);
 }
 
@@ -732,10 +728,6 @@ body::after {
 /* The window-list dropdown anchors to its trigger; keep it full width too. */
 .op-sidebar__section--windows .window-list-shell {
   width: 100%;
-}
-
-.op-sidebar__update-anchor {
-  display: flex;
 }
 
 .op-layer {
@@ -1822,9 +1814,10 @@ kbd.op-kbd {
 
 .workspace-overview-section-label {
   margin: 0 0 8px;
-  font-family: var(--font-body);
-  font-size: var(--type-xs);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 700;
+  letter-spacing: 0.12em;
   color: var(--color-text-muted);
 }
 
@@ -1836,31 +1829,80 @@ kbd.op-kbd {
   gap: 8px;
 }
 
+/* Design pass (2026-06-11): the Workspace list is a console roster — flat
+   hairline rows with a state dot rail, not a stack of cards. Selection is an
+   accent rail + elevated fill; everything transitions on the fast curve. */
+.workspace-overview-list {
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+
 .workspace-overview-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
+  align-items: center;
   width: 100%;
   min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
+  padding: 8px 10px 8px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-curve),
+    border-color var(--motion-fast) var(--motion-curve);
+}
+
+.workspace-overview-row:hover {
+  background: color-mix(in oklab, var(--color-surface-elevated) 72%, transparent);
 }
 
 .workspace-overview-row[aria-selected="true"] {
-  border-color: var(--color-focus-ring);
+  border-left-color: var(--color-state-active);
   background: var(--color-surface-elevated);
 }
 
+.workspace-overview-row:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+/* State dot rail: the literal label stays in the DOM for assistive tech; the
+   dot carries the state visually (status-strip language). */
 .workspace-overview-status {
-  align-self: start;
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  color: var(--color-state-active);
+  align-self: center;
+  overflow: hidden;
+  font-size: 0;
+  line-height: 0;
+}
+
+.workspace-overview-status::before {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-state-idle);
+  transition: background var(--motion-fast) var(--motion-curve);
+}
+
+.workspace-overview-row[data-status="active"] .workspace-overview-status::before,
+.workspace-overview-row[data-status="running"] .workspace-overview-status::before {
+  background: var(--color-state-active);
+  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-state-active) 55%, transparent);
+}
+
+.workspace-overview-row[data-status="blocked"] .workspace-overview-status::before {
+  background: var(--color-state-blocked);
+}
+
+.workspace-overview-row[data-status="done"] .workspace-overview-status::before {
+  background: var(--color-state-done);
 }
 
 .workspace-overview-row-copy,
@@ -1877,10 +1919,34 @@ kbd.op-kbd {
 .workspace-overview-row-title {
   overflow: hidden;
   color: var(--color-text-strong);
+  font-family: var(--font-mono);
   font-size: var(--type-sm);
-  font-weight: 650;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Branch = namespace prefix (dim) + leaf (strong): 200+ work/* rows scan by
+   leaf while the verbatim branch stays selectable. */
+.workspace-branch-prefix {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.workspace-branch-leaf {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+/* Relative updated time, right-aligned on the title row (FR-403 ordering made
+   visible). Tabular numerals keep the column steady while scrolling. */
+.workspace-overview-row-time {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 /* SPEC-2359 Phase W-12 (FR-351): Work card title row pairs the title with its
@@ -1898,12 +1964,14 @@ kbd.op-kbd {
 
 .workspace-overview-lifecycle {
   flex-shrink: 0;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
   padding: 0 var(--space-2);
 }
 
@@ -1914,6 +1982,12 @@ kbd.op-kbd {
 
 .workspace-overview-lifecycle[data-lifecycle="paused"] {
   color: var(--color-state-idle);
+}
+
+/* SPEC-2359 W16-4 (FR-391): derived Done (merged ∧ stale) — dashed border
+   distinguishes it from an explicit user close. */
+.workspace-overview-lifecycle[data-derived="true"] {
+  border-style: dashed;
 }
 
 .workspace-overview-lifecycle[data-lifecycle="done"] {
@@ -1973,6 +2047,9 @@ kbd.op-kbd {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  padding-left: 10px;
+  border-left: 2px solid
+    color-mix(in oklab, var(--current-agent, var(--color-border-strong)) 55%, var(--color-border));
 }
 
 /* Per-Work head: optional Work label on the left, the per-Work Resume control
@@ -1986,14 +2063,27 @@ kbd.op-kbd {
 }
 
 .workspace-detail-work-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: 650;
-  color: var(--color-text-muted);
+  color: var(--color-text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Agent identity dot, colored by the [data-agent-color] system (SPEC-2133). */
+.workspace-detail-work-heading::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--current-agent, var(--color-text-muted));
 }
 
 .wizard-button.is-compact {
@@ -2028,6 +2118,44 @@ kbd.op-kbd {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* Bulk cleanup row above the Workspace roster (user verification
+   2026-06-12): one click sweeps every merged branch. */
+.workspace-overview-bulk-cleanup {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
+   worktree on demand. */
+.workspace-overview-remote {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+}
+
+/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
+.workspace-overview-merged {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  border-radius: var(--radius-sm);
+  color: var(--color-state-done);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
 }
 
 .workspace-overview-agent-name,
@@ -2079,23 +2207,50 @@ kbd.op-kbd {
   justify-content: flex-end;
 }
 
+.workspace-detail-more-sessions {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
 .workspace-detail-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
   margin-bottom: 16px;
 }
 
 .workspace-detail-heading {
+  flex: 1 1 240px;
   min-width: 0;
+}
+
+/* The heading block wears the corner-bracket ornament (.has-brackets) so the
+   detail reads as the operator's focused frame. The title is the branch — a
+   code identifier — so it stays mono with the dim-prefix treatment. */
+.workspace-detail-heading.has-brackets::before,
+.workspace-detail-heading.has-brackets::after {
+  color: var(--color-state-active);
 }
 
 .workspace-detail-title {
   margin: 0 0 6px;
   color: var(--color-text-strong);
+  font-family: var(--font-mono);
   font-size: var(--type-lg);
+  font-weight: 500;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Subtitle chips separated by interpuncts instead of bare gaps. */
+.workspace-detail-subtitle > * + *::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--color-border-strong);
 }
 
 .workspace-detail-actions {
@@ -2106,15 +2261,26 @@ kbd.op-kbd {
 
 .workspace-detail-section {
   padding: 14px 0;
-  border-top: 1px solid var(--color-border);
+  border-top: 0;
 }
 
 .workspace-detail-section-title {
-  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
   color: var(--color-text-muted);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.workspace-detail-section-title::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--color-border);
 }
 
 .workspace-detail-section-body {
@@ -2169,7 +2335,9 @@ kbd.op-kbd {
 
 .workspace-overview-empty {
   color: var(--color-text-muted);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0.02em;
 }
 
 :root[data-theme] .hint {

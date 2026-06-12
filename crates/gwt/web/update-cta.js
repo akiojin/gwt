@@ -31,13 +31,11 @@ export function createUpdateCtaController({
     });
   }
 
-  // SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
-  // bottom-right corner. It mounts into the sidebar Update section anchor
-  // (#update-cta-anchor) when present, falling back to <body> only if the
-  // sidebar is unavailable (e.g. degraded shell) so the update path never
-  // silently disappears.
+  // User verification 2026-06-12: the SPEC-2356 sidebar Update section was
+  // undiscoverable, so the CTA returns to its previous fixed bottom-right
+  // home — the shell mounts on <body> and the CSS floats it.
   function ctaMountParent() {
-    return document.getElementById("update-cta-anchor") || document.body;
+    return document.body;
   }
 
   function ensureShell() {

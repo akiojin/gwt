@@ -95,6 +95,15 @@ function attachCancelHandlers(modalEl, dialogEl, onCancel) {
   cancelHandlerMap.set(modalEl, { overlay, escape });
 }
 
+// Default copy is the SPEC-2013 project tab close; the agent-window close
+// confirm (user verification 2026-06-12) reuses this renderer with its own
+// modal element and copy overrides.
+const DEFAULT_COPY = Object.freeze({
+  title: "Close project tab?",
+  summary: (runningAgents) => `${runningAgents.length} running agent(s) will be stopped:`,
+  confirmLabel: "Close anyway",
+});
+
 export function renderCloseProjectTabConfirmModal({
   modalEl,
   dialogEl,
@@ -102,6 +111,7 @@ export function renderCloseProjectTabConfirmModal({
   createNode,
   onCancel,
   onConfirm,
+  copy = DEFAULT_COPY,
 }) {
   if (!modalEl || !dialogEl) {
     return;
@@ -154,7 +164,7 @@ export function renderCloseProjectTabConfirmModal({
   const title = createNode(
     "h2",
     "close-project-tab-modal__title",
-    "Close project tab?",
+    copy.title || DEFAULT_COPY.title,
   );
   header.appendChild(title);
   if (state.tabTitle) {
@@ -168,10 +178,14 @@ export function renderCloseProjectTabConfirmModal({
   dialogEl.appendChild(header);
 
   const runningAgents = Array.isArray(state.runningAgents) ? state.runningAgents : [];
+  const summaryText =
+    typeof copy.summary === "function"
+      ? copy.summary(runningAgents)
+      : copy.summary || DEFAULT_COPY.summary(runningAgents);
   const summary = createNode(
     "p",
     "close-project-tab-modal__summary",
-    `${runningAgents.length} running agent(s) will be stopped:`,
+    summaryText,
   );
   dialogEl.appendChild(summary);
 
@@ -192,7 +206,7 @@ export function renderCloseProjectTabConfirmModal({
   const confirmButton = createNode(
     "button",
     "wizard-button primary destructive close-project-tab-modal__confirm",
-    "Close anyway",
+    copy.confirmLabel || DEFAULT_COPY.confirmLabel,
   );
   confirmButton.type = "button";
   confirmButton.dataset.role = "close-project-tab-confirm";

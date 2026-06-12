@@ -4,6 +4,7 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use gwt_agent::session::GWT_SESSION_ID_ENV;
 use gwt_github::{ApiError, SpecOpsError};
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -41,6 +42,10 @@ pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
             let (id, rest) = rest.split_first().ok_or(CliParseError::Usage)?;
             ensure_no_args(rest)?;
             Ok(PaneCommand::Close { id: id.clone() })
+        }
+        "send" => {
+            let (id, text) = parse_send_args(rest)?;
+            Ok(PaneCommand::Send { id, text })
         }
         id => Ok(PaneCommand::Read {
             id: id.to_string(),
@@ -82,7 +87,61 @@ async fn run_async(
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
         PaneCommand::Close { id } => close_pane(ws_url, project_root, &id).await,
+        PaneCommand::Send { id, text } => {
+            send_pane_input(ws_url, project_root, id.as_deref(), &text).await
+        }
     }
+}
+
+/// SPEC-3050 FR-001/FR-002: queue one line into the calling agent's own pane.
+/// The injected line is submitted by the runtime once the agent's current
+/// turn ends, which is what the gwt-discussion "Goal Start" step relies on.
+async fn send_pane_input(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: Option<&str>,
+    text: &str,
+) -> Result<String, String> {
+    let session_id = std::env::var(GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{GWT_SESSION_ID_ENV} is not set; gwtd pane send injects only into the calling agent's own pane"
+            )
+        })?;
+
+    let windows = request_window_list(ws_url, project_root).await?;
+    let window_id = resolve_send_target(&windows, requested_id, &session_id)?;
+    let line = ensure_trailing_submit(text);
+
+    let (mut socket, _) = connect_async(ws_url)
+        .await
+        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    send_frontend_event(
+        &mut socket,
+        json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
+    )
+    .await?;
+
+    for _ in 0..128 {
+        let value = next_backend_json(&mut socket).await?;
+        let Some(reply) = parse_pane_send_result(&value)? else {
+            continue;
+        };
+        return if reply.ok {
+            Ok(format!(
+                "sent input to {}\n",
+                reply.window_id.unwrap_or(window_id)
+            ))
+        } else {
+            Err(format!(
+                "pane send rejected: {}",
+                reply.error.unwrap_or_else(|| "unknown error".to_string())
+            ))
+        };
+    }
+    Err("pane send: backend did not return pane_send_result".to_string())
 }
 
 async fn request_window_list(
@@ -214,6 +273,84 @@ async fn next_workspace_windows(
         }
     }
     Err(format!("{context}: backend did not return workspace_state"))
+}
+
+fn parse_send_args(args: &[String]) -> Result<(Option<String>, String), CliParseError> {
+    match args {
+        [flag, text] if flag == "--text" => Ok((None, text.clone())),
+        [id, flag, text] if flag == "--text" => Ok((Some(id.clone()), text.clone())),
+        _ => Err(CliParseError::Usage),
+    }
+}
+
+/// SPEC-3050 FR-002: the send target is always the caller's own pane. An
+/// explicit pane id is accepted only when it resolves to the window bound to
+/// the caller's `GWT_SESSION_ID`; everything else is rejected client-side
+/// (the server re-checks by resolving the session id itself).
+fn resolve_send_target(
+    windows: &[PersistedWindowState],
+    requested_id: Option<&str>,
+    session_id: &str,
+) -> Result<String, String> {
+    let own = windows
+        .iter()
+        .find(|window| window.session_id.as_deref() == Some(session_id));
+    match requested_id {
+        Some(requested) => {
+            let Some(resolved) = resolve_window_id(windows, requested) else {
+                return Err(format!("pane send: unknown pane {requested}"));
+            };
+            match own {
+                Some(own_window) if own_window.id == resolved => Ok(resolved.to_string()),
+                _ => Err(format!(
+                    "pane send: pane {requested} is not bound to this session (self-only injection)"
+                )),
+            }
+        }
+        None => own.map(|window| window.id.clone()).ok_or_else(|| {
+            format!("pane send: no pane is bound to session {session_id} (self-only injection)")
+        }),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PaneSendReply {
+    ok: bool,
+    window_id: Option<String>,
+    error: Option<String>,
+}
+
+fn parse_pane_send_result(value: &Value) -> Result<Option<PaneSendReply>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("pane_send_result") {
+        return Ok(None);
+    }
+    let ok = value
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "pane_send_result missing ok".to_string())?;
+    let window_id = value
+        .get("window_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some(PaneSendReply {
+        ok,
+        window_id,
+        error,
+    }))
+}
+
+/// The injected text must end with a submit key so the runtime actually
+/// queues the line instead of leaving it in the composer.
+fn ensure_trailing_submit(text: &str) -> String {
+    if text.ends_with('\r') || text.ends_with('\n') {
+        text.to_string()
+    } else {
+        format!("{text}\r")
+    }
 }
 
 fn parse_lines(args: &[String]) -> Result<usize, CliParseError> {
@@ -473,6 +610,97 @@ mod tests {
                 id: "agent-1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn parse_supports_send_action_with_optional_pane_id() {
+        assert_eq!(
+            parse(&[s("send"), s("--text"), s("/goal tests pass")]).unwrap(),
+            PaneCommand::Send {
+                id: None,
+                text: "/goal tests pass".to_string(),
+            }
+        );
+        assert_eq!(
+            parse(&[s("send"), s("agent-1"), s("--text"), s("/goal x")]).unwrap(),
+            PaneCommand::Send {
+                id: Some("agent-1".to_string()),
+                text: "/goal x".to_string(),
+            }
+        );
+        assert!(parse(&[s("send")]).is_err());
+        assert!(parse(&[s("send"), s("agent-1")]).is_err());
+        assert!(parse(&[s("send"), s("--text")]).is_err());
+    }
+
+    #[test]
+    fn resolve_send_target_enforces_self_only_session_binding() {
+        let mut own = window("tab-1::claude-1", WindowPreset::Claude, Some("claude"));
+        own.session_id = Some("session-a".to_string());
+        let mut other = window("tab-1::codex-1", WindowPreset::Codex, Some("codex"));
+        other.session_id = Some("session-b".to_string());
+        let windows = vec![own, other];
+
+        // 対象省略 = 自 session の pane に解決される。
+        assert_eq!(
+            resolve_send_target(&windows, None, "session-a").unwrap(),
+            "tab-1::claude-1"
+        );
+        // 明示指定も自 session の pane なら許可 (suffix 解決込み)。
+        assert_eq!(
+            resolve_send_target(&windows, Some("claude-1"), "session-a").unwrap(),
+            "tab-1::claude-1"
+        );
+        // 他 session の pane 指定は self-only 違反として拒否 (SPEC-3050 AS3)。
+        let denied = resolve_send_target(&windows, Some("codex-1"), "session-a").unwrap_err();
+        assert!(denied.contains("not bound to this session"));
+        // 未知の pane id。
+        assert!(resolve_send_target(&windows, Some("ghost-1"), "session-a").is_err());
+        // session に紐づく pane が無い場合。
+        assert!(resolve_send_target(&windows, None, "session-zzz").is_err());
+    }
+
+    #[test]
+    fn parse_pane_send_result_extracts_backend_reply() {
+        let ok = serde_json::json!({
+            "kind": "pane_send_result",
+            "ok": true,
+            "window_id": "tab-1::claude-1",
+            "error": null
+        });
+        assert_eq!(
+            parse_pane_send_result(&ok).unwrap(),
+            Some(PaneSendReply {
+                ok: true,
+                window_id: Some("tab-1::claude-1".to_string()),
+                error: None,
+            })
+        );
+
+        let err = serde_json::json!({
+            "kind": "pane_send_result",
+            "ok": false,
+            "window_id": null,
+            "error": "no pane bound to session session-a"
+        });
+        assert_eq!(
+            parse_pane_send_result(&err).unwrap(),
+            Some(PaneSendReply {
+                ok: false,
+                window_id: None,
+                error: Some("no pane bound to session session-a".to_string()),
+            })
+        );
+
+        let unrelated = serde_json::json!({ "kind": "workspace_state" });
+        assert_eq!(parse_pane_send_result(&unrelated).unwrap(), None);
+    }
+
+    #[test]
+    fn ensure_trailing_submit_appends_carriage_return_once() {
+        assert_eq!(ensure_trailing_submit("/goal x"), "/goal x\r");
+        assert_eq!(ensure_trailing_submit("/goal x\r"), "/goal x\r");
+        assert_eq!(ensure_trailing_submit("/goal x\n"), "/goal x\n");
     }
 
     #[test]

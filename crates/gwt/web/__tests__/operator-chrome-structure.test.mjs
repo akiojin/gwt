@@ -289,10 +289,12 @@ test("Sidebar groups actionable controls into Quick / Windows / Palette / Update
   const headings = sections.map((section) =>
     section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
   );
+  // User verification 2026-06-12: the Update CTA returned to its fixed
+  // bottom-right home, so the sidebar no longer carries an Update section.
   assert.deepEqual(
     headings,
-    ["Quick", "Windows", "Palette", "Update"],
-    "Sidebar order must be Quick → Windows → Palette → Update with no Layers section",
+    ["Quick", "Windows", "Palette"],
+    "Sidebar order must be Quick → Windows → Palette (Update floats bottom-right)",
   );
   assert.ok(
     !headings.includes("Active Works"),
@@ -382,36 +384,30 @@ test("Status Strip hosts the zoom controls so canvas zoom is always reachable (S
   assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
 });
 
-test("Sidebar Update section provides the mount anchor for the Update CTA (SPEC-2356)", () => {
-  // SPEC-2356 chrome cleanup: the Update CTA moves out of the fixed bottom-right
-  // corner into a dedicated sidebar Update section. update-cta.js mounts the
-  // shell into this anchor instead of document.body.
+test("Update CTA floats fixed bottom-right, not in a sidebar section (user verification 2026-06-12)", () => {
+  // SPEC-2356 moved the Update CTA into a sidebar Update section, but the
+  // user found it undiscoverable there — the CTA returns to its previous
+  // fixed bottom-right home and the sidebar section is gone.
   const updateSection = Array.from(
     document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
   ).find(
     (section) =>
       section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Update",
   );
-  assert.ok(updateSection, "expected an Update section in the sidebar");
-  const anchor = updateSection.querySelector("#update-cta-anchor");
-  assert.ok(anchor, "expected #update-cta-anchor inside the Update section");
-});
+  assert.equal(updateSection, undefined, "the sidebar Update section must be removed");
 
-test("update-cta.js mounts into the sidebar anchor and peeks the sidebar when an update arrives (SPEC-2356)", () => {
+  const componentsCssText = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const shellRule = componentsCssText.match(/\.update-cta-shell \{[^}]*\}/);
+  assert.ok(shellRule, "expected a .update-cta-shell rule");
+  assert.match(shellRule[0], /position: fixed/, "CTA shell floats fixed");
+  assert.match(shellRule[0], /bottom:/, "CTA shell anchors to the bottom");
+  assert.match(shellRule[0], /right:/, "CTA shell anchors to the right");
+
   const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
-  // The shell must prefer the sidebar anchor over document.body so the CTA
-  // lives inside the sidebar Update section.
-  assert.match(
+  assert.doesNotMatch(
     updateCtaSource,
     /update-cta-anchor/,
-    "update-cta.js must mount into the sidebar #update-cta-anchor",
-  );
-  // When an update becomes available, the sidebar must peek/badge so the user
-  // notices even though the sidebar is auto-hidden (hover not required).
-  assert.match(
-    updateCtaSource,
-    /op:update-available/,
-    "update-cta.js must signal update availability so the sidebar can peek/badge",
+    "update-cta.js mounts on document.body again, not a sidebar anchor",
   );
 });
 
@@ -2909,34 +2905,29 @@ test("Sidebar row buttons reset UA chrome so Windows WebView2 stops drawing defa
 
 // --- SPEC-2359 Work Unification (US-49): Workspace → Work/Works labels ---
 
-test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
+// SPEC-2359 W-15 (FR-392) supersedes the former SC-207 blanket "no Workspace
+// labels" rule (US-49): the W-13 three-layer model names the place "Workspace"
+// (Workspace = place / Work = launch / Session = conversation), so surface
+// entry points say "Workspace" while launch-level rows keep "Work".
+test("FR-392: surface entry points are labelled 'Workspace' (3-layer model)", () => {
   const sidebarLabel = document.querySelector("#op-workspace-overview-entry .op-layer__label");
   assert.ok(sidebarLabel, "expected sidebar overview entry to exist");
-  assert.equal(sidebarLabel.textContent.trim(), "Work");
-  assert.doesNotMatch(sidebarLabel.textContent, /Workspace/i);
+  assert.equal(sidebarLabel.textContent.trim(), "Workspace");
 
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
-  assert.doesNotMatch(sidebarAria.getAttribute("aria-label") ?? "", /workspace/i);
+  assert.equal(sidebarAria.getAttribute("aria-label"), "Workspace");
 
-  const presetSections = document.querySelectorAll(".preset-section-label");
-  for (const presetSection of presetSections) {
-    if (/workspace/i.test(presetSection.textContent)) {
-      assert.fail("preset section label must not contain 'Workspace'");
-    }
+  const paletteEntry = Array.from(document.querySelectorAll(".preset-button strong"))
+    .find((btn) => /^Work(space)?$/.test(btn.textContent.trim()));
+  if (paletteEntry) {
+    assert.equal(paletteEntry.textContent.trim(), "Workspace",
+      "palette surface entry must say 'Workspace'");
   }
 
-  const presetButtons = document.querySelectorAll(".preset-button strong");
-  for (const btn of presetButtons) {
-    assert.doesNotMatch(btn.textContent, /^Workspace$/i,
-      `preset button "${btn.textContent}" must not say 'Workspace'`);
-  }
-
-  const allAriaLabels = Array.from(document.querySelectorAll("[aria-label]"))
-    .map((el) => el.getAttribute("aria-label") ?? "");
-  for (const label of allAriaLabels) {
-    assert.doesNotMatch(label, /Workspace/i,
-      `aria-label "${label}" must not contain 'Workspace'`);
-  }
+  const hotkeyRows = Array.from(document.querySelectorAll(".op-hotkey-card__row span"))
+    .map((el) => el.textContent.trim());
+  assert.ok(!hotkeyRows.includes("Work surface"),
+    "hotkey card must name the surface 'Workspace surface', not 'Work surface'");
 });
 
 function cssBlockContaining(css, selector) {
@@ -4350,4 +4341,25 @@ test("branch_entries telemetry uses the guarded helper without the retired git l
     /window\.__operatorShell\?\.applyTelemetryCounts/,
     "branch telemetry must not call applyTelemetryCounts directly",
   );
+});
+
+// Layout regression (2026-06-10 user verification): app.css carried a stale
+// `.workspace-overview-shell { display: flex }` block that overrode the
+// canonical grid layout in components.css. Under flex, long Workspace rows
+// grow the list pane and crush the detail pane into a vertical sliver. The
+// shell's display is owned by components.css (grid) alone.
+test("app.css must not redeclare display for the Workspace overview shell", () => {
+  const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const blocks = appCss.match(/\.workspace-overview-shell[^{]*\{[^}]*\}/g) ?? [];
+  for (const block of blocks) {
+    if (/\[hidden\]/.test(block)) continue;
+    assert.doesNotMatch(
+      block,
+      /display\s*:\s*(?!none)/,
+      `app.css must not override the overview shell display (grid lives in components.css): ${block}`,
+    );
+  }
+  const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const shellBlock = componentsCss.match(/\.workspace-overview-shell\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(shellBlock, /display\s*:\s*grid/, "components.css owns the grid layout");
 });

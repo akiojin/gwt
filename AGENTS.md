@@ -205,6 +205,7 @@
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 - GUI のユーザー確認が必要な実装では、ビルド済みなら `target/debug/gwt`、未ビルドなら `cargo run -p gwt --bin gwt` で起動し、標準出力の `gwt browser URL: http://127.0.0.1:<port>/` をユーザーに共有する。共有前に `curl -fsS -I <URL>` などで HTTP 200 を確認し、ユーザーが同じ URL で手動確認できる状態にする。
+- 「デバッグ用サーバーを起動して」等の依頼は **`browser-check` skill**（`.claude/skills/browser-check/SKILL.md`）の手順に従う。production の `GWT.app` や既存 gwt インスタンスの URL を共有せず、この checkout の `target/debug/gwt` を隔離 HOME（fresh home + `~/.gwt/runtime` symlink + credential/`.docker` symlink + `session.json` seed）で `--no-tray --no-open` 起動し、`GWT_BROWSER_URL_FILE` から得た URL を HTTP 200 確認後に共有する。検査完了の連絡を受けたらプロセスを停止する。
 
 ## コミュニケーションガイドライン
 

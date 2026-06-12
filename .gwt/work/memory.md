@@ -6821,7 +6821,7 @@ Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --j
 Type: lesson
 Context: PR #3007 で Fable 5 をモデル候補に追加した際、opus と同じ reasoning ladder (xHigh default) を共有させたが、Codex レビューで Fable 5 の Claude Code 既定 effort は high だと指摘された。検証の結果 Opus 4.8 / Sonnet 4.6 の既定も high で、gwt の xHigh/medium 既定は旧バージョン (Opus 4.7 時代) の stale な引き継ぎだった。
 Learning: Claude Code の既定 effort はモデル世代ごとに変わる (4.7=xhigh, 4.8/Fable5/Sonnet4.6=high)。モデル候補の追加・ラベル更新時にラベルだけ追従して既定値の追従が漏れると、ユーザーが意図せず高コスト effort で起動する。
-Future Action: launch_wizard のモデル一覧や既定値を更新する際は https://code.claude.com/docs/en/model-config#adjust-effort-level の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
+Future Action: launch_wizard のモデル一覧や既定値を更新する際は <https://code.claude.com/docs/en/model-config#adjust-effort-level> の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
 
 ## 2026-06-10 — effort 既定はハードコードせず Auto（非 export）で Claude Code に委譲する
 
@@ -6851,6 +6851,13 @@ Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-lo
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
 
+## 2026-06-10 — PowerShell wrapper は .cmd ターゲットへ常に Legacy passing で埋め込み quote を壊す
+
+Type: lesson
+Context: SPEC-2014 Fast mode 起動失敗。PS wrapper 経由の --settings {"fastMode":true} が {fastMode:true} に破損し claude が Error: Invalid JSON provided to --settings で exit 1（windows_shell=PowerShell 7、npx.cmd 経由）
+Learning: pwsh 7.3+ でも .cmd/.bat への native argument passing は Legacy 固定で、空白なし引数は raw 配置・埋め込み " は非エスケープ。MSVCRT 互換の事前エスケープ（" 直前の backslash run 倍化 + バックスラッシュ+quote）と $PSNativeCommandArgumentPassing='Legacy' 固定で全 PS バージョン決定的になる。末尾 backslash は PS が wrap 時に自前で倍化するので触らない（pwsh7/PS5.1 で node argv echo probe により実測確認）
+Future Action: シェルラッパー経由で引数を渡す変更では、quote/space/backslash 入り引数の argv echo probe を pwsh7/PS5.1/cmd.exe で先に実測してから実装する。inline JSON を CLI 引数に乗せる設計は避け、ファイルパス渡しを正本にする
+
 ## 2026-06-10 — llvm-cov はビルド失敗時に 0% レポートを静かに出力する
 
 Type: lesson
@@ -6878,3 +6885,10 @@ Type: lesson
 Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
 Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
 Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
+
+## 2026-06-12 — gwtd register の placeholder --spec 0 は phase で実 ID に rebind できない
+
+Type: lesson
+Context: gwt-register-spec skill の手順は『register start --spec 0 → issue 作成後 register phase --spec <n> --label create で実 ID を bind』と記載しているが、gwtd register phase は state の owner_spec(0) と不一致の --spec を 'phase refused' で拒否する (SPEC-2784)
+Learning: skill doc と CLI 実装が乖離しており、placeholder からの rebind 経路は存在しない。register abort --spec 0 → register start --spec <実ID> で張り直すのが現状の正しい手順。また production GWT.app の gwtd (v9.55.0) は memory add を legacy の tasks/memory.md に書くため、canonical な .gwt/work/memory.md へ届いているかを確認する
+Future Action: gwt-register-spec を使う際は issue 番号確定後に abort+start で lifecycle を実 ID に張り直す。恒久対応するなら skill doc 修正か CLI の rebind 許可のどちらかに寄せる Issue を立てる

@@ -117,9 +117,9 @@ reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
   question line. It does not bypass incomplete evidence.
 
 When the `Action Bundle` is produced, call the matching exit command for each
-proposal before stopping. Codex's `stop_hook_active` flag (shared with Claude
-Code via `codex_hooks`) keeps the handler fail-safe: at most one forced
-continuation per Stop cycle.
+proposal before stopping. The runtime's `stop_hook_active` flag (built into
+Claude Code; shared with Codex via `codex_hooks`) keeps the handler fail-safe:
+at most one forced continuation per Stop cycle.
 
 ## Resume hooks
 
@@ -165,7 +165,8 @@ exception path. Keep the same one-question-at-a-time discipline.
 ### Phase 1: Theme + search
 
 1. Understand the user's concern, idea, or implementation gap.
-2. Run `gwt-search` with 2-3 semantic queries in Japanese and English.
+2. Use the `gwt-search` skill (a skill, not a PATH command) with 2-3
+   semantic queries in Japanese and English.
 3. Check open SPEC Issues: `gwtd issue spec list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
@@ -340,7 +341,14 @@ When the discussion stabilizes, update the right artifacts in one batch.
 
 - Use `references/intake.md` for search and routing discipline
 - Use `references/ddd-modeling.md` for Bounded Context and domain modeling
-- Use `references/registration.md` to create or seed `spec.md`
+- **Register the SPEC via `gwt-register-spec`** (sub-skill, SPEC-2784). The
+  caller prepares title + body file from this discussion's outcome; the
+  sub-skill validates, executes the canonical `create` → `--edit spec` →
+  `--section spec` roundtrip safely, and returns the new Issue number. Add
+  `Register Spec` to the Action Bundle. Use `references/registration.md`
+  only when the sub-skill is unavailable; in that case follow its 2-step
+  flow manually and verify `--section spec` returns non-empty content
+  before handoff.
 - Use `references/clarification.md` to remove high-impact
   `[NEEDS CLARIFICATION]` markers
 - Use `references/deepening.md` when the user asks for deeper analysis on an
@@ -388,6 +396,7 @@ Reason: <one sentence>
 - Resume Build Context: <what the implementer must use>
 
 ### Action Bundle
+- Register Spec
 - Update Spec
 - Update Plan
 - Resume Build
@@ -396,6 +405,10 @@ Reason: <one sentence>
 - No Action
 ```
 
+`Register Spec` runs the `gwt-register-spec` sub-skill (SPEC-2784) to
+materialize a new SPEC Issue safely. Use it instead of manual
+`gwtd issue spec create` whenever a fresh SPEC owner is needed.
+
 This final result is the handoff point where the workflow may leave Plan Mode.
 
 `Action Bundle` may contain multiple actions. Examples:
@@ -403,6 +416,34 @@ This final result is the handoff point where the workflow may leave Plan Mode.
 - `Update Spec` + `Update Plan` + `Resume Build`
 - `Update Issue` + `No Action`
 - `Write Memory` only
+
+### Goal Start (after Action Bundle approval)
+
+Once the user approves the Action Bundle and the follow-up work should
+continue autonomously, start a runtime goal from the approved bundle
+(SPEC-3050):
+
+1. Build a goal condition from the Action Bundle: one verifiable end state
+   (tests green, lint clean, evidence bundle emitted), the check that proves
+   it, and a turn or time cap (for example "or stop after 20 turns"). The
+   condition must respect gwt's PR gate: stop at "verification handoff ready
+   with a recorded User Verification Result" — never "PR created" or "PR
+   merged".
+2. Start the goal per runtime:
+   - **Codex** (goals enabled; gwt launches Codex with `--enable goals`):
+     start the Goal directly with the condition as its objective — the goals
+     tool contract allows the model to start a Goal itself.
+   - **Claude Code** (v2.1.139 or later): the built-in `/goal` command cannot
+     be self-invoked by the agent. Queue it into your own pane instead:
+     `gwtd pane send --text '/goal <condition>'` (resolve `GWT_BIN` first per
+     the gwtd resolution section). The injected line is submitted
+     automatically when the current turn ends. `pane send` is self-only: it
+     targets the pane bound to `GWT_SESSION_ID` and rejects other panes.
+3. If the goal cannot be started (older Claude Code, trust dialog not
+   accepted, goals feature disabled, `pane send` failure), do not skip
+   silently: report the failure reason explicitly, print the assembled
+   `/goal <condition>` line so the user can run it manually, and continue
+   the exit. Goal start failures never block the discussion exit.
 
 ## Routing notes
 
