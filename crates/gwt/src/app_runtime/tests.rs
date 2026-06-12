@@ -14112,6 +14112,107 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
+/// User verification 2026-06-12: a Resume creates a NEW gwt session for the
+/// SAME agent conversation, so the row showed two Work groups with the same
+/// conversation id ("Agent" 15m ago + "Claude Code" 1d ago). Agents whose
+/// latest conversation matches collapse into one row — newest wins, and a
+/// missing display_name is borrowed from the duplicate.
+#[test]
+fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
+    fn agent_view(
+        session_id: &str,
+        display_name: &str,
+        updated_at: &str,
+        conversation: &str,
+    ) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: "claude".to_string(),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: "idle".to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: updated_at.to_string(),
+            sessions: vec![gwt::WorkspaceHistorySessionView {
+                agent_session_id: conversation.to_string(),
+                started_at: updated_at.to_string(),
+                is_active: true,
+                resumable: true,
+            }],
+        }
+    }
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-work-x-12345678".to_string(),
+        title: "work/x".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/x".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            // Resume-created record agent: no display_name recorded yet.
+            agent_view("gwt-new", "", "2026-06-12T02:05:00Z", "conv-shared"),
+            // The original session for the same conversation, a day older.
+            agent_view(
+                "gwt-old",
+                "Claude Code",
+                "2026-06-10T04:15:00Z",
+                "conv-shared",
+            ),
+            // A different conversation must survive untouched.
+            agent_view("gwt-other", "Codex", "2026-06-11T00:00:00Z", "conv-other"),
+        ],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        updated_at: String::new(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    );
+
+    let agents = &works[0].agents;
+    assert_eq!(agents.len(), 2, "shared conversation collapses to one row");
+    let kept = agents
+        .iter()
+        .find(|agent| agent.sessions[0].agent_session_id == "conv-shared")
+        .expect("shared conversation row");
+    assert_eq!(kept.session_id, "gwt-new", "newest gwt session wins");
+    assert_eq!(
+        kept.display_name, "Claude Code",
+        "missing display_name is borrowed from the duplicate"
+    );
+    assert!(agents
+        .iter()
+        .any(|agent| agent.sessions[0].agent_session_id == "conv-other"));
+    assert_eq!(
+        works[0].session_agent_total, 2,
+        "the collapsed duplicate is not counted as a hidden extra session"
+    );
+}
+
 /// SPEC-2359 Phase W-16 (FR-402 follow-up, user verification 2026-06-10): on
 /// this machine none of the ledger TOMLs carry `session_history` (the field
 /// is newer than the sessions), but almost all carry `agent_session_id` (the

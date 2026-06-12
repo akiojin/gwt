@@ -3023,6 +3023,45 @@ fn attach_registry_sessions_to_active_works(
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
+        // User verification 2026-06-12: a Resume creates a new gwt session for
+        // the SAME agent conversation, which used to render as two Work rows
+        // ("Agent" + "Claude Code") carrying one conversation id. Collapse
+        // agents whose latest conversation matches — newest updated_at wins
+        // and borrows the duplicate's display_name when its own is empty.
+        {
+            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
+            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            let mut seen_conversations: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+            let mut dropped = 0usize;
+            for agent in sorted {
+                let conversation = agent
+                    .sessions
+                    .iter()
+                    .find(|session| session.is_active)
+                    .or_else(|| agent.sessions.first())
+                    .map(|session| session.agent_session_id.clone());
+                match conversation {
+                    Some(conversation) if !conversation.is_empty() => {
+                        if let Some(&index) = seen_conversations.get(&conversation) {
+                            if kept[index].display_name.trim().is_empty()
+                                && !agent.display_name.trim().is_empty()
+                            {
+                                kept[index].display_name = agent.display_name.clone();
+                            }
+                            dropped += 1;
+                        } else {
+                            seen_conversations.insert(conversation, kept.len());
+                            kept.push(agent);
+                        }
+                    }
+                    _ => kept.push(agent),
+                }
+            }
+            work.agents = kept;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
+        }
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds
         // every connected client (unbounded fan-out amplifies the WebSocket
