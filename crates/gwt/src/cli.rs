@@ -24,6 +24,7 @@ mod pane;
 mod plan;
 mod pr;
 pub(crate) mod register;
+pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
@@ -41,6 +42,7 @@ pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
+pub use search::SearchCommand;
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -148,6 +150,8 @@ pub enum CliCommand {
     Pane(PaneCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
+    /// SPEC-1942 US-15: `gwtd search "<query>" [flags]`.
+    Search(SearchCommand),
 }
 
 /// SPEC-2077 family enum for `gwtd daemon ...`.
@@ -405,7 +409,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd discussion update [fields] | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs] | gwtd diagnostics cpu --json"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd discussion update [fields] | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs] | gwtd search \"<query>\" [--specs] [--issues] [--files] [--files-docs] [--memory] [--board] [--discussions] [--match-mode semantic|all_terms] [--n-results <n>] [--json] | gwtd diagnostics cpu --json"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -538,6 +542,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "work"
                     | "pane"
                     | "open"
+                    | "search"
             )
         })
         .unwrap_or(false)
@@ -767,6 +772,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
+        CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
