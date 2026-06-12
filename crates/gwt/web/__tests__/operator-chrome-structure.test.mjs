@@ -49,6 +49,14 @@ const profileWindowSurfaceSource = readFileSync(
   resolve(here, "../profile-window-surface.js"),
   "utf8",
 );
+// SPEC-3064 Phase 3 (E7): the project & workspace shell chrome (project
+// tabs, recent projects + open-project menu, picker/onboarding, window list
+// dropdown, maximized viewport sync, clone/migration modal glue) moved from
+// app.js to project-shell-surface.js.
+const projectShellSurfaceSource = readFileSync(
+  resolve(here, "../project-shell-surface.js"),
+  "utf8",
+);
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
   "utf8",
@@ -457,7 +465,7 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
   );
@@ -834,7 +842,7 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /window-list-title">\$\{escapeHtml\(windowDisplayTitle\(entry\)\)\}/,
     "expected the Windows dropdown to escape the shared display-title helper output",
   );
@@ -2764,15 +2772,22 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
   // longer routes to skip_migration; at the confirm stage it is swallowed
   // (no backend send), at the error stage it dismisses the UI without
   // flipping `migration_pending`.
+  // SPEC-3064 Phase 3 (E7): the migration Esc branch delegates into the
+  // project shell surface, which owns the migration modal state.
   assert.doesNotMatch(
-    appSource,
+    projectShellSurfaceSource,
     /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]{0,400}skip_migration/,
     "Esc must not send skip_migration when the Accept-only migration modal is open",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModalState\.stage\s*===\s*"error"[\s\S]*migrationModalState\.open\s*=\s*false/,
     "expected Esc on the migration modal error stage to dismiss the dialog without backend skip",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(handleMigrationModalEscape\(event\)\)\s*\{\s*return;\s*\}/,
+    "expected the global Esc handler to delegate the migration branch into the surface",
   );
   // SPEC-3064 Phase 3 (E5): the wizard Esc branch delegates into the
   // launch wizard surface, which owns the cancel dispatch.
@@ -2786,10 +2801,17 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /wizardModal\.classList\.contains\("open"\)[\s\S]*sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc to send cancel when wizard modal is open",
   );
+  // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc branch delegates into
+  // the project shell surface, which owns the dropdown state.
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
     "expected Esc to close window list dropdown and restore focus to trigger",
+  );
+  assert.match(
+    appSource,
+    /handleWindowListEscape\(event\);/,
+    "expected the global Esc handler to delegate the Windows dropdown branch into the surface",
   );
   // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
   // handles both the .open class flip and focus restore.
@@ -3479,21 +3501,26 @@ test("Project Tabs renderer avoids mapped selector snapshots on tab switches", (
 });
 
 test("hidden project picker does not rebuild Recent Projects on workspace_state", () => {
-  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  // SPEC-3064 Phase 3 (E7): the picker / recent-projects renderers and
+  // their render keys live in the project shell surface.
+  const renderProjectPickerBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "renderProjectPicker",
+  );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+renderedRecentProjectsKey\s*=/,
-    "app.js must track the visible picker Recent Projects render key",
+    "the project shell surface must track the visible picker Recent Projects render key",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+renderedRecentProjectsMenuKey\s*=/,
-    "app.js must track the split-menu Recent Projects render key separately",
+    "the project shell surface must track the split-menu Recent Projects render key separately",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /function\s+recentProjectsRenderKey\s*\(/,
-    "app.js must define a Recent Projects render key helper",
+    "the project shell surface must define a Recent Projects render key helper",
   );
   assert.match(
     renderProjectPickerBody,
@@ -3508,7 +3535,10 @@ test("hidden project picker does not rebuild Recent Projects on workspace_state"
 });
 
 test("Recent Projects render key ignores workspace state and split menu refreshes on open", () => {
-  const keyBody = extractFunctionBody(appSource, "recentProjectsRenderKey");
+  const keyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "recentProjectsRenderKey",
+  );
   for (const field of ["title", "kind", "path"]) {
     assert.match(
       keyBody,
@@ -3523,7 +3553,10 @@ test("Recent Projects render key ignores workspace state and split menu refreshe
       `Recent Projects key must ignore ${workspaceField}`,
     );
   }
-  const openMenuBody = extractFunctionBody(appSource, "openOpenProjectMenu");
+  const openMenuBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "openOpenProjectMenu",
+  );
   assert.match(
     openMenuBody,
     /renderRecentProjectsIntoMenu\s*\(\s*\{\s*force:\s*true\s*\}\s*\)/,
@@ -3612,15 +3645,18 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
 
 test("maximized viewport sync is coalesced across unchanged workspace_state events", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
+  // SPEC-3064 Phase 3 (E7): the coalesced scheduler and its pending-frame
+  // slot live in the project shell surface; renderWorkspace (app.js) keeps
+  // the call sites.
   const schedulerBody = extractFunctionBody(
-    appSource,
+    projectShellSurfaceSource,
     "scheduleMaximizedWindowsToViewportSync",
   );
 
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+maximizedViewportSyncFrame\s*=\s*null\s*;/,
-    "app.js must track a pending maximized viewport sync frame",
+    "the project shell surface must track a pending maximized viewport sync frame",
   );
   assert.match(
     schedulerBody,
@@ -3764,16 +3800,21 @@ test("Workspace Windows render key avoids JSON stringify allocation", () => {
 });
 
 test("Window List skips unchanged row rebuilds after updating open state", () => {
-  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
-  assert.match(
-    appSource,
-    /let\s+renderedWindowListKey\s*=/,
-    "app.js must track the last rendered Window List row key",
+  // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer, its render
+  // key, and its rendered-key slot live in the project shell surface.
+  const renderWindowListBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "renderWindowList",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
+    /let\s+renderedWindowListKey\s*=/,
+    "the project shell surface must track the last rendered Window List row key",
+  );
+  assert.match(
+    projectShellSurfaceSource,
     /function\s+windowListRenderKey\s*\(/,
-    "app.js must define a Window List render key helper",
+    "the project shell surface must define a Window List render key helper",
   );
 
   const hiddenIndex = renderWindowListBody.indexOf("windowListPanel.hidden");
@@ -3830,7 +3871,10 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
     "unchanged Window List key guard must return before clearing rows",
   );
 
-  const toggleWindowListBody = extractFunctionBody(appSource, "toggleWindowList");
+  const toggleWindowListBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "toggleWindowList",
+  );
   const invalidateIndex = toggleWindowListBody.indexOf("renderedWindowListKey = \"\";");
   const renderIndex = toggleWindowListBody.indexOf("renderWindowList();");
   const requestIndex = toggleWindowListBody.indexOf("requestWindowList();");
@@ -3842,7 +3886,10 @@ test("Window List skips unchanged row rebuilds after updating open state", () =>
 });
 
 test("Window List row source rebuild avoids mapped intermediate arrays", () => {
-  const renderWindowListBody = extractFunctionBody(appSource, "renderWindowList");
+  const renderWindowListBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "renderWindowList",
+  );
   assert.doesNotMatch(
     renderWindowListBody,
     /workspaceWindows\.map\s*\(/,
@@ -3871,7 +3918,12 @@ test("Window List row source rebuild avoids mapped intermediate arrays", () => {
 });
 
 test("Window List render key ignores viewport and includes row shell fields", () => {
-  const keyBody = extractFunctionBody(appSource, "windowListRenderKey");
+  const keyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "windowListRenderKey",
+  );
+  // appendRenderKeyPart stays in app.js (shared with the render keys that
+  // remained there) and reaches the surface through the deps bag.
   assert.match(
     appSource,
     /function\s+appendRenderKeyPart\s*\(/,
@@ -3952,20 +4004,22 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     /let\s+renderedAppVersionLabel\s*=/,
     "app.js must track the last rendered app version label",
   );
+  // SPEC-3064 Phase 3 (E7): the static project chrome renderers and their
+  // rendered-key slots live in the project shell surface.
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+renderedProjectPickerKey\s*=/,
-    "app.js must track the last rendered Project Picker key",
+    "the project shell surface must track the last rendered Project Picker key",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+renderedProjectOnboardingKey\s*=/,
-    "app.js must track the last rendered Project Onboarding key",
+    "the project shell surface must track the last rendered Project Onboarding key",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /let\s+renderedActionAvailabilityKey\s*=/,
-    "app.js must track the last rendered action availability key",
+    "the project shell surface must track the last rendered action availability key",
   );
 
   const renderAppVersionBody = extractFunctionBody(appSource, "renderAppVersion");
@@ -3978,7 +4032,10 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     "renderAppVersion must return before unchanged label DOM writes",
   );
 
-  const renderProjectPickerBody = extractFunctionBody(appSource, "renderProjectPicker");
+  const renderProjectPickerBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "renderProjectPicker",
+  );
   const pickerKeyIndex = renderProjectPickerBody.indexOf(
     "const nextProjectPickerKey = projectPickerRenderKey(activeTab);",
   );
@@ -3995,7 +4052,10 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     "renderProjectPicker must return before unchanged picker DOM writes",
   );
 
-  const renderProjectOnboardingBody = extractFunctionBody(appSource, "renderProjectOnboarding");
+  const renderProjectOnboardingBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "renderProjectOnboarding",
+  );
   const onboardingKeyIndex = renderProjectOnboardingBody.indexOf(
     "const nextProjectOnboardingKey = projectOnboardingRenderKey(tab);",
   );
@@ -4012,7 +4072,10 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     "renderProjectOnboarding must return before unchanged onboarding DOM writes",
   );
 
-  const updateActionAvailabilityBody = extractFunctionBody(appSource, "updateActionAvailability");
+  const updateActionAvailabilityBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "updateActionAvailability",
+  );
   const actionKeyIndex = updateActionAvailabilityBody.indexOf(
     "const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);",
   );
@@ -4029,7 +4092,10 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
 });
 
 test("Static project chrome keys ignore workspace geometry and include visible transition state", () => {
-  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
+  const pickerKeyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "projectPickerRenderKey",
+  );
   assert.match(
     pickerKeyBody,
     /activeTab/,
@@ -4046,7 +4112,10 @@ test("Static project chrome keys ignore workspace geometry and include visible t
     "Project Picker key must include Recent Projects only when visible",
   );
 
-  const onboardingKeyBody = extractFunctionBody(appSource, "projectOnboardingRenderKey");
+  const onboardingKeyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "projectOnboardingRenderKey",
+  );
   for (const field of ["kind", "project_root"]) {
     assert.match(
       onboardingKeyBody,
@@ -4055,7 +4124,10 @@ test("Static project chrome keys ignore workspace geometry and include visible t
     );
   }
 
-  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  const actionKeyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "actionAvailabilityRenderKey",
+  );
   assert.match(
     actionKeyBody,
     /activeTab/,
@@ -4075,7 +4147,7 @@ test("Static project chrome keys ignore workspace geometry and include visible t
 
 test("Static project chrome keys avoid JSON stringify allocation", () => {
   for (const name of ["projectPickerRenderKey", "projectOnboardingRenderKey"]) {
-    const keyBody = extractFunctionBody(appSource, name);
+    const keyBody = extractFunctionBody(projectShellSurfaceSource, name);
     assert.match(
       keyBody,
       /appendRenderKeyPart\s*\(/,
@@ -4107,8 +4179,14 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
     "renderAppState must resolve the active tab once and pass it through static chrome and workspace renderers",
   );
 
-  const pickerKeyBody = extractFunctionBody(appSource, "projectPickerRenderKey");
-  const actionKeyBody = extractFunctionBody(appSource, "actionAvailabilityRenderKey");
+  const pickerKeyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "projectPickerRenderKey",
+  );
+  const actionKeyBody = extractFunctionBody(
+    projectShellSurfaceSource,
+    "actionAvailabilityRenderKey",
+  );
   for (const keyBody of [pickerKeyBody, actionKeyBody]) {
     assert.doesNotMatch(
       keyBody,

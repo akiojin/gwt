@@ -56,6 +56,8 @@ const ROOT_MODULES = new Set([
   "profile-window-surface.js",
   // SPEC-3064 Phase 3 (E3) — Project Index window surface.
   "project-index-search-surface.js",
+  // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface.
+  "project-shell-surface.js",
   "project-tabs-renderer.js",
   // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
   "provider-usage-surface.js",

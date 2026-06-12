@@ -182,6 +182,11 @@ root_js_modules! {
     // SPEC-3064 Phase 3 (E6e) — Profile window surface (profile state +
     // draft editing, window mount) extracted from app.js.
     "profile-window-surface.js" => "createProfileWindowSurface",
+    // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+    // (project tabs + close-tab confirm, recent projects + open-project
+    // menu, picker/onboarding, window list dropdown, maximized viewport
+    // sync, clone/migration modal glue) extracted from app.js.
+    "project-shell-surface.js" => "createProjectShellSurface",
 }
 
 /// Embedded payload of a [`StaticAsset`].

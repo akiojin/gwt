@@ -35,6 +35,12 @@ fn settings_surface_js() -> &'static str {
     root_js_module_source("/settings-surface.js")
 }
 
+/// SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+/// extracted from app.js.
+fn project_shell_surface_js() -> &'static str {
+    root_js_module_source("/project-shell-surface.js")
+}
+
 /// SPEC-3015 — generated protocol enum contract (see web_protocol_enums.rs).
 fn protocol_enums_js() -> &'static str {
     root_js_module_source("/protocol-enums.js")
@@ -109,7 +115,11 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         // SPEC-3064 Phase 3 (E6e) — Profile window surface moved out of
         // app.js.
-        include_str!("../web/profile-window-surface.js")
+        include_str!("../web/profile-window-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+        // moved out of app.js.
+        include_str!("../web/project-shell-surface.js")
     )
 }
 
@@ -1272,14 +1282,19 @@ fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separate
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
+    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved to the
+    // project shell surface; the geometry/runtime label separation is pinned
+    // against the extracted module while windowGeometryLabel stays in app.js.
+    let shell_js = project_shell_surface_js();
     assert!(
-            js.contains("const geometryLabel = windowGeometryLabel(entry);")
-                && js.contains("const runtimeState = runtimeStateForWindow(entry);")
-                && js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
+            shell_js.contains("const geometryLabel = windowGeometryLabel(entry);")
+                && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
+                && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
             "expected window list rendering to derive geometry and runtime labels through separate helpers",
         );
     assert!(
-        !js.contains("function windowStateLabel(windowData)"),
+        !js.contains("function windowStateLabel(windowData)")
+            && !shell_js.contains("function windowStateLabel(windowData)"),
         "expected embedded js to stop reusing one helper for both geometry and runtime labels",
     );
 }
@@ -1465,7 +1480,10 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
 
 #[test]
 fn embedded_web_window_list_selection_keeps_focus_center_and_restore_contract() {
-    let js = app_js();
+    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
+    // app.js to the project shell surface; the selection contract is pinned
+    // against the extracted module.
+    let js = project_shell_surface_js();
 
     assert!(
         js.contains("focusWindowRemotely(entry.id, { center: true });"),
@@ -3491,14 +3509,19 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              (fit + viewport refresh + focus) so scrollback responds without a manual \
              resize (SPEC-2008 FR-051); body: {body}",
     );
+    // SPEC-3064 Phase 3 (E7): the coalesced scheduler and its pending-frame
+    // slot moved to the project shell surface; renderWorkspace (app.js)
+    // keeps the call sites.
+    let shell_js = project_shell_surface_js();
     assert!(
-        js.contains("function scheduleMaximizedWindowsToViewportSync()")
-            && js.contains("let maximizedViewportSyncFrame = null;"),
+        shell_js.contains("function scheduleMaximizedWindowsToViewportSync()")
+            && shell_js.contains("let maximizedViewportSyncFrame = null;"),
         "expected maximized viewport sync to be routed through the coalesced \
              frame scheduler (SPEC-1939 Phase 52)",
     );
     assert!(
-        !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
+        !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
+            && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
         "expected renderWorkspace to avoid raw maximized viewport sync rAF fan-out",
     );
 }
