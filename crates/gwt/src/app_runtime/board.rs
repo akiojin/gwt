@@ -24,7 +24,10 @@ use gwt_core::{
 
 use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
 
-use super::{AppRuntime, BackendEvent, OutboundEvent, WindowGeometry, WindowPreset};
+use super::{
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
+    WindowGeometry, WindowPreset,
+};
 
 pub(super) fn gui_default_board_scope_for_project(
     project_root: &Path,
@@ -489,5 +492,261 @@ fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) 
 pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
     for entry in entries.iter_mut() {
         entry.body_html = Some(gwt::board_remote::markdown::markdown_to_html(&entry.body));
+    }
+}
+
+impl AppRuntime {
+    pub(crate) fn load_board_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        all: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+        let project_root = tab.project_root.clone();
+        if all {
+            self.board_all_view_windows.insert(id.to_string());
+        } else {
+            self.board_all_view_windows.remove(id);
+        }
+
+        let scope = if all {
+            gwt_core::coordination::BoardAudienceScope::All
+        } else {
+            match gui_default_board_scope_for_project(&project_root) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::BoardError {
+                            id: id.to_string(),
+                            message: error.to_string(),
+                        },
+                    )];
+                }
+            }
+        };
+        let snapshot_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+            gwt::board_provider::load_snapshot(&project_root)
+        } else {
+            gwt::board_provider::load_snapshot_for_scope(&project_root, &scope)
+        };
+        match snapshot_result {
+            Ok(snapshot) => {
+                let mut entries = snapshot.board.entries;
+                attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardEntries {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: snapshot.board.has_more_before,
+                    },
+                )]
+            }
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn load_board_history_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        before_entry_id: Option<&str>,
+        limit: usize,
+        all: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+        let project_root = tab.project_root.clone();
+        if all {
+            self.board_all_view_windows.insert(id.to_string());
+        } else {
+            self.board_all_view_windows.remove(id);
+        }
+
+        let scope = if all {
+            gwt_core::coordination::BoardAudienceScope::All
+        } else {
+            match gui_default_board_scope_for_project(&project_root) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::BoardError {
+                            id: id.to_string(),
+                            message: error.to_string(),
+                        },
+                    )];
+                }
+            }
+        };
+        let page_result = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+            gwt::board_provider::load_entries_before(&project_root, before_entry_id, limit)
+        } else {
+            gwt::board_provider::load_entries_before_for_scope(
+                &project_root,
+                before_entry_id,
+                limit,
+                &scope,
+            )
+        };
+        match page_result {
+            Ok(page) => {
+                let mut entries = page.entries;
+                attach_board_body_html(&mut entries);
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardHistoryPage {
+                        id: id.to_string(),
+                        entries,
+                        has_more_before: page.has_more_before,
+                    },
+                )]
+            }
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn handle_board_projection_changed_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Ok(snapshot) = gwt::board_provider::load_snapshot(project_root) else {
+            return Vec::new();
+        };
+
+        let mut events = Vec::new();
+        let latest_entry = snapshot.board.entries.last().cloned();
+        for tab in &self.tabs {
+            if !same_worktree_path(&tab.project_root, project_root) {
+                continue;
+            }
+            for window in &tab.workspace.persisted().windows {
+                if window.preset != WindowPreset::Board {
+                    continue;
+                }
+                let window_id = combined_window_id(&tab.id, &window.id);
+                let scope = if self.board_all_view_windows.contains(&window_id) {
+                    gwt_core::coordination::BoardAudienceScope::All
+                } else {
+                    gui_default_board_scope_for_project(&tab.project_root)
+                        .unwrap_or(gwt_core::coordination::BoardAudienceScope::All)
+                };
+                let board = if matches!(scope, gwt_core::coordination::BoardAudienceScope::All) {
+                    snapshot.board.clone()
+                } else {
+                    gwt::board_provider::load_snapshot_for_scope(&tab.project_root, &scope)
+                        .map(|snapshot| snapshot.board)
+                        .unwrap_or_else(|_| snapshot.board.clone())
+                };
+                let mut entries = board.entries;
+                attach_board_body_html(&mut entries);
+                events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
+                    id: window_id,
+                    entries,
+                    has_more_before: board.has_more_before,
+                }));
+            }
+        }
+        if let Some(entry) = latest_entry.as_ref() {
+            if let Some((tab_id, project_root)) = self
+                .tabs
+                .iter()
+                .find(|tab| {
+                    same_worktree_path(&tab.project_root, project_root)
+                        && self.active_tab_id.as_deref() == Some(tab.id.as_str())
+                })
+                .map(|tab| (tab.id.clone(), tab.project_root.clone()))
+            {
+                events.extend(self.record_workspace_board_milestone_event(
+                    &tab_id,
+                    &project_root,
+                    entry,
+                ));
+            }
+        }
+        events
     }
 }
