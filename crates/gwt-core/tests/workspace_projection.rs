@@ -7,10 +7,10 @@ use gwt_core::{
         gwt_workspace_projection_path_for_repo_path,
     },
     repo_hash::compute_repo_hash,
-    workspace_projection::{
+    work_projection::{
         load_or_default_workspace_projection_from_path, load_workspace_projection_from_path,
-        save_workspace_projection_to_path, GitDetails, WorkspaceAgentAffiliationStatus,
-        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
+        save_workspace_projection_to_path, GitDetails, WorkProjection,
+        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceStatusCategory,
     },
 };
 
@@ -21,8 +21,8 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .expect("env lock")
 }
 
-fn projection(project_root: &Path) -> WorkspaceProjection {
-    WorkspaceProjection {
+fn projection(project_root: &Path) -> WorkProjection {
+    WorkProjection {
         id: "work-1".to_string(),
         project_root: project_root.to_path_buf(),
         title: "Start payment cleanup".to_string(),
@@ -63,7 +63,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
         updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 1, 0).unwrap(),
         created_at: Utc.with_ymd_and_hms(2026, 5, 4, 11, 30, 0).unwrap(),
         creator: Some("codex".to_string()),
-        lifecycle_stage: gwt_core::workspace_projection::WorkspaceLifecycleStage::Active,
+        lifecycle_stage: gwt_core::work_projection::WorkspaceLifecycleStage::Active,
         blocked_reason: None,
         linked_issues: Vec::new(),
         linked_prs: Vec::new(),
@@ -78,7 +78,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
 /// signals route to Active; Unknown stays in Planning.
 #[test]
 fn recompute_lifecycle_stage_follows_documented_precedence_rules() {
-    use gwt_core::workspace_projection::{
+    use gwt_core::work_projection::{
         recompute_lifecycle_stage, WorkspaceLifecycleStage, WorkspacePrLink,
     };
 
@@ -154,7 +154,7 @@ fn recompute_lifecycle_stage_follows_documented_precedence_rules() {
 fn record_board_milestone_backfills_summary_when_missing_for_status_entry() {
     use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
 
-    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    let mut projection = WorkProjection::default_for_project("/repo");
     projection.agents.push(WorkspaceAgentSummary {
         session_id: "session-1".to_string(),
         window_id: None,
@@ -201,7 +201,7 @@ fn record_board_milestone_backfills_summary_when_missing_for_status_entry() {
 fn record_board_milestone_sets_blocked_reason_separately_from_status_text() {
     use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
 
-    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    let mut projection = WorkProjection::default_for_project("/repo");
     projection.agents.push(WorkspaceAgentSummary {
         session_id: "session-1".to_string(),
         window_id: None,
@@ -252,7 +252,7 @@ fn record_board_milestone_sets_blocked_reason_separately_from_status_text() {
 fn record_board_milestone_preserves_existing_summary_on_status_entry() {
     use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
 
-    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    let mut projection = WorkProjection::default_for_project("/repo");
     projection.agents.push(WorkspaceAgentSummary {
         session_id: "session-1".to_string(),
         window_id: None,
@@ -314,7 +314,7 @@ fn workspace_projection_legacy_json_deserializes_with_serde_defaults() {
         "updated_at": "2026-04-01T12:00:00Z"
     });
 
-    let projection: WorkspaceProjection =
+    let projection: WorkProjection =
         serde_json::from_value(legacy_json).expect("legacy projection deserializes");
 
     assert_eq!(projection.id, "legacy-1");
@@ -322,13 +322,13 @@ fn workspace_projection_legacy_json_deserializes_with_serde_defaults() {
     // New fields populate via serde defaults so legacy data does not panic.
     assert_eq!(
         projection.created_at,
-        gwt_core::workspace_projection::workspace_projection_default_created_at(),
+        gwt_core::work_projection::workspace_projection_default_created_at(),
         "legacy data lacks created_at; default is UNIX_EPOCH sentinel for migration"
     );
     assert_eq!(projection.creator, None);
     assert_eq!(
         projection.lifecycle_stage,
-        gwt_core::workspace_projection::WorkspaceLifecycleStage::Planning,
+        gwt_core::work_projection::WorkspaceLifecycleStage::Planning,
         "legacy data defaults to Planning until migration recomputes"
     );
     assert_eq!(projection.blocked_reason, None);
@@ -343,11 +343,9 @@ fn workspace_projection_legacy_json_deserializes_with_serde_defaults() {
 /// and CLI updates all persist losslessly.
 #[test]
 fn workspace_projection_serde_round_trip_preserves_new_fields() {
-    use gwt_core::workspace_projection::{
-        WorkspaceIssueLink, WorkspaceLifecycleStage, WorkspacePrLink,
-    };
+    use gwt_core::work_projection::{WorkspaceIssueLink, WorkspaceLifecycleStage, WorkspacePrLink};
 
-    let original = WorkspaceProjection {
+    let original = WorkProjection {
         id: "round-trip-1".to_string(),
         project_root: PathBuf::from("/repo"),
         title: "Schema round-trip".to_string(),
@@ -380,7 +378,7 @@ fn workspace_projection_serde_round_trip_preserves_new_fields() {
     };
 
     let json = serde_json::to_string(&original).expect("serialize");
-    let restored: WorkspaceProjection = serde_json::from_str(&json).expect("deserialize");
+    let restored: WorkProjection = serde_json::from_str(&json).expect("deserialize");
 
     assert_eq!(restored, original);
 }
@@ -418,7 +416,7 @@ fn workspace_projection_repo_path_migrates_legacy_workspace_current_json() {
         "test precondition: canonical project-state file should not exist"
     );
 
-    let loaded = gwt_core::workspace_projection::load_workspace_projection(repo.path())
+    let loaded = gwt_core::work_projection::load_workspace_projection(repo.path())
         .expect("migrate")
         .expect("migrated projection");
 

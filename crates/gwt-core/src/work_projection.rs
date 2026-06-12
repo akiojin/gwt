@@ -132,7 +132,7 @@ pub fn derive_merged_done_equivalent(
 /// items key on the canonical worktree identity; everything else (legacy
 /// `workspace-<millis>` / bare-UUID items without containers) keeps its own
 /// `item.id` as the key so old rows never vanish.
-pub fn workspace_group_key_for_item(project_root: &Path, item: &WorkspaceWorkItem) -> String {
+pub fn workspace_group_key_for_item(project_root: &Path, item: &WorkItem) -> String {
     let branch = item
         .execution_containers
         .iter()
@@ -1091,7 +1091,7 @@ impl WorkProjection {
 
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): point the projection at an
     /// existing Work item (the CLI `workspace join` / selection paths).
-    pub fn apply_work_item(&mut self, item: &WorkspaceWorkItem, updated_at: DateTime<Utc>) {
+    pub fn apply_work_item(&mut self, item: &WorkItem, updated_at: DateTime<Utc>) {
         self.id = item.id.clone();
         self.title = item.title.clone();
         self.status_category = item.status_category;
@@ -1211,7 +1211,7 @@ pub struct WorkspaceJournalEntry {
 
 /// Reference from a Work item to one agent session that worked on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceWorkAgentRef {
+pub struct WorkAgentRef {
     pub session_id: String,
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -1236,10 +1236,10 @@ pub struct WorkspaceExecutionContainerRef {
 }
 
 /// Lifecycle event kind in a Work item's history (start, claim, update,
-/// pause, done, ...). Each kind maps to one [`WorkspaceWorkEvent`] record.
+/// pause, done, ...). Each kind maps to one [`WorkEvent`] record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkspaceWorkEventKind {
+pub enum WorkEventKind {
     Start,
     Claim,
     Update,
@@ -1269,12 +1269,12 @@ pub enum WorkspaceWorkEventKind {
 }
 
 /// One append-only event in a Work item's lifecycle. Events are folded into
-/// [`WorkspaceWorkItem`]s by [`WorkspaceWorkItemsProjection`].
+/// [`WorkItem`]s by [`WorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceWorkEvent {
+pub struct WorkEvent {
     pub id: String,
     pub work_item_id: String,
-    pub kind: WorkspaceWorkEventKind,
+    pub kind: WorkEventKind,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -1302,9 +1302,9 @@ pub struct WorkspaceWorkEvent {
     pub updated_at: DateTime<Utc>,
 }
 
-impl WorkspaceWorkEvent {
+impl WorkEvent {
     pub fn new(
-        kind: WorkspaceWorkEventKind,
+        kind: WorkEventKind,
         work_item_id: impl Into<String>,
         updated_at: DateTime<Utc>,
     ) -> Self {
@@ -1331,9 +1331,9 @@ impl WorkspaceWorkEvent {
 
 /// One unit of work on the Work surface: title, status, participating
 /// agents, execution containers, and its event history. Built by folding
-/// [`WorkspaceWorkEvent`]s.
+/// [`WorkEvent`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceWorkItem {
+pub struct WorkItem {
     pub id: String,
     pub title: String,
     #[serde(default)]
@@ -1348,7 +1348,7 @@ pub struct WorkspaceWorkItem {
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub agents: Vec<WorkspaceWorkAgentRef>,
+    pub agents: Vec<WorkAgentRef>,
     #[serde(default)]
     pub execution_containers: Vec<WorkspaceExecutionContainerRef>,
     #[serde(default)]
@@ -1356,7 +1356,7 @@ pub struct WorkspaceWorkItem {
     #[serde(default)]
     pub related_work_item_ids: Vec<String>,
     #[serde(default)]
-    pub events: Vec<WorkspaceWorkEvent>,
+    pub events: Vec<WorkEvent>,
     /// SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal discarded close. A
     /// discarded Work is removed from the active Work surface but kept in the
     /// history with its provenance. Distinct from `status_category == Done`
@@ -1366,7 +1366,7 @@ pub struct WorkspaceWorkItem {
     pub discarded: bool,
 }
 
-impl WorkspaceWorkItem {
+impl WorkItem {
     /// A Work is incomplete while it is neither completed (Done) nor discarded.
     /// Both Done and Discarded are terminal closes (FR-352).
     pub fn is_incomplete(&self) -> bool {
@@ -1383,13 +1383,13 @@ impl WorkspaceWorkItem {
 /// Materialized collection of all Work items for one project, rebuilt by
 /// folding the Work event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceWorkItemsProjection {
+pub struct WorkItemsProjection {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
-    pub work_items: Vec<WorkspaceWorkItem>,
+    pub work_items: Vec<WorkItem>,
 }
 
-impl WorkspaceWorkItemsProjection {
+impl WorkItemsProjection {
     pub fn empty(updated_at: DateTime<Utc>) -> Self {
         Self {
             updated_at,
@@ -1397,13 +1397,13 @@ impl WorkspaceWorkItemsProjection {
         }
     }
 
-    pub fn apply_event(&mut self, event: WorkspaceWorkEvent) {
+    pub fn apply_event(&mut self, event: WorkEvent) {
         let existing_index = self
             .work_items
             .iter()
             .position(|item| item.id == event.work_item_id);
         let index = existing_index.unwrap_or_else(|| {
-            self.work_items.push(WorkspaceWorkItem {
+            self.work_items.push(WorkItem {
                 id: event.work_item_id.clone(),
                 title: event
                     .title
@@ -1434,7 +1434,7 @@ impl WorkspaceWorkItemsProjection {
         // `updated_at`, overwrite the real title, or touch status — otherwise
         // every materialized row collapses onto the replay instant and the
         // recency sort degenerates. Only the execution container may merge.
-        if existing_index.is_some() && event.kind == WorkspaceWorkEventKind::Backfill {
+        if existing_index.is_some() && event.kind == WorkEventKind::Backfill {
             if let Some(container) = event.execution_container.clone() {
                 if !item
                     .execution_containers
@@ -1475,7 +1475,7 @@ impl WorkspaceWorkItemsProjection {
         if !preserve_terminal {
             item.status_category = new_status;
         }
-        if event.kind == WorkspaceWorkEventKind::Discard {
+        if event.kind == WorkEventKind::Discard {
             item.discarded = true;
         }
         if item.status_category == WorkspaceStatusCategory::Done {
@@ -1500,7 +1500,7 @@ impl WorkspaceWorkItemsProjection {
                 agent.display_name = event.display_name.clone().or(agent.display_name.clone());
                 agent.updated_at = event.updated_at;
             } else {
-                item.agents.push(WorkspaceWorkAgentRef {
+                item.agents.push(WorkAgentRef {
                     session_id,
                     agent_id: event.agent_id.clone(),
                     display_name: event.display_name.clone(),
@@ -1671,7 +1671,7 @@ fn migrate_legacy_workspace_projection(
 fn migrate_legacy_workspace_work_items(
     repo_path: &Path,
     canonical_path: &Path,
-) -> Result<Option<WorkspaceWorkItemsProjection>> {
+) -> Result<Option<WorkItemsProjection>> {
     if let Some(projection) = load_workspace_work_items_from_path(canonical_path)? {
         return Ok(Some(projection));
     }
@@ -1809,19 +1809,17 @@ fn migrate_workspace_to_work_terminology(projection: &mut WorkProjection) {
     }
 }
 
-pub fn load_workspace_work_items(repo_path: &Path) -> Result<Option<WorkspaceWorkItemsProjection>> {
+pub fn load_workspace_work_items(repo_path: &Path) -> Result<Option<WorkItemsProjection>> {
     migrate_legacy_workspace_work_items(
         repo_path,
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
     )
 }
 
-pub fn load_workspace_work_items_from_path(
-    path: &Path,
-) -> Result<Option<WorkspaceWorkItemsProjection>> {
+pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkItemsProjection>> {
     match fs::read(path) {
         Ok(bytes) => {
-            let mut items: WorkspaceWorkItemsProjection = serde_json::from_slice(&bytes)
+            let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
                 .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
             for item in &mut items.work_items {
                 if item.title == "Workspace" {
@@ -1841,9 +1839,7 @@ pub fn load_workspace_work_items_from_path(
     }
 }
 
-pub fn load_or_synthesize_workspace_work_items(
-    repo_path: &Path,
-) -> Result<WorkspaceWorkItemsProjection> {
+pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkItemsProjection> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
@@ -1866,7 +1862,7 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
     current_path: &Path,
     journal_path: &Path,
     project_root: &Path,
-) -> Result<WorkspaceWorkItemsProjection> {
+) -> Result<WorkItemsProjection> {
     if let Some(projection) = load_workspace_work_items_from_path(work_items_path)? {
         return Ok(projection);
     }
@@ -1881,7 +1877,7 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
 /// the parsed projection instead. Synthesized fallbacks (works.json absent)
 /// are never cached — they must observe legacy-file changes.
 #[derive(Default)]
-pub struct WorkspaceWorkItemsCache {
+pub struct WorkItemsCache {
     entries: HashMap<PathBuf, CachedWorkItemsProjection>,
     /// Lifetime parse counter; tests assert the steady state stops parsing.
     pub parse_count: u64,
@@ -1890,16 +1886,16 @@ pub struct WorkspaceWorkItemsCache {
 struct CachedWorkItemsProjection {
     mtime: std::time::SystemTime,
     size: u64,
-    projection: WorkspaceWorkItemsProjection,
+    projection: WorkItemsProjection,
 }
 
-impl WorkspaceWorkItemsCache {
+impl WorkItemsCache {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Cached equivalent of [`load_or_synthesize_workspace_work_items`].
-    pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkspaceWorkItemsProjection> {
+    pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkItemsProjection> {
         let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
         if let Some(hit) = self.lookup(&work_items_path) {
             return Ok(hit);
@@ -1916,7 +1912,7 @@ impl WorkspaceWorkItemsCache {
         current_path: &Path,
         journal_path: &Path,
         project_root: &Path,
-    ) -> Result<WorkspaceWorkItemsProjection> {
+    ) -> Result<WorkItemsProjection> {
         if let Some(hit) = self.lookup(work_items_path) {
             return Ok(hit);
         }
@@ -1930,14 +1926,14 @@ impl WorkspaceWorkItemsCache {
         Ok(projection)
     }
 
-    fn lookup(&self, work_items_path: &Path) -> Option<WorkspaceWorkItemsProjection> {
+    fn lookup(&self, work_items_path: &Path) -> Option<WorkItemsProjection> {
         let meta = fs::metadata(work_items_path).ok()?;
         let mtime = meta.modified().ok()?;
         let hit = self.entries.get(work_items_path)?;
         (hit.mtime == mtime && hit.size == meta.len()).then(|| hit.projection.clone())
     }
 
-    fn store(&mut self, work_items_path: &Path, projection: &WorkspaceWorkItemsProjection) {
+    fn store(&mut self, work_items_path: &Path, projection: &WorkItemsProjection) {
         self.parse_count += 1;
         let Ok(meta) = fs::metadata(work_items_path) else {
             // works.json absent: the result was synthesized from legacy
@@ -1962,14 +1958,14 @@ impl WorkspaceWorkItemsCache {
 
 pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
-    projection: &WorkspaceWorkItemsProjection,
+    projection: &WorkItemsProjection,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
     write_atomic(path, &bytes)
 }
 
-pub fn record_workspace_work_event(repo_path: &Path, event: WorkspaceWorkEvent) -> Result<()> {
+pub fn record_workspace_work_event(repo_path: &Path, event: WorkEvent) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = repo_local_work_events_path_with_migration(repo_path)?;
@@ -1979,10 +1975,10 @@ pub fn record_workspace_work_event(repo_path: &Path, event: WorkspaceWorkEvent) 
 pub fn record_workspace_work_event_paths(
     work_items_path: &Path,
     events_path: &Path,
-    event: WorkspaceWorkEvent,
+    event: WorkEvent,
 ) -> Result<()> {
     let mut projection = load_workspace_work_items_from_path(work_items_path)?
-        .unwrap_or_else(|| WorkspaceWorkItemsProjection::empty(event.updated_at));
+        .unwrap_or_else(|| WorkItemsProjection::empty(event.updated_at));
     projection.apply_event(event.clone());
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     append_workspace_work_event_to_path(events_path, &event)?;
@@ -2007,7 +2003,7 @@ pub struct WorktreeReconcileSource {
 /// matching worktree path. Terminal (Done/Discarded) items also match here,
 /// which keeps closed Work closed (US-61 — backfill never re-opens).
 pub fn worktree_sources_needing_backfill(
-    projection: &WorkspaceWorkItemsProjection,
+    projection: &WorkItemsProjection,
     project_root: &Path,
     sources: &[WorktreeReconcileSource],
 ) -> Vec<(String, WorktreeReconcileSource)> {
@@ -2057,7 +2053,7 @@ pub fn record_workspace_backfill_event_paths(
     worktree_path: &Path,
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
-    let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, work_id, updated_at);
+    let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
     event.execution_container = Some(WorkspaceExecutionContainerRef {
         branch: Some(branch.to_string()),
@@ -2082,7 +2078,7 @@ pub fn reconcile_worktree_work_items_paths(
     now: DateTime<Utc>,
 ) -> Result<usize> {
     let projection = load_workspace_work_items_from_path(work_items_path)?
-        .unwrap_or_else(|| WorkspaceWorkItemsProjection::empty(now));
+        .unwrap_or_else(|| WorkItemsProjection::empty(now));
     let pending = worktree_sources_needing_backfill(&projection, project_root, sources);
     for (work_id, source) in &pending {
         let Some(branch) = source.branch.as_deref() else {
@@ -2154,8 +2150,8 @@ pub fn decompose_legacy_multi_branch_work_items_paths(
         return Ok(0);
     };
     let mut decomposed = 0usize;
-    let mut replacement: Vec<WorkspaceWorkItem> = Vec::new();
-    let mut pending_events: Vec<WorkspaceWorkEvent> = Vec::new();
+    let mut replacement: Vec<WorkItem> = Vec::new();
+    let mut pending_events: Vec<WorkEvent> = Vec::new();
     for item in projection.work_items.drain(..) {
         let mut branch_identities: Vec<String> = Vec::new();
         for event in &item.events {
@@ -2249,8 +2245,7 @@ pub fn record_workspace_work_paused_event_paths(
     agent_session_id: Option<&str>,
     updated_at: DateTime<Utc>,
 ) -> Result<()> {
-    let mut event =
-        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Pause, work_item_id, updated_at);
+    let mut event = WorkEvent::new(WorkEventKind::Pause, work_item_id, updated_at);
     event.title = non_empty_clone(title);
     event.summary = non_empty_clone(summary);
     event.owner = non_empty_clone(owner);
@@ -2261,8 +2256,7 @@ pub fn record_workspace_work_paused_event_paths(
     record_workspace_work_event_paths(work_items_path, events_path, event)?;
     for board_ref in board_refs {
         if let Some(board_ref) = non_empty_clone(Some(board_ref.as_str())) {
-            let mut ref_event =
-                WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, updated_at);
+            let mut ref_event = WorkEvent::new(WorkEventKind::Update, work_item_id, updated_at);
             ref_event.board_entry_id = Some(board_ref);
             record_workspace_work_event_paths(work_items_path, events_path, ref_event)?;
         }
@@ -2306,7 +2300,7 @@ pub fn record_workspace_work_paused_event(
     )
 }
 
-/// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkspaceWorkEvent`
+/// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkEvent`
 /// for `work_item_id` iff no Done event has been recorded for it yet. This is
 /// the canonical write path for auto-done emission from PR merge detection,
 /// user-confirmed cleanup, and startup retroactive migration. Returns
@@ -2321,7 +2315,7 @@ pub fn emit_workspace_done_event_if_absent_paths(
     if work_item_has_done_event_in_projection(work_items_path, work_item_id)? {
         return Ok(false);
     }
-    let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, updated_at);
+    let mut event = WorkEvent::new(WorkEventKind::Done, work_item_id, updated_at);
     event.status_category = Some(WorkspaceStatusCategory::Done);
     record_workspace_work_event_paths(work_items_path, events_path, event)?;
     Ok(true)
@@ -2359,12 +2353,12 @@ fn work_item_has_done_event_in_projection(
         .any(|item| {
             item.events
                 .iter()
-                .any(|event| event.kind == WorkspaceWorkEventKind::Done)
+                .any(|event| event.kind == WorkEventKind::Done)
         }))
 }
 
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): Emit a single Discard
-/// `WorkspaceWorkEvent` for `work_item_id` iff the Work is not already
+/// `WorkEvent` for `work_item_id` iff the Work is not already
 /// terminal (Done or already Discarded). This is the canonical write path for a
 /// user-initiated Discard close from the Work surface. Returns `Ok(true)` when
 /// a new Discard event was appended, `Ok(false)` when the Work was already
@@ -2378,7 +2372,7 @@ pub fn emit_workspace_discard_event_if_absent_paths(
     if work_item_is_terminal_in_projection(work_items_path, work_item_id)? {
         return Ok(false);
     }
-    let event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, updated_at);
+    let event = WorkEvent::new(WorkEventKind::Discard, work_item_id, updated_at);
     record_workspace_work_event_paths(work_items_path, events_path, event)?;
     Ok(true)
 }
@@ -2485,11 +2479,11 @@ pub fn retroactive_auto_done_scan_paths(
 /// Version 1 corresponds to the terminal-Done apply_event fix; prior
 /// projections may show stale non-Done status_category for items whose
 /// latest event regressed Done.
-pub const WORKSPACE_WORK_ITEMS_REBUILD_VERSION: u32 = 1;
+pub const WORK_ITEMS_REBUILD_VERSION: u32 = 1;
 
 /// SPEC-2359 US-37: Outcome of the work_items.json rebuild migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceWorkItemsRebuildOutcome {
+pub enum WorkItemsRebuildOutcome {
     /// `work_events.jsonl` does not exist. Nothing to rebuild.
     Missing,
     /// Marker already records the current rebuild version. Skip silently.
@@ -2499,7 +2493,7 @@ pub enum WorkspaceWorkItemsRebuildOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct WorkspaceWorkItemsRebuildMarker {
+struct WorkItemsRebuildMarker {
     version: u32,
     #[serde(default)]
     migrated_at: Option<DateTime<Utc>>,
@@ -2515,19 +2509,19 @@ pub fn rebuild_work_items_from_events_paths(
     work_items_path: &Path,
     events_path: &Path,
     marker_path: &Path,
-) -> Result<WorkspaceWorkItemsRebuildOutcome> {
-    if rebuild_marker_at_or_above(marker_path, WORKSPACE_WORK_ITEMS_REBUILD_VERSION)? {
-        return Ok(WorkspaceWorkItemsRebuildOutcome::AlreadyMigrated);
+) -> Result<WorkItemsRebuildOutcome> {
+    if rebuild_marker_at_or_above(marker_path, WORK_ITEMS_REBUILD_VERSION)? {
+        return Ok(WorkItemsRebuildOutcome::AlreadyMigrated);
     }
     if !events_path.exists() {
-        return Ok(WorkspaceWorkItemsRebuildOutcome::Missing);
+        return Ok(WorkItemsRebuildOutcome::Missing);
     }
     let content = fs::read_to_string(events_path)?;
-    let mut events: Vec<WorkspaceWorkEvent> = content
+    let mut events: Vec<WorkEvent> = content
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            serde_json::from_str::<WorkspaceWorkEvent>(line)
+            serde_json::from_str::<WorkEvent>(line)
                 .map_err(|err| GwtError::Other(format!("workspace work event json: {err}")))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2536,14 +2530,14 @@ pub fn rebuild_work_items_from_events_paths(
         .first()
         .map(|event| event.updated_at)
         .unwrap_or_else(chrono::Utc::now);
-    let mut projection = WorkspaceWorkItemsProjection::empty(initial_updated_at);
+    let mut projection = WorkItemsProjection::empty(initial_updated_at);
     for event in events {
         projection.apply_event(event);
     }
     projection.updated_at = chrono::Utc::now();
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     write_rebuild_marker(marker_path)?;
-    Ok(WorkspaceWorkItemsRebuildOutcome::Applied)
+    Ok(WorkItemsRebuildOutcome::Applied)
 }
 
 /// SPEC-2359 US-37 — SUPERSEDED by the W-16 intake consumer
@@ -2560,7 +2554,7 @@ pub fn rebuild_work_items_from_events_paths(
 /// such replay must also merge the home close log.
 pub fn rebuild_work_items_from_events_for_repo(
     repo_path: &Path,
-) -> Result<WorkspaceWorkItemsRebuildOutcome> {
+) -> Result<WorkItemsRebuildOutcome> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     let events_path = repo_local_work_events_path_with_migration(repo_path)?;
@@ -2576,16 +2570,14 @@ fn rebuild_marker_at_or_above(path: &Path, required: u32) -> Result<bool> {
         return Ok(false);
     }
     let body = fs::read_to_string(path)?;
-    Ok(
-        serde_json::from_str::<WorkspaceWorkItemsRebuildMarker>(&body)
-            .map(|marker| marker.version >= required)
-            .unwrap_or(false),
-    )
+    Ok(serde_json::from_str::<WorkItemsRebuildMarker>(&body)
+        .map(|marker| marker.version >= required)
+        .unwrap_or(false))
 }
 
 fn write_rebuild_marker(path: &Path) -> Result<()> {
-    let marker = WorkspaceWorkItemsRebuildMarker {
-        version: WORKSPACE_WORK_ITEMS_REBUILD_VERSION,
+    let marker = WorkItemsRebuildMarker {
+        version: WORK_ITEMS_REBUILD_VERSION,
         migrated_at: Some(chrono::Utc::now()),
     };
     let body = serde_json::to_vec_pretty(&marker)
@@ -2699,7 +2691,7 @@ pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Resul
     retroactive_auto_done_scan_paths(&current_path, &work_items_path, &events_path, now)
 }
 
-fn work_item_is_eligible_for_auto_done(item: &WorkspaceWorkItem) -> bool {
+fn work_item_is_eligible_for_auto_done(item: &WorkItem) -> bool {
     item.execution_containers.iter().any(|container| {
         let branch_starts_with_work = container
             .branch
@@ -2728,7 +2720,7 @@ fn workspace_projection_is_eligible_for_auto_done(projection: &WorkProjection) -
     branch_starts_with_work && pr_state_merged && details.created_by_start_work
 }
 
-/// SPEC-2359 US-37 / FR-118: Emit a Done WorkspaceWorkEvent for the Workspace
+/// SPEC-2359 US-37 / FR-118: Emit a Done WorkEvent for the Workspace
 /// WorkItem currently associated with `branch`. The function loads the current
 /// projection at `current_path` and emits Done iff
 /// `projection.git_details.branch` matches `branch`. Used by user-confirmed
@@ -2854,7 +2846,7 @@ pub fn append_workspace_journal_entry_to_path(
     Ok(())
 }
 
-pub fn append_workspace_work_event_to_path(path: &Path, event: &WorkspaceWorkEvent) -> Result<()> {
+pub fn append_workspace_work_event_to_path(path: &Path, event: &WorkEvent) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2904,7 +2896,7 @@ fn synthesize_workspace_work_items_from_legacy_paths(
     current_path: &Path,
     journal_path: &Path,
     project_root: &Path,
-) -> Result<WorkspaceWorkItemsProjection> {
+) -> Result<WorkItemsProjection> {
     let projection = load_workspace_projection_from_path(current_path)?;
     let mut journal_entries =
         load_recent_workspace_journal_entries_from_path(journal_path, usize::MAX)?;
@@ -2919,9 +2911,9 @@ fn synthesize_workspace_work_items_from_legacy_paths(
         &journal_entries,
         project_root,
     ) else {
-        return Ok(WorkspaceWorkItemsProjection::empty(updated_at));
+        return Ok(WorkItemsProjection::empty(updated_at));
     };
-    Ok(WorkspaceWorkItemsProjection {
+    Ok(WorkItemsProjection {
         updated_at: item.updated_at,
         work_items: vec![item],
     })
@@ -2931,7 +2923,7 @@ fn synthesize_workspace_work_item_from_legacy(
     projection: Option<&WorkProjection>,
     journal_entries: &[WorkspaceJournalEntry],
     _project_root: &Path,
-) -> Option<WorkspaceWorkItem> {
+) -> Option<WorkItem> {
     if projection.is_none() && journal_entries.is_empty() {
         return None;
     }
@@ -2979,7 +2971,7 @@ fn synthesize_workspace_work_item_from_legacy(
         .or_else(|| last_entry.map(|entry| entry.updated_at))
         .unwrap_or(created_at);
     let completed_at = (status_category == WorkspaceStatusCategory::Done).then_some(updated_at);
-    let mut item = WorkspaceWorkItem {
+    let mut item = WorkItem {
         id: id.clone(),
         title,
         intent: summary.clone(),
@@ -2999,16 +2991,13 @@ fn synthesize_workspace_work_item_from_legacy(
         discarded: false,
     };
     if let Some(projection) = projection {
-        item.agents.extend(
-            projection
-                .assigned_agents()
-                .map(|agent| WorkspaceWorkAgentRef {
-                    session_id: agent.session_id.clone(),
-                    agent_id: Some(agent.agent_id.clone()),
-                    display_name: Some(agent.display_name.clone()),
-                    updated_at: agent.updated_at,
-                }),
-        );
+        item.agents
+            .extend(projection.assigned_agents().map(|agent| WorkAgentRef {
+                session_id: agent.session_id.clone(),
+                agent_id: Some(agent.agent_id.clone()),
+                display_name: Some(agent.display_name.clone()),
+                updated_at: agent.updated_at,
+            }));
         if let Some(details) = projection.git_details.as_ref() {
             item.execution_containers
                 .push(WorkspaceExecutionContainerRef {
@@ -3021,7 +3010,7 @@ fn synthesize_workspace_work_item_from_legacy(
         }
     }
     for (index, entry) in journal_entries.iter().enumerate() {
-        let mut event = WorkspaceWorkEvent::new(
+        let mut event = WorkEvent::new(
             workspace_work_event_kind_from_journal(index, entry),
             id.clone(),
             entry.updated_at,
@@ -3046,7 +3035,7 @@ fn synthesize_workspace_work_item_from_legacy(
                 .iter()
                 .any(|agent| agent.session_id == session_id)
             {
-                item.agents.push(WorkspaceWorkAgentRef {
+                item.agents.push(WorkAgentRef {
                     session_id,
                     agent_id: None,
                     display_name: entry.agent_title_summary.clone(),
@@ -3057,7 +3046,7 @@ fn synthesize_workspace_work_item_from_legacy(
         item.events.push(event);
     }
     if item.events.is_empty() {
-        let mut event = WorkspaceWorkEvent::new(
+        let mut event = WorkEvent::new(
             workspace_work_event_kind_from_status(status_category, 0),
             id,
             updated_at,
@@ -3075,8 +3064,8 @@ fn synthesize_workspace_work_item_from_legacy(
 fn workspace_work_event_from_journal_entry(
     projection: &WorkProjection,
     entry: &WorkspaceJournalEntry,
-) -> WorkspaceWorkEvent {
-    let mut event = WorkspaceWorkEvent::new(
+) -> WorkEvent {
+    let mut event = WorkEvent::new(
         workspace_work_event_kind_from_status(
             entry.status_category.unwrap_or(projection.status_category),
             1,
@@ -3116,8 +3105,8 @@ fn workspace_work_event_from_journal_entry(
 pub fn workspace_work_event_from_board_entry(
     projection: &WorkProjection,
     entry: &BoardEntry,
-) -> WorkspaceWorkEvent {
-    let mut event = WorkspaceWorkEvent::new(
+) -> WorkEvent {
+    let mut event = WorkEvent::new(
         workspace_work_event_kind_from_board_entry(entry),
         projection.id.clone(),
         entry.updated_at,
@@ -3152,49 +3141,49 @@ pub fn workspace_work_event_from_board_entry(
     event
 }
 
-fn workspace_work_event_status(event: &WorkspaceWorkEvent) -> WorkspaceStatusCategory {
+fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
     event.status_category.unwrap_or(match event.kind {
-        WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
-        WorkspaceWorkEventKind::Blocked => WorkspaceStatusCategory::Blocked,
+        WorkEventKind::Done => WorkspaceStatusCategory::Done,
+        WorkEventKind::Blocked => WorkspaceStatusCategory::Blocked,
         // Pause keeps the Work incomplete (non-Done) while the agent is stopped;
         // the Idle status preserves the retained-but-not-running semantics.
-        WorkspaceWorkEventKind::Pause => WorkspaceStatusCategory::Idle,
+        WorkEventKind::Pause => WorkspaceStatusCategory::Idle,
         // Discard does not complete the Work (status stays non-Done); the
         // terminal close is carried by the `discarded` flag (FR-352). Idle
         // mirrors the retained-but-not-running runtime status.
-        WorkspaceWorkEventKind::Discard => WorkspaceStatusCategory::Idle,
+        WorkEventKind::Discard => WorkspaceStatusCategory::Idle,
         // Backfill materializes a Work for an existing worktree with no live
         // agent, so it surfaces as retained-but-not-running (rendered Paused).
-        WorkspaceWorkEventKind::Backfill => WorkspaceStatusCategory::Idle,
-        WorkspaceWorkEventKind::Start
-        | WorkspaceWorkEventKind::Claim
-        | WorkspaceWorkEventKind::Update
-        | WorkspaceWorkEventKind::Handoff
-        | WorkspaceWorkEventKind::Resume
-        | WorkspaceWorkEventKind::Split
-        | WorkspaceWorkEventKind::Merge
-        | WorkspaceWorkEventKind::Pr => WorkspaceStatusCategory::Active,
+        WorkEventKind::Backfill => WorkspaceStatusCategory::Idle,
+        WorkEventKind::Start
+        | WorkEventKind::Claim
+        | WorkEventKind::Update
+        | WorkEventKind::Handoff
+        | WorkEventKind::Resume
+        | WorkEventKind::Split
+        | WorkEventKind::Merge
+        | WorkEventKind::Pr => WorkspaceStatusCategory::Active,
     })
 }
 
-fn workspace_work_event_kind_from_board_entry(entry: &BoardEntry) -> WorkspaceWorkEventKind {
+fn workspace_work_event_kind_from_board_entry(entry: &BoardEntry) -> WorkEventKind {
     match entry.kind {
-        BoardEntryKind::Claim => WorkspaceWorkEventKind::Claim,
-        BoardEntryKind::Blocked => WorkspaceWorkEventKind::Blocked,
-        BoardEntryKind::Handoff => WorkspaceWorkEventKind::Handoff,
+        BoardEntryKind::Claim => WorkEventKind::Claim,
+        BoardEntryKind::Blocked => WorkEventKind::Blocked,
+        BoardEntryKind::Handoff => WorkEventKind::Handoff,
         BoardEntryKind::Next
         | BoardEntryKind::Status
         | BoardEntryKind::Decision
         | BoardEntryKind::Request
         | BoardEntryKind::Impact
-        | BoardEntryKind::Question => WorkspaceWorkEventKind::Update,
+        | BoardEntryKind::Question => WorkEventKind::Update,
     }
 }
 
 fn workspace_work_event_kind_from_journal(
     index: usize,
     entry: &WorkspaceJournalEntry,
-) -> WorkspaceWorkEventKind {
+) -> WorkEventKind {
     workspace_work_event_kind_from_status(
         entry
             .status_category
@@ -3206,12 +3195,12 @@ fn workspace_work_event_kind_from_journal(
 fn workspace_work_event_kind_from_status(
     status_category: WorkspaceStatusCategory,
     index: usize,
-) -> WorkspaceWorkEventKind {
+) -> WorkEventKind {
     match status_category {
-        WorkspaceStatusCategory::Done => WorkspaceWorkEventKind::Done,
-        WorkspaceStatusCategory::Blocked => WorkspaceWorkEventKind::Blocked,
-        _ if index == 0 => WorkspaceWorkEventKind::Start,
-        _ => WorkspaceWorkEventKind::Update,
+        WorkspaceStatusCategory::Done => WorkEventKind::Done,
+        WorkspaceStatusCategory::Blocked => WorkEventKind::Blocked,
+        _ if index == 0 => WorkEventKind::Start,
+        _ => WorkEventKind::Update,
     }
 }
 
@@ -3527,6 +3516,17 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
 /// new code must use the Work spelling.
 pub type WorkspaceProjection = WorkProjection;
 
+/// SPEC-2359 US-66 (T-529): legacy adapter aliases for the renamed Work
+/// entity family. In-repo call sites are fully migrated; these exist only
+/// so external consumers keep compiling. New code must use the Work names.
+pub type WorkspaceWorkItem = WorkItem;
+pub type WorkspaceWorkEvent = WorkEvent;
+pub type WorkspaceWorkEventKind = WorkEventKind;
+pub type WorkspaceWorkItemsProjection = WorkItemsProjection;
+pub type WorkspaceWorkAgentRef = WorkAgentRef;
+pub type WorkspaceWorkItemsCache = WorkItemsCache;
+pub type WorkspaceWorkItemsRebuildOutcome = WorkItemsRebuildOutcome;
+
 #[cfg(test)]
 mod tests {
     // SPEC-2359 close-latency root fix: the works.json cache must stop
@@ -3542,12 +3542,12 @@ mod tests {
         std::fs::create_dir_all(&project_root).expect("repo dir");
 
         let now = chrono::Utc::now();
-        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        let mut projection = super::WorkItemsProjection::empty(now);
         projection.apply_event(sample_work_event("work-1", now));
         super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
             .expect("save works.json");
 
-        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let mut cache = super::WorkItemsCache::new();
         let first = cache
             .load_or_synthesize_from_paths(
                 &work_items_path,
@@ -3601,7 +3601,7 @@ mod tests {
         let project_root = tmp.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("repo dir");
 
-        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let mut cache = super::WorkItemsCache::new();
         let synthesized = cache
             .load_or_synthesize_from_paths(
                 &work_items_path,
@@ -3614,7 +3614,7 @@ mod tests {
 
         // works.json appears afterwards: the next load must see it.
         let now = chrono::Utc::now();
-        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        let mut projection = super::WorkItemsProjection::empty(now);
         projection.apply_event(sample_work_event("work-1", now));
         super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
             .expect("save works.json");
@@ -3632,12 +3632,8 @@ mod tests {
     fn sample_work_event(
         work_id: &str,
         updated_at: chrono::DateTime<chrono::Utc>,
-    ) -> super::WorkspaceWorkEvent {
-        let mut event = super::WorkspaceWorkEvent::new(
-            super::WorkspaceWorkEventKind::Start,
-            work_id,
-            updated_at,
-        );
+    ) -> super::WorkEvent {
+        let mut event = super::WorkEvent::new(super::WorkEventKind::Start, work_id, updated_at);
         event.status_category = Some(super::WorkspaceStatusCategory::Active);
         event.title = Some(format!("title {work_id}"));
         event
@@ -4225,8 +4221,8 @@ mod tests {
         let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 0, 0).unwrap();
         let done_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 30, 0).unwrap();
 
-        let mut start = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
             "workitem-workspace-history",
             started_at,
         );
@@ -4249,11 +4245,7 @@ mod tests {
         record_workspace_work_event_paths(&work_items_path, &events_path, start)
             .expect("record start event");
 
-        let mut done = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Done,
-            "workitem-workspace-history",
-            done_at,
-        );
+        let mut done = WorkEvent::new(WorkEventKind::Done, "workitem-workspace-history", done_at);
         done.summary = Some("WorkItem lifecycle history is implemented.".to_string());
         done.status_category = Some(WorkspaceStatusCategory::Done);
         done.agent_session_id = Some("session-1".to_string());
@@ -4287,8 +4279,8 @@ mod tests {
             Some("work/20260510-2353")
         );
         assert_eq!(item.events.len(), 2);
-        assert_eq!(item.events[0].kind, WorkspaceWorkEventKind::Start);
-        assert_eq!(item.events[1].kind, WorkspaceWorkEventKind::Done);
+        assert_eq!(item.events[0].kind, WorkEventKind::Start);
+        assert_eq!(item.events[1].kind, WorkEventKind::Done);
 
         let event_lines = std::fs::read_to_string(&events_path).expect("event log");
         assert_eq!(event_lines.lines().count(), 2);
@@ -4372,7 +4364,7 @@ mod tests {
             item.events[0].summary.as_deref(),
             Some("Started from legacy journal.")
         );
-        assert_eq!(item.events[1].kind, WorkspaceWorkEventKind::Blocked);
+        assert_eq!(item.events[1].kind, WorkEventKind::Blocked);
         assert!(
             !work_items_path.exists(),
             "legacy migration must be read-only until a real WorkItem event is recorded"
@@ -4878,8 +4870,7 @@ mod tests {
         let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
         let done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
 
-        let mut start =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-auto-done", started_at);
+        let mut start = WorkEvent::new(WorkEventKind::Start, "wi-auto-done", started_at);
         start.title = Some("Auto-done test work".to_string());
         start.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event_paths(&work_items_path, &events_path, start)
@@ -4920,8 +4911,7 @@ mod tests {
         let first_done_at = Utc.with_ymd_and_hms(2026, 5, 13, 2, 0, 0).unwrap();
         let second_done_at = Utc.with_ymd_and_hms(2026, 5, 13, 3, 0, 0).unwrap();
 
-        let mut start =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-idempotent", started_at);
+        let mut start = WorkEvent::new(WorkEventKind::Start, "wi-idempotent", started_at);
         start.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event_paths(&work_items_path, &events_path, start)
             .expect("record start event");
@@ -4967,8 +4957,7 @@ mod tests {
         let started_at = Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
 
-        let mut eligible =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-eligible", started_at);
+        let mut eligible = WorkEvent::new(WorkEventKind::Start, "wi-eligible", started_at);
         eligible.status_category = Some(WorkspaceStatusCategory::Active);
         eligible.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/20260513-0100".to_string()),
@@ -4980,11 +4969,7 @@ mod tests {
         record_workspace_work_event_paths(&work_items_path, &events_path, eligible)
             .expect("record eligible start");
 
-        let mut non_work = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "wi-non-work-branch",
-            started_at,
-        );
+        let mut non_work = WorkEvent::new(WorkEventKind::Start, "wi-non-work-branch", started_at);
         non_work.status_category = Some(WorkspaceStatusCategory::Active);
         non_work.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("feature/manual".to_string()),
@@ -4996,8 +4981,7 @@ mod tests {
         record_workspace_work_event_paths(&work_items_path, &events_path, non_work)
             .expect("record non-work start");
 
-        let mut not_merged =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-not-merged", started_at);
+        let mut not_merged = WorkEvent::new(WorkEventKind::Start, "wi-not-merged", started_at);
         not_merged.status_category = Some(WorkspaceStatusCategory::Active);
         not_merged.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/20260513-0200".to_string()),
@@ -5058,8 +5042,7 @@ mod tests {
         let first_run = Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap();
         let second_run = Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap();
 
-        let mut eligible =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, "wi-twice", started_at);
+        let mut eligible = WorkEvent::new(WorkEventKind::Start, "wi-twice", started_at);
         eligible.status_category = Some(WorkspaceStatusCategory::Active);
         eligible.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/20260513-0100".to_string()),
@@ -5124,8 +5107,8 @@ mod tests {
         });
         save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
 
-        let mut start = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
             "wi-cleanup-target",
             Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
         );
@@ -5180,8 +5163,8 @@ mod tests {
         });
         save_workspace_projection_to_path(&current_path, &projection).expect("save projection");
 
-        let mut start = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
             "wi-different-branch",
             Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
         );
@@ -5684,10 +5667,9 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 11, 0, 0).unwrap();
 
-        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let mut projection = WorkItemsProjection::empty(t1);
 
-        let mut done_event =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        let mut done_event = WorkEvent::new(WorkEventKind::Done, work_item_id, t1);
         done_event.status_category = Some(WorkspaceStatusCategory::Done);
         done_event.title = Some("Test work item".to_string());
         projection.apply_event(done_event);
@@ -5703,8 +5685,7 @@ mod tests {
         );
         assert_eq!(item_after_done.completed_at, Some(t1));
 
-        let update_event =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        let update_event = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
         assert!(
             update_event.status_category.is_none(),
             "heartbeat update event has no explicit status_category"
@@ -5742,19 +5723,17 @@ mod tests {
         let work_item_id = "wi-recovered";
         let t1 = Utc.with_ymd_and_hms(2026, 5, 10, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 5, 10, 11, 0, 0).unwrap();
-        let mut done_event =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        let mut done_event = WorkEvent::new(WorkEventKind::Done, work_item_id, t1);
         done_event.status_category = Some(WorkspaceStatusCategory::Done);
         done_event.title = Some("Recovered work".to_string());
         append_workspace_work_event_to_path(&events_path, &done_event).expect("append done");
-        let update_event =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        let update_event = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
         append_workspace_work_event_to_path(&events_path, &update_event).expect("append update");
 
         let outcome =
             rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
                 .expect("rebuild");
-        assert_eq!(outcome, WorkspaceWorkItemsRebuildOutcome::Applied);
+        assert_eq!(outcome, WorkItemsRebuildOutcome::Applied);
 
         let projection = load_workspace_work_items_from_path(&work_items_path)
             .expect("load")
@@ -5771,10 +5750,7 @@ mod tests {
         let outcome_again =
             rebuild_work_items_from_events_paths(&work_items_path, &events_path, &marker_path)
                 .expect("rebuild idempotent");
-        assert_eq!(
-            outcome_again,
-            WorkspaceWorkItemsRebuildOutcome::AlreadyMigrated
-        );
+        assert_eq!(outcome_again, WorkItemsRebuildOutcome::AlreadyMigrated);
     }
 
     #[test]
@@ -5785,13 +5761,13 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
 
-        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
-        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        let mut projection = WorkItemsProjection::empty(t1);
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_item_id, t1);
         start.status_category = Some(WorkspaceStatusCategory::Active);
         start.title = Some("Discardable work".to_string());
         projection.apply_event(start);
 
-        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t2);
+        let discard = WorkEvent::new(WorkEventKind::Discard, work_item_id, t2);
         projection.apply_event(discard);
 
         let item = projection
@@ -5821,10 +5797,10 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
 
-        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
-        let discard = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Discard, work_item_id, t1);
+        let mut projection = WorkItemsProjection::empty(t1);
+        let discard = WorkEvent::new(WorkEventKind::Discard, work_item_id, t1);
         projection.apply_event(discard);
-        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, t2);
+        let update = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
         projection.apply_event(update);
 
         let item = projection
@@ -5850,7 +5826,7 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
 
-        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, t1);
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_item_id, t1);
         start.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event_paths(&work_items_path, &events_path, start)
             .expect("record start");
@@ -5888,7 +5864,7 @@ mod tests {
         let discard_events = item
             .events
             .iter()
-            .filter(|e| e.kind == WorkspaceWorkEventKind::Discard)
+            .filter(|e| e.kind == WorkEventKind::Discard)
             .count();
         assert_eq!(discard_events, 1, "only one Discard event is recorded");
     }
@@ -5936,15 +5912,13 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
 
-        let mut projection = WorkspaceWorkItemsProjection::empty(t1);
+        let mut projection = WorkItemsProjection::empty(t1);
 
-        let mut first_done =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t1);
+        let mut first_done = WorkEvent::new(WorkEventKind::Done, work_item_id, t1);
         first_done.status_category = Some(WorkspaceStatusCategory::Done);
         projection.apply_event(first_done);
 
-        let mut second_done =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, work_item_id, t2);
+        let mut second_done = WorkEvent::new(WorkEventKind::Done, work_item_id, t2);
         second_done.status_category = Some(WorkspaceStatusCategory::Done);
         projection.apply_event(second_done);
 
@@ -5991,7 +5965,7 @@ mod tests {
     fn workspace_group_key_groups_same_branch_across_spellings_and_ids() {
         let project_root = Path::new("/tmp/repo");
         let now = chrono::Utc::now();
-        let mut item_a = WorkspaceWorkItem {
+        let mut item_a = WorkItem {
             id: "work-session-aaaa".to_string(),
             title: "a".to_string(),
             intent: None,
@@ -6174,7 +6148,7 @@ mod tests {
         assert!(item
             .events
             .iter()
-            .any(|event| event.kind == WorkspaceWorkEventKind::Pause));
+            .any(|event| event.kind == WorkEventKind::Pause));
     }
 
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a Pause event carries no explicit
@@ -6186,7 +6160,7 @@ mod tests {
         let work_items_path = temp.path().join("works.json");
         let events_path = temp.path().join("work-events.jsonl");
         let now = Utc::now();
-        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "work-session-x", now);
+        let mut done = WorkEvent::new(WorkEventKind::Done, "work-session-x", now);
         done.status_category = Some(WorkspaceStatusCategory::Done);
         super::record_workspace_work_event_paths(&work_items_path, &events_path, done)
             .expect("record done");
@@ -6265,8 +6239,8 @@ mod tests {
         }
     }
 
-    fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkspaceWorkEvent {
-        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, work_item_id, at);
+    fn start_event(work_item_id: &str, at: DateTime<Utc>) -> WorkEvent {
+        let mut event = WorkEvent::new(WorkEventKind::Start, work_item_id, at);
         event.status_category = Some(WorkspaceStatusCategory::Active);
         event.title = Some("Repo-local work".to_string());
         event
@@ -6416,14 +6390,14 @@ mod tests {
         let home_events = gwt_workspace_work_events_path_for_repo_path(&repo);
         let t1 = Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 6, 1, 11, 0, 0).unwrap();
-        let mut done = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Done, "wi-rebuild", t1);
+        let mut done = WorkEvent::new(WorkEventKind::Done, "wi-rebuild", t1);
         done.status_category = Some(WorkspaceStatusCategory::Done);
         append_workspace_work_event_to_path(&home_events, &done).expect("seed done");
-        let update = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "wi-rebuild", t2);
+        let update = WorkEvent::new(WorkEventKind::Update, "wi-rebuild", t2);
         append_workspace_work_event_to_path(&home_events, &update).expect("seed update");
 
         let outcome = rebuild_work_items_from_events_for_repo(&repo).expect("rebuild");
-        assert_eq!(outcome, WorkspaceWorkItemsRebuildOutcome::Applied);
+        assert_eq!(outcome, WorkItemsRebuildOutcome::Applied);
 
         // The rebuild must have migrated and replayed the repo-local log.
         let repo_local = repo.join(".gwt").join("work").join("events.jsonl");
@@ -6462,8 +6436,8 @@ mod tests {
         status: WorkspaceStatusCategory,
         discarded: bool,
         at: DateTime<Utc>,
-    ) -> WorkspaceWorkItem {
-        WorkspaceWorkItem {
+    ) -> WorkItem {
+        WorkItem {
             id: id.to_string(),
             title: id.to_string(),
             intent: None,
@@ -6537,8 +6511,8 @@ mod tests {
         let events_text = fs::read_to_string(&events_path).expect("worktree events log");
         let lines: Vec<&str> = events_text.lines().collect();
         assert_eq!(lines.len(), 1, "exactly one backfill event line");
-        let event: WorkspaceWorkEvent = serde_json::from_str(lines[0]).expect("event json");
-        assert_eq!(event.kind, WorkspaceWorkEventKind::Backfill);
+        let event: WorkEvent = serde_json::from_str(lines[0]).expect("event json");
+        assert_eq!(event.kind, WorkEventKind::Backfill);
         assert_eq!(
             event.status_category, None,
             "backfill must not carry an explicit status so apply_event terminal \
@@ -6588,7 +6562,7 @@ mod tests {
         let work_items_path = temp.path().join("works.json");
         let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
 
-        let projection = WorkspaceWorkItemsProjection {
+        let projection = WorkItemsProjection {
             updated_at: now,
             work_items: vec![seeded_work_item(
                 "work-session-abc",
@@ -6653,7 +6627,7 @@ mod tests {
         let work_items_path = temp.path().join("works.json");
         let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
 
-        let projection = WorkspaceWorkItemsProjection {
+        let projection = WorkItemsProjection {
             updated_at: now,
             work_items: vec![
                 seeded_work_item(
@@ -6704,10 +6678,10 @@ mod tests {
     /// snake_case "backfill" on the wire and round-trips.
     #[test]
     fn backfill_event_kind_serializes_as_snake_case() {
-        let json = serde_json::to_string(&WorkspaceWorkEventKind::Backfill).expect("serialize");
+        let json = serde_json::to_string(&WorkEventKind::Backfill).expect("serialize");
         assert_eq!(json, "\"backfill\"");
-        let parsed: WorkspaceWorkEventKind = serde_json::from_str("\"backfill\"").expect("parse");
-        assert_eq!(parsed, WorkspaceWorkEventKind::Backfill);
+        let parsed: WorkEventKind = serde_json::from_str("\"backfill\"").expect("parse");
+        assert_eq!(parsed, WorkEventKind::Backfill);
     }
 
     // --- SPEC-2359 Phase W-14 (US-70 / FR-375, SC-251): transition service ---
@@ -7015,7 +6989,7 @@ mod tests {
     fn apply_work_item_copies_status_fields() {
         let mut projection = WorkProjection::default_for_project("/repo");
         let now = Utc.timestamp_opt(8_000, 0).unwrap();
-        let item = WorkspaceWorkItem {
+        let item = WorkItem {
             id: "item-1".to_string(),
             title: "Item Title".to_string(),
             intent: Some("intent text".to_string()),
@@ -7141,8 +7115,8 @@ mod tests {
         title: Option<&str>,
         session: Option<&str>,
         at: DateTime<Utc>,
-    ) -> WorkspaceWorkEvent {
-        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, at);
+    ) -> WorkEvent {
+        let mut event = WorkEvent::new(WorkEventKind::Update, work_item_id, at);
         event.title = title.map(str::to_string);
         event.agent_session_id = session.map(str::to_string);
         event.execution_container = branch.map(|branch| WorkspaceExecutionContainerRef {
@@ -7169,7 +7143,7 @@ mod tests {
         let t2 = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
 
         let mega_id = "0c14f2ab-9f9a-4e79-94ab-db590cf88343";
-        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        let mut projection = WorkItemsProjection::empty(t0);
         projection.apply_event(legacy_event(
             mega_id,
             Some("develop"),
@@ -7253,7 +7227,7 @@ mod tests {
         let work_items_path = temp.path().join("works.json");
         let t0 = Utc.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap();
 
-        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        let mut projection = WorkItemsProjection::empty(t0);
         projection.apply_event(legacy_event(
             "work-session-abc",
             Some("work/bar"),
@@ -7284,14 +7258,13 @@ mod tests {
     fn backfill_event_does_not_bump_updated_at_of_existing_item() {
         let t_old = Utc.with_ymd_and_hms(2026, 5, 18, 9, 15, 0).unwrap();
         let t_backfill = Utc.with_ymd_and_hms(2026, 6, 10, 6, 19, 47).unwrap();
-        let mut projection = WorkspaceWorkItemsProjection::empty(t_old);
-        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "work-x", t_old);
+        let mut projection = WorkItemsProjection::empty(t_old);
+        let mut start = WorkEvent::new(WorkEventKind::Update, "work-x", t_old);
         start.title = Some("作業中".to_string());
         projection.apply_event(start);
         assert_eq!(projection.work_items[0].updated_at, t_old);
 
-        let mut backfill =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-x", t_backfill);
+        let mut backfill = WorkEvent::new(WorkEventKind::Backfill, "work-x", t_backfill);
         backfill.title = Some("work/x".to_string());
         projection.apply_event(backfill);
 
@@ -7306,8 +7279,7 @@ mod tests {
         );
 
         // A brand-new item still gets the backfill time as its baseline.
-        let mut fresh =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-new", t_backfill);
+        let mut fresh = WorkEvent::new(WorkEventKind::Backfill, "work-new", t_backfill);
         fresh.title = Some("work/new".to_string());
         projection.apply_event(fresh);
         let fresh_item = projection

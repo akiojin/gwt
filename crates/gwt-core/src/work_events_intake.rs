@@ -25,9 +25,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, Result};
-use crate::workspace_projection::{
-    load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path,
-    WorkspaceWorkEvent, WorkspaceWorkEventKind, WorkspaceWorkItemsProjection,
+use crate::work_projection::{
+    load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path, WorkEvent,
+    WorkEventKind, WorkItemsProjection,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -46,20 +46,16 @@ impl WorkEventsIntakeReport {
     }
 }
 
-fn is_close_kind(kind: WorkspaceWorkEventKind) -> bool {
+fn is_close_kind(kind: WorkEventKind) -> bool {
     matches!(
         kind,
-        WorkspaceWorkEventKind::Pause
-            | WorkspaceWorkEventKind::Done
-            | WorkspaceWorkEventKind::Discard
+        WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
     )
 }
 
 /// The moment a terminal item closed: `completed_at` when recorded, else its
 /// last update. Events at or before this instant must not re-apply.
-fn terminal_close_time(
-    item: &crate::workspace_projection::WorkspaceWorkItem,
-) -> Option<DateTime<Utc>> {
+fn terminal_close_time(item: &crate::work_projection::WorkItem) -> Option<DateTime<Utc>> {
     item.is_terminal()
         .then(|| item.completed_at.unwrap_or(item.updated_at))
 }
@@ -72,7 +68,7 @@ pub fn ingest_work_events_content(
 ) -> Result<WorkEventsIntakeReport> {
     let mut report = WorkEventsIntakeReport::default();
     let mut projection = load_workspace_work_items_from_path(work_items_path)?
-        .unwrap_or_else(|| WorkspaceWorkItemsProjection::empty(Utc::now()));
+        .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
 
     let mut seen_event_ids: HashSet<String> = projection
         .work_items
@@ -80,13 +76,13 @@ pub fn ingest_work_events_content(
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect();
 
-    let mut incoming: Vec<WorkspaceWorkEvent> = Vec::new();
+    let mut incoming: Vec<WorkEvent> = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let event: WorkspaceWorkEvent = match serde_json::from_str(line) {
+        let event: WorkEvent = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(error) => {
                 report.skipped_invalid += 1;
@@ -170,7 +166,7 @@ pub fn save_work_events_intake_state(path: &Path, state: &WorkEventsIntakeState)
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::workspace_projection::write_atomic(path, &body)
+    crate::work_projection::write_atomic(path, &body)
 }
 
 /// Content sha256 used as the fingerprint for filesystem sources (git blob
@@ -185,7 +181,7 @@ pub fn content_fingerprint(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_projection::{WorkspaceStatusCategory, WorkspaceWorkItemsProjection};
+    use crate::work_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
 
     fn event_json(id: &str, work_id: &str, kind: &str, updated_at: &str, extra: &str) -> String {
@@ -348,9 +344,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let works = tmp.path().join("works.json");
         let closed_at = chrono::Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
-        let mut projection = WorkspaceWorkItemsProjection::empty(closed_at);
-        let mut done = crate::workspace_projection::WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Done,
+        let mut projection = WorkItemsProjection::empty(closed_at);
+        let mut done = crate::work_projection::WorkEvent::new(
+            WorkEventKind::Done,
             "work-x-eeee5555",
             closed_at,
         );

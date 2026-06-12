@@ -1,7 +1,7 @@
 //! SPEC-2359: SessionStart hook must register the running agent session
 //! into `projection.agents[]` so that `gwtd workspace update --title-summary`
 //! reaches the matching agent record instead of being silently dropped at
-//! the `apply_update` matcher in `gwt_core::workspace_projection`.
+//! the `apply_update` matcher in `gwt_core::work_projection`.
 
 use std::{
     path::{Path, PathBuf},
@@ -12,7 +12,7 @@ use gwt::cli::hook::event_dispatcher;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{
     paths::gwt_sessions_dir,
-    workspace_projection::{
+    work_projection::{
         load_workspace_projection, update_workspace_projection_with_journal,
         WorkspaceProjectionUpdate,
     },

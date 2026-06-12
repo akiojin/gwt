@@ -2246,7 +2246,7 @@ mod tests {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+                gwt_core::work_projection::WorkItemsCache::new(),
             ),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),

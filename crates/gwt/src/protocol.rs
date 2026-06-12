@@ -741,7 +741,7 @@ pub enum FrontendEvent {
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
     /// archive→delete transitions. `ids` limits the action to specific
-    /// `WorkspaceProjection::id` values; an empty list means "every classified
+    /// `WorkProjection::id` values; an empty list means "every classified
     /// entry". Backend replies with [`BackendEvent::WorkspaceProjectionPruneResult`].
     WorkspaceProjectionPrune {
         #[serde(default)]
@@ -1012,7 +1012,7 @@ pub struct WorkspaceHistoryAgentView {
     pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
-pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
+pub type WorkAgentView = WorkspaceHistoryAgentView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
@@ -1040,7 +1040,7 @@ pub struct WorkspaceHistoryEventView {
     pub updated_at: String,
 }
 
-pub type WorkspaceWorkEventView = WorkspaceHistoryEventView;
+pub type WorkEventView = WorkspaceHistoryEventView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistoryView {
@@ -1060,7 +1060,7 @@ pub struct WorkspaceHistoryView {
     pub events: Vec<WorkspaceHistoryEventView>,
 }
 
-pub type WorkspaceWorkItemView = WorkspaceHistoryView;
+pub type WorkItemView = WorkspaceHistoryView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkCleanupCandidateView {

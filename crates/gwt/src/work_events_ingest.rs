@@ -270,7 +270,7 @@ mod tests {
         );
 
         let projection =
-            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+            gwt_core::work_projection::load_workspace_work_items_from_path(&work_items_path)
                 .expect("load")
                 .expect("projection");
         let ids: Vec<&str> = projection

@@ -1970,9 +1970,9 @@ pub fn build_frontend_sync_events(
 }
 
 fn workspace_status_category_wire(
-    category: gwt_core::workspace_projection::WorkspaceStatusCategory,
+    category: gwt_core::work_projection::WorkspaceStatusCategory,
 ) -> &'static str {
-    use gwt_core::workspace_projection::WorkspaceStatusCategory;
+    use gwt_core::work_projection::WorkspaceStatusCategory;
 
     match category {
         WorkspaceStatusCategory::Active => "active",
@@ -1986,9 +1986,9 @@ fn workspace_status_category_wire(
 /// SPEC-2359 Phase W-12 (FR-349): map the agent-session Work lifecycle state
 /// to its snake_case wire string for [`gwt::ActiveWorkItemView::lifecycle_state`].
 fn work_active_lifecycle_state_wire(
-    state: gwt_core::workspace_projection::WorkActiveLifecycleState,
+    state: gwt_core::work_projection::WorkActiveLifecycleState,
 ) -> &'static str {
-    use gwt_core::workspace_projection::WorkActiveLifecycleState;
+    use gwt_core::work_projection::WorkActiveLifecycleState;
 
     match state {
         WorkActiveLifecycleState::Active => "active",
@@ -2003,7 +2003,7 @@ const WORKSPACE_CLEANUP_EVENT_ID: &str = "__workspace_cleanup__";
 
 #[cfg(test)]
 fn active_work_projection_from_saved(
-    projection: gwt_core::workspace_projection::WorkspaceProjection,
+    projection: gwt_core::work_projection::WorkProjection,
 ) -> gwt::ActiveWorkProjectionView {
     let cleanup_candidate = projection
         .cleanup_candidate(false)
@@ -2017,7 +2017,7 @@ fn active_work_projection_from_saved(
 }
 
 fn active_work_projection_from_saved_with_journal(
-    projection: gwt_core::workspace_projection::WorkspaceProjection,
+    projection: gwt_core::work_projection::WorkProjection,
     journal_entries: Vec<gwt::WorkspaceJournalEntryView>,
     works: Vec<gwt::WorkspaceHistoryView>,
     cleanup_candidate: Option<gwt::ActiveWorkCleanupCandidateView>,
@@ -2143,9 +2143,9 @@ fn empty_active_work_projection_view(
 
 fn workspace_agent_summary_work_id(
     project_root: &Path,
-    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+    agent: &gwt_core::work_projection::WorkspaceAgentSummary,
 ) -> Option<String> {
-    gwt_core::workspace_projection::canonical_work_id(
+    gwt_core::work_projection::canonical_work_id(
         project_root,
         agent.branch.as_deref(),
         agent.worktree_path.as_deref(),
@@ -2168,7 +2168,7 @@ fn active_work_agent_work_id(
         return Some(format!("work-session-{session_id}"));
     }
     let worktree_path = agent.worktree_path.as_deref().map(Path::new);
-    gwt_core::workspace_projection::canonical_work_id(
+    gwt_core::work_projection::canonical_work_id(
         project_root,
         agent.branch.as_deref(),
         worktree_path,
@@ -2185,14 +2185,14 @@ fn active_work_agent_work_id(
 }
 
 fn projection_matches_active_work(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    projection: &gwt_core::work_projection::WorkProjection,
     work_id: &str,
 ) -> bool {
     projection
         .git_details
         .as_ref()
         .and_then(|details| {
-            gwt_core::workspace_projection::canonical_work_id(
+            gwt_core::work_projection::canonical_work_id(
                 &projection.project_root,
                 details.branch.as_deref(),
                 details.worktree_path.as_deref(),
@@ -2210,7 +2210,7 @@ fn projection_matches_active_work(
 /// title / status_text / summary / PR selection driven by `is_current_projection`
 /// keeps choosing the live projection values.
 fn agent_matches_projection_git_details(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    projection: &gwt_core::work_projection::WorkProjection,
     agent: &gwt::ActiveWorkAgentView,
 ) -> bool {
     let Some(details) = projection.git_details.as_ref() else {
@@ -2253,7 +2253,7 @@ fn find_active_work_history<'a>(
 }
 
 fn active_work_items_from_projection(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    projection: &gwt_core::work_projection::WorkProjection,
     agents: &[gwt::ActiveWorkAgentView],
     works: &[gwt::WorkspaceHistoryView],
 ) -> Vec<gwt::ActiveWorkItemView> {
@@ -2405,8 +2405,8 @@ fn active_work_items_from_projection(
                 // assigned agents, so the owning agent session is Running and
                 // not user-closed → Active.
                 lifecycle_state: work_active_lifecycle_state_wire(
-                    gwt_core::workspace_projection::recompute_work_active_lifecycle(
-                        gwt_core::workspace_projection::WorkAgentRuntime::Running,
+                    gwt_core::work_projection::recompute_work_active_lifecycle(
+                        gwt_core::work_projection::WorkAgentRuntime::Running,
                         None,
                     ),
                 )
@@ -2492,8 +2492,8 @@ fn append_paused_work_items(
             // No live agent session owns this Work and it is not user-closed →
             // WorkAgentRuntime::None resolves to Paused (FR-350).
             lifecycle_state: work_active_lifecycle_state_wire(
-                gwt_core::workspace_projection::recompute_work_active_lifecycle(
-                    gwt_core::workspace_projection::WorkAgentRuntime::None,
+                gwt_core::work_projection::recompute_work_active_lifecycle(
+                    gwt_core::work_projection::WorkAgentRuntime::None,
                     None,
                 ),
             )
@@ -2554,7 +2554,7 @@ fn active_work_already_present(
 }
 
 fn active_work_cleanup_candidate_view_from_candidate(
-    candidate: gwt_core::workspace_projection::WorkspaceCleanupCandidate,
+    candidate: gwt_core::work_projection::WorkspaceCleanupCandidate,
 ) -> gwt::ActiveWorkCleanupCandidateView {
     gwt::ActiveWorkCleanupCandidateView {
         branch: candidate.branch,
@@ -2569,7 +2569,7 @@ fn active_work_cleanup_candidate_view_from_candidate(
 }
 
 fn workspace_journal_entry_view_from_entry(
-    entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+    entry: &gwt_core::work_projection::WorkspaceJournalEntry,
 ) -> gwt::WorkspaceJournalEntryView {
     gwt::WorkspaceJournalEntryView {
         id: entry.id.clone(),
@@ -2603,7 +2603,7 @@ fn work_session_index(
 }
 
 pub(crate) fn workspace_work_item_view_from_item(
-    item: &gwt_core::workspace_projection::WorkspaceWorkItem,
+    item: &gwt_core::work_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
@@ -2650,7 +2650,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 }
 
 fn workspace_work_agent_view_from_ref(
-    agent: &gwt_core::workspace_projection::WorkspaceWorkAgentRef,
+    agent: &gwt_core::work_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
@@ -2730,7 +2730,7 @@ fn workspace_work_agent_view_from_ref(
 }
 
 fn workspace_execution_container_view_from_ref(
-    container: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+    container: &gwt_core::work_projection::WorkspaceExecutionContainerRef,
 ) -> gwt::WorkspaceExecutionContainerView {
     gwt::WorkspaceExecutionContainerView {
         branch: container.branch.clone(),
@@ -2745,7 +2745,7 @@ fn workspace_execution_container_view_from_ref(
 }
 
 fn workspace_work_event_view_from_event(
-    event: &gwt_core::workspace_projection::WorkspaceWorkEvent,
+    event: &gwt_core::work_projection::WorkEvent,
 ) -> gwt::WorkspaceHistoryEventView {
     gwt::WorkspaceHistoryEventView {
         id: event.id.clone(),
@@ -2769,25 +2769,23 @@ fn workspace_work_event_view_from_event(
     }
 }
 
-fn workspace_work_event_kind_wire(
-    kind: gwt_core::workspace_projection::WorkspaceWorkEventKind,
-) -> &'static str {
-    use gwt_core::workspace_projection::WorkspaceWorkEventKind;
+fn workspace_work_event_kind_wire(kind: gwt_core::work_projection::WorkEventKind) -> &'static str {
+    use gwt_core::work_projection::WorkEventKind;
 
     match kind {
-        WorkspaceWorkEventKind::Start => "start",
-        WorkspaceWorkEventKind::Claim => "claim",
-        WorkspaceWorkEventKind::Update => "update",
-        WorkspaceWorkEventKind::Blocked => "blocked",
-        WorkspaceWorkEventKind::Handoff => "handoff",
-        WorkspaceWorkEventKind::Resume => "resume",
-        WorkspaceWorkEventKind::Split => "split",
-        WorkspaceWorkEventKind::Merge => "merge",
-        WorkspaceWorkEventKind::Pr => "pr",
-        WorkspaceWorkEventKind::Pause => "pause",
-        WorkspaceWorkEventKind::Done => "done",
-        WorkspaceWorkEventKind::Discard => "discard",
-        WorkspaceWorkEventKind::Backfill => "backfill",
+        WorkEventKind::Start => "start",
+        WorkEventKind::Claim => "claim",
+        WorkEventKind::Update => "update",
+        WorkEventKind::Blocked => "blocked",
+        WorkEventKind::Handoff => "handoff",
+        WorkEventKind::Resume => "resume",
+        WorkEventKind::Split => "split",
+        WorkEventKind::Merge => "merge",
+        WorkEventKind::Pr => "pr",
+        WorkEventKind::Pause => "pause",
+        WorkEventKind::Done => "done",
+        WorkEventKind::Discard => "discard",
+        WorkEventKind::Backfill => "backfill",
     }
 }
 
@@ -2799,7 +2797,7 @@ fn non_empty_workspace_text(value: Option<&str>) -> Option<String> {
 }
 
 fn workspace_resume_context_from_projection(
-    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    projection: &gwt_core::work_projection::WorkProjection,
 ) -> WorkspaceResumeContext {
     WorkspaceResumeContext {
         title: non_empty_workspace_text(Some(&projection.title)),
@@ -2810,7 +2808,7 @@ fn workspace_resume_context_from_projection(
 }
 
 fn workspace_resume_context_from_journal(
-    entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+    entry: &gwt_core::work_projection::WorkspaceJournalEntry,
 ) -> WorkspaceResumeContext {
     WorkspaceResumeContext {
         title: non_empty_workspace_text(entry.title.as_deref())
@@ -2972,11 +2970,11 @@ fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
 }
 
 fn active_work_agent_view_from_summary(
-    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+    agent: &gwt_core::work_projection::WorkspaceAgentSummary,
 ) -> gwt::ActiveWorkAgentView {
     let affiliation_status = match agent.affiliation_status {
-        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned => "unassigned",
-        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned => "assigned",
+        gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Unassigned => "unassigned",
+        gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Assigned => "assigned",
     };
     gwt::ActiveWorkAgentView {
         session_id: agent.session_id.clone(),
@@ -3042,7 +3040,7 @@ fn attach_registry_sessions_to_active_works(
             );
         work.session_agent_total = (work.agents.len() + extra_total) as u32;
         for session in additions {
-            let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+            let agent_ref = gwt_core::work_projection::WorkAgentRef {
                 session_id: session.id.clone(),
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
@@ -3179,10 +3177,8 @@ fn assign_and_merge_workspace_groups(
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let worktree = work.worktree_path.as_deref().map(std::path::Path::new);
-        let key = gwt_core::workspace_projection::canonical_work_id(project_root, branch, None)
-            .or_else(|| {
-                gwt_core::workspace_projection::canonical_work_id(project_root, None, worktree)
-            })
+        let key = gwt_core::work_projection::canonical_work_id(project_root, branch, None)
+            .or_else(|| gwt_core::work_projection::canonical_work_id(project_root, None, worktree))
             .unwrap_or_else(|| work.id.clone());
         work.workspace_key = Some(key);
     }
@@ -3299,7 +3295,7 @@ fn mark_merged_active_works(
             .max();
         work.done_equivalent = !terminal
             && last_activity.is_some_and(|last| {
-                gwt_core::workspace_projection::derive_merged_done_equivalent(
+                gwt_core::work_projection::derive_merged_done_equivalent(
                     merge_reference.is_some(),
                     last,
                     merge_reference,
@@ -3347,10 +3343,10 @@ fn active_agent_session_matches_work(
 fn unassigned_agent_summary_from_session(
     session: &ActiveAgentSession,
     updated_at: chrono::DateTime<chrono::Utc>,
-) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
+) -> gwt_core::work_projection::WorkspaceAgentSummary {
     let mut summary = active_agent_summary_from_session(session, updated_at);
     summary.affiliation_status =
-        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+        gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Unassigned;
     summary.workspace_id = None;
     summary
 }
@@ -3405,12 +3401,12 @@ fn save_unassigned_workspace_launch_projection(
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
     let mut projection =
-        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
+        gwt_core::work_projection::load_or_default_workspace_projection(project_root)
             .map_err(|error| error.to_string())?;
     projection.project_root = project_root.to_path_buf();
     projection.register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
     projection.updated_at = now;
-    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+    gwt_core::work_projection::save_workspace_projection(project_root, &projection)
         .map_err(|error| error.to_string())
 }
 
@@ -3838,8 +3834,7 @@ pub struct AppRuntime {
         std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
     /// Same root fix for the home works.json (megabytes of Work items +
     /// events): cache hit clones instead of re-parsing per projection event.
-    pub(crate) work_items_cache:
-        std::cell::RefCell<gwt_core::workspace_projection::WorkspaceWorkItemsCache>,
+    pub(crate) work_items_cache: std::cell::RefCell<gwt_core::work_projection::WorkItemsCache>,
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
@@ -3962,7 +3957,7 @@ impl AppRuntime {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+                gwt_core::work_projection::WorkItemsCache::new(),
             ),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
@@ -4074,9 +4069,7 @@ impl AppRuntime {
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let Ok(projection) =
-                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                    &project_root,
-                )
+                gwt_core::work_projection::load_or_synthesize_workspace_work_items(&project_root)
             else {
                 return;
             };
@@ -4170,7 +4163,7 @@ impl AppRuntime {
         if sources.is_empty() {
             return;
         }
-        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+        match gwt_core::work_projection::reconcile_worktree_work_items(
             project_root,
             &sources,
             chrono::Utc::now(),
@@ -4196,8 +4189,7 @@ impl AppRuntime {
         // files are missing or unreadable.
         let now = chrono::Utc::now();
         for tab in &self.tabs {
-            let _ =
-                gwt_core::workspace_projection::retroactive_auto_done_scan(&tab.project_root, now);
+            let _ = gwt_core::work_projection::retroactive_auto_done_scan(&tab.project_root, now);
             // SPEC-2359 US-39 / FR-142..145: backfill Phase U-6 schema
             // additions (`summary`, `created_at`, `creator`,
             // `lifecycle_stage`) on legacy `workspace.json` files. Runs
@@ -4215,7 +4207,7 @@ impl AppRuntime {
             // shows its real title / sessions. Idempotent; must run before
             // the intake/reconcile chain so decomposed branches are not
             // redundantly backfilled.
-            let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
+            let _ = gwt_core::work_projection::decompose_legacy_multi_branch_work_items(
                 &tab.project_root,
             );
             // SPEC-2359 W-16 (FR-387): cross-machine work events intake.
@@ -4231,9 +4223,8 @@ impl AppRuntime {
             // display fallback and agent re-authoring. Idempotent via
             // `agent_identity.migration.json`; never re-clears agent-authored
             // values written after the marker.
-            let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
-                &tab.project_root,
-            );
+            let _ =
+                gwt_core::work_projection::reset_legacy_agent_identity_for_repo(&tab.project_root);
         }
 
         self.queue_startup_auto_resume_sessions();
@@ -4333,7 +4324,7 @@ impl AppRuntime {
                 continue;
             }
             let workspace_resume_context =
-                gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
+                gwt_core::work_projection::load_workspace_projection(&session.worktree_path)
                     .ok()
                     .flatten()
                     .map(|projection| workspace_resume_context_from_projection(&projection));
@@ -4478,12 +4469,10 @@ impl AppRuntime {
                     continue;
                 }
                 let workspace_resume_context =
-                    gwt_core::workspace_projection::load_workspace_projection(
-                        &session.worktree_path,
-                    )
-                    .ok()
-                    .flatten()
-                    .map(|projection| workspace_resume_context_from_projection(&projection));
+                    gwt_core::work_projection::load_workspace_projection(&session.worktree_path)
+                        .ok()
+                        .flatten()
+                        .map(|projection| workspace_resume_context_from_projection(&projection));
                 let fallback_geometry = window.geometry.clone();
                 let mut spawned = self.spawn_restored_agent_session(
                     tab_id,
@@ -5289,7 +5278,7 @@ impl AppRuntime {
         ids: Vec<String>,
     ) -> Vec<OutboundEvent> {
         use gwt_core::paths::gwt_projects_dir;
-        use gwt_core::workspace_projection::{
+        use gwt_core::work_projection::{
             apply_prune_plan, classify_workspace_projections, WorkspaceRetentionConfig,
         };
 
@@ -5298,13 +5287,12 @@ impl AppRuntime {
         let config = WorkspaceRetentionConfig::default();
         let live_session_ids: std::collections::HashSet<String> =
             self.active_agent_sessions.keys().cloned().collect();
-        let is_active_session =
-            |projection: &gwt_core::workspace_projection::WorkspaceProjection| {
-                projection
-                    .agents
-                    .iter()
-                    .any(|agent| live_session_ids.contains(&agent.session_id))
-            };
+        let is_active_session = |projection: &gwt_core::work_projection::WorkProjection| {
+            projection
+                .agents
+                .iter()
+                .any(|agent| live_session_ids.contains(&agent.session_id))
+        };
         let plan = classify_workspace_projections(&scan_root, &config, now, is_active_session);
         let filtered: Vec<_> = if ids.is_empty() {
             plan
@@ -5911,7 +5899,7 @@ impl AppRuntime {
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
         let saved_projection =
-            gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
+            gwt_core::work_projection::load_workspace_projection(&tab.project_root)
                 .ok()
                 .flatten();
         // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
@@ -5927,7 +5915,7 @@ impl AppRuntime {
                 .ok()
                 .filter(|works| !works.work_items.is_empty())
                 .map(|_| {
-                    gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    gwt_core::work_projection::WorkProjection::default_for_project(
                         &tab.project_root,
                     )
                 })
@@ -5947,15 +5935,14 @@ impl AppRuntime {
             if had_saved_agents && !projection.has_current_agents() {
                 projection.reset_idle_identity(&tab.title, updated_at);
             }
-            let journal_entries =
-                gwt_core::workspace_projection::load_recent_workspace_journal_entries(
-                    &tab.project_root,
-                    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
-                )
-                .unwrap_or_default()
-                .iter()
-                .map(workspace_journal_entry_view_from_entry)
-                .collect::<Vec<_>>();
+            let journal_entries = gwt_core::work_projection::load_recent_workspace_journal_entries(
+                &tab.project_root,
+                WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+            )
+            .unwrap_or_default()
+            .iter()
+            .map(workspace_journal_entry_view_from_entry)
+            .collect::<Vec<_>>();
             let agent_sessions = self
                 .session_ledger_cache
                 .borrow_mut()
@@ -5965,12 +5952,10 @@ impl AppRuntime {
                 .work_items_cache
                 .borrow_mut()
                 .load_or_synthesize(&tab.project_root)
-                .unwrap_or_else(
-                    |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
-                        updated_at,
-                        work_items: Vec::new(),
-                    },
-                )
+                .unwrap_or_else(|_| gwt_core::work_projection::WorkItemsProjection {
+                    updated_at,
+                    work_items: Vec::new(),
+                })
                 .work_items
                 .iter()
                 .map(|item| workspace_work_item_view_from_item(item, &session_index))
@@ -6048,8 +6033,8 @@ impl AppRuntime {
             // SPEC-2359 Phase W-12 (FR-349): synthesized from live sessions, so
             // the owning agent is Running and not user-closed → Active.
             lifecycle_state: work_active_lifecycle_state_wire(
-                gwt_core::workspace_projection::recompute_work_active_lifecycle(
-                    gwt_core::workspace_projection::WorkAgentRuntime::Running,
+                gwt_core::work_projection::recompute_work_active_lifecycle(
+                    gwt_core::work_projection::WorkAgentRuntime::Running,
                     None,
                 ),
             )
@@ -7832,7 +7817,7 @@ impl AppRuntime {
         project_root: &Path,
     ) -> Vec<OutboundEvent> {
         let Ok(Some(projection)) =
-            gwt_core::workspace_projection::load_workspace_projection(project_root)
+            gwt_core::work_projection::load_workspace_projection(project_root)
         else {
             return Vec::new();
         };
@@ -7851,7 +7836,7 @@ impl AppRuntime {
     pub(crate) fn sync_agent_window_titles_from_workspace_projection(
         &mut self,
         project_root: &Path,
-        projection: &gwt_core::workspace_projection::WorkspaceProjection,
+        projection: &gwt_core::work_projection::WorkProjection,
     ) -> bool {
         // SPEC-2359 Phase W-11 (US-58 / FR-344): resolve the effective window
         // title with the display fallback chain — the agent-authored
@@ -7935,7 +7920,7 @@ impl AppRuntime {
     /// `active_agent_sessions` is sufficient to identify the target.
     fn resolve_title_sync_window_id(
         &self,
-        agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+        agent: &gwt_core::work_projection::WorkspaceAgentSummary,
         project_root: &Path,
     ) -> Option<String> {
         if let Some((window_id, _session)) = self
@@ -9630,8 +9615,8 @@ impl AppRuntime {
             return Vec::new();
         }
         let close_kind = match close_kind.trim().to_ascii_lowercase().as_str() {
-            "done" => gwt_core::workspace_projection::WorkCloseKind::Done,
-            "discarded" => gwt_core::workspace_projection::WorkCloseKind::Discarded,
+            "done" => gwt_core::work_projection::WorkCloseKind::Done,
+            "discarded" => gwt_core::work_projection::WorkCloseKind::Discarded,
             other => {
                 tracing::warn!(
                     work_id = %work_id,
@@ -9664,11 +9649,10 @@ impl AppRuntime {
         // Work can have its worktree removed without a live session.
         let worktree_path = self.resolve_work_worktree_path(&project_root, work_id);
 
-        let decision =
-            gwt_core::workspace_projection::decide_work_close(has_live_agent, worktree_path);
+        let decision = gwt_core::work_projection::decide_work_close(has_live_agent, worktree_path);
 
         match decision {
-            gwt_core::workspace_projection::WorkCloseDecision::BlockedLiveAgent => {
+            gwt_core::work_projection::WorkCloseDecision::BlockedLiveAgent => {
                 // FR-352: never clean up a Work while its agent session is live.
                 tracing::warn!(
                     work_id = %work_id,
@@ -9677,12 +9661,10 @@ impl AppRuntime {
                 );
                 return Vec::new();
             }
-            gwt_core::workspace_projection::WorkCloseDecision::CleanupWorktree {
-                worktree_path,
-            } => {
+            gwt_core::work_projection::WorkCloseDecision::CleanupWorktree { worktree_path } => {
                 self.remove_work_worktree_only(&project_root, &worktree_path);
             }
-            gwt_core::workspace_projection::WorkCloseDecision::RecordOnly => {
+            gwt_core::work_projection::WorkCloseDecision::RecordOnly => {
                 // No resolvable worktree path: record the close without any
                 // filesystem side effect.
             }
@@ -9692,15 +9674,15 @@ impl AppRuntime {
         // already-closed Work, so a duplicate close emits no new event.
         let now = chrono::Utc::now();
         let recorded = match close_kind {
-            gwt_core::workspace_projection::WorkCloseKind::Done => {
-                gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+            gwt_core::work_projection::WorkCloseKind::Done => {
+                gwt_core::work_projection::emit_workspace_done_event_if_absent(
                     &project_root,
                     work_id,
                     now,
                 )
             }
-            gwt_core::workspace_projection::WorkCloseKind::Discarded => {
-                gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+            gwt_core::work_projection::WorkCloseKind::Discarded => {
+                gwt_core::work_projection::emit_workspace_discard_event_if_absent(
                     &project_root,
                     work_id,
                     now,
@@ -9781,7 +9763,7 @@ impl AppRuntime {
             // before clearing the agent from the live projection so the Work is
             // retained on the Work surface until the user explicitly closes it.
             self.persist_paused_work_for_stopped_session(&project_root, &session);
-            if let Err(error) = gwt_core::workspace_projection::mark_workspace_agent_stopped(
+            if let Err(error) = gwt_core::work_projection::mark_workspace_agent_stopped(
                 &project_root,
                 &session.session_id,
                 Some(&session.window_id),
@@ -9820,7 +9802,7 @@ impl AppRuntime {
             return;
         }
         let work_id = format!("work-session-{session_id}");
-        let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
+        let projection = gwt_core::work_projection::load_workspace_projection(project_root)
             .ok()
             .flatten();
         let agent_summary = projection.as_ref().and_then(|projection| {
@@ -9875,7 +9857,7 @@ impl AppRuntime {
             .as_ref()
             .and_then(|projection| projection.git_details.clone());
         let execution_container = (branch.is_some() || worktree_path.is_some()).then(|| {
-            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            gwt_core::work_projection::WorkspaceExecutionContainerRef {
                 branch,
                 worktree_path,
                 pr_number: git_details.as_ref().and_then(|details| details.pr_number),
@@ -9899,7 +9881,7 @@ impl AppRuntime {
         let session_id = session_id.to_string();
         let log_session_id = session.session_id.clone();
         let record = thread::spawn(move || {
-            if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
+            if let Err(error) = gwt_core::work_projection::record_workspace_work_paused_event(
                 &project_root,
                 &work_id,
                 title.as_deref(),
