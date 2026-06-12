@@ -1702,6 +1702,8 @@ fn sample_runtime_with_events(
         work_items_cache: std::cell::RefCell::new(
             gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
         ),
+        last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,
@@ -2148,7 +2150,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_
         events.first(),
         Some(event)
             if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                && matches!(event.event, BackendEvent::WorkspaceState { .. })
+                && matches!(event.event, BackendEvent::WorkState { .. })
     ));
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -2779,7 +2781,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 
     assert!(matches!(
         events.first().map(|event| &event.event),
-        Some(BackendEvent::WorkspaceState { .. })
+        Some(BackendEvent::WorkState { .. })
     ));
     let projection = events.iter().find_map(|event| match &event.event {
         BackendEvent::ActiveWorkProjection { projection } => Some(projection),
@@ -2836,10 +2838,7 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
 
     assert_eq!(events.len(), 3);
     assert!(matches!(events[0].target, DispatchTarget::Broadcast));
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(events[1].target, DispatchTarget::Broadcast));
     assert!(matches!(
         events[1].event,
@@ -2965,7 +2964,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "non-structural runtime status changes must not force a full workspace_state"
     );
     assert!(matches!(events[0].target, DispatchTarget::Broadcast));
@@ -4314,7 +4313,7 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            BackendEvent::WorkState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("workspace state after wizard submit");
@@ -4938,19 +4937,25 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
         .expect("projection view");
 
-    assert_eq!(view.active_work_count, 2);
-    assert_eq!(view.active_works.len(), 2);
-    assert!(view.active_works.iter().all(|work| work.agents.len() == 1));
-    assert!(view.active_works.iter().any(|work| work
+    // SPEC-2359 W16-2 (FR-389 / SC-259) supersedes the original two-row
+    // contract here: storage still keys one Work per agent session (FR-348),
+    // but the VIEW groups same-branch Works into one Workspace row carrying
+    // both live agents.
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "same branch groups into one row"
+    );
+    let row = &view.active_works[0];
+    assert!(row
         .agents
         .iter()
-        .any(|agent| agent.session_id == "session-a")));
-    assert!(view.active_works.iter().any(|work| work
+        .any(|agent| agent.session_id == "session-a"));
+    assert!(row
         .agents
         .iter()
-        .any(|agent| agent.session_id == "session-b")));
-    // Same branch, different sessions → distinct Work ids.
-    assert_ne!(view.active_works[0].id, view.active_works[1].id);
+        .any(|agent| agent.session_id == "session-b"));
+    assert!(row.workspace_key.is_some());
 }
 
 /// SPEC-2359 Phase W-12 Slice 2 (FR-349): each `active_works` item carries a
@@ -5634,7 +5639,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
         }
     )));
 }
@@ -5773,10 +5778,7 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
     // the surface must update without a saved current.json or live agents —
     // so the projection broadcast accompanies the WorkspaceState event.
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8318,10 +8320,7 @@ fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
     // the surface must update without a saved current.json or live agents —
     // so the projection broadcast accompanies the WorkspaceState event.
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8351,10 +8350,7 @@ fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_
     runtime.push_workspace_and_active_work_projection_broadcasts(&mut events);
 
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8566,7 +8562,7 @@ fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
 
     assert!(matches!(
         events.first().map(|event| &event.event),
-        Some(BackendEvent::WorkspaceState { .. })
+        Some(BackendEvent::WorkState { .. })
     ));
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
@@ -9166,7 +9162,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
             ..
         }
     )));
@@ -10998,7 +10994,7 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            BackendEvent::WorkState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("initial WorkspaceState broadcast");
@@ -11355,7 +11351,7 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
     assert!(
             events
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+                .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
             "expected WorkspaceState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
         );
     assert!(
@@ -11410,10 +11406,10 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 
     let workspace_event = events
         .iter()
-        .find(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
+        .find(|event| matches!(event.event, BackendEvent::WorkState { .. }))
         .expect("WorkspaceState reply for FrontendReady");
     let workspace = match &workspace_event.event {
-        BackendEvent::WorkspaceState { workspace } => workspace,
+        BackendEvent::WorkState { workspace } => workspace,
         _ => unreachable!(),
     };
     let projected_window = workspace
@@ -11512,7 +11508,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "first Board post should broadcast WorkspaceState: {first:?}"
     );
 
@@ -11520,7 +11516,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     assert!(
             !second
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+                .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
             "second Board post with identical title_summary must not duplicate WorkspaceState: {second:?}"
         );
     assert!(
@@ -11992,7 +11988,7 @@ fn apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_titl
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "expected WorkspaceState broadcast when dynamic_title changed: {events:?}"
     );
 }
@@ -12025,7 +12021,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_nothing_chan
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "WorkspaceState must be skipped when in-memory dynamic_title did not change: {events:?}"
     );
 }
@@ -12056,7 +12052,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "first sync should broadcast WorkspaceState: {first:?}"
     );
 
@@ -12067,7 +12063,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
     assert!(
         !second
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "second sync with identical title must not broadcast WorkspaceState: {second:?}"
     );
     // ActiveWorkProjection still fires (it's idempotent on the
@@ -12110,7 +12106,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "handle_workspace_projection_changed_events must broadcast WorkspaceState: {events:?}"
     );
     assert!(
@@ -12154,7 +12150,7 @@ fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "canonical Project State root updates must broadcast WorkspaceState: {events:?}"
     );
     let tab = runtime.tab("tab-1").expect("tab");
@@ -12493,7 +12489,7 @@ fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "non-structural runtime hook state changes must not force a full workspace_state"
     );
     assert!(events
@@ -12999,7 +12995,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
         }
     )));
 }
@@ -14090,6 +14086,9 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14202,6 +14201,9 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14282,6 +14284,9 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14400,6 +14405,9 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14493,6 +14501,9 @@ fn active_works_are_sorted_by_latest_update_descending() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14561,6 +14572,9 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         closed_at: None,
         session_agent_total: 0,
         merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -14568,8 +14582,10 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         row(Some("work/open"), None),
         row(None, Some("MERGED")),
     ];
-    let merged: std::collections::HashSet<String> =
-        ["work/merged".to_string()].into_iter().collect();
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect();
 
     super::mark_merged_active_works(&mut works, Some(&merged));
 
@@ -14620,8 +14636,10 @@ fn apply_work_merge_status_caches_and_flags_rows() {
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let merged: std::collections::HashSet<String> =
-        ["work/merged".to_string()].into_iter().collect();
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect();
     let _ = runtime.apply_work_merge_status(&repo, merged);
 
     let view = runtime
@@ -14848,4 +14866,299 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(recorded, "Paused Work record must land in works.json");
+}
+
+/// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
+/// once per 30s per project; bootstrap / project-open callers bypass it.
+#[test]
+fn work_events_ingest_attempt_is_throttled_per_project() {
+    let temp = tempdir().expect("tempdir");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let root = temp.path().join("repo");
+
+    assert!(runtime.note_work_events_ingest_attempt(&root, false));
+    assert!(
+        !runtime.note_work_events_ingest_attempt(&root, false),
+        "second attempt within 30s is throttled"
+    );
+    assert!(
+        runtime.note_work_events_ingest_attempt(&root, true),
+        "force bypasses the throttle"
+    );
+    let other = temp.path().join("other");
+    assert!(
+        runtime.note_work_events_ingest_attempt(&other, false),
+        "throttle is per project root"
+    );
+}
+
+/// SPEC-2359 W-16 (FR-387): the ingest completion handler runs the worktree
+/// reconcile AFTER the intake (intake → reconcile order) and rebroadcasts
+/// the projection only when the intake applied events.
+#[test]
+fn handle_work_events_ingested_broadcasts_only_on_change() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    // Seed one Work record so the projection broadcast has content.
+    let mut seed = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+        gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+        "work-session-ingest-seed",
+        chrono::Utc::now(),
+    );
+    seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
+    seed.title = Some("seed".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, seed)
+        .expect("seed work record");
+
+    let unchanged = runtime.handle_work_events_ingested(repo.clone(), false);
+    assert!(
+        unchanged.is_empty(),
+        "no-op ingest must not rebroadcast the projection"
+    );
+
+    let changed = runtime.handle_work_events_ingested(repo, true);
+    assert!(
+        changed
+            .iter()
+            .any(|outbound| matches!(&outbound.event, BackendEvent::ActiveWorkProjection { .. })),
+        "changed ingest rebroadcasts the projection"
+    );
+}
+
+/// SPEC-2359 W16-2 (FR-389 / SC-259): two Works on the same canonical branch
+/// (any spelling) merge into ONE Workspace row — newest representative,
+/// agents concatenated, counts summed — while branchless legacy rows keep
+/// their own identity.
+#[test]
+fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
+    fn row(
+        id: &str,
+        branch: Option<&str>,
+        updated_at: &str,
+        agents: usize,
+    ) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: agents,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "paused".to_string(),
+            closed_at: None,
+            session_agent_total: 1,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    let mut works = vec![
+        row(
+            "work-session-aaaa",
+            Some("work/x"),
+            "2026-06-11T10:00:00Z",
+            1,
+        ),
+        row(
+            "work-session-bbbb",
+            Some("origin/work/x"),
+            "2026-06-12T10:00:00Z",
+            2,
+        ),
+        row("workspace-1748822400000", None, "2026-06-10T10:00:00Z", 0),
+    ];
+
+    super::assign_and_merge_workspace_groups(&mut works, &root);
+
+    assert_eq!(
+        works.len(),
+        2,
+        "same-branch rows merge; legacy row survives"
+    );
+    let group = works
+        .iter()
+        .find(|work| {
+            work.branch.as_deref() == Some("origin/work/x")
+                || work.branch.as_deref() == Some("work/x")
+        })
+        .expect("grouped row");
+    assert_eq!(
+        group.id, "work-session-bbbb",
+        "newest row is the representative"
+    );
+    assert_eq!(group.active_agents, 3, "agent counts sum");
+    assert_eq!(group.session_agent_total, 2, "session totals sum");
+    assert!(group.workspace_key.is_some());
+    let legacy = works
+        .iter()
+        .find(|work| work.id == "workspace-1748822400000")
+        .expect("legacy row");
+    assert_eq!(
+        legacy.workspace_key.as_deref(),
+        Some("workspace-1748822400000")
+    );
+}
+
+/// SPEC-2359 W16-3 (FR-390): a row whose branch is known only from fetched
+/// refs (no recorded worktree, not in the local-worktree set) is flagged
+/// `remote_only`; rows with a worktree or a locally checked-out branch and
+/// branchless rows are not.
+#[test]
+fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
+    fn row(id: &str, branch: Option<&str>, worktree: Option<&str>) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 0,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: worktree.map(str::to_string),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "paused".to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            updated_at: String::new(),
+        }
+    }
+
+    let mut local = std::collections::HashSet::new();
+    local.insert("work/local".to_string());
+    let mut works = vec![
+        row("w-remote", Some("origin/work/fetched"), None),
+        row("w-local-branch", Some("work/local"), None),
+        row("w-with-worktree", Some("work/other"), Some("/tmp/x")),
+        row("w-branchless", None, None),
+    ];
+
+    super::mark_remote_only_active_works(&mut works, Some(&local));
+
+    assert!(works[0].remote_only, "fetched-only branch is Remote");
+    assert!(!works[1].remote_only, "locally checked-out branch is not");
+    assert!(!works[2].remote_only, "rows with a worktree are not");
+    assert!(!works[3].remote_only, "branchless rows are not");
+}
+
+/// SPEC-2359 W16-4 (FR-391): merged ∧ stale rows classify as derived Done;
+/// activity after the merge reference clears it; explicit terminal closes
+/// and pr_state-only merges never enter the derived classification; and the
+/// marking writes nothing (US-61).
+#[test]
+fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
+    fn row(
+        id: &str,
+        branch: Option<&str>,
+        pr_state: Option<&str>,
+        lifecycle: &str,
+        updated_at: &str,
+    ) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 0,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: pr_state.map(str::to_string),
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: lifecycle.to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    let merge_at = chrono::Utc::now();
+    let stale =
+        (merge_at - chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let fresh =
+        (merge_at + chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), merge_at)]
+            .into_iter()
+            .collect();
+
+    let mut works = vec![
+        row("w-stale", Some("work/merged"), None, "paused", &stale),
+        row("w-fresh", Some("work/merged"), None, "paused", &fresh),
+        row("w-closed", Some("work/merged"), None, "done", &stale),
+        row(
+            "w-pr-only",
+            Some("work/other"),
+            Some("MERGED"),
+            "paused",
+            &stale,
+        ),
+    ];
+
+    super::mark_merged_active_works(&mut works, Some(&merged));
+
+    assert!(works[0].done_equivalent, "merged ∧ stale → derived Done");
+    assert!(
+        !works[1].done_equivalent,
+        "updated after the merge → back to Active/Paused (FR-391)"
+    );
+    assert!(
+        !works[2].done_equivalent,
+        "explicit terminal close keeps its own lifecycle"
+    );
+    assert!(
+        !works[3].done_equivalent,
+        "pr_state stays badge-only — membership rides the scan verdict"
+    );
+    assert!(works[3].merged_into_base, "pr_state still drives the badge");
 }

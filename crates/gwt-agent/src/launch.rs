@@ -33,6 +33,38 @@ fn claude_session_settings_json(fast_mode: bool, ultracode: bool) -> Option<Stri
     Some(format!("{{{}}}", entries.join(",")))
 }
 
+/// Stable settings filename suffix for the active toggle combination.
+fn claude_settings_file_suffix(fast_mode: bool, ultracode: bool) -> &'static str {
+    match (fast_mode, ultracode) {
+        (true, true) => "fast-ultracode",
+        (true, false) => "fast",
+        _ => "ultracode",
+    }
+}
+
+/// Materialize the session settings JSON under `dir` and return the file
+/// path to pass as `--settings <path>` (SPEC-2014 FR-106).
+///
+/// Host launches must not place the JSON on a shell command line: Windows
+/// PowerShell wrappers mangle embedded quotes for `.cmd` targets, breaking
+/// `--settings {"fastMode":true}` into invalid JSON. The filename is keyed
+/// by the toggle combination so concurrent launches with the same toggles
+/// write identical bytes and the directory never accumulates stale files.
+fn materialize_claude_settings_file(
+    dir: &Path,
+    fast_mode: bool,
+    ultracode: bool,
+    json: &str,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!(
+        "claude-settings-{}.json",
+        claude_settings_file_suffix(fast_mode, ultracode)
+    ));
+    std::fs::write(&path, json)?;
+    Ok(path)
+}
+
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
 fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
@@ -780,8 +812,33 @@ impl AgentLaunchBuilder {
         // effort-level value.
         let ultracode = self.reasoning_level.as_deref() == Some("ultracode");
         if let Some(settings) = claude_session_settings_json(self.fast_mode, ultracode) {
+            // SPEC-2014 FR-106: host launches deliver the settings as a file
+            // path so the JSON never rides a shell command line. Docker keeps
+            // the inline form: its args travel as an argv vector with no
+            // quoting layer, and the host-side file is not guaranteed to be
+            // mounted in the container.
+            let value = if self.runtime_target == LaunchRuntimeTarget::Host {
+                match materialize_claude_settings_file(
+                    &gwt_core::paths::gwt_home().join("tmp"),
+                    self.fast_mode,
+                    ultracode,
+                    &settings,
+                ) {
+                    Ok(path) => path.display().to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to materialize claude session settings file; \
+                             falling back to inline JSON"
+                        );
+                        settings
+                    }
+                }
+            } else {
+                settings
+            };
             args.push("--settings".to_string());
-            args.push(settings);
+            args.push(value);
         }
 
         // Session mode
@@ -1280,28 +1337,52 @@ mod tests {
         assert!(config.skip_permissions);
     }
 
+    /// SPEC-2014 FR-106 / SC-064: host launches carry --settings as a
+    /// materialized file path so the JSON never rides a shell command line.
+    fn claude_settings_arg(config: &LaunchConfig) -> String {
+        config
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .map(|pair| pair[1].clone())
+            .expect("--settings argument present")
+    }
+
     #[test]
-    fn build_claude_fast_mode_injects_session_settings() {
+    fn build_claude_fast_mode_host_materializes_settings_file() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .fast_mode(true)
             .build();
 
-        assert!(config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#));
+        let value = claude_settings_arg(&config);
+        assert!(
+            value.ends_with("claude-settings-fast.json"),
+            "host launches must pass a settings file path, got {value}"
+        );
+        let content = std::fs::read_to_string(&value).expect("settings file written");
+        assert_eq!(content, r#"{"fastMode":true}"#);
         assert!(config.fast_mode);
         assert!(!config.codex_fast_mode);
+    }
+
+    #[test]
+    fn build_claude_fast_mode_docker_keeps_inline_settings() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .fast_mode(true)
+            .runtime_target(LaunchRuntimeTarget::Docker)
+            .build();
+
+        // Docker args travel as an argv vector with no quoting layer, and a
+        // host-side settings file is not guaranteed to be mounted in the
+        // container, so the inline JSON form stays.
+        assert_eq!(claude_settings_arg(&config), r#"{"fastMode":true}"#);
     }
 
     #[test]
     fn build_claude_without_fast_mode_omits_session_settings() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
 
-        assert!(!config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "--settings" && pair[1].contains("fastMode")));
+        assert!(!config.args.iter().any(|arg| arg == "--settings"));
     }
 
     #[test]
@@ -1311,10 +1392,15 @@ mod tests {
             .build();
 
         // ultracode rides --settings, never CLAUDE_CODE_EFFORT_LEVEL.
-        assert!(config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"ultracode":true}"#));
+        let value = claude_settings_arg(&config);
+        assert!(
+            value.ends_with("claude-settings-ultracode.json"),
+            "host launches must pass a settings file path, got {value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&value).expect("settings file written"),
+            r#"{"ultracode":true}"#
+        );
         assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
         assert!(!config.args.contains(&"--effort".to_string()));
         // reasoning_level still round-trips for persistence/display.
@@ -1338,12 +1424,35 @@ mod tests {
             settings_count, 1,
             "must combine into a single --settings flag"
         );
-        assert!(config
-            .args
-            .windows(2)
-            .any(|pair| pair[0] == "--settings"
-                && pair[1] == r#"{"fastMode":true,"ultracode":true}"#));
+        let value = claude_settings_arg(&config);
+        assert!(
+            value.ends_with("claude-settings-fast-ultracode.json"),
+            "host launches must pass a settings file path, got {value}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&value).expect("settings file written"),
+            r#"{"fastMode":true,"ultracode":true}"#
+        );
         assert!(!config.env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+    }
+
+    #[test]
+    fn materialize_claude_settings_file_writes_content_keyed_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let json = r#"{"fastMode":true,"ultracode":true}"#;
+
+        let path = materialize_claude_settings_file(temp.path(), true, true, json)
+            .expect("settings file materializes");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("claude-settings-fast-ultracode.json")
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), json);
+        // Re-materializing the same toggles is idempotent.
+        let again = materialize_claude_settings_file(temp.path(), true, true, json)
+            .expect("settings file rewrites");
+        assert_eq!(again, path);
     }
 
     #[test]
