@@ -17,6 +17,36 @@ const componentsCss = readFileSync(
   "utf8",
 );
 
+function extractFunctionSource(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `missing function ${name}`);
+  const braceStart = source.indexOf("{", start);
+  assert.notEqual(braceStart, -1, `missing body for ${name}`);
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`unterminated function ${name}`);
+}
+
+function loadFunction(name) {
+  return Function(`"use strict"; return (${extractFunctionSource(appSource, name)});`)();
+}
+
+function loadFunctionWithDeps(name, deps) {
+  const dependencySources = deps
+    .map((dep) => extractFunctionSource(appSource, dep))
+    .join("\n");
+  return Function(
+    `"use strict"; ${dependencySources}; return (${extractFunctionSource(appSource, name)});`,
+  )();
+}
+
 test("components.css declares the settings tab and panel surfaces under :root[data-theme]", () => {
   // Every Settings primitive must live inside the dual-theme scope so it
   // honors Dark Operator / Light Drafting alongside the rest of the shell.
@@ -244,6 +274,84 @@ test("System tab exposes remote provider config form that saves via update_board
     /A client secret is saved/,
     "the saved-state indicator must confirm the secret persisted",
   );
+});
+
+test("System tab accepts a Teams channel link without exposing Team ID fields (SPEC-2963 Phase 9)", () => {
+  assert.match(
+    appSource,
+    /function\s+parseTeamsChannelLink\(/,
+    "expected a helper that parses a copied Teams channel link",
+  );
+  assert.match(
+    appSource,
+    /function\s+composeTeamsDefaultChannel\(/,
+    "expected the parsed Teams link to save as team_id/channel_id",
+  );
+  assert.match(
+    appSource,
+    /function\s+formatTeamsChannelLink\(/,
+    "expected saved team_id/channel_id config to render back into the link field",
+  );
+  assert.match(
+    appSource,
+    /"settings-board-teams-channel-link"/,
+    "Teams channel link paste input must exist",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /"settings-board-teams-team-id"/,
+    "Teams Team ID must not be exposed as a separate input",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /"settings-board-teams-channel-id"/,
+    "Teams Channel ID must not be exposed as a separate input",
+  );
+  assert.match(
+    appSource,
+    /const\s+parsedTeamsChannel\s*=\s*parseTeamsChannelLink\(\s*teamsChannelLinkValue\s*,?\s*\)/,
+    "Save must parse the Teams channel link",
+  );
+  assert.match(
+    appSource,
+    /default_channel:\s*nextTeamsDefaultChannel/,
+    "Save payload must use the parsed or preserved Teams channel",
+  );
+  assert.match(
+    appSource,
+    /let\s+nextTeamsDefaultChannel\s*=\s*cfg\.teamsDefaultChannel\s*\|\|\s*""/,
+    "saving client/tenant settings without a new link must preserve the existing channel",
+  );
+  assert.match(
+    appSource,
+    /formatTeamsChannelLink\(\s*cfg\.teamsDefaultChannel,\s*cfg\.teamsTenantId,?\s*\)/,
+    "saved channel must remain visible in the Teams channel link field after rerender",
+  );
+});
+
+test("Teams channel helpers parse and rehydrate channel links without losing the saved channel (SPEC-2963 Phase 9)", () => {
+  const parseTeamsChannelLink = loadFunction("parseTeamsChannelLink");
+  const formatTeamsChannelLink = loadFunctionWithDeps("formatTeamsChannelLink", [
+    "parseTeamsDefaultChannel",
+  ]);
+  const composeTeamsDefaultChannel = loadFunction("composeTeamsDefaultChannel");
+  const teamId = "0abf2b52-ada6-40ee-96ba-c8010f5be083";
+  const channelId = "19:04685a0564cd4f7eb712f8152167360a@thread.skype";
+  const tenantId = "0ff7b59c-80f2-4925-99ca-f6d55b11d31c";
+  const defaultChannel = `${teamId}/${channelId}`;
+
+  assert.deepEqual(
+    parseTeamsChannelLink(
+      `https://teams.microsoft.com/l/channel/${encodeURIComponent(channelId)}/gwt-test?groupId=${teamId}&tenantId=${tenantId}`,
+    ),
+    { teamId, channelId },
+  );
+  assert.equal(composeTeamsDefaultChannel(teamId, channelId), defaultChannel);
+  assert.deepEqual(parseTeamsChannelLink(formatTeamsChannelLink(defaultChannel, tenantId)), {
+    teamId,
+    channelId,
+  });
+  assert.equal(parseTeamsChannelLink("not a Teams link"), null);
 });
 
 test("System tab exposes an editable OAuth callback port + redirect URL hint (SPEC-2963 FR-005)", () => {

@@ -860,6 +860,40 @@ mod tests {
     }
 
     #[test]
+    fn reply_payload_renders_multiline_body_as_teams_br_tags() {
+        // SPEC-2963 Phase 9 regression: Teams renders raw newline text nodes in
+        // Graph HTML bodies as visible "n" boxes. The provider payload must
+        // carry explicit <br> tags instead.
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let mock = RecordingGraph::new();
+        let posts = mock.posts();
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+        let root = root();
+        prov.post_entry(
+            &root,
+            entry("Current state: A\n\nReason: B\n\nNext: C")
+                .with_audience(vec!["ws-a".to_string()]),
+        )
+        .unwrap();
+        let calls = posts.lock().unwrap().clone();
+        let payload: serde_json::Value = serde_json::from_str(&calls[1].1).unwrap();
+        let content = payload["body"]["content"].as_str().unwrap();
+        assert!(
+            content.contains("Current state: A<br><br>Reason: B<br><br>Next: C"),
+            "multiline reply content must use Teams-safe breaks: {content}"
+        );
+        assert!(
+            !content.contains('\n'),
+            "Teams HTML content must not carry raw newlines: {content:?}"
+        );
+        assert!(
+            !content.contains("\\n"),
+            "Teams HTML content must not carry escaped newlines: {content:?}"
+        );
+    }
+
+    #[test]
     fn second_post_reuses_root_and_general_for_broadcast() {
         // get-or-create: same Workspace reuses its root; broadcast uses General.
         let mut map = BTreeMap::new();

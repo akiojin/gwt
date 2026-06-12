@@ -169,6 +169,7 @@ pub type AgentLaunchCompletion = (
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
+mod launch_output_mirror;
 mod migration;
 pub(crate) mod persist_dispatcher;
 mod profile;
@@ -1933,16 +1934,6 @@ pub fn build_frontend_sync_events(
         ));
     }
 
-    for (id, snapshot) in terminal_snapshots {
-        events.push(OutboundEvent::reply(
-            client_id,
-            BackendEvent::TerminalSnapshot {
-                id,
-                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-            },
-        ));
-    }
-
     events.push(OutboundEvent::reply(
         client_id,
         BackendEvent::LaunchWizardState {
@@ -1954,6 +1945,19 @@ pub fn build_frontend_sync_events(
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::UpdateState(state),
+        ));
+    }
+
+    // SPEC-2359 W-17 (FR-397): bulky terminal snapshots go last so a
+    // reconnect replay delivers lightweight state (wizard, statuses, update)
+    // before scrollback payloads, instead of burying it behind them.
+    for (id, snapshot) in terminal_snapshots {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalSnapshot {
+                id,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+            },
         ));
     }
 
@@ -2871,6 +2875,39 @@ fn normalize_existing_path_prefix(path: &Path) -> PathBuf {
     normalized
 }
 
+/// SPEC-2359 W-17 (FR-398): dedup window for launches that are past window
+/// registration but not yet live. Entries also clear on launch completion.
+const INFLIGHT_LAUNCH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Identity of a launch for in-flight dedup. Includes the agent and the
+/// resume conversation so parallel restores of *different* Sessions on the
+/// same Work (startup auto-resume) and multi-agent launches on one Work stay
+/// allowed — only a re-request of the *same* launch dedupes. `None` when the
+/// config carries neither a branch nor a working dir: such launches have no
+/// stable Work identity and must never dedup against each other.
+fn inflight_launch_key(tab_id: &str, config: &gwt_agent::LaunchConfig) -> Option<String> {
+    let branch = config
+        .branch
+        .as_deref()
+        .map(normalize_branch_name)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
+    let dir = config
+        .working_dir
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    if branch.is_empty() && dir.is_empty() {
+        return None;
+    }
+    let agent = config.agent_id.command();
+    let resume = config.resume_session_id.as_deref().unwrap_or_default();
+    Some(format!(
+        "{tab_id}\u{001f}{agent}\u{001f}{branch}\u{001f}{dir}\u{001f}{resume}"
+    ))
+}
+
 fn workspace_resume_branch_exists(project_root: &Path, branch_name: &str) -> bool {
     let branch_name = normalize_branch_name(branch_name.trim());
     if branch_name.is_empty() {
@@ -3538,6 +3575,12 @@ pub struct AppRuntime {
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) pending_workspace_resume_contexts: HashMap<String, WorkspaceResumeContext>,
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
+    /// SPEC-2359 W-17 (FR-398, Issue #3034): launches whose window is
+    /// registered but whose agent session is not live yet, keyed by
+    /// (tab, branch, working dir). A re-click in this window focuses the
+    /// pending window instead of spawning a duplicate. Entries clear on
+    /// launch completion/failure or after a TTL.
+    pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -3658,6 +3701,7 @@ impl AppRuntime {
             launch_wizard_cache,
             launch_wizard: None,
             pending_workspace_resume_contexts: HashMap::new(),
+            inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -5442,6 +5486,36 @@ impl AppRuntime {
         events.extend(self.migration_detected_replies(client_id));
         events.extend(self.migration_recovery_replies(client_id));
         events
+    }
+
+    /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
+    /// streamed output was dropped under client queue pressure, restoring
+    /// display consistency for the affected client only.
+    pub(crate) fn client_pane_snapshot_repair_events(
+        &self,
+        client_id: &str,
+        pane_ids: &[String],
+    ) -> Vec<OutboundEvent> {
+        pane_ids
+            .iter()
+            .filter_map(|id| {
+                let runtime = self.runtimes.get(id)?;
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.snapshot_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then(|| {
+                    OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::TerminalSnapshot {
+                            id: id.clone(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                        },
+                    )
+                })
+            })
+            .collect()
     }
 
     fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
@@ -8214,6 +8288,8 @@ impl AppRuntime {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
         let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        self.inflight_launches
+            .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
             Ok((
                 process_launch,
@@ -8768,6 +8844,25 @@ impl AppRuntime {
                 self.focus_existing_live_work_agent_events(&window_id, Some(placement.bounds()))
             );
         }
+        // SPEC-2359 W-17 (FR-398, Issue #3034): the live-window check above
+        // only sees launches whose agent session is already live. A re-click
+        // while the previous launch is still materializing (window registered,
+        // session pending) must focus that pending window, not spawn a twin.
+        let inflight_key = inflight_launch_key(tab_id, &config);
+        {
+            let window_lookup = &self.window_lookup;
+            self.inflight_launches.retain(|_, (window_id, started)| {
+                started.elapsed() < INFLIGHT_LAUNCH_TTL
+                    && window_lookup.contains_key(window_id.as_str())
+            });
+        }
+        if let Some(key) = inflight_key.as_deref() {
+            if let Some((window_id, _)) = self.inflight_launches.get(key) {
+                let window_id = window_id.clone();
+                return Ok(self
+                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+            }
+        }
         let issue_link_cache_dir = self.issue_link_cache_dir.clone();
         let tab = self
             .tab_mut(tab_id)
@@ -8809,6 +8904,10 @@ impl AppRuntime {
         self.window_pty_statuses
             .insert(window_id.clone(), WindowProcessStatus::Running);
         self.window_hook_states.remove(&window_id);
+        if let Some(key) = inflight_key {
+            self.inflight_launches
+                .insert(key, (window_id.clone(), std::time::Instant::now()));
+        }
 
         let mut events = vec![self.workspace_state_broadcast()];
         let composed_status = self
@@ -8857,6 +8956,17 @@ impl AppRuntime {
         profile_config_path: PathBuf,
         hook_forward_target: Option<HookForwardTarget>,
     ) {
+        // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
+        // compose ps/up incl. image build, exec probes), mirror docker-kind
+        // Process Console lines into the agent terminal. Host launches keep
+        // their immediate-PTY behavior untouched (FR-142).
+        let docker_output_mirror =
+            (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
+                launch_output_mirror::DockerLaunchOutputMirror::start(
+                    proxy.clone(),
+                    window_id.clone(),
+                )
+            });
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
@@ -9021,6 +9131,12 @@ impl AppRuntime {
                 agent_project_root,
             ))
         })();
+
+        // Drop (= final drain + join) BEFORE dispatching the result so the
+        // tail of the mirrored docker output lands in the terminal ahead of
+        // the success transition or the `[gwt] Launch failed` summary —
+        // otherwise the failure summary gets buried mid-stream.
+        drop(docker_output_mirror);
 
         match result {
             Ok((

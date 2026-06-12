@@ -1,6 +1,7 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -20,6 +21,17 @@ use crate::{
 };
 
 static UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn resolve_config_home_dir(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    fallback: Option<PathBuf>,
+) -> Option<PathBuf> {
+    home.filter(|value| !value.is_empty())
+        .or_else(|| userprofile.filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .or(fallback)
+}
 
 /// Top-level application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +94,12 @@ impl Settings {
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| Self::global_config_path_for_home(&home))
+        resolve_config_home_dir(
+            std::env::var_os("HOME"),
+            std::env::var_os("USERPROFILE"),
+            dirs::home_dir(),
+        )
+        .map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -180,6 +197,35 @@ mod tests {
             Settings::global_config_path_for_home(&home),
             home.join(".gwt").join("config.toml")
         );
+    }
+
+    #[test]
+    fn config_home_resolution_prefers_env_over_dirs_fallback() {
+        assert_eq!(
+            resolve_config_home_dir(
+                Some("home-env".into()),
+                Some("userprofile-env".into()),
+                Some(PathBuf::from("dirs-home")),
+            ),
+            Some(PathBuf::from("home-env"))
+        );
+        assert_eq!(
+            resolve_config_home_dir(
+                Some("".into()),
+                Some("userprofile-env".into()),
+                Some(PathBuf::from("dirs-home")),
+            ),
+            Some(PathBuf::from("userprofile-env"))
+        );
+        assert_eq!(
+            resolve_config_home_dir(
+                Some("".into()),
+                Some("".into()),
+                Some(PathBuf::from("dirs-home"))
+            ),
+            Some(PathBuf::from("dirs-home"))
+        );
+        assert_eq!(resolve_config_home_dir(None, None, None), None);
     }
 
     #[test]

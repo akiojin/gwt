@@ -943,15 +943,9 @@ mod tests {
     fn list_branches_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        gwt_core::process::hidden_command("git")
-            .args(["init", path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        gwt_core::process::hidden_command("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .unwrap();
+        // Configures committer identity so the fixture works on CI runners
+        // that have no global git config.
+        init_named_repo(path);
 
         let branches = list_branches(path).unwrap();
         assert!(!branches.is_empty());

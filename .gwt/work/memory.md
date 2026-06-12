@@ -6843,3 +6843,38 @@ Type: decision
 Context: Windows 自動更新で helper exe (gwt-update-helper.exe) の spawn が os error 740 で失敗 (#3018)。manifest 無しの exe は名前に update/setup/install/patch を含むと UAC Installer Detection で昇格要求され、CreateProcess は昇格できず ERROR_ELEVATION_REQUIRED になる。EnableInstallerDetection は Windows Home 既定有効でマシン依存再現。
 Learning: rustc は exe にデフォルト manifest を埋め込まない。winresource も set_manifest 明示時のみ。Microsoft 規定の対処は requestedExecutionLevel=asInvoker の manifest 埋め込みで、これが installer detection の off-switch になる。
 Future Action: Windows 向けバイナリを追加・リネームする際は (1) build.rs の set_manifest が適用されるか、(2) exe / 一時コピーの名前に installer-detection キーワードを含めないかを確認する。自己更新系の修正は実行中バイナリ側に効くため E2E は 2 リリース跨ぎになる前提で検証計画を立てる。
+
+## 2026-06-10 — worktree-local な coordination 状態は worktree 削除で消えて重複を再生産する
+
+Type: lesson
+Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-local) のみ保存で、info/exclude 旧パターンにより git 共有も死んでいた。root を作った worktree の削除で mapping が消え、新 worktree が General root を再作成し続けた (3 本に増殖)。
+Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
+Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
+
+## 2026-06-10 — llvm-cov はビルド失敗時に 0% レポートを静かに出力する
+
+Type: lesson
+Context: arch-review P1 で workspace カバレッジを計測した際、テストファイルの import エラーで cargo build が失敗していたのに --ignore-run-fail 指定の cargo llvm-cov が exit 0 相当で summary JSON を生成し、covered=0 の無意味な数値を報告した
+Learning: --ignore-run-fail はテスト実行失敗のみ許容し、ビルド失敗時もレポート生成自体は完走する。0% や極端に低い数値が出たら、まず llvm-cov の実行ログで全テストバイナリがビルド・実行されたかを確認する
+Future Action: カバレッジ計測値を意思決定に使う前に、実行ログの 'error\[' / 'build failed' を grep し、test result 行数が期待クレート数と一致することを確認する
+
+## 2026-06-10 — CI ゲート拡張は hermeticity 監査 + 現行ゲート相当との差分比較で安全に行う
+
+Type: lesson
+Context: arch-review P1 で per-PR CI を 2→12 クレートに拡張する際、ローカル (Windows) で 9 件のテスト失敗が出たが、現行ゲート相当のコマンド (cargo test -p gwt --lib) でも同一に失敗することを確認し、本変更起因でないと証明できた
+Learning: (1) 未ゲートテストの CI 安全性は spawn/network/docker/cfg を grep する hermeticity 監査で事前確認する (2) ローカル失敗が出たら『現行ゲート相当の選択で同じ失敗が出るか』の差分比較で回帰有無を切り分ける (3) Windows ローカルと ubuntu CI はテスト成否が異なる前提で、PR 自身の CI 実行を最終検証点に据える
+Future Action: CI 対象拡張時は、新規対象クレートの tests を #\[ignore\]/reqwest/TcpListener/Command::new/cfg(unix) で grep し、ローカル全実行 → 失敗があれば現行ゲート相当コマンドで再現確認 → PR CI で最終確認、の 3 段で検証する
+
+## 2026-06-10 — GUI フリーズ調査は WebSocket eviction ログ（evicting lagging websocket clients）を最初に疑う
+
+Type: lesson
+Context: Start Work/Resume 後の無表示・操作不能・無反応の報告。フロントの pending UI 欠如だけでは説明できない完全フリーズが含まれていた。
+Learning: 原因は per-client outbound queue(64) 溢れでクライアントを即切断する ClientHub の eviction 設計。エージェント起動直後の TerminalOutput broadcast 洪水で操作したクライアント自身が evict され、再接続時の全 pane snapshot 一括 replay が再バーストを生んで storm 化する。~/.gwt/projects/<hash>/logs/gwt.log.* の 'evicting lagging websocket clients' と frontend user action の時刻相関（今回 open_start_work 10/10 で一致）が決定的証拠になる。切断中の frontend send() は黙ってキューされるため UI は無反応に見える。
+Future Action: GUI の無反応・取りこぼし系バグはコード読みの前に該当時間帯の gwt.log で eviction / frontend_ready 再接続 / client_id 変化（ユーザーのリロード痕跡）を確認する。修正は SPEC-2359 Phase W-17（lossy/lossless 分離・replay 分割・pending UI・スキャン抑止）を参照。
+
+## 2026-06-10 — 検証コマンドと後続アクションを ; で連結すると検証が形骸化する
+
+Type: lesson
+Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
+Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
+Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない

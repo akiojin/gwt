@@ -191,6 +191,49 @@ fn docker_compose_exec_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
 }
 
+/// Timeout for launch-critical, read-only status queries (`compose ps`,
+/// `compose logs`, command availability checks). The generic 5s
+/// `docker_timeout()` proved too aggressive on busy hosts (Issue #3029:
+/// a normally-0.2s `compose ps` exceeded 5s while ChromaDB indexing
+/// saturated the CPU, aborting the whole agent launch).
+fn docker_status_timeout() -> Duration {
+    const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+    std::env::var("GWT_DOCKER_STATUS_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
+fn is_docker_timeout_error(error: &GwtError) -> bool {
+    matches!(error, GwtError::Docker(message) if message.contains(" timed out after "))
+}
+
+/// Run a read-only status query with `docker_status_timeout()`, retrying
+/// once when the first attempt times out. Non-zero exits and other
+/// failures propagate immediately — only transient load-induced timeouts
+/// are retried.
+fn run_docker_status_query_with_retry(
+    args: &[&str],
+    action: &str,
+    current_dir: Option<&std::path::Path>,
+) -> Result<Output> {
+    let timeout = docker_status_timeout();
+    match run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, timeout) {
+        Err(error) if is_docker_timeout_error(&error) => {
+            tracing::warn!(
+                category = "docker",
+                action = action,
+                timeout_ms = timeout.as_millis() as u64,
+                "docker status query timed out; retrying once"
+            );
+            run_docker_with_timeout_in_dir_and_timeout(args, action, current_dir, timeout)
+        }
+        result => result,
+    }
+}
+
 fn run_docker_with_timeout(args: &[&str], action: &str) -> Result<Output> {
     run_docker_with_timeout_in_dir(args, action, None)
 }
@@ -568,7 +611,7 @@ fn compose_service_statuses_with_files(
         "{{.Service}}\t{{.State}}".to_string(),
     ]);
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = run_docker_with_timeout_in_dir(
+    let output = run_docker_status_query_with_retry(
         &arg_refs,
         "docker compose ps",
         Some(compose_parent_dir_for_files(compose_files)),
@@ -639,7 +682,7 @@ pub fn compose_service_status_with_files(
 /// Return recent logs for a compose service.
 pub fn compose_service_logs(compose_file: &Path, service: &str) -> Result<String> {
     let compose_file = compose_file.display().to_string();
-    let output = run_docker_with_timeout_in_dir(
+    let output = run_docker_with_timeout_in_dir_and_timeout(
         &[
             "compose",
             "-f",
@@ -652,6 +695,7 @@ pub fn compose_service_logs(compose_file: &Path, service: &str) -> Result<String
         ],
         "docker compose logs",
         Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        docker_status_timeout(),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -692,10 +736,11 @@ pub fn compose_service_has_command_with_files(
         command.to_string(),
     ]);
     let arg_refs = docker_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = run_docker_with_timeout_in_dir(
+    let output = run_docker_with_timeout_in_dir_and_timeout(
         &arg_refs,
         "docker compose exec command check",
         Some(compose_parent_dir_for_files(compose_files)),
+        docker_status_timeout(),
     )?;
     if output.status.success() {
         return Ok(true);
@@ -921,7 +966,9 @@ mod tests {
 
     use super::*;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn test_lock() -> &'static Mutex<()> {
+        crate::docker_env_test_lock()
+    }
 
     #[cfg(windows)]
     fn git_bash_path() -> PathBuf {
@@ -1000,7 +1047,7 @@ mod tests {
     }
 
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce(&PathBuf) -> R) -> R {
-        let _guard = TEST_LOCK
+        let _guard = test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_dir, script_path) = write_fake_docker(script_body);
@@ -1047,6 +1094,28 @@ mod tests {
         }
         panic!(
             "read invocation log: file at {} still empty / missing after 500ms",
+            path.display()
+        );
+    }
+
+    /// Issue #2349 follow-up: a lingering `docker info` availability probe
+    /// (e.g. an abandoned timeout thread from another test) can execute the
+    /// currently-installed fake docker and write into this test's log. The
+    /// recording scripts append (`>>`) so every invocation survives intact,
+    /// and this assertion checks that the expected invocation block was
+    /// recorded rather than requiring it to be the only one.
+    fn assert_invocation_recorded(path: &Path, expected: &str) {
+        for _ in 0..50 {
+            if let Ok(content) = fs::read_to_string(path) {
+                if content.contains(expected) {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let content = fs::read_to_string(path).unwrap_or_default();
+        panic!(
+            "expected invocation {expected:?} not recorded at {} within 500ms; log: {content:?}",
             path.display()
         );
     }
@@ -1140,7 +1209,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1148,7 +1217,7 @@ mod tests {
             start("abc123").expect("start container");
         });
 
-        assert_eq!(read_invocation(&log_path), "start\nabc123\n");
+        assert_invocation_recorded(&log_path, "start\nabc123\n");
     }
 
     #[test]
@@ -1156,7 +1225,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1164,7 +1233,7 @@ mod tests {
             stop("abc123").expect("stop container");
         });
 
-        assert_eq!(read_invocation(&log_path), "stop\nabc123\n");
+        assert_invocation_recorded(&log_path, "stop\nabc123\n");
     }
 
     #[test]
@@ -1172,7 +1241,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1180,7 +1249,7 @@ mod tests {
             restart("abc123").expect("restart container");
         });
 
-        assert_eq!(read_invocation(&log_path), "restart\nabc123\n");
+        assert_invocation_recorded(&log_path, "restart\nabc123\n");
     }
 
     #[test]
@@ -1251,6 +1320,104 @@ mod tests {
     }
 
     #[test]
+    fn compose_ps_uses_status_timeout_longer_than_default_docker_commands() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  sleep 0.2\n  printf 'app\\trunning\\n'\n  exit 0\nfi\nexit 0\n";
+
+        with_fake_docker(script, |_| {
+            let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
+            let previous_status_timeout = std::env::var_os("GWT_DOCKER_STATUS_TIMEOUT_MS");
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
+            std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", "5000");
+
+            let result = compose_service_status(&compose_path, "app");
+
+            match previous_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_TIMEOUT_MS"),
+            }
+            match previous_status_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_STATUS_TIMEOUT_MS"),
+            }
+
+            assert_eq!(
+                result.expect("compose ps should use status timeout"),
+                ComposeServiceStatus::Running
+            );
+        });
+    }
+
+    #[test]
+    fn compose_ps_retries_once_after_timeout() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let marker_dir = tempfile::tempdir().expect("temp marker dir");
+        let marker_path = marker_dir.path().join("first-call.marker");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  if [ ! -f '{marker}' ]; then\n    : > '{marker}'\n    sleep 5\n    exit 0\n  fi\n  printf 'app\\trunning\\n'\n  exit 0\nfi\nexit 0\n",
+            marker = shell_script_path(&marker_path)
+        );
+
+        with_fake_docker(&script, |_| {
+            let previous_status_timeout = std::env::var_os("GWT_DOCKER_STATUS_TIMEOUT_MS");
+            std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", "500");
+
+            let result = compose_service_status(&compose_path, "app");
+
+            match previous_status_timeout {
+                Some(value) => std::env::set_var("GWT_DOCKER_STATUS_TIMEOUT_MS", value),
+                None => std::env::remove_var("GWT_DOCKER_STATUS_TIMEOUT_MS"),
+            }
+
+            assert_eq!(
+                result.expect("compose ps should succeed via retry after a timeout"),
+                ComposeServiceStatus::Running
+            );
+        });
+    }
+
+    #[test]
+    fn compose_ps_does_not_retry_on_nonzero_exit() {
+        let compose_dir = tempfile::tempdir().expect("temp compose dir");
+        let compose_path = compose_dir.path().join("docker-compose.yml");
+        fs::write(
+            &compose_path,
+            "services:\n  app:\n    image: nginx:latest\n",
+        )
+        .expect("compose");
+        let count_dir = tempfile::tempdir().expect("temp count dir");
+        let count_path = count_dir.path().join("calls.txt");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"ps\" ]; then\n  printf 'x\\n' >> '{count}'\n  echo 'boom' >&2\n  exit 1\nfi\nexit 0\n",
+            count = shell_script_path(&count_path)
+        );
+
+        with_fake_docker(&script, |_| {
+            let err = compose_service_status(&compose_path, "app")
+                .expect_err("compose ps failure should propagate");
+            assert!(format!("{err}").contains("boom"), "unexpected error: {err}");
+        });
+
+        assert_eq!(
+            read_invocation(&count_path),
+            "x\n",
+            "non-zero exit must not be retried"
+        );
+    }
+
+    #[test]
     fn compose_up_invokes_docker_with_expected_arguments() {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
@@ -1262,7 +1429,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1270,9 +1437,9 @@ mod tests {
             compose_up(&compose_path, "app").expect("compose up");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display()),
         );
     }
 
@@ -1306,7 +1473,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1314,12 +1481,12 @@ mod tests {
             compose_up_force_recreate(&compose_path, "app").expect("compose up force recreate");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!(
+        assert_invocation_recorded(
+            &log_path,
+            &format!(
                 "compose\n-f\n{}\nup\n-d\n--force-recreate\napp\n",
                 compose_path.display()
-            )
+            ),
         );
     }
 
@@ -1403,7 +1570,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1411,9 +1578,9 @@ mod tests {
             compose_restart(&compose_path, "app").expect("compose restart");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nrestart\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nrestart\napp\n", compose_path.display()),
         );
     }
 
@@ -1429,7 +1596,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1437,9 +1604,9 @@ mod tests {
             compose_stop(&compose_path, "app").expect("compose stop");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nstop\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nstop\napp\n", compose_path.display()),
         );
     }
 
@@ -1529,7 +1696,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
             shell_script_path(&log_path)
         );
 
@@ -1548,12 +1715,12 @@ mod tests {
 
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stderr).contains("could not determine"));
-            assert_eq!(
-                read_invocation(&log_path),
-                format!(
+            assert_invocation_recorded(
+                &log_path,
+                &format!(
                     "compose\n-f\n{}\nexec\n-T\n-w\n/workspace\napp\nbunx\n@anthropic-ai/claude-code@latest\n--version\n",
                     compose_path.display()
-                )
+                ),
             );
         });
     }

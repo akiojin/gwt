@@ -19,6 +19,9 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
+  crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
+  crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \
+  crates/gwt/web/__tests__/connection-overlay.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
   crates/gwt/web/__tests__/window-docking.test.mjs \
   crates/gwt/web/__tests__/terminal-context-menu.test.mjs \
@@ -40,6 +43,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/viewport-persist-throttle.test.mjs \
   crates/gwt/web/__tests__/viewport-sync.test.mjs \
   crates/gwt/web/__tests__/project-tabs-renderer.test.mjs \
+  crates/gwt/web/__tests__/window-tabs-renderer.test.mjs \
   crates/gwt/web/__tests__/project-tab-style.test.mjs \
   crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs \
   crates/gwt/web/__tests__/viewport-persist-wiring.test.mjs \

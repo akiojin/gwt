@@ -44,8 +44,13 @@ an old browser tab.
    - If the real `$HOME/.gwt/runtime` exists, symlink it to
      `"$CHECK_HOME/.gwt/runtime"` so startup does not rebuild the runtime.
    - Symlink only credential/config inputs needed by the checkout, such as
-     `.codex`, `.claude`, `.config`, `.ssh`, `.gitconfig`, `.git-credentials`,
-     `.npmrc`, and `.bunfig.toml`, when they exist.
+     `.codex`, `.claude`, `.config`, `.docker`, `.ssh`, `.gitconfig`,
+     `.git-credentials`, `.npmrc`, and `.bunfig.toml`, when they exist.
+     `.docker` is required for Docker-runtime launches: on macOS Docker
+     Desktop, `docker compose` is a CLI plugin discovered via
+     `$HOME/.docker/cli-plugins`, so an isolated HOME without this symlink
+     fails the launch preflight with `docker compose is not available`
+     (Issue #3029).
    - Seed `"$CHECK_HOME/.gwt/session.json"` with one active project tab for
      the current repository root so the user lands in the actual app instead
      of the Open Project picker.

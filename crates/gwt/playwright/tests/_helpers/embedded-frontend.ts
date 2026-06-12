@@ -34,12 +34,15 @@ const ROOT_MODULES = new Set([
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
+  "launch-pending-controller.js",
+  "connection-overlay.js",
   // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders.
   "interaction-guard.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
   "project-tabs-renderer.js",
+  "window-tabs-renderer.js",
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
   "protocol-enums.js",

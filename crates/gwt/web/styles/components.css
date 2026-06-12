@@ -5185,3 +5185,74 @@ kbd.op-kbd {
   background: var(--color-accent, #6fb1ff);
   opacity: 1;
 }
+
+/* SPEC-2359 W-17 (FR-399) — full-screen Reconnecting overlay while the
+   WebSocket bridge is down. Blocks interaction that could not succeed
+   anyway and clears automatically on reconnect. */
+.connection-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface-base, #0b0e14) 72%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: all;
+}
+
+.connection-overlay__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 36px;
+  border: 1px solid var(--line-soft, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  background: var(--surface-raised, #131722);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.connection-overlay__spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--line-soft, rgba(255, 255, 255, 0.18));
+  border-top-color: var(--accent, #7aa2f7);
+  border-radius: 50%;
+  animation: connection-overlay-spin 0.9s linear infinite;
+}
+
+.connection-overlay__title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.connection-overlay__detail {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+@keyframes connection-overlay-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* SPEC-2359 W-17 (FR-398) — pending Resume feedback. */
+.workspace-resume-picker-pending {
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.wizard-button.is-pending {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-overlay__spinner {
+    animation: none;
+  }
+}
