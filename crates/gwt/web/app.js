@@ -622,8 +622,11 @@
         clearChildren,
         focusOrSpawnPreset,
         knowledgeKindForPreset,
-        requestKnowledgeDetail,
-        renderKnowledgeBridge,
+        // SPEC-3064 Phase 3 (E6d): these two live in the knowledge-kanban
+        // surface, whose factory runs after this one — close over the
+        // bindings instead of passing the (not yet initialized) consts.
+        requestKnowledgeDetail: (...args) => requestKnowledgeDetail(...args),
+        renderKnowledgeBridge: (...args) => renderKnowledgeBridge(...args),
         // SPEC-3064 Phase 3 (E4): these two live in the settings surface,
         // whose factory runs after this one — close over the bindings
         // instead of passing the (not yet initialized) consts directly.
