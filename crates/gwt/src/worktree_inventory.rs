@@ -189,18 +189,20 @@ fn label_for(info: &WorktreeInfo, kind: WorktreeEntryKind) -> String {
 /// backfill target). Prunable worktrees never reach here because
 /// `enumerate_worktrees` already skips them. Branchless (detached) entries are
 /// passed through; the FR-381 guard in
-/// `gwt_core::work_projection::worktree_sources_needing_backfill` skips
+/// `gwt_core::workspace_projection::worktree_sources_needing_backfill` skips
 /// them so the policy lives in one place.
 pub fn worktree_reconcile_sources(
     entries: &[WorktreeEntry],
-) -> Vec<gwt_core::work_projection::WorktreeReconcileSource> {
+) -> Vec<gwt_core::workspace_projection::WorktreeReconcileSource> {
     entries
         .iter()
         .filter(|entry| entry.kind == WorktreeEntryKind::Workspace)
-        .map(|entry| gwt_core::work_projection::WorktreeReconcileSource {
-            branch: entry.branch.clone(),
-            worktree_path: entry.path.clone(),
-        })
+        .map(
+            |entry| gwt_core::workspace_projection::WorktreeReconcileSource {
+                branch: entry.branch.clone(),
+                worktree_path: entry.path.clone(),
+            },
+        )
         .collect()
 }
 

@@ -20,7 +20,7 @@
 use serde::Serialize;
 
 use crate::persistence::WindowState;
-use gwt_core::work_projection::{
+use gwt_core::workspace_projection::{
     WorkActiveLifecycleState, WorkspaceLifecycleStage, WorkspaceStatusCategory,
 };
 

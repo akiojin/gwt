@@ -741,7 +741,7 @@ pub enum FrontendEvent {
     /// SPEC-2359 US-41: classify Workspace projections under `~/.gwt/projects/`
     /// and either preview (`dry_run = true`) or apply (`dry_run = false`) the
     /// archive→delete transitions. `ids` limits the action to specific
-    /// `WorkProjection::id` values; an empty list means "every classified
+    /// `WorkspaceProjection::id` values; an empty list means "every classified
     /// entry". Backend replies with [`BackendEvent::WorkspaceProjectionPruneResult`].
     WorkspaceProjectionPrune {
         #[serde(default)]
@@ -1181,7 +1181,7 @@ pub enum BackendEvent {
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
     #[serde(rename = "workspace_state")]
-    WorkState {
+    WorkspaceState {
         workspace: AppStateView,
     },
     ActiveWorkProjection {
@@ -2246,7 +2246,7 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
-            BackendEvent::WorkState { .. } => "workspace_state",
+            BackendEvent::WorkspaceState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ProviderUsage { .. } => "provider_usage",

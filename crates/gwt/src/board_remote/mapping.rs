@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use chrono::{DateTime, TimeZone, Utc};
 use gwt_core::board_remote_roots::GENERAL_THREAD_KEY;
 use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind, BoardMentionTargetKind};
-use gwt_core::work_projection::{WorkItem, WorkspaceStatusCategory};
+use gwt_core::workspace_projection::{WorkItem, WorkspaceStatusCategory};
 
 /// Parse a Slack message timestamp (`"1700000000.123456"`) into UTC.
 pub fn slack_ts_to_datetime(ts: &str) -> Option<DateTime<Utc>> {

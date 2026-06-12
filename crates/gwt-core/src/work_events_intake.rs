@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, Result};
-use crate::work_projection::{
+use crate::workspace_projection::{
     load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path, WorkEvent,
     WorkEventKind, WorkItemsProjection,
 };
@@ -55,7 +55,7 @@ fn is_close_kind(kind: WorkEventKind) -> bool {
 
 /// The moment a terminal item closed: `completed_at` when recorded, else its
 /// last update. Events at or before this instant must not re-apply.
-fn terminal_close_time(item: &crate::work_projection::WorkItem) -> Option<DateTime<Utc>> {
+fn terminal_close_time(item: &crate::workspace_projection::WorkItem) -> Option<DateTime<Utc>> {
     item.is_terminal()
         .then(|| item.completed_at.unwrap_or(item.updated_at))
 }
@@ -166,7 +166,7 @@ pub fn save_work_events_intake_state(path: &Path, state: &WorkEventsIntakeState)
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::work_projection::write_atomic(path, &body)
+    crate::workspace_projection::write_atomic(path, &body)
 }
 
 /// Content sha256 used as the fingerprint for filesystem sources (git blob
@@ -181,7 +181,7 @@ pub fn content_fingerprint(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_projection::{WorkItemsProjection, WorkspaceStatusCategory};
+    use crate::workspace_projection::{WorkItemsProjection, WorkspaceStatusCategory};
     use chrono::TimeZone;
 
     fn event_json(id: &str, work_id: &str, kind: &str, updated_at: &str, extra: &str) -> String {
@@ -345,7 +345,7 @@ mod tests {
         let works = tmp.path().join("works.json");
         let closed_at = chrono::Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
         let mut projection = WorkItemsProjection::empty(closed_at);
-        let mut done = crate::work_projection::WorkEvent::new(
+        let mut done = crate::workspace_projection::WorkEvent::new(
             WorkEventKind::Done,
             "work-x-eeee5555",
             closed_at,

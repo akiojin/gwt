@@ -2,9 +2,9 @@
 //! GUI, CLI, and hooks all read and update.
 //!
 //! SPEC-2359 Phase W-14 (US-70 / FR-378): every state transition of
-//! [`WorkProjection`] (status category changes, agent merge/assign/retain
+//! [`WorkspaceProjection`] (status category changes, agent merge/assign/retain
 //! rules, launch/start composition) is owned by the methods on
-//! [`WorkProjection`] in this module. Callers in UI/CLI layers must go
+//! [`WorkspaceProjection`] in this module. Callers in UI/CLI layers must go
 //! through these APIs; assigning transition fields (`status_category`,
 //! `status_text`, `next_action`, `agents`) directly from outside this module
 //! is not allowed in new code, so the transition rules stay single-source.
@@ -471,7 +471,7 @@ impl Default for WorkspaceRetentionConfig {
     }
 }
 
-/// Per-agent slice of a [`WorkProjection`]: session identity, runtime
+/// Per-agent slice of a [`WorkspaceProjection`]: session identity, runtime
 /// status, current focus, and Board linkage. Updated from agent session
 /// events and `gwtd workspace update`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,7 +514,7 @@ impl WorkspaceAgentSummary {
 /// Board stays the coordination/history log while this projection tracks the
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkProjection {
+pub struct WorkspaceProjection {
     pub id: String,
     pub project_root: PathBuf,
     pub title: String,
@@ -576,7 +576,7 @@ pub struct WorkProjection {
     pub progress_pct: Option<u8>,
 }
 
-impl WorkProjection {
+impl WorkspaceProjection {
     pub fn default_for_project(project_root: impl Into<PathBuf>) -> Self {
         let now = Utc::now();
         Self {
@@ -1142,7 +1142,7 @@ impl WorkProjection {
     }
 }
 
-/// Partial update applied to a [`WorkProjection`] (e.g. from
+/// Partial update applied to a [`WorkspaceProjection`] (e.g. from
 /// `gwtd workspace update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceProjectionUpdate {
@@ -1158,7 +1158,7 @@ pub struct WorkspaceProjectionUpdate {
 }
 
 /// SPEC-2359 Phase W-14 (US-70 / FR-375): parameters for
-/// [`WorkProjection::apply_launch`].
+/// [`WorkspaceProjection::apply_launch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceLaunchUpdate {
     /// Canonical work id; `None` keeps the current projection id.
@@ -1179,7 +1179,7 @@ pub struct WorkspaceLaunchUpdate {
 }
 
 /// SPEC-2359 Phase W-14 (US-70 / FR-375): parameters for
-/// [`WorkProjection::start_work`].
+/// [`WorkspaceProjection::start_work`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceStartUpdate {
     pub workspace_id: String,
@@ -1652,7 +1652,7 @@ fn ensure_work_events_gitattributes(repo_path: &Path) -> Result<()> {
 fn migrate_legacy_workspace_projection(
     repo_path: &Path,
     canonical_path: &Path,
-) -> Result<Option<WorkProjection>> {
+) -> Result<Option<WorkspaceProjection>> {
     if canonical_path.exists() {
         return load_workspace_projection_from_path(canonical_path);
     }
@@ -1686,7 +1686,7 @@ fn migrate_legacy_workspace_work_items(
     Ok(Some(projection))
 }
 
-pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkProjection>> {
+pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspaceProjection>> {
     let path = gwt_workspace_projection_path_for_repo_path(repo_path);
     if let Some(projection) = load_workspace_projection_from_path(&path)? {
         return Ok(Some(projection));
@@ -1738,12 +1738,12 @@ pub fn resolve_workspace_id_for_mention(
         .and_then(|agent| agent.workspace_id.clone())
 }
 
-pub fn load_or_default_workspace_projection(repo_path: &Path) -> Result<WorkProjection> {
+pub fn load_or_default_workspace_projection(repo_path: &Path) -> Result<WorkspaceProjection> {
     Ok(load_workspace_projection(repo_path)?
-        .unwrap_or_else(|| WorkProjection::default_for_project(repo_path)))
+        .unwrap_or_else(|| WorkspaceProjection::default_for_project(repo_path)))
 }
 
-pub fn save_workspace_projection(repo_path: &Path, projection: &WorkProjection) -> Result<()> {
+pub fn save_workspace_projection(repo_path: &Path, projection: &WorkspaceProjection) -> Result<()> {
     save_workspace_projection_to_path(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
         projection,
@@ -1784,10 +1784,10 @@ pub fn mark_workspace_agent_stopped(
     mark_workspace_agent_stopped_at(&current_path, repo_path, session_id, window_id, Utc::now())
 }
 
-pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkProjection>> {
+pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
     match fs::read(path) {
         Ok(bytes) => {
-            let mut projection: WorkProjection = serde_json::from_slice(&bytes)
+            let mut projection: WorkspaceProjection = serde_json::from_slice(&bytes)
                 .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
             migrate_workspace_to_work_terminology(&mut projection);
             Ok(Some(projection))
@@ -1797,7 +1797,7 @@ pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkPro
     }
 }
 
-fn migrate_workspace_to_work_terminology(projection: &mut WorkProjection) {
+fn migrate_workspace_to_work_terminology(projection: &mut WorkspaceProjection) {
     if projection.title == "Workspace" {
         projection.title = "Work".to_string();
     } else if projection.title.starts_with("Workspace ") {
@@ -2705,7 +2705,7 @@ fn work_item_is_eligible_for_auto_done(item: &WorkItem) -> bool {
     })
 }
 
-fn workspace_projection_is_eligible_for_auto_done(projection: &WorkProjection) -> bool {
+fn workspace_projection_is_eligible_for_auto_done(projection: &WorkspaceProjection) -> bool {
     let Some(details) = projection.git_details.as_ref() else {
         return false;
     };
@@ -2768,12 +2768,15 @@ pub fn emit_workspace_done_event_for_branch(
 pub fn load_or_default_workspace_projection_from_path(
     path: &Path,
     project_root: &Path,
-) -> Result<WorkProjection> {
+) -> Result<WorkspaceProjection> {
     Ok(load_workspace_projection_from_path(path)?
-        .unwrap_or_else(|| WorkProjection::default_for_project(project_root)))
+        .unwrap_or_else(|| WorkspaceProjection::default_for_project(project_root)))
 }
 
-pub fn save_workspace_projection_to_path(path: &Path, projection: &WorkProjection) -> Result<()> {
+pub fn save_workspace_projection_to_path(
+    path: &Path,
+    projection: &WorkspaceProjection,
+) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
     write_atomic(path, &bytes)
@@ -2920,7 +2923,7 @@ fn synthesize_workspace_work_items_from_legacy_paths(
 }
 
 fn synthesize_workspace_work_item_from_legacy(
-    projection: Option<&WorkProjection>,
+    projection: Option<&WorkspaceProjection>,
     journal_entries: &[WorkspaceJournalEntry],
     _project_root: &Path,
 ) -> Option<WorkItem> {
@@ -2952,7 +2955,7 @@ fn synthesize_workspace_work_item_from_legacy(
         })
         .unwrap_or_else(|| "Work history".to_string());
     let status_category = projection
-        .map(WorkProjection::effective_status_category)
+        .map(WorkspaceProjection::effective_status_category)
         .or_else(|| last_entry.and_then(|entry| entry.status_category))
         .unwrap_or(WorkspaceStatusCategory::Unknown);
     let summary = projection
@@ -3062,7 +3065,7 @@ fn synthesize_workspace_work_item_from_legacy(
 }
 
 fn workspace_work_event_from_journal_entry(
-    projection: &WorkProjection,
+    projection: &WorkspaceProjection,
     entry: &WorkspaceJournalEntry,
 ) -> WorkEvent {
     let mut event = WorkEvent::new(
@@ -3103,7 +3106,7 @@ fn workspace_work_event_from_journal_entry(
 }
 
 pub fn workspace_work_event_from_board_entry(
-    projection: &WorkProjection,
+    projection: &WorkspaceProjection,
     entry: &BoardEntry,
 ) -> WorkEvent {
     let mut event = WorkEvent::new(
@@ -3205,7 +3208,7 @@ fn workspace_work_event_kind_from_status(
 }
 
 fn workspace_execution_container_from_projection(
-    projection: &WorkProjection,
+    projection: &WorkspaceProjection,
 ) -> Option<WorkspaceExecutionContainerRef> {
     projection
         .git_details
@@ -3284,7 +3287,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// `git_details.pr_state`, which are populated by the existing GitHub Issue
 /// cache via `gh` API (the caller keeps that cache fresh).
 pub fn workspace_projection_stale_reason(
-    projection: &WorkProjection,
+    projection: &WorkspaceProjection,
     config: &WorkspaceRetentionConfig,
     now: DateTime<Utc>,
 ) -> Option<StaleReason> {
@@ -3396,7 +3399,7 @@ pub fn classify_workspace_projections<F>(
     is_active_session: F,
 ) -> Vec<ClassifiedProjection>
 where
-    F: Fn(&WorkProjection) -> bool,
+    F: Fn(&WorkspaceProjection) -> bool,
 {
     let mut results = Vec::new();
 
@@ -3510,11 +3513,6 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
     }
     Ok(summary)
 }
-
-/// SPEC-2359 US-66 (T-526): legacy adapter alias — the canonical name is
-/// [`WorkProjection`]. Kept so staged migration never breaks call sites;
-/// new code must use the Work spelling.
-pub type WorkspaceProjection = WorkProjection;
 
 /// SPEC-2359 US-66 (T-529): legacy adapter aliases for the renamed Work
 /// entity family. In-repo call sites are fully migrated; these exist only
@@ -3645,7 +3643,7 @@ mod tests {
 
     #[test]
     fn effective_status_prioritizes_blocked_agents_over_active_projection() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Still describing the current task".to_string();
         projection.agents.push(WorkspaceAgentSummary {
@@ -3685,7 +3683,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let current_path = temp.path().join("current.json");
 
-        let mut projection = WorkProjection::default_for_project(temp.path());
+        let mut projection = WorkspaceProjection::default_for_project(temp.path());
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-legacy".to_string(),
             window_id: None,
@@ -3755,7 +3753,7 @@ mod tests {
 
     #[test]
     fn effective_status_uses_active_agent_before_idle_projection() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Idle;
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
@@ -3784,7 +3782,7 @@ mod tests {
     #[test]
     fn cleanup_candidate_requires_done_or_merged_start_work_workspace_branch() {
         let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Done;
         projection.git_details = Some(GitDetails {
             branch: Some("work/20260507-0200".to_string()),
@@ -3825,7 +3823,7 @@ mod tests {
     #[test]
     fn cleanup_candidate_preserves_non_workspace_or_active_branches() {
         let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Done;
         projection.git_details = Some(GitDetails {
             branch: Some("feature/manual".to_string()),
@@ -3858,7 +3856,7 @@ mod tests {
 
     #[test]
     fn board_milestone_records_ref_id_and_copies_current_text() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut entry = BoardEntry::new(
             crate::coordination::AuthorKind::Agent,
             "codex",
@@ -3885,7 +3883,7 @@ mod tests {
 
     #[test]
     fn board_milestone_updates_next_and_blocked_state_without_replay() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut next = BoardEntry::new(
             crate::coordination::AuthorKind::Agent,
             "codex",
@@ -3929,7 +3927,7 @@ mod tests {
 
     #[test]
     fn board_milestone_restores_blocked_agent_to_active_on_progress() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
             window_id: None,
@@ -3991,7 +3989,7 @@ mod tests {
 
     #[test]
     fn board_milestone_keeps_title_summary_separate_from_current_focus() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
             window_id: None,
@@ -4045,7 +4043,7 @@ mod tests {
 
     #[test]
     fn board_milestone_next_keeps_blocked_agent_blocked() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
             window_id: None,
@@ -4108,7 +4106,7 @@ mod tests {
 
     #[test]
     fn board_milestone_records_agent_coordination_kind_and_scope() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
             window_id: None,
@@ -4296,7 +4294,7 @@ mod tests {
         let first_at = Utc.with_ymd_and_hms(2026, 5, 11, 2, 0, 0).unwrap();
         let second_at = Utc.with_ymd_and_hms(2026, 5, 11, 2, 5, 0).unwrap();
 
-        let mut projection = WorkProjection::default_for_project(&project_root);
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
         projection.id = "workspace-current".to_string();
         projection.title = "Workspace WorkItem history".to_string();
         projection.status_category = WorkspaceStatusCategory::Active;
@@ -4374,7 +4372,7 @@ mod tests {
     #[test]
     fn workspace_update_persists_agent_title_summary_separately_from_focus() {
         let updated_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 30, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "session-1".to_string(),
             window_id: Some("tab-1::agent-1".to_string()),
@@ -4437,7 +4435,7 @@ mod tests {
         // (Phase U-3) so `apply_update` is the only point where this CLI
         // path can guarantee the agent is registered.
         let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         assert!(projection.agents.is_empty());
 
         let journal = projection.apply_update(
@@ -4478,7 +4476,7 @@ mod tests {
         // registered it with richer state). Only title_summary /
         // current_focus from the update should change.
         let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "session-launched".to_string(),
             window_id: Some("tab-1::agent-1".to_string()),
@@ -4536,7 +4534,7 @@ mod tests {
         // entries from the pre-existing-agent path so downstream consumers
         // (UI, broadcasts) cannot tell them apart.
         let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
 
         let journal = projection.apply_update(
             WorkspaceProjectionUpdate {
@@ -4589,7 +4587,7 @@ mod tests {
 
     #[test]
     fn unassigned_agent_is_not_effective_active_workspace_status() {
-        let mut projection = WorkProjection::default_for_project("/tmp/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/tmp/repo");
         projection.register_unassigned_agent(WorkspaceAgentSummary {
             session_id: "session-unassigned".to_string(),
             window_id: Some("tab-1:agent-1".to_string()),
@@ -4619,7 +4617,7 @@ mod tests {
     #[test]
     fn stopped_agent_is_removed_from_current_projection_without_losing_summary() {
         let now = Utc::now();
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
         projection.next_action = Some("Review output".to_string());
@@ -4749,7 +4747,7 @@ mod tests {
     fn resolve_workspace_id_for_session_returns_assigned_workspace_id() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
             .agents
             .push(assigned_agent("sess-A", "codex", "ws-1"));
@@ -4765,7 +4763,7 @@ mod tests {
     fn resolve_workspace_id_for_session_returns_none_for_unassigned_agent() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-B", "codex"));
         save_workspace_projection(dir.path(), &projection).unwrap();
 
@@ -4776,7 +4774,7 @@ mod tests {
     fn resolve_workspace_id_for_session_returns_none_when_session_missing() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let projection = WorkProjection::default_for_project(dir.path());
+        let projection = WorkspaceProjection::default_for_project(dir.path());
         save_workspace_projection(dir.path(), &projection).unwrap();
 
         assert_eq!(
@@ -4789,7 +4787,7 @@ mod tests {
     fn resolve_workspace_id_for_mention_session_matches_session_id() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
             .agents
             .push(assigned_agent("sess-C", "codex", "ws-2"));
@@ -4805,7 +4803,7 @@ mod tests {
     fn resolve_workspace_id_for_mention_agent_matches_display_or_agent_id() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
             .agents
             .push(assigned_agent("sess-D", "codex", "ws-3"));
@@ -4826,7 +4824,7 @@ mod tests {
     fn resolve_workspace_id_for_mention_returns_none_for_unassigned_target() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection.agents.push(unassigned_agent("sess-E", "codex"));
         save_workspace_projection(dir.path(), &projection).unwrap();
 
@@ -4844,7 +4842,7 @@ mod tests {
     fn resolve_workspace_id_for_mention_user_or_branch_kind_returns_none() {
         let _guard = lock_test_env();
         let dir = tempfile::tempdir().unwrap();
-        let mut projection = WorkProjection::default_for_project(dir.path());
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
         projection
             .agents
             .push(assigned_agent("sess-F", "codex", "ws-4"));
@@ -5092,7 +5090,7 @@ mod tests {
         let project_root = temp.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("create repo");
 
-        let mut projection = WorkProjection::default_for_project(&project_root);
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
         projection.id = "wi-cleanup-target".to_string();
         projection.git_details = Some(GitDetails {
             branch: Some("work/auto-done-branch".to_string()),
@@ -5148,7 +5146,7 @@ mod tests {
         let project_root = temp.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("create repo");
 
-        let mut projection = WorkProjection::default_for_project(&project_root);
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
         projection.id = "wi-different-branch".to_string();
         projection.git_details = Some(GitDetails {
             branch: Some("work/current-branch".to_string()),
@@ -5227,7 +5225,7 @@ mod tests {
         let project_root = temp.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("create repo");
 
-        let mut projection = WorkProjection::default_for_project(&project_root);
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
         projection.id = "wi-current-merged".to_string();
         projection.git_details = Some(GitDetails {
             branch: Some("work/20260513-0100".to_string()),
@@ -5280,7 +5278,7 @@ mod tests {
         let project_root = temp.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("create repo");
 
-        let mut projection = WorkProjection::default_for_project(&project_root);
+        let mut projection = WorkspaceProjection::default_for_project(&project_root);
         projection.id = "wi-manual-branch".to_string();
         projection.git_details = Some(GitDetails {
             branch: Some("work/20260513-0200".to_string()),
@@ -5308,8 +5306,8 @@ mod tests {
         );
     }
 
-    fn make_stale_projection(updated_at: DateTime<Utc>) -> WorkProjection {
-        let mut projection = WorkProjection::default_for_project("/repo");
+    fn make_stale_projection(updated_at: DateTime<Utc>) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.updated_at = updated_at;
         projection
     }
@@ -5436,7 +5434,7 @@ mod tests {
         assert_eq!(StaleReason::Compound.as_str(), "compound");
     }
 
-    fn write_projection_at(workspace_dir: &Path, projection: &WorkProjection) {
+    fn write_projection_at(workspace_dir: &Path, projection: &WorkspaceProjection) {
         std::fs::create_dir_all(workspace_dir).expect("create workspace dir");
         let current = workspace_dir.join("current.json");
         save_workspace_projection_to_path(&current, projection).expect("save projection");
@@ -5447,8 +5445,8 @@ mod tests {
         project_root: &Path,
         updated_at: DateTime<Utc>,
         lifecycle: WorkspaceLifecycleStage,
-    ) -> WorkProjection {
-        let mut projection = WorkProjection::default_for_project(project_root);
+    ) -> WorkspaceProjection {
+        let mut projection = WorkspaceProjection::default_for_project(project_root);
         projection.id = id.to_string();
         projection.updated_at = updated_at;
         projection.lifecycle_stage = lifecycle;
@@ -6712,7 +6710,7 @@ mod tests {
 
     #[test]
     fn upsert_agent_summary_preserves_blocked_status_and_merges_fields() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut blocked = us70_agent(
             "sess-1",
             WorkspaceStatusCategory::Blocked,
@@ -6747,7 +6745,7 @@ mod tests {
 
     #[test]
     fn upsert_agent_summary_inserts_new_sessions_and_never_rewinds_updated_at() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut first = us70_agent(
             "sess-1",
             WorkspaceStatusCategory::Active,
@@ -6773,7 +6771,7 @@ mod tests {
 
     #[test]
     fn retain_live_agents_transitions_to_idle_when_no_assigned_agent_remains() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
         projection.next_action = Some("Keep going".to_string());
@@ -6795,7 +6793,7 @@ mod tests {
 
     #[test]
     fn retain_live_agents_keeps_active_state_while_assigned_agent_lives() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let before = projection.updated_at;
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
@@ -6818,7 +6816,7 @@ mod tests {
 
     #[test]
     fn assign_agent_marks_assigned_active_and_merges_identity() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(us70_agent(
             "sess-1",
             WorkspaceStatusCategory::Idle,
@@ -6852,7 +6850,7 @@ mod tests {
 
     #[test]
     fn apply_launch_composes_active_projection_with_defaults() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.git_details = Some(GitDetails {
             branch: Some("work/old".to_string()),
             worktree_path: None,
@@ -6913,7 +6911,7 @@ mod tests {
 
     #[test]
     fn apply_launch_reports_multiple_active_agents() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut resident = us70_agent(
             "sess-0",
             WorkspaceStatusCategory::Active,
@@ -6958,7 +6956,7 @@ mod tests {
 
     #[test]
     fn start_work_applies_active_identity_with_defaults() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let now = Utc.timestamp_opt(7_000, 0).unwrap();
         projection.start_work(
             WorkspaceStartUpdate {
@@ -6987,7 +6985,7 @@ mod tests {
 
     #[test]
     fn apply_work_item_copies_status_fields() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         let now = Utc.timestamp_opt(8_000, 0).unwrap();
         let item = WorkItem {
             id: "item-1".to_string(),
@@ -7020,7 +7018,7 @@ mod tests {
 
     #[test]
     fn reset_idle_identity_clears_identity_and_transitions_to_idle() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
         projection.summary = Some("summary".to_string());
@@ -7050,7 +7048,7 @@ mod tests {
 
     #[test]
     fn clear_git_details_to_idle_clears_details_and_transitions() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
         projection.next_action = Some("next".to_string());
@@ -7078,7 +7076,7 @@ mod tests {
 
     #[test]
     fn has_current_agents_requires_assigned_active_or_blocked() {
-        let mut projection = WorkProjection::default_for_project("/repo");
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
         assert!(!projection.has_current_agents());
 
         projection.agents.push(us70_agent(

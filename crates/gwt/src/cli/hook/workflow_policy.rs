@@ -17,7 +17,7 @@ use gwt_agent::{
 };
 use gwt_core::{
     paths::{gwt_cache_dir, gwt_sessions_dir},
-    work_projection::load_workspace_projection,
+    workspace_projection::load_workspace_projection,
 };
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;

@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
-use gwt_core::work_projection::{
-    load_or_default_workspace_projection, save_workspace_projection, WorkProjection,
-    WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceStatusCategory,
+use gwt_core::workspace_projection::{
+    load_or_default_workspace_projection, save_workspace_projection,
+    WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+    WorkspaceStatusCategory,
 };
 
 use super::HookError;
@@ -83,7 +84,7 @@ fn coordination_assets_need_refresh(worktree: &Path) -> bool {
 /// the same `session_id` is present. Returns `true` when a new record
 /// was inserted. Existing records are preserved as-is.
 pub(crate) fn register_session_in_projection(
-    projection: &mut WorkProjection,
+    projection: &mut WorkspaceProjection,
     session: &Session,
     now: DateTime<Utc>,
 ) -> bool {
@@ -175,16 +176,16 @@ fn current_session_from_env() -> Result<Option<Session>, HookError> {
 mod tests {
     use chrono::Utc;
     use gwt_agent::{AgentId, Session};
-    use gwt_core::work_projection::{
-        load_workspace_projection, save_workspace_projection, WorkProjection,
-        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceStatusCategory,
+    use gwt_core::workspace_projection::{
+        load_workspace_projection, save_workspace_projection, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
     };
 
     use super::*;
 
-    fn projection_for(repo: &std::path::Path) -> WorkProjection {
+    fn projection_for(repo: &std::path::Path) -> WorkspaceProjection {
         let now = Utc::now();
-        WorkProjection {
+        WorkspaceProjection {
             id: "ws-test".to_string(),
             project_root: repo.to_path_buf(),
             title: String::new(),
