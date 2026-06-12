@@ -3522,6 +3522,11 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
     Ok(summary)
 }
 
+/// SPEC-2359 US-66 (T-526): legacy adapter alias — the canonical name is
+/// [`WorkProjection`]. Kept so staged migration never breaks call sites;
+/// new code must use the Work spelling.
+pub type WorkspaceProjection = WorkProjection;
+
 #[cfg(test)]
 mod tests {
     // SPEC-2359 close-latency root fix: the works.json cache must stop
@@ -7405,8 +7410,3 @@ mod tests {
         );
     }
 }
-
-/// SPEC-2359 US-66 (T-526): legacy adapter alias — the canonical name is
-/// [`WorkProjection`]. Kept so staged migration never breaks call sites;
-/// new code must use the Work spelling.
-pub type WorkspaceProjection = WorkProjection;
