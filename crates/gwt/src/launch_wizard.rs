@@ -746,12 +746,14 @@ pub struct LaunchWizardContext {
     /// `None` for Branches-window callers, preserving non-breaking behavior.
     pub linked_issue_kind: Option<LinkedIssueKind>,
     /// Whether the locally installed Claude Code can offer the opt-in
-    /// `ultracode` reasoning option: dynamic workflows enabled (env
-    /// `CLAUDE_CODE_DISABLE_WORKFLOWS` + user `~/.claude/settings.json`) AND
-    /// installed version >= 2.1.154. Captured once at wizard open via
-    /// `gwt_agent::claude_ultracode_supported()` because the wizard has no
-    /// reliable installed-version field at render time. Defaults to `false`.
+    /// `ultracode` reasoning option. Used only when selected version is
+    /// `installed`; npm-backed `latest` and pinned versions are evaluated from
+    /// the selected version string at render time. Defaults to `false`.
     pub ultracode_supported: bool,
+    /// Whether Claude Code dynamic workflows are enabled in the current
+    /// environment. This gate applies to installed, `latest`, and pinned
+    /// versions.
+    pub claude_workflows_enabled: bool,
 }
 
 impl LaunchWizardContext {
@@ -3301,14 +3303,10 @@ impl LaunchWizardState {
             && is_claude_opus_tier_model(self.model.as_str())
         {
             let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus 4.7/4.8 with a
-            // recent Claude Code (>= 2.1.154) and workflows enabled. The
-            // combined gate is captured once at wizard open (the wizard has no
-            // reliable installed-version field at render time). Hide ultracode
-            // otherwise so the wizard never offers an unusable option. It is
-            // the last (non-default) row, so removing it keeps every other
-            // index stable.
-            if !self.context.ultracode_supported {
+            // `ultracode` is opt-in and only usable on Opus-tier models with
+            // Claude Code >= 2.1.154 and workflows enabled. It is the last
+            // non-default row, so removing it keeps every other index stable.
+            if !self.current_claude_ultracode_supported() {
                 options.retain(|option| option.stored_value != "ultracode");
             }
             options
@@ -3316,6 +3314,17 @@ impl LaunchWizardState {
             CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
         } else {
             Vec::new()
+        }
+    }
+
+    fn current_claude_ultracode_supported(&self) -> bool {
+        if !self.context.claude_workflows_enabled {
+            return false;
+        }
+        match self.version.as_str() {
+            "latest" => true,
+            "installed" | "" => self.context.ultracode_supported,
+            version => gwt_agent::supports_ultracode(version, true),
         }
     }
 
@@ -4764,6 +4773,7 @@ mod tests {
             linked_issue_number: None,
             linked_issue_kind: None,
             ultracode_supported: false,
+            claude_workflows_enabled: false,
         }
     }
 
@@ -8566,14 +8576,24 @@ mod tests {
             custom_agent: None,
         }];
         let mut ctx = context(branch("feature/gui"), "feature/gui");
-        // The combined version+workflows gate is captured at wizard open; tests
-        // inject it directly (the wizard has no reliable installed-version
-        // field at render time — see `current_reasoning_options`).
+        // Installed capability is captured at wizard open, while selected
+        // npm versions are evaluated from `state.version`.
         ctx.ultracode_supported = ultracode_supported;
+        ctx.claude_workflows_enabled = true;
         let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
         // Drive current_reasoning_options() down the requested Claude model branch.
         state.agent_id = "claude".to_string();
         state.model = model.to_string();
+        state
+    }
+
+    fn claude_state_with_version(
+        model: &str,
+        installed_ultracode_supported: bool,
+        version: &str,
+    ) -> LaunchWizardState {
+        let mut state = claude_state(model, installed_ultracode_supported);
+        state.version = version.to_string();
         state
     }
 
@@ -8586,15 +8606,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_reasoning_includes_ultracode_when_supported() {
-        let values = claude_reasoning_values(&claude_state("opus", true));
+    fn opus_reasoning_includes_ultracode_for_installed_when_supported() {
+        let values = claude_reasoning_values(&claude_state_with_version("opus", true, "installed"));
         assert!(values.contains(&"ultracode"));
         assert_eq!(values.last(), Some(&"ultracode"));
     }
 
     #[test]
-    fn opus_reasoning_excludes_ultracode_when_unsupported() {
-        let values = claude_reasoning_values(&claude_state("opus", false));
+    fn opus_reasoning_excludes_ultracode_for_installed_when_unsupported() {
+        let values =
+            claude_reasoning_values(&claude_state_with_version("opus", false, "installed"));
         assert!(!values.contains(&"ultracode"));
         // Common levels remain intact when ultracode is gated out.
         assert!(values.contains(&"xhigh"));
@@ -8618,8 +8639,41 @@ mod tests {
     }
 
     #[test]
-    fn fable_reasoning_excludes_ultracode_when_unsupported() {
-        let values = claude_reasoning_values(&claude_state("fable", false));
+    fn fable_reasoning_excludes_ultracode_for_installed_when_unsupported() {
+        let values =
+            claude_reasoning_values(&claude_state_with_version("fable", false, "installed"));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_includes_ultracode_for_latest_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", false, "latest"));
+        assert!(values.contains(&"ultracode"));
+        assert_eq!(values.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn fable_reasoning_includes_ultracode_for_supported_pinned_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", false, "2.1.154"));
+        assert!(values.contains(&"ultracode"));
+        assert_eq!(values.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_for_unsupported_pinned_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", true, "2.1.153"));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_for_latest_when_workflows_disabled() {
+        let mut state = claude_state_with_version("fable", true, "latest");
+        state.context.claude_workflows_enabled = false;
+        let values = claude_reasoning_values(&state);
         assert!(!values.contains(&"ultracode"));
         assert!(values.contains(&"xhigh"));
         assert!(values.contains(&"max"));
