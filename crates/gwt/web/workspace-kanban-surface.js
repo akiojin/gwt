@@ -907,10 +907,13 @@ export function createWorkspaceKanbanSurface({
       cleanupButton.type = "button";
       cleanupButton.dataset.action = "cleanup-merged-workspace";
       cleanupButton.addEventListener("click", () =>
-        openWorkspaceCleanup?.({
-          branch: workspace.branch,
-          remote_delete_available: true,
-        }),
+        openWorkspaceCleanup?.(
+          {
+            branch: workspace.branch,
+            remote_delete_available: true,
+          },
+          windowId,
+        ),
       );
       actions.appendChild(cleanupButton);
     } else if (workspace.cleanup_candidate) {
@@ -1025,6 +1028,7 @@ export function createWorkspaceKanbanSurface({
               branch: workspace.branch,
               remote_delete_available: true,
             })),
+            windowId,
           ),
         );
         bulkRow.appendChild(bulk);

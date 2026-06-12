@@ -3041,11 +3041,14 @@
         };
       }
 
-      function openWorkspaceCleanup(candidateOverride) {
+      function openWorkspaceCleanup(candidateOverride, sourceWindowId) {
         // The Workspace detail passes the selected row, the list header
         // passes ALL merged rows (user verification 2026-06-12: completed
         // local branches need a bulk cleanup path); without an override the
-        // projection-level cleanup candidate is used.
+        // projection-level cleanup candidate is used. When the caller knows
+        // its real window id the run rides the multi-branch
+        // `run_branch_cleanup` machinery (per-branch progress + failure
+        // reasons); the synthetic id keeps the legacy single-candidate wire.
         const overrides = Array.isArray(candidateOverride)
           ? candidateOverride
           : [candidateOverride];
@@ -3054,7 +3057,8 @@
           : [activeWorkProjection?.cleanup_candidate]
         ).filter((candidate) => candidate?.branch);
         if (candidates.length === 0) return;
-        const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
+        const cleanupWindowId = sourceWindowId || WORKSPACE_CLEANUP_WINDOW_ID;
+        const state = ensureBranchListState(cleanupWindowId);
         state.entries = candidates.map((candidate) => workspaceCleanupEntry(candidate));
         state.cleanupSelected = new Set(candidates.map((candidate) => candidate.branch));
         state.notice = "";
@@ -3068,7 +3072,7 @@
           progress: null,
           results: [],
         };
-        branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
+        branchCleanupWindowId = cleanupWindowId;
         renderBranchCleanupModal();
       }
 
