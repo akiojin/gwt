@@ -1030,6 +1030,21 @@ impl WorkspaceProjection {
         now: DateTime<Utc>,
     ) {
         if let Some(work_id) = launch.work_id {
+            if work_id != self.id {
+                // #3065: this projection is shared per repository. A launch
+                // that re-points it at a different Work must not inherit the
+                // previous Work's identity — otherwise the stale owner/title
+                // is replayed into the new Work's event log on every resume.
+                self.owner = None;
+                self.summary = None;
+                self.next_action = None;
+                self.agents.retain(|agent| {
+                    agent
+                        .workspace_id
+                        .as_deref()
+                        .is_none_or(|assigned| assigned == work_id)
+                });
+            }
             self.id = work_id;
         }
         self.title = launch.title.unwrap_or_else(|| "Start Work".to_string());
@@ -1377,6 +1392,19 @@ impl WorkItem {
     /// terminal close — either completed (Done) or explicitly discarded.
     pub fn is_terminal(&self) -> bool {
         self.status_category == WorkspaceStatusCategory::Done || self.discarded
+    }
+
+    /// #3065: the most recent non-empty `next_action` across this Work's
+    /// events. Used to build a per-work-item resume context instead of
+    /// reading the repo-shared current projection.
+    pub fn latest_next_action(&self) -> Option<&str> {
+        self.events.iter().rev().find_map(|event| {
+            event
+                .next_action
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
     }
 }
 
@@ -2040,6 +2068,41 @@ pub fn worktree_sources_needing_backfill(
     pending
 }
 
+/// #3065: find the Work item that owns a given execution container. The
+/// match mirrors the backfill coverage rule: canonical work id, canonical
+/// branch identity (`origin/x` == `x`), or canonical worktree path. Used to
+/// source the Workspace Resume context from the resumed Work itself instead
+/// of the repo-shared current projection (whose identity may belong to a
+/// different Work).
+pub fn find_work_item_for_container<'a>(
+    projection: &'a WorkItemsProjection,
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+) -> Option<&'a WorkItem> {
+    let branch = branch.map(str::trim).filter(|value| !value.is_empty());
+    let canonical_id = canonical_work_id(project_root, branch, worktree_path);
+    let branch_identity = branch.map(canonical_work_branch_identity);
+    let worktree_identity = worktree_path.map(canonical_worktree_identity);
+    projection.work_items.iter().find(|item| {
+        canonical_id
+            .as_deref()
+            .is_some_and(|work_id| item.id == work_id)
+            || item.execution_containers.iter().any(|container| {
+                branch_identity.as_deref().is_some_and(|identity| {
+                    container.branch.as_deref().is_some_and(|existing| {
+                        canonical_work_branch_identity(existing) == identity
+                    })
+                }) || worktree_identity.as_deref().is_some_and(|identity| {
+                    container
+                        .worktree_path
+                        .as_deref()
+                        .is_some_and(|existing| canonical_worktree_identity(existing) == identity)
+                })
+            })
+    })
+}
+
 /// SPEC-2359 Phase W-15 (FR-380): record a single Backfill event for a
 /// worktree that has no Work record. `status_category` stays `None` so a
 /// re-ingested copy of this event (W-16 intake on another machine) cannot
@@ -2110,6 +2173,215 @@ pub fn reconcile_worktree_work_items_paths(
         )?;
     }
     Ok(pending.len())
+}
+
+/// #3065: report of one resume-owner-bleed repair pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResumeOwnerBleedRepairReport {
+    /// Resume events whose stamped identity fields were cleared.
+    pub sanitized_events: usize,
+    /// Whether the shared current projection's identity was cleared.
+    pub cleared_current: bool,
+    /// Stray agents pruned from the shared current projection.
+    pub pruned_current_agents: usize,
+}
+
+impl ResumeOwnerBleedRepairReport {
+    pub fn changed(&self) -> bool {
+        self.sanitized_events > 0 || self.cleared_current || self.pruned_current_agents > 0
+    }
+}
+
+/// #3065: minimum number of distinct Work items sharing one identical resume
+/// payload before it is treated as a bleed signature. Two branches may
+/// legitimately resume the same SPEC with the same wording; three or more
+/// identical (title, owner, next_action) stamps across different Work items
+/// only arise from the shared-projection replay bug.
+const RESUME_OWNER_BLEED_MIN_ITEMS: usize = 3;
+
+fn resume_bleed_key(event: &WorkEvent) -> Option<(String, String, String)> {
+    if event.kind != WorkEventKind::Resume {
+        return None;
+    }
+    let owner = event
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = event.title.as_deref().map(str::trim).unwrap_or("");
+    let next_action = event.next_action.as_deref().map(str::trim).unwrap_or("");
+    Some((
+        title.to_string(),
+        owner.to_string(),
+        next_action.to_string(),
+    ))
+}
+
+/// #3065: the contaminated identity pair carried by one bleed event —
+/// `(title, owner)`, both trimmed, owner non-empty.
+fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
+    let owner = event
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = event.title.as_deref().map(str::trim).unwrap_or("");
+    Some((title.to_string(), owner.to_string()))
+}
+
+/// #3065: detection-based, idempotent repair for the resume owner bleed.
+/// Detection: an identical (title, owner, next_action) resume payload stamped
+/// onto [`RESUME_OWNER_BLEED_MIN_ITEMS`]+ distinct Work items. Sanitization,
+/// in two strengths:
+///
+/// - events carrying a contaminated (title, owner) identity pair — the same
+///   shared-projection snapshot also leaked through pause / update stamps —
+///   have ALL identity fields cleared;
+/// - events carrying a contaminated owner VALUE with a different title (the
+///   update/done/pause leak stamped the poisoned owner alongside an
+///   agent-authored title) lose only their owner.
+///
+/// Event ids are kept so the intake dedup still skips re-ingestion, and the
+/// Work items are re-folded from their events. The shared current projection
+/// is cleared when its (title, owner) pair carries the contamination (full
+/// clear) or its owner value alone does (owner-only clear). Stray agents
+/// assigned to a different work id are pruned from the current projection in
+/// the same pass. Runs after every work-events ingest; converges to a no-op
+/// once the data is clean.
+pub fn repair_resume_owner_bleed_paths(
+    work_items_path: &Path,
+    current_projection_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<ResumeOwnerBleedRepairReport> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut report = ResumeOwnerBleedRepairReport::default();
+    let Some(mut works) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(report);
+    };
+
+    let mut stamped: HashMap<(String, String, String), HashSet<String>> = HashMap::new();
+    for item in &works.work_items {
+        for event in &item.events {
+            if let Some(key) = resume_bleed_key(event) {
+                stamped.entry(key).or_default().insert(item.id.clone());
+            }
+        }
+    }
+    let contaminated_pairs: HashSet<(String, String)> = stamped
+        .into_iter()
+        .filter(|(_, items)| items.len() >= RESUME_OWNER_BLEED_MIN_ITEMS)
+        .map(|((title, owner, _), _)| (title, owner))
+        .collect();
+    let contaminated_owners: HashSet<String> = contaminated_pairs
+        .iter()
+        .map(|(_, owner)| owner.clone())
+        .collect();
+
+    if !contaminated_pairs.is_empty() {
+        let projection_updated_at = works.updated_at;
+        let mut all_events: Vec<WorkEvent> = Vec::new();
+        let mut eventless_items: Vec<WorkItem> = Vec::new();
+        for item in works.work_items.drain(..) {
+            if item.events.is_empty() {
+                eventless_items.push(item);
+                continue;
+            }
+            all_events.extend(item.events);
+        }
+        let mut sanitized = 0usize;
+        for event in &mut all_events {
+            let Some(pair) = bleed_identity_pair(event) else {
+                continue;
+            };
+            if contaminated_pairs.contains(&pair) {
+                event.title = None;
+                event.intent = None;
+                event.summary = None;
+                event.owner = None;
+                event.next_action = None;
+                sanitized += 1;
+            } else if contaminated_owners.contains(&pair.1) {
+                event.owner = None;
+                sanitized += 1;
+            }
+        }
+        all_events.sort_by_key(|event| event.updated_at);
+        let mut rebuilt = WorkItemsProjection::empty(projection_updated_at);
+        for event in all_events {
+            rebuilt.apply_event(event);
+        }
+        rebuilt.work_items.extend(eventless_items);
+        if projection_updated_at > rebuilt.updated_at {
+            rebuilt.updated_at = projection_updated_at;
+        }
+        save_workspace_work_items_projection_to_path(work_items_path, &rebuilt)?;
+        report.sanitized_events = sanitized;
+    }
+
+    let Some(mut current) = load_workspace_projection_from_path(current_projection_path)? else {
+        return Ok(report);
+    };
+    let mut current_changed = false;
+    let current_pair = (
+        current.title.trim().to_string(),
+        current
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string(),
+    );
+    if !current_pair.1.is_empty() && contaminated_pairs.contains(&current_pair) {
+        current.title = "Work".to_string();
+        current.owner = None;
+        current.summary = None;
+        current.next_action = None;
+        current.agents.clear();
+        current.status_category = WorkspaceStatusCategory::Idle;
+        current.status_text = "No active work".to_string();
+        current.updated_at = now;
+        report.cleared_current = true;
+        current_changed = true;
+    } else {
+        if !current_pair.1.is_empty() && contaminated_owners.contains(&current_pair.1) {
+            // The title drifted (agent-authored) but the owner value is the
+            // contaminated one — drop only the owner.
+            current.owner = None;
+            current.updated_at = now;
+            report.cleared_current = true;
+            current_changed = true;
+        }
+        let before = current.agents.len();
+        let current_id = current.id.clone();
+        current.agents.retain(|agent| {
+            agent
+                .workspace_id
+                .as_deref()
+                .is_none_or(|assigned| assigned == current_id)
+        });
+        let pruned = before - current.agents.len();
+        if pruned > 0 {
+            report.pruned_current_agents = pruned;
+            current.updated_at = now;
+            current_changed = true;
+        }
+    }
+    if current_changed {
+        save_workspace_projection_to_path(current_projection_path, &current)?;
+    }
+    Ok(report)
+}
+
+/// #3065: repo-path wrapper for [`repair_resume_owner_bleed_paths`] resolving
+/// the canonical home-projection paths.
+pub fn repair_resume_owner_bleed_for_repo(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<ResumeOwnerBleedRepairReport> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    repair_resume_owner_bleed_paths(&work_items_path, &current_path, now)
 }
 
 /// HEAD committer time of a git worktree (`git log -1 --format=%ct`).
@@ -7377,6 +7649,348 @@ mod tests {
             projection.work_items[0].updated_at,
             Utc.with_ymd_and_hms(2025, 6, 15, 0, 0, 0).unwrap(),
             "git worktree baseline is the HEAD committer time"
+        );
+    }
+
+    // #3065: a launch that re-points the shared projection at a DIFFERENT
+    // work item must not inherit the previous work's identity (owner /
+    // summary / next_action) or keep agents assigned to the previous work.
+    #[test]
+    fn apply_launch_does_not_inherit_identity_across_work_items() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.id = "work-old-11111111".to_string();
+        projection.owner = Some("SPEC-2359".to_string());
+        projection.summary = Some("old summary".to_string());
+        projection.next_action = Some("old next action".to_string());
+        let mut resident = us70_agent(
+            "sess-old",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        resident.workspace_id = Some("work-old-11111111".to_string());
+        projection.agents.push(resident);
+
+        let agent = us70_agent(
+            "sess-new",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-new-22222222".to_string()),
+                title: None,
+                summary: None,
+                owner: None,
+                next_action: None,
+                branch: "work/new".to_string(),
+                worktree_path: PathBuf::from("/wt-new"),
+                base_branch: None,
+                created_by_start_work: false,
+            },
+            agent,
+            Utc.timestamp_opt(8_000, 0).unwrap(),
+        );
+
+        assert_eq!(projection.id, "work-new-22222222");
+        assert_eq!(
+            projection.owner, None,
+            "owner must not leak across work items"
+        );
+        assert_eq!(
+            projection.summary, None,
+            "summary must not leak across work items"
+        );
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Check Board for latest updates"),
+            "next action falls back to the default, not the previous work's"
+        );
+        assert!(
+            projection
+                .agents
+                .iter()
+                .all(|agent| agent.workspace_id.as_deref() != Some("work-old-11111111")),
+            "agents assigned to the previous work item are dropped"
+        );
+        assert_eq!(projection.status_text, "Codex is running");
+    }
+
+    // #3065: resuming the SAME work item keeps the inherited identity —
+    // the boundary only applies across different work ids.
+    #[test]
+    fn apply_launch_keeps_identity_for_same_work_item() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.id = "work-foo-12345678".to_string();
+        projection.owner = Some("Issue #42".to_string());
+        projection.summary = Some("kept summary".to_string());
+
+        let agent = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-foo-12345678".to_string()),
+                title: None,
+                summary: None,
+                owner: None,
+                next_action: None,
+                branch: "work/foo".to_string(),
+                worktree_path: PathBuf::from("/wt"),
+                base_branch: None,
+                created_by_start_work: false,
+            },
+            agent,
+            Utc.timestamp_opt(8_100, 0).unwrap(),
+        );
+
+        assert_eq!(projection.owner.as_deref(), Some("Issue #42"));
+        assert_eq!(projection.summary.as_deref(), Some("kept summary"));
+    }
+
+    // #3065: the resume context source lookup — a work item is found by
+    // canonical branch identity (local or origin/ prefixed), by worktree
+    // path, and misses cleanly for unknown containers.
+    #[test]
+    fn find_work_item_for_container_matches_branch_worktree_and_id() {
+        let project_root = Path::new("/repo");
+        let now = Utc.timestamp_opt(9_000, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(now);
+        let work_id =
+            canonical_work_id(project_root, Some("work/foo"), None).expect("canonical id");
+        let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id.clone(), now);
+        event.title = Some("work/foo".to_string());
+        event.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/foo".to_string()),
+            worktree_path: Some(PathBuf::from("/wt/foo")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(event);
+
+        let by_branch =
+            find_work_item_for_container(&projection, project_root, Some("work/foo"), None)
+                .expect("matched by branch");
+        assert_eq!(by_branch.id, work_id);
+        let by_remote =
+            find_work_item_for_container(&projection, project_root, Some("origin/work/foo"), None)
+                .expect("matched by remote-prefixed branch");
+        assert_eq!(by_remote.id, work_id);
+        let by_worktree = find_work_item_for_container(
+            &projection,
+            project_root,
+            None,
+            Some(Path::new("/wt/foo")),
+        )
+        .expect("matched by worktree path");
+        assert_eq!(by_worktree.id, work_id);
+        assert!(
+            find_work_item_for_container(&projection, project_root, Some("work/other"), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn work_item_latest_next_action_reads_most_recent_event() {
+        let now = Utc.timestamp_opt(9_100, 0).unwrap();
+        let later = Utc.timestamp_opt(9_200, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(now);
+        let mut first = WorkEvent::new(WorkEventKind::Start, "work-x", now);
+        first.next_action = Some("older action".to_string());
+        projection.apply_event(first);
+        let mut second = WorkEvent::new(WorkEventKind::Update, "work-x", later);
+        second.next_action = Some("newer action".to_string());
+        projection.apply_event(second);
+
+        assert_eq!(
+            projection.work_items[0].latest_next_action(),
+            Some("newer action")
+        );
+    }
+
+    fn bleed_resume_event(work_id: &str, seq: i64) -> WorkEvent {
+        let mut event = WorkEvent::new(
+            WorkEventKind::Resume,
+            work_id,
+            Utc.timestamp_opt(20_000 + seq, 0).unwrap(),
+        );
+        event.title = Some("gwt-manage-pr".to_string());
+        event.owner = Some("SPEC-2359".to_string());
+        event.summary = Some("765 active agents".to_string());
+        event.next_action = Some("merged build re-check".to_string());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        event.agent_session_id = Some(format!("sess-{seq}"));
+        event
+    }
+
+    fn backfill_event(work_id: &str, branch: &str, seq: i64) -> WorkEvent {
+        let mut event = WorkEvent::new(
+            WorkEventKind::Backfill,
+            work_id,
+            Utc.timestamp_opt(10_000 + seq, 0).unwrap(),
+        );
+        event.title = Some(branch.to_string());
+        event.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(PathBuf::from(format!("/wt/{branch}"))),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        event
+    }
+
+    // #3065: the repair detects the bleed signature — an identical
+    // (title, owner, next_action) resume payload stamped onto 3+ distinct
+    // work items — sanitizes every event carrying the contaminated
+    // (title, owner) identity (resume AND pause/update stamps), re-folds the
+    // items, and clears the contaminated shared current projection even when
+    // its next_action has drifted. Idempotent: a second run is a no-op.
+    #[test]
+    fn repair_resume_owner_bleed_sanitizes_cross_item_stamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let current_path = temp.path().join("current.json");
+        let now = Utc.timestamp_opt(30_000, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(now);
+        for (index, branch) in ["work/a", "work/b", "work/c"].iter().enumerate() {
+            let work_id = format!("work-{}-0000000{index}", branch.replace('/', "-"));
+            projection.apply_event(backfill_event(&work_id, branch, index as i64));
+            projection.apply_event(bleed_resume_event(&work_id, index as i64));
+        }
+        // A pause stamp carrying the same contaminated identity on a fourth
+        // item (the work-session-* leak path) is sanitized by the pair rule.
+        let mut pause = WorkEvent::new(
+            WorkEventKind::Pause,
+            "work-session-sess-dead",
+            Utc.timestamp_opt(20_900, 0).unwrap(),
+        );
+        pause.title = Some("gwt-manage-pr".to_string());
+        pause.owner = Some("SPEC-2359".to_string());
+        projection.apply_event(pause);
+        // An update stamp with an agent-authored title but the contaminated
+        // owner (the update/done leak) loses only its owner; the title and
+        // the rest of the payload survive.
+        let mut update = WorkEvent::new(
+            WorkEventKind::Update,
+            "work-work-d-00000003",
+            Utc.timestamp_opt(20_950, 0).unwrap(),
+        );
+        update.title = Some("agent authored title".to_string());
+        update.owner = Some("SPEC-2359".to_string());
+        update.status_category = Some(WorkspaceStatusCategory::Active);
+        projection.apply_event(update);
+        let event_ids_before: std::collections::BTreeSet<String> = projection
+            .work_items
+            .iter()
+            .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
+            .collect();
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works");
+
+        let mut current = WorkspaceProjection::default_for_project("/repo");
+        current.id = "work-work-a-00000000".to_string();
+        current.title = "gwt-manage-pr".to_string();
+        current.owner = Some("SPEC-2359".to_string());
+        // next_action drifted after the stamps were written; the pair rule
+        // must still clear the identity.
+        current.next_action = Some("Check Board for latest updates".to_string());
+        current.status_text = "883 active agents".to_string();
+        for seq in 0..5 {
+            let mut agent = us70_agent(
+                &format!("dead-{seq}"),
+                WorkspaceStatusCategory::Active,
+                WorkspaceAgentAffiliationStatus::Assigned,
+            );
+            agent.workspace_id = Some(format!("work-other-{seq}"));
+            current.agents.push(agent);
+        }
+        save_workspace_projection_to_path(&current_path, &current).expect("save current");
+
+        let report =
+            repair_resume_owner_bleed_paths(&work_items_path, &current_path, now).expect("repair");
+        assert_eq!(
+            report.sanitized_events, 5,
+            "3 resume stamps + 1 pause stamp + 1 owner-only update stamp"
+        );
+        assert!(report.cleared_current, "current.json identity cleared");
+
+        let repaired = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        for item in &repaired.work_items {
+            assert_eq!(item.owner, None, "owner cleared for {}", item.id);
+            if item.id == "work-work-d-00000003" {
+                assert_eq!(
+                    item.title, "agent authored title",
+                    "owner-only sanitize keeps the agent-authored title"
+                );
+            } else if item.id != "work-session-sess-dead" {
+                assert!(
+                    item.title.starts_with("work/"),
+                    "title restored to branch name, got {}",
+                    item.title
+                );
+            }
+        }
+        let event_ids_after: std::collections::BTreeSet<String> = repaired
+            .work_items
+            .iter()
+            .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
+            .collect();
+        assert_eq!(
+            event_ids_before, event_ids_after,
+            "sanitized events keep their ids so the intake dedup still skips them"
+        );
+
+        let repaired_current = load_workspace_projection_from_path(&current_path)
+            .expect("load current")
+            .expect("current exists");
+        assert_eq!(repaired_current.owner, None);
+        assert_eq!(repaired_current.next_action, None);
+        assert!(repaired_current.agents.is_empty(), "dead agents purged");
+
+        let second = repair_resume_owner_bleed_paths(&work_items_path, &current_path, now)
+            .expect("repair rerun");
+        assert_eq!(second.sanitized_events, 0, "second run is a no-op");
+        assert!(!second.cleared_current);
+    }
+
+    // #3065: two work items legitimately sharing the same owner/title (e.g.
+    // two branches working one SPEC) stay untouched — the signature requires
+    // 3+ distinct work items.
+    #[test]
+    fn repair_resume_owner_bleed_keeps_legitimate_duplicates_below_threshold() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("works.json");
+        let current_path = temp.path().join("current.json");
+        let now = Utc.timestamp_opt(31_000, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(now);
+        for (index, branch) in ["work/a", "work/b"].iter().enumerate() {
+            let work_id = format!("work-{}-0000000{index}", branch.replace('/', "-"));
+            projection.apply_event(backfill_event(&work_id, branch, index as i64));
+            projection.apply_event(bleed_resume_event(&work_id, index as i64));
+        }
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works");
+
+        let report =
+            repair_resume_owner_bleed_paths(&work_items_path, &current_path, now).expect("repair");
+        assert_eq!(report.sanitized_events, 0);
+
+        let untouched = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert!(
+            untouched
+                .work_items
+                .iter()
+                .all(|item| item.owner.as_deref() == Some("SPEC-2359")),
+            "below-threshold duplicates keep their owner"
         );
     }
 }
