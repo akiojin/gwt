@@ -591,6 +591,41 @@ pub fn record_workspace_backfill_event_paths(
     record_workspace_work_event_paths(work_items_path, events_path, event)
 }
 
+/// #3065: find the Work item that owns a given execution container. The
+/// match mirrors the backfill coverage rule: canonical work id, canonical
+/// branch identity (`origin/x` == `x`), or canonical worktree path. Used to
+/// source the Workspace Resume context from the resumed Work itself instead
+/// of the repo-shared current projection (whose identity may belong to a
+/// different Work).
+pub fn find_work_item_for_container<'a>(
+    projection: &'a WorkItemsProjection,
+    project_root: &Path,
+    branch: Option<&str>,
+    worktree_path: Option<&Path>,
+) -> Option<&'a WorkItem> {
+    let branch = branch.map(str::trim).filter(|value| !value.is_empty());
+    let canonical_id = canonical_work_id(project_root, branch, worktree_path);
+    let branch_identity = branch.map(canonical_work_branch_identity);
+    let worktree_identity = worktree_path.map(canonical_worktree_identity);
+    projection.work_items.iter().find(|item| {
+        canonical_id
+            .as_deref()
+            .is_some_and(|work_id| item.id == work_id)
+            || item.execution_containers.iter().any(|container| {
+                branch_identity.as_deref().is_some_and(|identity| {
+                    container.branch.as_deref().is_some_and(|existing| {
+                        canonical_work_branch_identity(existing) == identity
+                    })
+                }) || worktree_identity.as_deref().is_some_and(|identity| {
+                    container
+                        .worktree_path
+                        .as_deref()
+                        .is_some_and(|existing| canonical_worktree_identity(existing) == identity)
+                })
+            })
+    })
+}
+
 /// SPEC-2359 Phase W-15 (FR-379/FR-380): reconcile locally existing worktrees
 /// against the Work records and backfill the missing ones. Each Backfill
 /// event is appended to the *owning worktree's* repo-local event log
@@ -748,6 +783,215 @@ pub fn reconcile_worktree_work_items(
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
     reconcile_worktree_work_items_paths(&work_items_path, repo_path, sources, now)
+}
+
+/// #3065: report of one resume-owner-bleed repair pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResumeOwnerBleedRepairReport {
+    /// Resume events whose stamped identity fields were cleared.
+    pub sanitized_events: usize,
+    /// Whether the shared current projection's identity was cleared.
+    pub cleared_current: bool,
+    /// Stray agents pruned from the shared current projection.
+    pub pruned_current_agents: usize,
+}
+
+impl ResumeOwnerBleedRepairReport {
+    pub fn changed(&self) -> bool {
+        self.sanitized_events > 0 || self.cleared_current || self.pruned_current_agents > 0
+    }
+}
+
+/// #3065: minimum number of distinct Work items sharing one identical resume
+/// payload before it is treated as a bleed signature. Two branches may
+/// legitimately resume the same SPEC with the same wording; three or more
+/// identical (title, owner, next_action) stamps across different Work items
+/// only arise from the shared-projection replay bug.
+const RESUME_OWNER_BLEED_MIN_ITEMS: usize = 3;
+
+fn resume_bleed_key(event: &WorkEvent) -> Option<(String, String, String)> {
+    if event.kind != WorkEventKind::Resume {
+        return None;
+    }
+    let owner = event
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = event.title.as_deref().map(str::trim).unwrap_or("");
+    let next_action = event.next_action.as_deref().map(str::trim).unwrap_or("");
+    Some((
+        title.to_string(),
+        owner.to_string(),
+        next_action.to_string(),
+    ))
+}
+
+/// #3065: the contaminated identity pair carried by one bleed event —
+/// `(title, owner)`, both trimmed, owner non-empty.
+fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
+    let owner = event
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = event.title.as_deref().map(str::trim).unwrap_or("");
+    Some((title.to_string(), owner.to_string()))
+}
+
+/// #3065: detection-based, idempotent repair for the resume owner bleed.
+/// Detection: an identical (title, owner, next_action) resume payload stamped
+/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct Work items. Sanitization,
+/// in two strengths:
+///
+/// - events carrying a contaminated (title, owner) identity pair — the same
+///   shared-projection snapshot also leaked through pause / update stamps —
+///   have ALL identity fields cleared;
+/// - events carrying a contaminated owner VALUE with a different title (the
+///   update/done/pause leak stamped the poisoned owner alongside an
+///   agent-authored title) lose only their owner.
+///
+/// Event ids are kept so the intake dedup still skips re-ingestion, and the
+/// Work items are re-folded from their events. The shared current projection
+/// is cleared when its (title, owner) pair carries the contamination (full
+/// clear) or its owner value alone does (owner-only clear). Stray agents
+/// assigned to a different work id are pruned from the current projection in
+/// the same pass. Runs after every work-events ingest; converges to a no-op
+/// once the data is clean.
+pub fn repair_resume_owner_bleed_paths(
+    work_items_path: &Path,
+    current_projection_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<ResumeOwnerBleedRepairReport> {
+    use std::collections::HashSet;
+
+    let mut report = ResumeOwnerBleedRepairReport::default();
+    let Some(mut works) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(report);
+    };
+
+    let mut stamped: HashMap<(String, String, String), HashSet<String>> = HashMap::new();
+    for item in &works.work_items {
+        for event in &item.events {
+            if let Some(key) = resume_bleed_key(event) {
+                stamped.entry(key).or_default().insert(item.id.clone());
+            }
+        }
+    }
+    let contaminated_pairs: HashSet<(String, String)> = stamped
+        .into_iter()
+        .filter(|(_, items)| items.len() >= RESUME_OWNER_BLEED_MIN_ITEMS)
+        .map(|((title, owner, _), _)| (title, owner))
+        .collect();
+    let contaminated_owners: HashSet<String> = contaminated_pairs
+        .iter()
+        .map(|(_, owner)| owner.clone())
+        .collect();
+
+    if !contaminated_pairs.is_empty() {
+        let projection_updated_at = works.updated_at;
+        let mut all_events: Vec<WorkEvent> = Vec::new();
+        let mut eventless_items: Vec<WorkItem> = Vec::new();
+        for item in works.work_items.drain(..) {
+            if item.events.is_empty() {
+                eventless_items.push(item);
+                continue;
+            }
+            all_events.extend(item.events);
+        }
+        let mut sanitized = 0usize;
+        for event in &mut all_events {
+            let Some(pair) = bleed_identity_pair(event) else {
+                continue;
+            };
+            if contaminated_pairs.contains(&pair) {
+                event.title = None;
+                event.intent = None;
+                event.summary = None;
+                event.owner = None;
+                event.next_action = None;
+                sanitized += 1;
+            } else if contaminated_owners.contains(&pair.1) {
+                event.owner = None;
+                sanitized += 1;
+            }
+        }
+        all_events.sort_by_key(|event| event.updated_at);
+        let mut rebuilt = WorkItemsProjection::empty(projection_updated_at);
+        for event in all_events {
+            rebuilt.apply_event(event);
+        }
+        rebuilt.work_items.extend(eventless_items);
+        if projection_updated_at > rebuilt.updated_at {
+            rebuilt.updated_at = projection_updated_at;
+        }
+        save_workspace_work_items_projection_to_path(work_items_path, &rebuilt)?;
+        report.sanitized_events = sanitized;
+    }
+
+    let Some(mut current) = load_workspace_projection_from_path(current_projection_path)? else {
+        return Ok(report);
+    };
+    let mut current_changed = false;
+    let current_pair = (
+        current.title.trim().to_string(),
+        current
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string(),
+    );
+    if !current_pair.1.is_empty() && contaminated_pairs.contains(&current_pair) {
+        current.title = "Work".to_string();
+        current.owner = None;
+        current.summary = None;
+        current.next_action = None;
+        current.agents.clear();
+        current.status_category = WorkspaceStatusCategory::Idle;
+        current.status_text = "No active work".to_string();
+        current.updated_at = now;
+        report.cleared_current = true;
+        current_changed = true;
+    } else {
+        if !current_pair.1.is_empty() && contaminated_owners.contains(&current_pair.1) {
+            // The title drifted (agent-authored) but the owner value is the
+            // contaminated one — drop only the owner.
+            current.owner = None;
+            current.updated_at = now;
+            report.cleared_current = true;
+            current_changed = true;
+        }
+        let before = current.agents.len();
+        let current_id = current.id.clone();
+        current.agents.retain(|agent| {
+            agent
+                .workspace_id
+                .as_deref()
+                .is_none_or(|assigned| assigned == current_id)
+        });
+        let pruned = before - current.agents.len();
+        if pruned > 0 {
+            report.pruned_current_agents = pruned;
+            current.updated_at = now;
+            current_changed = true;
+        }
+    }
+    if current_changed {
+        save_workspace_projection_to_path(current_projection_path, &current)?;
+    }
+    Ok(report)
+}
+
+/// #3065: repo-path wrapper for [`repair_resume_owner_bleed_paths`] resolving
+/// the canonical home-projection paths.
+pub fn repair_resume_owner_bleed_for_repo(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<ResumeOwnerBleedRepairReport> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    repair_resume_owner_bleed_paths(&work_items_path, &current_path, now)
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a `Pause` work event so a

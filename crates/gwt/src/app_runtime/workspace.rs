@@ -155,12 +155,17 @@ pub(super) fn save_workspace_launch_projection(
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
     created_by_start_work: bool,
+    live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
     let mut projection =
         gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
             .map_err(|error| error.to_string())?;
     projection.project_root = project_root.to_path_buf();
+    // #3065: drop dead agent entries before computing the running-agents
+    // status text — the shared projection otherwise accumulates one entry
+    // per historical session ("765 active agents").
+    projection.retain_live_agents(live_session_ids.iter().map(String::as_str), now);
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         project_root,
         Some(session.branch_name.as_str()),
