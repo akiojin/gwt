@@ -164,7 +164,8 @@ exception path. Keep the same one-question-at-a-time discipline.
 ### Phase 1: Theme + search
 
 1. Understand the user's concern, idea, or implementation gap.
-2. Run `gwt-search` with 2-3 semantic queries in Japanese and English.
+2. Use the `gwt-search` skill (a skill, not a PATH command) with 2-3
+   semantic queries in Japanese and English.
 3. Check open SPEC Issues: `gwtd issue spec list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.

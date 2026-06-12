@@ -117,9 +117,8 @@ reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
   question line. It does not bypass incomplete evidence.
 
 When the `Action Bundle` is produced, call the matching exit command for each
-proposal before stopping. Codex's `stop_hook_active` flag (shared with Claude
-Code via `codex_hooks`) keeps the handler fail-safe: at most one forced
-continuation per Stop cycle.
+proposal before stopping. Claude Code's built-in `stop_hook_active` flag keeps
+the handler fail-safe: at most one forced continuation per Stop cycle.
 
 ## Resume hooks
 
@@ -165,28 +164,12 @@ exception path. Keep the same one-question-at-a-time discipline.
 ### Phase 1: Theme + search
 
 1. Understand the user's concern, idea, or implementation gap.
-2. Run `gwt-search` with 2-3 semantic queries in Japanese and English.
+2. Use the `gwt-search` skill (a skill, not a PATH command) with 2-3
+   semantic queries in Japanese and English.
 3. Check open SPEC Issues: `gwtd issue spec list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
-6. If the clear owner is an existing SPEC, run the Board active-claim preflight
-   before changing `.gwt/discussion.md` or any SPEC/plan artifacts:
-   - Read the current Board with `gwtd board show --json` when available, or
-     `gwtd board show` as the fallback.
-   - Look for active `claim` entries from another session that mention the same
-     owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
-   - If a matching claim exists, pause the discussion flow and present the
-     conflict: join that session with a Board handoff request, redesign a
-     disjoint work split, or continue only after the user explicitly accepts
-     duplicate risk.
-   - Intentional parallel discussion/planning is allowed only when ownership is
-     disjoint. Post a fresh Board `claim` with a `Boundary:` line naming the
-     topic, artifacts, or files owned by this session before continuing.
-   - Acceptance scenario: Given another session has an active Board claim for
-     `SPEC-2008 Phase 24`, when `gwt-discussion --deepen SPEC-2008` starts,
-     then the preflight reports the claim and requires user confirmation before
-     producing an Action Delta or changing SPEC artifacts.
 
 ### Phase 2: Investigation
 
@@ -340,7 +323,14 @@ When the discussion stabilizes, update the right artifacts in one batch.
 
 - Use `references/intake.md` for search and routing discipline
 - Use `references/ddd-modeling.md` for Bounded Context and domain modeling
-- Use `references/registration.md` to create or seed `spec.md`
+- **Register the SPEC via `gwt-register-spec`** (sub-skill, SPEC-2784). The
+  caller prepares title + body file from this discussion's outcome; the
+  sub-skill validates, executes the canonical `create` → `--edit spec` →
+  `--section spec` roundtrip safely, and returns the new Issue number. Add
+  `Register Spec` to the Action Bundle. Use `references/registration.md`
+  only when the sub-skill is unavailable; in that case follow its 2-step
+  flow manually and verify `--section spec` returns non-empty content
+  before handoff.
 - Use `references/clarification.md` to remove high-impact
   `[NEEDS CLARIFICATION]` markers
 - Use `references/deepening.md` when the user asks for deeper analysis on an
@@ -388,6 +378,7 @@ Reason: <one sentence>
 - Resume Build Context: <what the implementer must use>
 
 ### Action Bundle
+- Register Spec
 - Update Spec
 - Update Plan
 - Resume Build
@@ -395,6 +386,10 @@ Reason: <one sentence>
 - Write Memory
 - No Action
 ```
+
+`Register Spec` runs the `gwt-register-spec` sub-skill (SPEC-2784) to
+materialize a new SPEC Issue safely. Use it instead of manual
+`gwtd issue spec create` whenever a fresh SPEC owner is needed.
 
 This final result is the handoff point where the workflow may leave Plan Mode.
 
