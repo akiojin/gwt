@@ -6892,3 +6892,17 @@ Type: lesson
 Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
 Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
 Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
+
+## 2026-06-12 — 並行エージェント作業との UI 設計衝突は最新のユーザー検証コメントを必ず突き合わせる
+
+Type: lesson
+Context: SPEC-3038 のレール/close/ラベル設計が、develop に並行マージされた PR #3045（CTA 右下固定・実行中のみ close 確認・FR-392 Workspace 改名）と 3 点衝突。さらにユーザーへの Work/Workspace 回答を旧 SC-207 根拠で行い、FR-392 が既に SC-207 を置換していた事実を見落とした
+Learning: 同一 UI 領域の並行作業では、merge コンフリクトのテスト側コメント（user verification 日付・FR 番号）が最新のプロダクト判断の一次情報になる。SPEC の命名規則（SC-207 等）は後続 FR で置換され得るため、ユーザーへ仕様根拠を回答する前に develop 側の最新テスト契約を grep して確認する
+Future Action: UI 系 SPEC の実装前後に origin/develop の関連テスト（operator-chrome-structure 等）の diff を確認し、設計判断の衝突は AskUserQuestion で 1 問に絞って解決する。命名・配置などのプロダクト判断は両ブランチの user verification 記録を提示した上で確認する
+
+## 2026-06-12 — このマシンの gh token は read:org 不足で gwtd pr edit が常に失敗する
+
+Type: lesson
+Context: PR #3047 の本文更新で gwtd pr edit → gh pr edit が GraphQL 'login' field の read:org スコープ要求で 2 回失敗。直接 gh api PATCH はリポジトリの hook でブロックされる
+Learning: gwtd pr edit は内部の gh pr edit GraphQL がこの環境の token スコープ (repo/user/workflow 等、read:org なし) と非互換。PR 本文の事後修正はこの環境では不可
+Future Action: PR 本文は create 時に確定させる。事後の訂正・補足は gwtd pr comment で代替する。token スコープ追加はユーザーにしかできないため、必要ならユーザーへ https://github.com/settings/tokens での read:org 付与を依頼する
