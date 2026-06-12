@@ -1925,7 +1925,7 @@ pub fn build_frontend_sync_events(
 ) -> Vec<OutboundEvent> {
     let mut events = vec![OutboundEvent::reply(
         client_id,
-        BackendEvent::WorkspaceState { workspace },
+        BackendEvent::WindowCanvasState { workspace },
     )];
 
     for (id, status, detail) in terminal_statuses {
@@ -3502,7 +3502,7 @@ pub struct ProjectTabRuntime {
     pub(crate) title: String,
     pub(crate) project_root: PathBuf,
     pub(crate) kind: gwt::ProjectKind,
-    pub(crate) workspace: WorkspaceState,
+    pub(crate) workspace: WindowCanvasState,
     /// SPEC-1934 US-6: in-memory flag set when the tab was opened on a Normal
     /// Git layout that we want to migrate. The frontend sees a
     /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
@@ -3926,14 +3926,14 @@ pub struct AppRuntime {
 impl ProjectTabRuntime {
     pub(crate) fn from_persisted(
         tab: gwt::PersistedSessionTabState,
-        workspace: gwt::PersistedWorkspaceState,
+        workspace: gwt::PersistedWindowCanvasState,
     ) -> Self {
         Self {
             id: tab.id,
             title: tab.title,
             project_root: tab.project_root,
             kind: tab.kind,
-            workspace: WorkspaceState::from_persisted(workspace),
+            workspace: WindowCanvasState::from_persisted(workspace),
             // Re-detected at startup via resolve_project_target; persistence
             // does not carry the flag.
             migration_pending: false,
@@ -6355,7 +6355,7 @@ impl AppRuntime {
             title: target.title.clone(),
             project_root: target.project_root.clone(),
             kind: target.kind,
-            workspace: WorkspaceState::from_persisted({
+            workspace: WindowCanvasState::from_persisted({
                 load_restored_workspace_state(&target.project_root)
                     .map_err(|error| error.to_string())?
             }),
@@ -8324,6 +8324,8 @@ impl AppRuntime {
                 &scopes,
                 worktree_hash.as_deref(),
                 match_mode,
+                // GUI interactive search: the watcher owns index builds.
+                false,
             ) {
                 Ok(outcome) => BackendEvent::ProjectIndexSearchResults {
                     id: id.clone(),
@@ -10382,7 +10384,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+        OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
             workspace: self.app_state_view(),
         })
     }

@@ -30,8 +30,9 @@ use structured::{
 const SPEC_SECTION_NAME: &str = "spec";
 const SPEC_CREATE_HELP: &str = r#"gwtd issue spec create --json --title "SPEC: <short title>" [-f <input.json>]
 
-Structured SPEC input is owned by the CLI. Use this help output as the
-single source of truth for the JSON shape and the generated Markdown format.
+Structured SPEC input is owned by gwt-github (spec_structured). Use this help
+output as the single source of truth for the JSON shape and the generated
+Markdown format.
 
 Input JSON schema:
 {

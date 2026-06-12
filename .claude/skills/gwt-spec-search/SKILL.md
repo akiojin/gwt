@@ -27,54 +27,34 @@ When the user asks any of the following, use SPEC search **before** manual file 
 
 Minimum workflow:
 
-1. Run `search-specs` with 2-3 semantic queries derived from the request
+1. Run `"$GWT_BIN" search --specs ...` with 2-3 semantic queries derived from the request
 2. Pick the canonical existing spec if found
 3. Only fall back to creating a new spec when no suitable canonical spec exists
 
-## Environment
-
-When the gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) launches an agent pane, the following env vars are exported automatically:
-
-- `GWT_PROJECT_ROOT` — absolute path of the active worktree
-- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
-- `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
-
-> The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` and
-> `GWT_WORKTREE_HASH` are unset or passed empty, the runner derives them from
-> `--project-root` automatically (Issue #2933). A search therefore needs only
-> `--project-root`, and works in any shell on any platform.
-
 ## SPEC search command
 
+`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
+from inside the target worktree; the repo is resolved from the current
+directory.
+
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action search-specs \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
+"$GWT_BIN" search --specs "your search query" --n-results 10 --json
 ```
 
-If the SPEC index does not yet exist, the runner builds it inline (full mode) from the repo-scoped Issue cache and emits NDJSON progress on stderr before returning the search result.
+If the SPEC index does not yet exist, the search builds it automatically from the repo-scoped Issue cache before returning results (the first call may take longer).
 
 To force a full re-index (normally handled by the watcher / auto-build):
 
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action index-specs \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --mode full
+"$GWT_BIN" index rebuild --scope specs
 ```
 
-## SPEC search output format
+## Output format
 
 ```json
-{"ok": true, "specResults": [
-  {"spec_id": "1939", "title": "gwt-spec: Semantic search platform", "status": "open", "phase": "phase/review", "dir_name": "#1939", "distance": 0.08}
-]}
+{"ok": true, "query": "...", "results": [
+  {"scope": "specs", "title": "SPEC-1939: Semantic search platform", "subtitle": "open · phase/review", "preview": "...", "distance": 0.08, "target": {"kind": "spec", "spec_id": 1939}}
+], "suggestions": []}
 ```
 
 ## When to use
@@ -86,9 +66,31 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Notes
 
-- `search-specs` refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache before external (non-GUI) runner invocations
-- The runner auto-builds the index when missing (use `--no-auto-build` to suppress)
+- The search refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache when invoked outside the GUI
+- A missing index is auto-built on the first search
+- An `EMPTY_CORPUS` error means the Issue cache is unpopulated — refresh the cache (`gwtd issue spec pull --all`) and retry; do **not** conclude that no SPEC owner exists
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For file search, use `gwt-project-search` instead
 - For GitHub Issue search, use `gwt-issue-search` instead
+
+## Fallback: direct runner invocation (older binaries only)
+
+Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
+binary older than the search family), call the Python runner directly:
+
+```bash
+~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
+  --action search-specs \
+  --repo-hash "$GWT_REPO_HASH" \
+  --worktree-hash "$GWT_WORKTREE_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
+  --query "your search query" \
+  --n-results 10
+```
+
+On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe`. The hashes
+are an optimization, not a requirement: when `GWT_REPO_HASH` and
+`GWT_WORKTREE_HASH` are unset or passed empty, the runner derives them from
+`--project-root` automatically (Issue #2933). The fallback returns the legacy
+`{"ok": true, "specResults": [...]}` shape.
