@@ -1118,6 +1118,22 @@ pub struct ActiveWorkItemView {
     /// safe to delete. Display-only; no automatic close (US-61).
     #[serde(default)]
     pub merged_into_base: bool,
+    /// SPEC-2359 W16-2 (FR-389): Workspace grouping key — Works sharing a
+    /// canonical branch (any spelling) carry the same key and merge into one
+    /// Workspace row at view assembly. `None` on legacy payloads.
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    /// SPEC-2359 W16-3 (FR-390): the branch exists only as a fetched remote
+    /// ref — no local worktree. Display-only; launching materializes the
+    /// worktree through the existing Launch path. Default false (legacy).
+    #[serde(default)]
+    pub remote_only: bool,
+    /// SPEC-2359 W16-4 (FR-391): derived Done classification — the branch is
+    /// merged into a base AND the Workspace has no update after the merge
+    /// reference time. Display-only (US-61: never records a close); clears
+    /// automatically when the Workspace is updated after the merge.
+    #[serde(default)]
+    pub done_equivalent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2759,6 +2775,9 @@ mod tests {
                     closed_at: None,
                     session_agent_total: 0,
                     merged_into_base: false,
+                    workspace_key: None,
+                    remote_only: false,
+                    done_equivalent: false,
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {

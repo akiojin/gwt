@@ -1027,6 +1027,167 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+// User verification 2026-06-12: completed (merged) local branches need a
+// BULK cleanup path — the list header offers "Clean Up Merged (N)" that opens
+// the cleanup flow with every merged row preselected.
+test("list header offers bulk Clean Up Merged for all merged Workspaces", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 3,
+      active_works: [
+        {
+          id: "work-work-a-12345678",
+          title: "work/a",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/a",
+          merged_into_base: true,
+          done_equivalent: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-work-b-12345678",
+          title: "work/b",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/b",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-work-open-12345678",
+          title: "work/open",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/open",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidates) => cleanupCalls.push(candidates),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const bulk = fixture.body.querySelector('[data-action="cleanup-merged-workspaces"]');
+  assert.ok(bulk, "bulk Clean Up Merged control must exist");
+  assert.match(bulk.textContent, /Clean Up Merged \(2\)/);
+  bulk.click();
+  assert.equal(cleanupCalls.length, 1);
+  const branches = cleanupCalls[0].map((candidate) => candidate.branch).sort();
+  assert.deepEqual(branches, ["work/a", "work/b"]);
+});
+
+// SPEC-2359 W16-4 (FR-391 / SC-262): a merged-and-stale Workspace presents
+// as derived Done — badge "Done" with data-derived marking it apart from an
+// explicit close — and never as Active/Paused.
+test("done-equivalent Workspace presents as derived Done, not Paused", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-merged-12345678",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          done_equivalent: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const badge = fixture.body.querySelector(".workspace-overview-lifecycle");
+  assert.equal(badge.textContent, "Done", "derived Done presents as Done");
+  assert.equal(badge.dataset.lifecycle, "done");
+  assert.equal(badge.dataset.derived, "true", "distinct from an explicit close");
+});
+
+// SPEC-2359 W16-3 (FR-390): a fetched-remote-only Workspace shows a Remote
+// badge; the Launch Agent header action still opens the launch wizard with
+// the branch prefilled (worktree materializes on demand) and rendering the
+// badge sends nothing.
+test("remote-only Workspace shows the Remote badge and keeps the prefilled Launch", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-fetched-12345678",
+          title: "work/fetched",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/fetched",
+          remote_only: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const badge = fixture.body.querySelector(".workspace-overview-remote");
+  assert.ok(badge, "Remote badge renders for remote-only rows");
+  assert.equal(badge.textContent, "Remote");
+  assert.equal(sent.length, 0, "rendering generates no events (FR-381/FR-390)");
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "Launch Agent stays available for remote-only rows");
+  launch.click();
+  assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
+  assert.equal(sent.at(-1)?.branch_name, "work/fetched");
+});
+
 // Design pass (2026-06-11, frontend-design): the branch name renders with a
 // dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
 // the full text content stays the verbatim branch for copy / a11y.

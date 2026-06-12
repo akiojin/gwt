@@ -142,6 +142,91 @@ pub fn run_git_logged(
     result
 }
 
+/// SPEC-2359 W-16 (FR-387): `run_git_logged` variant that pipes `stdin`
+/// into the child — required by `git cat-file --batch-check`, which reads
+/// its object list from stdin so one spawn resolves many blobs.
+pub fn run_git_logged_with_stdin(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+    stdin: &[u8],
+) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+
+    let spawn_id = next_git_spawn_id();
+    let label = format!("git {}", args.join(" "));
+    let started_at = std::time::Instant::now();
+
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "git",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "start",
+        "process start",
+    );
+    push_command_banner_to_hub(
+        crate::process_console::ProcessKind::Git,
+        spawn_id,
+        &label,
+        current_dir,
+    );
+
+    let mut command = hidden_command("git");
+    command.args(args);
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let result = (|| {
+        let mut child = command.spawn()?;
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(stdin)?;
+        }
+        child.wait_with_output()
+    })();
+
+    let (exit_code, success, stdout_lines, stderr_lines) = match &result {
+        Ok(output) => {
+            forward_git_lines(spawn_id, &output.stdout, &output.stderr);
+            let stdout_lines = String::from_utf8_lossy(&output.stdout).lines().count() as u64;
+            let stderr_lines = String::from_utf8_lossy(&output.stderr).lines().count() as u64;
+            (
+                output.status.code(),
+                output.status.success(),
+                stdout_lines,
+                stderr_lines,
+            )
+        }
+        Err(_) => (None, false, 0, 0),
+    };
+
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    push_command_summary_to_hub(
+        crate::process_console::ProcessKind::Git,
+        spawn_id,
+        exit_code,
+        duration_ms,
+    );
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "git",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "end",
+        exit_code = exit_code.map(|c| c as i64),
+        duration_ms = duration_ms,
+        stdout_lines = stdout_lines,
+        stderr_lines = stderr_lines,
+        success = success,
+        "process end",
+    );
+
+    result
+}
+
 /// Shared helper: push a synthetic banner line (the command string
 /// prefixed with `$ `) as the first line of a new spawn. Used by
 /// `run_git_logged` and `spawn_logged` so the Console window can render

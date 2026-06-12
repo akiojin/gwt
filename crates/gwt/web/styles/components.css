@@ -1984,6 +1984,12 @@ kbd.op-kbd {
   color: var(--color-state-idle);
 }
 
+/* SPEC-2359 W16-4 (FR-391): derived Done (merged ∧ stale) — dashed border
+   distinguishes it from an explicit user close. */
+.workspace-overview-lifecycle[data-derived="true"] {
+  border-style: dashed;
+}
+
 .workspace-overview-lifecycle[data-lifecycle="done"] {
   border-color: color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
   color: var(--color-state-done);
@@ -2112,6 +2118,30 @@ kbd.op-kbd {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* Bulk cleanup row above the Workspace roster (user verification
+   2026-06-12): one click sweeps every merged branch. */
+.workspace-overview-bulk-cleanup {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
+   worktree on demand. */
+.workspace-overview-remote {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
 }
 
 /* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
