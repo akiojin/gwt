@@ -11,10 +11,19 @@ import { dirname, resolve } from "node:path";
 
 import { groupBoardLanes, GENERAL_LANE_KEY } from "../board-surface.js";
 
-const appSource = readFileSync(
-  resolve(dirname(fileURLToPath(import.meta.url)), "../app.js"),
-  "utf8",
-);
+// SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
+// board-logs-surface.js; source-pattern asserts scan both files so the
+// dispatcher case arms (app.js) and the moved renderers stay covered.
+const appSource = [
+  readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../app.js"),
+    "utf8",
+  ),
+  readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../board-logs-surface.js"),
+    "utf8",
+  ),
+].join("\n");
 
 const workspaces = [
   {
