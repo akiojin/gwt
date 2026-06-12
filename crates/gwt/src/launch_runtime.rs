@@ -502,14 +502,63 @@ fn quote_powershell_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Escape an argument for PowerShell's Legacy native command argument
+/// passing so the child's MSVCRT command-line parser reconstructs the
+/// original string (SPEC-2014 FR-105).
+///
+/// Legacy passing places the argument on the raw command line, wrapping it
+/// in double quotes only when it contains whitespace and never escaping
+/// embedded quotes. Unescaped `"` then toggle quoting in the child parser
+/// and disappear: `{"fastMode":true}` arrives as `{fastMode:true}` and
+/// Claude Code exits with `Error: Invalid JSON provided to --settings`.
+/// Batch targets (`.cmd`/`.bat` such as npx.cmd) always use Legacy passing,
+/// even under pwsh 7.3+'s `Windows` mode.
+///
+/// Only embedded quotes need help: a backslash run before each `"` is
+/// doubled and the quote emitted as `\"`. Trailing backslashes are left
+/// alone — Legacy passing already doubles a trailing run itself when it
+/// wraps whitespace arguments (probe-verified on pwsh 7 and PS 5.1).
+fn escape_native_arg_for_legacy_passing(value: &str) -> String {
+    if !value.contains('"') {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len() + 8);
+    let mut pending_backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => pending_backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', pending_backslashes * 2 + 1));
+                out.push('"');
+                pending_backslashes = 0;
+            }
+            other => {
+                out.extend(std::iter::repeat_n('\\', pending_backslashes));
+                pending_backslashes = 0;
+                out.push(other);
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', pending_backslashes));
+    out
+}
+
 fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&str>) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(quote_powershell_literal(command));
-    parts.extend(args.iter().map(|arg| quote_powershell_literal(arg)));
-    let mut script = launch_banner_lines(command, args, cwd)
-        .into_iter()
-        .map(|line| format!("Write-Host {}", quote_powershell_literal(&line)))
-        .collect::<Vec<_>>();
+    parts.extend(
+        args.iter()
+            .map(|arg| quote_powershell_literal(&escape_native_arg_for_legacy_passing(arg))),
+    );
+    // Pin Legacy passing so the escaping above is deterministic across
+    // PowerShell versions and target kinds (.exe vs .cmd). Windows
+    // PowerShell 5.1 ignores the assignment and is Legacy-only anyway.
+    let mut script = vec!["$PSNativeCommandArgumentPassing = 'Legacy'".to_string()];
+    script.extend(
+        launch_banner_lines(command, args, cwd)
+            .into_iter()
+            .map(|line| format!("Write-Host {}", quote_powershell_literal(&line))),
+    );
     script.push(format!("& {}", parts.join(" ")));
     script.push(
         "$gwtExitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }"
@@ -1633,6 +1682,80 @@ mod tests {
         assert!(expression.contains("[gwt] command:"));
         assert!(expression.contains("[gwt] process exited with status !GWT_AGENT_EXIT!"));
         assert!(expression.contains("exit !GWT_AGENT_EXIT!"));
+    }
+
+    // SPEC-2014 FR-105 / SC-063: PowerShell wrappers must deliver arguments
+    // containing embedded quotes intact. Legacy native passing places the
+    // argument raw on the child command line, so embedded `"` must be
+    // MSVCRT-escaped or the child argv loses them
+    // (`{"fastMode":true}` arrives as `{fastMode:true}`).
+    #[test]
+    fn powershell_agent_wrapper_forces_legacy_passing_and_escapes_quoted_args() {
+        let mut env = HashMap::from([(
+            "GWT_PROJECT_ROOT".to_string(),
+            r"E:\gwt\work\demo".to_string(),
+        )]);
+        let args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--settings".to_string(),
+            r#"{"fastMode":true}"#.to_string(),
+        ];
+
+        let (command, shell_args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::PowerShell7,
+            r"C:\Program Files\nodejs\npx.cmd",
+            &args,
+            &mut env,
+        );
+
+        assert_eq!(command, "pwsh");
+        let script = shell_args.last().expect("PowerShell command script");
+        assert!(
+            script.starts_with("$PSNativeCommandArgumentPassing = 'Legacy'"),
+            "script must pin Legacy native argument passing first: {script}"
+        );
+        assert!(
+            script.contains(r#"'{\"fastMode\":true}'"#),
+            "native invocation must carry MSVCRT-escaped JSON: {script}"
+        );
+        let native_invocation = script
+            .split("; ")
+            .find(|stmt| stmt.trim_start().starts_with("& "))
+            .expect("native invocation statement");
+        assert!(
+            !native_invocation.contains(r#"{"fastMode":true}"#),
+            "unescaped JSON must not reach the native invocation: {native_invocation}"
+        );
+    }
+
+    #[test]
+    fn escape_native_arg_for_legacy_passing_rules() {
+        // Arguments without embedded quotes (and without a wrapped trailing
+        // backslash) pass through unchanged.
+        assert_eq!(escape_native_arg_for_legacy_passing("--yes"), "--yes");
+        assert_eq!(
+            escape_native_arg_for_legacy_passing(r"E:\gwt\work\demo"),
+            r"E:\gwt\work\demo"
+        );
+        // Embedded quotes are MSVCRT-escaped.
+        assert_eq!(
+            escape_native_arg_for_legacy_passing(r#"{"fastMode":true}"#),
+            r#"{\"fastMode\":true}"#
+        );
+        // Backslashes immediately before a quote are doubled.
+        assert_eq!(escape_native_arg_for_legacy_passing(r#"a\"b"#), r#"a\\\"b"#);
+        // Trailing backslashes stay untouched: Legacy passing doubles a
+        // trailing run itself when it wraps whitespace arguments.
+        assert_eq!(
+            escape_native_arg_for_legacy_passing("E:\\path with space\\"),
+            "E:\\path with space\\"
+        );
+        // Whitespace and embedded quotes combined.
+        assert_eq!(
+            escape_native_arg_for_legacy_passing(r#"{"a":"hello world"}"#),
+            r#"{\"a\":\"hello world\"}"#
+        );
     }
 
     #[cfg(windows)]
