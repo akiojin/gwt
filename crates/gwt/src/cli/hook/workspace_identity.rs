@@ -14,7 +14,7 @@ use super::HookError;
 /// Workspace projection's `agents[]` before any further coordination CLI
 /// runs. Without this, `gwtd workspace update --agent-session ... --title-summary ...`
 /// silently no-ops because `apply_update`'s session matcher finds nothing
-/// to update (only a journal entry is written, and no `WorkspaceState`
+/// to update (only a journal entry is written, and no `WindowCanvasState`
 /// broadcast fires).
 ///
 /// Registration is idempotent: if the launch flow has already registered

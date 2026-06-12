@@ -1,0 +1,644 @@
+//! Work item / Work event data model: the event-sourced history entities
+//! ([`WorkEvent`], [`WorkEventKind`]) and the hot [`WorkItemsProjection`]
+//! fold that turns recorded events into current Work items, plus the legacy
+//! `Workspace*`-prefixed adapter aliases.
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::*;
+
+/// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
+/// linked to a Workspace. Workspace Card preview and Detail pane render these
+/// as chips (`#Issue-1234`) instead of free-text. The number is required;
+/// title / url are populated when known and default to None for legacy data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceIssueLink {
+    pub number: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Pull
+/// Request linked to a Workspace. Carries `state` (e.g. open / merged /
+/// closed) so UI can render lifecycle hints alongside `lifecycle_stage`
+/// without re-querying GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePrLink {
+    pub number: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+/// Reference from a Work item to one agent session that worked on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkAgentRef {
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Reference from a Work item to the branch / worktree / PR it executed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceExecutionContainerRef {
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub pr_number: Option<u64>,
+    #[serde(default)]
+    pub pr_url: Option<String>,
+    #[serde(default)]
+    pub pr_state: Option<String>,
+}
+
+/// Lifecycle event kind in a Work item's history (start, claim, update,
+/// pause, done, ...). Each kind maps to one [`WorkEvent`] record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventKind {
+    Start,
+    Claim,
+    Update,
+    Blocked,
+    Handoff,
+    Resume,
+    Split,
+    Merge,
+    Pr,
+    /// SPEC-2359 Phase W-12 Slice 5a (FR-350): the owning agent session stopped
+    /// without an explicit user close. The Work is retained as Paused (not Done)
+    /// so it stays on the Work surface until the user closes it.
+    Pause,
+    Done,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): the user explicitly discarded the
+    /// Work from the Work surface. This is a terminal close distinct from Done:
+    /// the Work leaves the active surface but its provenance is retained as
+    /// discarded (not completed). Agent stop alone never yields Discard.
+    Discard,
+    /// SPEC-2359 Phase W-15 (FR-380): a worktree existed on disk without any
+    /// matching Work record, so reconciliation materialized one. The event
+    /// must not carry an explicit `status_category`: `apply_event` only
+    /// preserves terminal (Done/Discarded) items against implicit-status
+    /// events, and a committed Backfill event may be re-ingested on another
+    /// machine after the Work was closed there (W-16 intake).
+    Backfill,
+}
+
+/// One append-only event in a Work item's lifecycle. Events are folded into
+/// [`WorkItem`]s by [`WorkItemsProjection`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEvent {
+    pub id: String,
+    pub work_item_id: String,
+    pub kind: WorkEventKind,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub status_category: Option<WorkspaceStatusCategory>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub board_entry_id: Option<String>,
+    #[serde(default)]
+    pub execution_container: Option<WorkspaceExecutionContainerRef>,
+    #[serde(default)]
+    pub related_work_item_id: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl WorkEvent {
+    pub fn new(
+        kind: WorkEventKind,
+        work_item_id: impl Into<String>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            work_item_id: work_item_id.into(),
+            kind,
+            title: None,
+            intent: None,
+            summary: None,
+            status_category: None,
+            owner: None,
+            next_action: None,
+            agent_session_id: None,
+            agent_id: None,
+            display_name: None,
+            board_entry_id: None,
+            execution_container: None,
+            related_work_item_id: None,
+            updated_at,
+        }
+    }
+}
+
+/// One unit of work on the Work surface: title, status, participating
+/// agents, execution containers, and its event history. Built by folding
+/// [`WorkEvent`]s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItem {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub status_category: WorkspaceStatusCategory,
+    #[serde(default)]
+    pub owner: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub agents: Vec<WorkAgentRef>,
+    #[serde(default)]
+    pub execution_containers: Vec<WorkspaceExecutionContainerRef>,
+    #[serde(default)]
+    pub board_refs: Vec<String>,
+    #[serde(default)]
+    pub related_work_item_ids: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<WorkEvent>,
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal discarded close. A
+    /// discarded Work is removed from the active Work surface but kept in the
+    /// history with its provenance. Distinct from `status_category == Done`
+    /// (which marks completion); `discarded` marks an explicit user discard.
+    /// Back-compat default is `false` for projections written before W-12.
+    #[serde(default)]
+    pub discarded: bool,
+}
+
+impl WorkItem {
+    /// A Work is incomplete while it is neither completed (Done) nor discarded.
+    /// Both Done and Discarded are terminal closes (FR-352).
+    pub fn is_incomplete(&self) -> bool {
+        self.status_category != WorkspaceStatusCategory::Done && !self.discarded
+    }
+
+    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when the Work has reached a
+    /// terminal close — either completed (Done) or explicitly discarded.
+    pub fn is_terminal(&self) -> bool {
+        self.status_category == WorkspaceStatusCategory::Done || self.discarded
+    }
+}
+
+/// Materialized collection of all Work items for one project, rebuilt by
+/// folding the Work event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemsProjection {
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub work_items: Vec<WorkItem>,
+}
+
+impl WorkItemsProjection {
+    pub fn empty(updated_at: DateTime<Utc>) -> Self {
+        Self {
+            updated_at,
+            work_items: Vec::new(),
+        }
+    }
+
+    pub fn apply_event(&mut self, event: WorkEvent) {
+        let existing_index = self
+            .work_items
+            .iter()
+            .position(|item| item.id == event.work_item_id);
+        let index = existing_index.unwrap_or_else(|| {
+            self.work_items.push(WorkItem {
+                id: event.work_item_id.clone(),
+                title: event
+                    .title
+                    .clone()
+                    .or_else(|| event.intent.clone())
+                    .unwrap_or_else(|| event.work_item_id.clone()),
+                intent: event.intent.clone(),
+                summary: event.summary.clone(),
+                status_category: workspace_work_event_status(&event),
+                owner: event.owner.clone(),
+                created_at: event.updated_at,
+                updated_at: event.updated_at,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: Vec::new(),
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                discarded: false,
+            });
+            self.work_items.len() - 1
+        });
+
+        let item = &mut self.work_items[index];
+        // SPEC-2359 Phase W-16 (FR-403): a Backfill event is a synthetic
+        // materialization marker, not activity. Applied to an existing item
+        // (a duplicated / replayed backfill line), it must not advance
+        // `updated_at`, overwrite the real title, or touch status — otherwise
+        // every materialized row collapses onto the replay instant and the
+        // recency sort degenerates. Only the execution container may merge.
+        if existing_index.is_some() && event.kind == WorkEventKind::Backfill {
+            if let Some(container) = event.execution_container.clone() {
+                if !item
+                    .execution_containers
+                    .iter()
+                    .any(|existing| workspace_execution_container_same(existing, &container))
+                {
+                    item.execution_containers.push(container);
+                }
+            }
+            item.events.push(event);
+            return;
+        }
+        if let Some(title) = non_empty_clone(event.title.as_deref()) {
+            item.title = title;
+        }
+        if let Some(intent) = non_empty_clone(event.intent.as_deref()) {
+            item.intent = Some(intent);
+        }
+        if let Some(summary) = non_empty_clone(event.summary.as_deref()) {
+            item.summary = Some(summary);
+        }
+        if let Some(owner) = non_empty_clone(event.owner.as_deref()) {
+            item.owner = Some(owner);
+        }
+        // SPEC-2359 US-37: Done is a terminal state. Heartbeat update events
+        // (kind=Update with status_category=None) emitted after a Done event
+        // must not regress the WorkItem to Active/Idle. Only events that
+        // carry an explicit `status_category` may transition out of Done.
+        //
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is likewise terminal.
+        // Once a Work is discarded, subsequent events (heartbeat updates without
+        // an explicit status_category) must not regress its runtime status; the
+        // `discarded` flag is monotonic and never reset.
+        let new_status = workspace_work_event_status(&event);
+        let preserve_terminal = (item.status_category == WorkspaceStatusCategory::Done
+            || item.discarded)
+            && event.status_category.is_none();
+        if !preserve_terminal {
+            item.status_category = new_status;
+        }
+        if event.kind == WorkEventKind::Discard {
+            item.discarded = true;
+        }
+        if item.status_category == WorkspaceStatusCategory::Done {
+            // Preserve the first Done timestamp so idempotent Done re-applies
+            // (e.g. retroactive_auto_done_scan rerun) keep the original
+            // completion time.
+            item.completed_at = item.completed_at.or(Some(event.updated_at));
+        } else {
+            item.completed_at = None;
+        }
+        item.updated_at = event.updated_at;
+        if item.created_at > event.updated_at {
+            item.created_at = event.updated_at;
+        }
+        if let Some(session_id) = non_empty_clone(event.agent_session_id.as_deref()) {
+            if let Some(agent) = item
+                .agents
+                .iter_mut()
+                .find(|agent| agent.session_id == session_id)
+            {
+                agent.agent_id = event.agent_id.clone().or(agent.agent_id.clone());
+                agent.display_name = event.display_name.clone().or(agent.display_name.clone());
+                agent.updated_at = event.updated_at;
+            } else {
+                item.agents.push(WorkAgentRef {
+                    session_id,
+                    agent_id: event.agent_id.clone(),
+                    display_name: event.display_name.clone(),
+                    updated_at: event.updated_at,
+                });
+            }
+        }
+        if let Some(container) = event.execution_container.clone() {
+            if !item
+                .execution_containers
+                .iter()
+                .any(|existing| workspace_execution_container_same(existing, &container))
+            {
+                item.execution_containers.push(container);
+            }
+        }
+        if let Some(board_entry_id) = non_empty_clone(event.board_entry_id.as_deref()) {
+            push_unique(&mut item.board_refs, board_entry_id);
+        }
+        if let Some(related_work_item_id) = non_empty_clone(event.related_work_item_id.as_deref()) {
+            push_unique(&mut item.related_work_item_ids, related_work_item_id);
+        }
+        let event_updated_at = event.updated_at;
+        item.events.push(event);
+        item.events.sort_by_key(|event| event.updated_at);
+        if event_updated_at > self.updated_at {
+            self.updated_at = event_updated_at;
+        }
+        self.work_items
+            .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    }
+}
+
+fn workspace_work_event_status(event: &WorkEvent) -> WorkspaceStatusCategory {
+    event.status_category.unwrap_or(match event.kind {
+        WorkEventKind::Done => WorkspaceStatusCategory::Done,
+        WorkEventKind::Blocked => WorkspaceStatusCategory::Blocked,
+        // Pause keeps the Work incomplete (non-Done) while the agent is stopped;
+        // the Idle status preserves the retained-but-not-running semantics.
+        WorkEventKind::Pause => WorkspaceStatusCategory::Idle,
+        // Discard does not complete the Work (status stays non-Done); the
+        // terminal close is carried by the `discarded` flag (FR-352). Idle
+        // mirrors the retained-but-not-running runtime status.
+        WorkEventKind::Discard => WorkspaceStatusCategory::Idle,
+        // Backfill materializes a Work for an existing worktree with no live
+        // agent, so it surfaces as retained-but-not-running (rendered Paused).
+        WorkEventKind::Backfill => WorkspaceStatusCategory::Idle,
+        WorkEventKind::Start
+        | WorkEventKind::Claim
+        | WorkEventKind::Update
+        | WorkEventKind::Handoff
+        | WorkEventKind::Resume
+        | WorkEventKind::Split
+        | WorkEventKind::Merge
+        | WorkEventKind::Pr => WorkspaceStatusCategory::Active,
+    })
+}
+
+fn workspace_execution_container_same(
+    left: &WorkspaceExecutionContainerRef,
+    right: &WorkspaceExecutionContainerRef,
+) -> bool {
+    (left.branch.is_some() && left.branch == right.branch)
+        || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
+        || (left.pr_number.is_some() && left.pr_number == right.pr_number)
+        || (left.pr_url.is_some() && left.pr_url == right.pr_url)
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+pub(super) fn non_empty_clone(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// SPEC-2359 US-66 (T-529): legacy adapter aliases for the renamed Work
+/// entity family. In-repo call sites are fully migrated; these exist only
+/// so external consumers keep compiling. New code must use the Work names.
+pub type WorkspaceWorkItem = WorkItem;
+pub type WorkspaceWorkEvent = WorkEvent;
+pub type WorkspaceWorkEventKind = WorkEventKind;
+pub type WorkspaceWorkItemsProjection = WorkItemsProjection;
+pub type WorkspaceWorkAgentRef = WorkAgentRef;
+pub type WorkspaceWorkItemsCache = WorkItemsCache;
+pub type WorkspaceWorkItemsRebuildOutcome = WorkItemsRebuildOutcome;
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn workspace_work_events_build_hot_projection_with_lifecycle_refs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = temp.path().join("workspace/work_items.json");
+        let events_path = temp.path().join("workspace/work_events.jsonl");
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 0, 0).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 5, 11, 1, 30, 0).unwrap();
+
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
+            "workitem-workspace-history",
+            started_at,
+        );
+        start.title = Some("Workspace WorkItem history".to_string());
+        start.intent = Some("Group duplicate Workspace work under one WorkItem".to_string());
+        start.summary = Some("Start the WorkItem lifecycle implementation.".to_string());
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        start.owner = Some("SPEC-2359".to_string());
+        start.agent_session_id = Some("session-1".to_string());
+        start.agent_id = Some("codex".to_string());
+        start.display_name = Some("Codex".to_string());
+        start.board_entry_id = Some("board-claim-1".to_string());
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/20260510-2353".to_string()),
+            worktree_path: Some(PathBuf::from("/repo/work/20260510-2353")),
+            pr_number: Some(2638),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/2638".to_string()),
+            pr_state: Some("open".to_string()),
+        });
+        record_workspace_work_event_paths(&work_items_path, &events_path, start)
+            .expect("record start event");
+
+        let mut done = WorkEvent::new(WorkEventKind::Done, "workitem-workspace-history", done_at);
+        done.summary = Some("WorkItem lifecycle history is implemented.".to_string());
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        done.agent_session_id = Some("session-1".to_string());
+        done.board_entry_id = Some("board-done-1".to_string());
+        record_workspace_work_event_paths(&work_items_path, &events_path, done)
+            .expect("record done event");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(projection.work_items.len(), 1);
+        let item = &projection.work_items[0];
+        assert_eq!(item.id, "workitem-workspace-history");
+        assert_eq!(item.title, "Work WorkItem history");
+        assert_eq!(
+            item.intent.as_deref(),
+            Some("Group duplicate Workspace work under one WorkItem")
+        );
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(item.owner.as_deref(), Some("SPEC-2359"));
+        assert_eq!(item.completed_at, Some(done_at));
+        assert_eq!(
+            item.board_refs,
+            vec!["board-claim-1".to_string(), "board-done-1".to_string()]
+        );
+        assert_eq!(item.agents.len(), 1);
+        assert_eq!(item.agents[0].session_id, "session-1");
+        assert_eq!(item.execution_containers.len(), 1);
+        assert_eq!(
+            item.execution_containers[0].branch.as_deref(),
+            Some("work/20260510-2353")
+        );
+        assert_eq!(item.events.len(), 2);
+        assert_eq!(item.events[0].kind, WorkEventKind::Start);
+        assert_eq!(item.events[1].kind, WorkEventKind::Done);
+
+        let event_lines = std::fs::read_to_string(&events_path).expect("event log");
+        assert_eq!(event_lines.lines().count(), 2);
+    }
+
+    #[test]
+    fn apply_event_preserves_done_against_subsequent_heartbeat() {
+        let work_item_id = "test-item-preserve";
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 11, 0, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(t1);
+
+        let mut done_event = WorkEvent::new(WorkEventKind::Done, work_item_id, t1);
+        done_event.status_category = Some(WorkspaceStatusCategory::Done);
+        done_event.title = Some("Test work item".to_string());
+        projection.apply_event(done_event);
+
+        let item_after_done = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("done event must create work item");
+        assert_eq!(
+            item_after_done.status_category,
+            WorkspaceStatusCategory::Done
+        );
+        assert_eq!(item_after_done.completed_at, Some(t1));
+
+        let update_event = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
+        assert!(
+            update_event.status_category.is_none(),
+            "heartbeat update event has no explicit status_category"
+        );
+        projection.apply_event(update_event);
+
+        let item_after_update = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item still exists");
+        assert_eq!(
+            item_after_update.status_category,
+            WorkspaceStatusCategory::Done,
+            "SPEC-2359 US-37: Done is a terminal state; heartbeat update with status_category=None must not regress it"
+        );
+        assert_eq!(
+            item_after_update.completed_at,
+            Some(t1),
+            "initial Done timestamp must be preserved across subsequent update events"
+        );
+    }
+
+    #[test]
+    fn apply_event_discard_marks_work_terminal_discarded() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
+        // terminal-discarded (not Done) and removes it from the incomplete set.
+        let work_item_id = "test-item-discard";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(t1);
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_item_id, t1);
+        start.status_category = Some(WorkspaceStatusCategory::Active);
+        start.title = Some("Discardable work".to_string());
+        projection.apply_event(start);
+
+        let discard = WorkEvent::new(WorkEventKind::Discard, work_item_id, t2);
+        projection.apply_event(discard);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(item.discarded, "Discard event must mark the Work discarded");
+        assert!(item.is_terminal(), "discarded Work is terminal");
+        assert!(!item.is_incomplete(), "discarded Work is not incomplete");
+        assert_ne!(
+            item.status_category,
+            WorkspaceStatusCategory::Done,
+            "Discard is distinct from Done"
+        );
+        assert_eq!(
+            item.completed_at, None,
+            "discarded Work is not completed, so completed_at stays None"
+        );
+    }
+
+    #[test]
+    fn apply_event_preserves_discarded_against_subsequent_heartbeat() {
+        // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is terminal — a later
+        // heartbeat update (no explicit status_category) must not un-discard.
+        let work_item_id = "test-item-discard-preserve";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 4, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 4, 11, 0, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(t1);
+        let discard = WorkEvent::new(WorkEventKind::Discard, work_item_id, t1);
+        projection.apply_event(discard);
+        let update = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
+        projection.apply_event(update);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists");
+        assert!(
+            item.discarded,
+            "heartbeat update must not clear the discarded terminal flag"
+        );
+        assert!(!item.is_incomplete());
+    }
+
+    #[test]
+    fn apply_event_idempotent_done_keeps_first_timestamp() {
+        let work_item_id = "test-item-idempotent";
+        let t1 = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(t1);
+
+        let mut first_done = WorkEvent::new(WorkEventKind::Done, work_item_id, t1);
+        first_done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(first_done);
+
+        let mut second_done = WorkEvent::new(WorkEventKind::Done, work_item_id, t2);
+        second_done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(second_done);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("item exists after idempotent done");
+        assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(
+            item.completed_at,
+            Some(t1),
+            "first Done timestamp must be preserved on idempotent Done re-apply"
+        );
+        assert_eq!(item.updated_at, t2, "updated_at should still advance");
+    }
+}

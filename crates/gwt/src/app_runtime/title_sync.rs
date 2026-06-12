@@ -8,7 +8,7 @@
 //! (1) update `current.json` + `journal.jsonl`,
 //! (2) sync `tab.workspace.windows[<id>].dynamic_title` in memory,
 //! (3) broadcast `BackendEvent::ActiveWorkProjection`, and
-//! (4) broadcast `BackendEvent::WorkspaceState` so the pane heading
+//! (4) broadcast `BackendEvent::WindowCanvasState` so the pane heading
 //! `windowData.dynamic_title` consumed by `windowDisplayTitle` on the
 //! frontend refreshes. `gwtd workspace update --title-summary` ran (1)
 //! and (3) but never (4), so the pane heading kept the `agent_id`
@@ -20,7 +20,7 @@
 //! returned `Vec<OutboundEvent>` and is guaranteed to leave the surfaces
 //! consistent. Phase U-1 (this commit) keeps the broadcast surface
 //! identical to the pre-refactor behavior to preserve every existing
-//! test; Phase U-2 wires the `WorkspaceState` broadcast in;
+//! test; Phase U-2 wires the `WindowCanvasState` broadcast in;
 //! Phase U-3 adds `active_agent_sessions` backfill for sessions that
 //! gwt's launch flow has not yet registered.
 
@@ -41,7 +41,7 @@ impl AppRuntime {
     ///
     /// Return value:
     /// - The `OutboundEvent`s that callers should dispatch. Phase U-2
-    ///   (SPEC-2359 US-26) makes this emit `BackendEvent::WorkspaceState`
+    ///   (SPEC-2359 US-26) makes this emit `BackendEvent::WindowCanvasState`
     ///   when an in-memory `dynamic_title` actually changed, so the
     ///   frontend's pane heading (`windowDisplayTitle` →
     ///   `windowData.dynamic_title`) updates immediately without waiting
