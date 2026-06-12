@@ -1984,6 +1984,12 @@ kbd.op-kbd {
   color: var(--color-state-idle);
 }
 
+/* SPEC-2359 W16-4 (FR-391): derived Done (merged ∧ stale) — dashed border
+   distinguishes it from an explicit user close. */
+.workspace-overview-lifecycle[data-derived="true"] {
+  border-style: dashed;
+}
+
 .workspace-overview-lifecycle[data-lifecycle="done"] {
   border-color: color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
   color: var(--color-state-done);

@@ -84,6 +84,39 @@ pub fn list_origin_refs_with_commit(repo_path: &Path) -> Result<Vec<(String, Str
     Ok(refs)
 }
 
+/// SPEC-2359 W16-4 (FR-391): committer time (unix seconds) of every local
+/// branch tip and every `origin/*` tip, in ONE `for-each-ref` spawn. Keys
+/// are short ref names (`work/x`, `origin/work/x`). Used as the
+/// merge-reference-time proxy for the derived Done classification.
+pub fn branch_tip_committer_times(
+    repo_path: &Path,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(committerdate:unix)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| GwtError::Git(format!("for-each-ref tip times: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Git(format!("for-each-ref tip times: {stderr}")));
+    }
+    let times = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, unix) = line.split_once('\t')?;
+            let name = name.trim();
+            let unix: i64 = unix.trim().parse().ok()?;
+            (!name.is_empty()).then(|| (name.to_string(), unix))
+        })
+        .collect();
+    Ok(times)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -130,6 +163,22 @@ mod tests {
         run(Command::new("git")
             .args(["update-ref", refname, "HEAD"])
             .current_dir(repo));
+    }
+
+    #[test]
+    fn branch_tip_committer_times_lists_local_and_origin_tips() {
+        let dir = init_repo();
+        let repo = dir.path();
+        create_branch(repo, "work/x");
+        create_remote_tracking_ref(repo, "refs/remotes/origin/work/y");
+
+        let times = branch_tip_committer_times(repo).expect("tip times");
+        assert!(times.contains_key("main"));
+        assert!(times.contains_key("work/x"));
+        assert!(times.contains_key("origin/work/y"));
+        for time in times.values() {
+            assert!(*time > 1_500_000_000, "plausible unix committer time");
+        }
     }
 
     #[test]

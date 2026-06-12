@@ -106,6 +106,25 @@ pub fn canonical_work_id(
     ))
 }
 
+/// SPEC-2359 W16-4 (FR-391): derived "Done-equivalent" classification for a
+/// merged-and-stale Workspace. PURE display state: callers must never record
+/// a close event from this verdict (US-61 — explicit user close only); the
+/// flag clears by itself when the Workspace is updated after the merge.
+///
+/// `merge_reference_time` is the branch tip committer time (proxy for the
+/// unknown squash-merge instant — plan decision 8). `None` (unknown) never
+/// classifies as Done.
+pub fn derive_merged_done_equivalent(
+    merged_into_base: bool,
+    last_updated_at: DateTime<Utc>,
+    merge_reference_time: Option<DateTime<Utc>>,
+) -> bool {
+    let Some(reference) = merge_reference_time else {
+        return false;
+    };
+    merged_into_base && last_updated_at <= reference
+}
+
 /// SPEC-2359 W16-2 (FR-389): the Workspace grouping key for one Work item —
 /// derived at view-assembly time, never stored (plan decision 6). Works that
 /// share a canonical branch (any spelling: `X`, `origin/X`,
@@ -5939,6 +5958,31 @@ mod tests {
             "first Done timestamp must be preserved on idempotent Done re-apply"
         );
         assert_eq!(item.updated_at, t2, "updated_at should still advance");
+    }
+
+    #[test]
+    fn derive_merged_done_equivalent_classifies_only_merged_and_stale() {
+        let merged_at = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        let before = merged_at - chrono::Duration::hours(1);
+        let after = merged_at + chrono::Duration::hours(1);
+
+        // merged ∧ stale (no update after the merge) → Done-equivalent.
+        assert!(derive_merged_done_equivalent(true, before, Some(merged_at)));
+        assert!(derive_merged_done_equivalent(
+            true,
+            merged_at,
+            Some(merged_at)
+        ));
+        // updated after the merge → back to Active/Paused (FR-391).
+        assert!(!derive_merged_done_equivalent(true, after, Some(merged_at)));
+        // unmerged → never.
+        assert!(!derive_merged_done_equivalent(
+            false,
+            before,
+            Some(merged_at)
+        ));
+        // unknown merge reference → never.
+        assert!(!derive_merged_done_equivalent(true, before, None));
     }
 
     #[test]

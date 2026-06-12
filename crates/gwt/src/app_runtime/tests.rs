@@ -14100,6 +14100,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14214,6 +14215,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14296,6 +14298,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14416,6 +14419,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     }];
 
@@ -14511,6 +14515,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14581,6 +14586,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         merged_into_base: false,
         workspace_key: None,
         remote_only: false,
+        done_equivalent: false,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -14588,8 +14594,10 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         row(Some("work/open"), None),
         row(None, Some("MERGED")),
     ];
-    let merged: std::collections::HashSet<String> =
-        ["work/merged".to_string()].into_iter().collect();
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect();
 
     super::mark_merged_active_works(&mut works, Some(&merged));
 
@@ -14640,8 +14648,10 @@ fn apply_work_merge_status_caches_and_flags_rows() {
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let merged: std::collections::HashSet<String> =
-        ["work/merged".to_string()].into_iter().collect();
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), chrono::Utc::now())]
+            .into_iter()
+            .collect();
     let _ = runtime.apply_work_merge_status(&repo, merged);
 
     let view = runtime
@@ -14977,6 +14987,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             merged_into_base: false,
             workspace_key: None,
             remote_only: false,
+            done_equivalent: false,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15060,6 +15071,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             merged_into_base: false,
             workspace_key: None,
             remote_only: false,
+            done_equivalent: false,
             updated_at: String::new(),
         }
     }
@@ -15079,4 +15091,86 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
     assert!(!works[1].remote_only, "locally checked-out branch is not");
     assert!(!works[2].remote_only, "rows with a worktree are not");
     assert!(!works[3].remote_only, "branchless rows are not");
+}
+
+/// SPEC-2359 W16-4 (FR-391): merged ∧ stale rows classify as derived Done;
+/// activity after the merge reference clears it; explicit terminal closes
+/// and pr_state-only merges never enter the derived classification; and the
+/// marking writes nothing (US-61).
+#[test]
+fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
+    fn row(
+        id: &str,
+        branch: Option<&str>,
+        pr_state: Option<&str>,
+        lifecycle: &str,
+        updated_at: &str,
+    ) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 0,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: pr_state.map(str::to_string),
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: lifecycle.to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    let merge_at = chrono::Utc::now();
+    let stale =
+        (merge_at - chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let fresh =
+        (merge_at + chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+        [("work/merged".to_string(), merge_at)]
+            .into_iter()
+            .collect();
+
+    let mut works = vec![
+        row("w-stale", Some("work/merged"), None, "paused", &stale),
+        row("w-fresh", Some("work/merged"), None, "paused", &fresh),
+        row("w-closed", Some("work/merged"), None, "done", &stale),
+        row(
+            "w-pr-only",
+            Some("work/other"),
+            Some("MERGED"),
+            "paused",
+            &stale,
+        ),
+    ];
+
+    super::mark_merged_active_works(&mut works, Some(&merged));
+
+    assert!(works[0].done_equivalent, "merged ∧ stale → derived Done");
+    assert!(
+        !works[1].done_equivalent,
+        "updated after the merge → back to Active/Paused (FR-391)"
+    );
+    assert!(
+        !works[2].done_equivalent,
+        "explicit terminal close keeps its own lifecycle"
+    );
+    assert!(
+        !works[3].done_equivalent,
+        "pr_state stays badge-only — membership rides the scan verdict"
+    );
+    assert!(works[3].merged_into_base, "pr_state still drives the badge");
 }

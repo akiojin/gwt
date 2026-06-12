@@ -925,7 +925,7 @@ enum UserEvent {
     /// so rows can show the "safe to delete" badge.
     WorkMergeStatus {
         project_root: PathBuf,
-        merged_branches: std::collections::HashSet<String>,
+        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
     /// The handler runs the worktree reconcile AFTER the intake (so branches

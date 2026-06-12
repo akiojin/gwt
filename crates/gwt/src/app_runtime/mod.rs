@@ -2411,6 +2411,7 @@ fn active_work_items_from_projection(
                 merged_into_base: false,
                 workspace_key: None,
                 remote_only: false,
+                done_equivalent: false,
                 updated_at: row_updated_at,
             }
         })
@@ -2497,6 +2498,7 @@ fn append_paused_work_items(
             merged_into_base: false,
             workspace_key: None,
             remote_only: false,
+            done_equivalent: false,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -3259,20 +3261,45 @@ fn mark_remote_only_active_works(
 /// "safe to delete" signal. Display-only; no automatic close (US-61).
 fn mark_merged_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
-    merged_branches: Option<&std::collections::HashSet<String>>,
+    merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
 ) {
     for work in active_works.iter_mut() {
-        let by_cache = work
+        let merge_reference = work
             .branch
             .as_deref()
             .map(crate::runtime_support::normalize_branch_name)
-            .map(|branch| merged_branches.is_some_and(|set| set.contains(&branch)))
-            .unwrap_or(false);
+            .and_then(|branch| merged_branches.and_then(|map| map.get(&branch)))
+            .copied();
         let by_pr = work
             .pr_state
             .as_deref()
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
-        work.merged_into_base = by_cache || by_pr;
+        work.merged_into_base = merge_reference.is_some() || by_pr;
+
+        // SPEC-2359 W16-4 (FR-391): merged ∧ stale → derived Done-equivalent.
+        // Membership rides the scan verdict ONLY (pr_state stays badge-only);
+        // explicit terminal closes keep their own lifecycle; no event is ever
+        // recorded from this classification (US-61).
+        let terminal = matches!(work.lifecycle_state.as_str(), "done" | "discarded");
+        let last_activity = work
+            .agents
+            .iter()
+            .map(|agent| agent.updated_at.as_str())
+            .chain(std::iter::once(work.updated_at.as_str()))
+            .filter_map(|stamp| {
+                chrono::DateTime::parse_from_rfc3339(stamp)
+                    .ok()
+                    .map(|value| value.with_timezone(&chrono::Utc))
+            })
+            .max();
+        work.done_equivalent = !terminal
+            && last_activity.is_some_and(|last| {
+                gwt_core::workspace_projection::derive_merged_done_equivalent(
+                    merge_reference.is_some(),
+                    last,
+                    merge_reference,
+                )
+            });
     }
 }
 
@@ -3793,7 +3820,11 @@ pub struct AppRuntime {
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
-    pub(crate) work_merged_branches: HashMap<PathBuf, std::collections::HashSet<String>>,
+    /// SPEC-2359 W-15/W16-4 (FR-386/FR-391): merged branches per project →
+    /// merge reference time (branch tip committer time proxy). Drives the
+    /// "safe to delete" badge and the derived Done-equivalent classification.
+    pub(crate) work_merged_branches:
+        HashMap<PathBuf, HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -3954,7 +3985,7 @@ impl AppRuntime {
     pub(crate) fn apply_work_merge_status(
         &mut self,
         project_root: &Path,
-        merged_branches: std::collections::HashSet<String>,
+        merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>>,
     ) -> Vec<OutboundEvent> {
         self.work_merged_branches
             .insert(project_root.to_path_buf(), merged_branches);
@@ -4064,21 +4095,39 @@ impl AppRuntime {
             if branches.is_empty() {
                 return;
             }
-            let mut merged = std::collections::HashSet::new();
+            let mut merged: Vec<String> = Vec::new();
             for branch in branches {
                 if matches!(
                     gwt_git::branch::merged_base_target(&project_root, &branch),
                     Ok(Some(_))
                 ) {
-                    merged.insert(branch);
+                    merged.push(branch);
                 }
             }
             if merged.is_empty() {
                 return;
             }
+            // SPEC-2359 W16-4 (FR-391): one extra spawn resolves every tip
+            // committer time — the merge-reference-time proxy for the derived
+            // Done classification (plan decision 8).
+            let tip_times =
+                gwt_git::refs::branch_tip_committer_times(&project_root).unwrap_or_default();
+            let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
+                .into_iter()
+                .map(|branch| {
+                    let unix = tip_times
+                        .get(&branch)
+                        .or_else(|| tip_times.get(&format!("origin/{branch}")))
+                        .copied();
+                    let reference = unix
+                        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                        .unwrap_or_else(chrono::Utc::now);
+                    (branch, reference)
+                })
+                .collect();
             proxy.send(UserEvent::WorkMergeStatus {
                 project_root,
-                merged_branches: merged,
+                merged_branches,
             });
         });
     }
@@ -6002,6 +6051,7 @@ impl AppRuntime {
             merged_into_base: false,
             workspace_key: None,
             remote_only: false,
+            done_equivalent: false,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {

@@ -1027,6 +1027,48 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+// SPEC-2359 W16-4 (FR-391 / SC-262): a merged-and-stale Workspace presents
+// as derived Done — badge "Done" with data-derived marking it apart from an
+// explicit close — and never as Active/Paused.
+test("done-equivalent Workspace presents as derived Done, not Paused", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-merged-12345678",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          done_equivalent: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const badge = fixture.body.querySelector(".workspace-overview-lifecycle");
+  assert.equal(badge.textContent, "Done", "derived Done presents as Done");
+  assert.equal(badge.dataset.lifecycle, "done");
+  assert.equal(badge.dataset.derived, "true", "distinct from an explicit close");
+});
+
 // SPEC-2359 W16-3 (FR-390): a fetched-remote-only Workspace shows a Remote
 // badge; the Launch Agent header action still opens the launch wizard with
 // the branch prefilled (worktree materializes on demand) and rendering the

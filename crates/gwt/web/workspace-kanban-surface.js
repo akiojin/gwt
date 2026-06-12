@@ -161,6 +161,9 @@ export function createWorkspaceKanbanSurface({
       // SPEC-2359 W16-3 (FR-390): branch known only from fetched refs — no
       // local worktree. Display-only; Launch materializes one on demand.
       remote_only: Boolean(item?.remote_only),
+      // SPEC-2359 W16-4 (FR-391): derived Done classification (merged ∧ no
+      // update after the merge). Display-only; clears on new activity.
+      done_equivalent: Boolean(item?.done_equivalent),
       // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
       // — the "safe to delete" signal. Display-only.
       merged_into_base: Boolean(item?.merged_into_base),
@@ -282,12 +285,22 @@ export function createWorkspaceKanbanSurface({
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
     // so the Work surface is the single home for Work lifecycle.
+    // SPEC-2359 W16-4 (FR-391): a merged-and-stale Workspace classifies as
+    // derived Done — the badge reads Done (data-derived marks it apart from
+    // an explicit close) and the row never presents as Active/Paused.
+    const doneEquivalent = Boolean(item.done_equivalent);
     const lifecycleBadge = createNode(
       "span",
       "workspace-overview-lifecycle",
-      formatLifecycleStateLabel(item.lifecycle_state),
+      doneEquivalent ? "Done" : formatLifecycleStateLabel(item.lifecycle_state),
     );
-    lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
+    lifecycleBadge.dataset.lifecycle = doneEquivalent
+      ? "done"
+      : String(item.lifecycle_state || "active").toLowerCase();
+    if (doneEquivalent) {
+      lifecycleBadge.dataset.derived = "true";
+      lifecycleBadge.title = "Merged with no updates since — derived Done (no close recorded)";
+    }
     titleRow.appendChild(lifecycleBadge);
     if (item.merged_into_base) {
       // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
