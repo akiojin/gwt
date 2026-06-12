@@ -1170,7 +1170,11 @@ pub struct ActiveWorkProjectionView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
-    WorkspaceState {
+    /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
+    /// `kind` stays `workspace_state` as the legacy adapter spelling so no
+    /// frontend/client breaks.
+    #[serde(rename = "workspace_state")]
+    WorkState {
         workspace: AppStateView,
     },
     ActiveWorkProjection {
@@ -2223,7 +2227,7 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
-            BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::WorkState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ProviderUsage { .. } => "provider_usage",

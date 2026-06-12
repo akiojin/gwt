@@ -8,7 +8,7 @@
 //! (1) update `current.json` + `journal.jsonl`,
 //! (2) sync `tab.workspace.windows[<id>].dynamic_title` in memory,
 //! (3) broadcast `BackendEvent::ActiveWorkProjection`, and
-//! (4) broadcast `BackendEvent::WorkspaceState` so the pane heading
+//! (4) broadcast `BackendEvent::WorkState` so the pane heading
 //! `windowData.dynamic_title` consumed by `windowDisplayTitle` on the
 //! frontend refreshes. `gwtd workspace update --title-summary` ran (1)
 //! and (3) but never (4), so the pane heading kept the `agent_id`
@@ -41,7 +41,7 @@ impl AppRuntime {
     ///
     /// Return value:
     /// - The `OutboundEvent`s that callers should dispatch. Phase U-2
-    ///   (SPEC-2359 US-26) makes this emit `BackendEvent::WorkspaceState`
+    ///   (SPEC-2359 US-26) makes this emit `BackendEvent::WorkState`
     ///   when an in-memory `dynamic_title` actually changed, so the
     ///   frontend's pane heading (`windowDisplayTitle` →
     ///   `windowData.dynamic_title`) updates immediately without waiting
