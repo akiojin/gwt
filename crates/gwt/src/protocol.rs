@@ -275,6 +275,13 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    /// Inject one line of input into the pane bound to the given agent
+    /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
+    /// window id so the event can only target the caller's own pane.
+    PaneSendInput {
+        session_id: String,
+        text: String,
+    },
     PasteImage {
         id: String,
         data_base64: String,
@@ -1005,7 +1012,7 @@ pub struct WorkspaceHistoryAgentView {
     pub sessions: Vec<WorkspaceHistorySessionView>,
 }
 
-pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
+pub type WorkAgentView = WorkspaceHistoryAgentView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
@@ -1033,7 +1040,7 @@ pub struct WorkspaceHistoryEventView {
     pub updated_at: String,
 }
 
-pub type WorkspaceWorkEventView = WorkspaceHistoryEventView;
+pub type WorkEventView = WorkspaceHistoryEventView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceHistoryView {
@@ -1053,7 +1060,7 @@ pub struct WorkspaceHistoryView {
     pub events: Vec<WorkspaceHistoryEventView>,
 }
 
-pub type WorkspaceWorkItemView = WorkspaceHistoryView;
+pub type WorkItemView = WorkspaceHistoryView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkCleanupCandidateView {
@@ -1099,6 +1106,41 @@ pub struct ActiveWorkItemView {
     /// close (Done / Discarded). None while the Work is active / paused.
     #[serde(default)]
     pub closed_at: Option<String>,
+    /// SPEC-2359 Phase W-16 (FR-402): total agents known for this Workspace
+    /// (record agents plus machine-local ledger sessions for its branch). The
+    /// `agents` list is capped on the wire, so the frontend renders
+    /// "+N more sessions" from this count. `0` means "not computed" (legacy
+    /// payloads) and must not render a label.
+    #[serde(default)]
+    pub session_agent_total: u32,
+    /// SPEC-2359 Phase W-16 (FR-403): RFC3339 timestamp of the Workspace's
+    /// last update (record `updated_at`). The list sorts by
+    /// `max(updated_at, agents[].updated_at)` descending so the most recently
+    /// touched branch is on top. Empty string for legacy payloads.
+    #[serde(default)]
+    pub updated_at: String,
+    /// SPEC-2359 Phase W-15 (FR-386): true when the Workspace's branch is
+    /// fully merged into a canonical base on origin (background scan via
+    /// `git cherry`) or its PR state is merged — i.e. the worktree/branch is
+    /// safe to delete. Display-only; no automatic close (US-61).
+    #[serde(default)]
+    pub merged_into_base: bool,
+    /// SPEC-2359 W16-2 (FR-389): Workspace grouping key — Works sharing a
+    /// canonical branch (any spelling) carry the same key and merge into one
+    /// Workspace row at view assembly. `None` on legacy payloads.
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    /// SPEC-2359 W16-3 (FR-390): the branch exists only as a fetched remote
+    /// ref — no local worktree. Display-only; launching materializes the
+    /// worktree through the existing Launch path. Default false (legacy).
+    #[serde(default)]
+    pub remote_only: bool,
+    /// SPEC-2359 W16-4 (FR-391): derived Done classification — the branch is
+    /// merged into a base AND the Workspace has no update after the merge
+    /// reference time. Display-only (US-61: never records a close); clears
+    /// automatically when the Workspace is updated after the merge.
+    #[serde(default)]
+    pub done_equivalent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1135,6 +1177,10 @@ pub struct ActiveWorkProjectionView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
+    /// `kind` stays `workspace_state` as the legacy adapter spelling so no
+    /// frontend/client breaks.
+    #[serde(rename = "workspace_state")]
     WorkspaceState {
         workspace: AppStateView,
     },
@@ -1164,6 +1210,13 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+    },
+    /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
+    /// (SPEC-3050 FR-005: failures must be explicit, never silent).
+    PaneSendResult {
+        ok: bool,
+        window_id: Option<String>,
+        error: Option<String>,
     },
     AttachmentProgress {
         id: String,
@@ -1795,6 +1848,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "pane_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "attachment_progress",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2195,6 +2253,7 @@ impl BackendEvent {
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
+            BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
@@ -2345,6 +2404,45 @@ mod tests {
         IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
         UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn pane_send_input_deserializes_session_scoped_injection_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "pane_send_input",
+            "session_id": "session-1",
+            "text": "/goal all tests pass\r"
+        }))
+        .expect("deserialize pane_send_input");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::PaneSendInput { session_id, text }
+                if session_id == "session-1" && text == "/goal all tests pass\r"
+        ));
+    }
+
+    #[test]
+    fn pane_send_result_serializes_kind_and_has_delivery_policy() {
+        let event = BackendEvent::PaneSendResult {
+            ok: false,
+            window_id: None,
+            error: Some("no pane bound to session session-1".to_string()),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize pane_send_result");
+        assert_eq!(
+            value.get("kind").and_then(Value::as_str),
+            Some("pane_send_result")
+        );
+        assert_eq!(event.event_kind(), "pane_send_result");
+
+        let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
 
     #[test]
     fn update_window_geometry_deserializes_base_geometry_revision_contract() {
@@ -2738,6 +2836,12 @@ mod tests {
                     agents: Vec::new(),
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
+                    session_agent_total: 0,
+                    merged_into_base: false,
+                    workspace_key: None,
+                    remote_only: false,
+                    done_equivalent: false,
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),

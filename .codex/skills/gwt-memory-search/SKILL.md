@@ -133,4 +133,5 @@ The watcher and the auto-build fallback pick up either path automatically.
 - For SPEC search, use `gwt-spec-search`. For GitHub Issue search, use
   `gwt-issue-search`. For implementation file search, use
   `gwt-project-search`. For a unified result across all four, use
-  `gwt-search` and add `--memory` (or omit filters to merge every scope).
+  the `gwt-search` skill with `--memory` (or omit filters to merge every
+  scope). These names are skills, not PATH executables.

@@ -15,9 +15,9 @@ use gwt_core::{
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
     workspace_projection::{
-        record_workspace_work_event, save_workspace_projection, WorkspaceAgentAffiliationStatus,
-        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkEvent,
-        WorkspaceWorkEventKind,
+        record_workspace_work_event, save_workspace_projection, WorkEvent, WorkEventKind,
+        WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+        WorkspaceStatusCategory,
     },
 };
 use gwt_github::{
@@ -251,17 +251,17 @@ fn seed_workspace_current_agent(repo_path: &Path, session_id: &str, title: &str,
 fn seed_workspace_work_item(
     repo_path: &Path,
     work_item_id: &str,
-    kind: WorkspaceWorkEventKind,
+    kind: WorkEventKind,
     title: &str,
     session_id: &str,
 ) {
-    let mut event = WorkspaceWorkEvent::new(kind, work_item_id, Utc::now());
+    let mut event = WorkEvent::new(kind, work_item_id, Utc::now());
     event.title = Some(title.to_string());
     event.intent = Some("Implement Workspace WorkItem lifecycle history".to_string());
     event.summary =
         Some("Workspace WorkItem history should be joined instead of duplicated.".to_string());
     event.status_category = Some(match kind {
-        WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
+        WorkEventKind::Done => WorkspaceStatusCategory::Done,
         _ => WorkspaceStatusCategory::Active,
     });
     event.agent_session_id = Some(session_id.to_string());
@@ -975,7 +975,7 @@ fn incomplete_work_item_history_does_not_hard_block_mutation() {
         seed_workspace_work_item(
             &repo_path,
             "workitem-existing",
-            WorkspaceWorkEventKind::Start,
+            WorkEventKind::Start,
             "Workspace WorkItem history duplicate prevention",
             "session-other",
         );
@@ -1018,7 +1018,7 @@ fn completed_work_item_history_does_not_block_new_related_work() {
         seed_workspace_work_item(
             &repo_path,
             "workitem-completed",
-            WorkspaceWorkEventKind::Done,
+            WorkEventKind::Done,
             "Workspace WorkItem history",
             "session-other",
         );

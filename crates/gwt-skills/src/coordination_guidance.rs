@@ -117,6 +117,14 @@ Do not manually create, switch, or delete branches/worktrees:
 - Existing branch switching, deletion, and renaming should happen only
   through human-driven operations
 
+## Skills
+
+`gwt-*` skill names (for example `gwt-search`, `gwt-discussion`) are
+skills, never PATH executables. Do not resolve them with `command -v`
+or `Get-Command`, and do not treat an empty PATH lookup as a missing
+command. Invoke them through the runtime's skill mechanism, or follow
+the executable commands written inside the skill's own SKILL.md.
+
 ## Persisted Work files
 
 The tracked `.gwt/work/` directory is the persistent Work core
@@ -233,6 +241,14 @@ branch / worktree の手動作成、切替、削除は禁止です:
 - Git 環境の作成は **gwt Start Work / Launch materialization** が担当
 - 既存 branch への切替・削除・名称変更も人間操作経由のみ
 
+## Skills
+
+`gwt-*` の skill 名（例: `gwt-search`、`gwt-discussion`）は skill であり、
+PATH 上の実行ファイルではありません。`command -v` や `Get-Command` で
+解決を試みず、PATH に見つからないことを「コマンド欠落」と扱わないで
+ください。runtime の skill 機構で呼び出すか、skill 自身の SKILL.md に
+書かれた実行コマンドに従います。
+
 ## Persisted Work files
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
@@ -343,6 +359,8 @@ mod tests {
             "events.jsonl",
             "merge=union",
             "AGENTS.md or CLAUDE.md",
+            "skills, never PATH executables",
+            "Get-Command",
             "PR check in progress",
             "verifying tests",
             "fixing bug",

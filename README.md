@@ -520,7 +520,7 @@ body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
 counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
-labels. Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
 Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
 single token system that ships in two flagship themes:
 
@@ -553,8 +553,14 @@ falls back to system colors so accessibility is preserved.
 | `⌘G` | Focus the Git (Branches) surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
-| `⌘\` | Collapse / expand the Sidebar Layers |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
+
+The Command Rail on the left edge is always visible: Start Work / Work /
+Board / Logs at the top, window operations (Tile / Stack / Align / window
+list / Add) in the middle, and the Command Palette at the bottom. Hovering a
+rail item reveals its label and real shortcut. Closing a
+window (titlebar × or tab ×) always asks for confirmation so a stray click
+can never kill a running agent.
 
 ### Accessibility
 
@@ -628,6 +634,18 @@ cargo bundle -p gwt --format osx
 ```bash
 cargo test -p gwt-core -p gwt --all-features
 ```
+
+### Releasing
+
+To cut a release, trigger the **Prepare Release** workflow from GitHub
+Actions (Actions → `Prepare Release` → `Run workflow`). It runs on `develop`
+and bumps the version, regenerates the `CHANGELOG`, and opens a
+`develop → main` Release PR — so you can release from any branch without
+switching to `develop` locally. The `bump` input is `auto` (default),
+`patch`, `minor`, or `major`. Review and merge the generated Release PR;
+merging to `main` then runs the release pipeline (tag, GitHub Release,
+cross‑platform binaries). The manual fallback procedure lives in
+`.claude/commands/release.md`.
 
 ### Release Asset Contract
 

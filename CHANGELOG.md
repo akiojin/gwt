@@ -1,6 +1,161 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.56.0] - 2026-06-12
+
+### Bug Fixes
+
+- **workspace:** Current.json 不在でも Work record を Workspace 一覧へ表示
+- **workspace:** Launch ボタンの重なり解消と branch 重複表示の抑制
+- **workspace:** App.css の旧 flex 規則を除去し overview の grid レイアウトを復元
+- **workspace:** Workspace 行の wire agents を合計 8 件に cap し payload 肥大を防止
+- **workspace:** Session_history 未保存の TOML でも最新会話を Session 行として合成表示
+- **workspace:** Backfill 再適用で updated_at を進めず更新日時ソートの退化を解消
+- **workspace:** Backfill の基準時刻を worktree の mtime にし古い worktree が一覧上位を占めないようにする
+- **workspace:** Backfill 基準時刻を HEAD コミット時刻に変更し中位帯の順序崩れを解消
+- **workspace:** Protected base ブランチを merged 安全削除バッジから除外
+- **workspace:** Launch Agent を detail ヘッダーの primary アクションに固定配置
+- **workspace:** ウィンドウ close 等の projection 再構築遅延を session ledger 差分キャッシュで根治
+- **workspace:** Works.json 4MB の毎イベント parse もキャッシュ化しキュー渋滞を解消
+- **workspace:** Agent 停止時の Paused 記録を event loop から退避し × の数分フリーズを根治
+- **workspace:** Idle の agent window も close 確認の対象にする
+- **gui:** Update CTA をサイドバーから従来の右下固定表示へ戻す
+- **workspace:** 同一会話を指す重複 Work 行を collapse し名前欠落を補完
+- **workspace:** 無名 Agent 表示を台帳から補完し Session 表示を直近 1 件に統一
+- **workspace:** 台帳からも復元不能な ghost agent 行を表示から除外
+- **workspace:** Work 表示を agent 種別ごとに直近 1 グループへ集約
+- **skills:** Gwt-search を PATH コマンドと誤認識させない skill-not-command 明示を追加 (#3049)
+- PowerShell ラッパーの引数クォート破損で Fast モード起動が失敗する問題を修正
+- **workspace:** 一括 Clean Up を複数 branch 対応の cleanup 経路へ接続
+- **core:** Legacy alias を test module より前へ移動し CI clippy を解消
+- **skills:** Gwt-discussion の Board active-claim preflight を復元
+
+### Documentation
+
+- デバッグ用サーバー起動は browser-check skill に従う導線を AGENTS.md に明記
+- **workspace:** Session 台帳 FR の番号を W-17 と衝突しない FR-402 へ改番
+
+### Features
+
+- **workspace:** 起動/プロジェクトオープン時に worktree reconcile を配線し全 worktree を一覧へ列挙
+- **workspace:** Work の無い Workspace 行に Launch 導線を追加
+- **workspace:** Legacy mega-item を canonical branch ID へ分解し実データを branch 行に表示
+- **workspace:** 一覧と detail を branch 名主体の表示に統一
+- **workspace:** Session 台帳を branch 単位で Workspace へ対応付け sessions を表示
+- **workspace:** Workspace 一覧を更新日時の降順に並べ替え、テストの実ブラウザ起動を解消
+- **workspace:** Work を持つ Workspace にも新規エージェント起動の Launch 導線を常設
+- **workspace:** Workspace 一覧を ArrowUp/ArrowDown で選択切替できるようにする
+- **workspace:** Merged 判定の安全に削除可能バッジ・Launch Agent 統一・キーボード選択のフォーカス復帰
+- **workspace:** Workspace surface を Operator design system の意匠に統一
+- **workspace:** Agent window の × に確認ダイアログ・merged Workspace に Clean Up を追加
+- **pane:** Gwtd pane send による self-only PTY 注入と gwt-discussion Goal Start を追加 (SPEC-3050)
+- **workspace:** Cross-machine Work 骨格復元の常設 intake consumer を実装 (SPEC-2359 W16-1)
+- **workspace:** 同一 branch の Work を canonical key で 1 Workspace 行に統合 (SPEC-2359 W16-2)
+- **workspace:** Fetch 済みリモート branch の Remote 表示と launch 導線 (SPEC-2359 W16-3)
+- **workspace:** Merged+stale を derived Done として分類 (SPEC-2359 W16-4)
+- **workspace:** Merged branch の一括 Clean Up を Workspace 一覧に追加
+
+### Miscellaneous Tasks
+
+- 検証用スクリーンショット成果物を削除
+- **gwt:** Work events 追記分をコミット
+- **gwt:** Work events 追記分をコミット
+- **gwt:** Register-spec lifecycle の placeholder rebind 不可を memory に記録
+- **gwt:** Memory.md の既存 bare URL を markdownlint MD034 準拠に修正
+- **gwt:** Work events 追記分をコミット
+
+### Refactor
+
+- **core:** Canonical 名を Work 系へ段階移行 (SPEC-2359 US-66 Stage 1)
+- **core:** Work 命名 Stage 2 — 全 call site の掃き出し完了 (SPEC-2359 T-529)
+
+### Revert
+
+- **core:** WorkspaceProjection と gwtd workspace を正へ戻す（ユーザー裁定）
+## [9.55.0] - 2026-06-12
+
+### Bug Fixes
+
+- **gui:** Branches detail-check を reconnect で自己回復させ最終既知の cleanup 安全性を保持
+- **gui:** Bare repo の symbolic HEAD で main を cleanup ブロックしない
+- **launch-wizard:** Claude reasoning 既定を Auto にして Claude Code 既定へ委譲
+- Prevent Windows Claude stub launch dialog
+- **update:** Windows 自動更新 helper の UAC Installer Detection による os error 740 を修正
+- **board:** Root mapping を home store 併用にして General root 重複を防止
+- **gui:** WebSocket 配信を lossy/lossless 分離し queue 溢れでの切断を廃止 (SPEC-2359 W17-1)
+- **gui:** Resume/Launch に起動フィードバックと二重実行防止・切断オーバーレイを追加 (SPEC-2359 W17-2/W17-3)
+- **gui:** Frontend_ready 再接続ごとの index bootstrap 再実行をクールダウンで抑止 (SPEC-2359 W17-4)
+- Honor HOME for gwt config path
+- Preserve Teams board message line breaks
+- Prevent window tab activation flicker
+- Harden visual test runner setup
+- **docker:** 状態参照系コマンドの timeout を 30s 化し compose ps の再試行と preflight 診断を追加 (#3029)
+- **docker:** 生成する compose override から obsolete な version 属性を除去
+- **launch:** Docker 準備出力の final drain を結果表示より先に完了させる
+- **docker:** Compose exec の env 注入から PATH を除外しコンテナ内 bunx 解決を修復
+- Prefer Bun for Claude placeholder wrappers
+- Stabilize Windows board setup verification
+
+### Documentation
+
+- **memory:** GUI フリーズ調査は WebSocket eviction ログを最初に疑う知見を記録
+- Explain remote board channel association
+- **skills:** Browser-check の隔離 HOME symlink リストに .docker を追加 (#3029)
+
+### Features
+
+- **gui:** ローカル main/develop を cleanup 選択可にしリモート base を多層保護
+- **workspace:** Backfill event kind と worktree reconcile ドメインロジックを追加
+- **workspace:** Close 系 event を home 専用ログへ分離し .gwt/work commit 導線を guidance に追加
+- Simplify Teams board channel setup
+- **launch:** Docker 起動準備の出力を agent terminal へストリーム表示 (SPEC-2014 FR-139..142)
+
+### Miscellaneous Tasks
+
+- Ignore .playwright-mcp automation artifacts
+- **memory:** Windows exe への asInvoker manifest 埋め込み判断を記録 (#3018)
+- Merge origin develop
+- Merge origin develop
+- **board:** General root mapping の union-merge 属性と正 root pin を共有
+- Merge origin develop
+- Merge origin develop
+- **memory:** Worktree-local coordination 状態の重複再生産と home store 対策を記録
+- Record workspace event log
+- Merge origin/develop into window tab fix
+- Merge origin/develop into PR 3035
+- Merge develop into Teams board setup
+- Merge origin develop
+- Merge develop into Teams board setup
+- **memory:** Llvm-cov 0% 罠と CI ゲート拡張の検証手順を記録
+- **memory:** Merge 競合マーカーの残骸を除去
+- **memory:** 検証と実行の ; 連結による検証形骸化の教訓を記録
+
+### Refactor
+
+- **workspace:** WorkspaceProjection の状態遷移を gwt-core に一元化 (SPEC-2359 US-70)
+- **core:** ProcessExecutor seam を導入し最重要経路に統合テストを追加 (SPEC-3014)
+- **app-runtime:** Workspace module 抽出とテスト領域の別ファイル化 (SPEC-2077 US-11)
+- **gwt:** Embedded_web manifest 化と test_support 統合 (SPEC-3016)
+- **frontend:** Protocol enum 契約の生成基盤と window runtime state の抽出 (SPEC-3015)
+
+### Testing
+
+- **gwt:** Fake gh compile の rustc spawn に current_dir を明示して CWD race を解消
+- **gwt:** Env tests の重複 fake gh compiler にも current_dir を明示
+- **core:** Windows 専用 update テストを ProcessExecutor シグネチャに追随
+- Stabilize full status refresh cooldown test
+- Accept module-aware frontend bundle checks
+- Gwt-config / gwt-skills に公開 API 契約の統合テストを追加
+- **gwt-git:** Fixture に committer identity を設定し CI で commit が失敗しないようにする
+- **gwt-git:** Migration fixture の initial branch を master に固定し identity を設定する
+- **gwt-docker:** Fake docker の記録を追記式にして漂着 invocation と競合しないようにする
+
+### Ci
+
+- **release:** Prepare-release ワークフローでどのブランチからでもリリース準備可能にする
+- **release:** Prepare-release の adversarial レビュー指摘を修正
+- PR の test/clippy ゲートを全クレートへ拡張し coverage を workspace 計測化
+
 ## [9.54.0] - 2026-06-09
 
 ### Bug Fixes

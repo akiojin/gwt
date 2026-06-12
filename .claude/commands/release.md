@@ -7,6 +7,29 @@ tags: [project]
 
 develop ブランチでバージョン更新・CHANGELOG更新を行い、main への Release PR を作成します。
 
+## 推奨: Prepare Release ワークフロー（どのブランチからでも）
+
+**develop に移動できない／したくない場合（work worktree 等）は、ローカル手順ではなく
+GitHub Actions の `Prepare Release` ワークフローを使う。** GitHub の
+Actions → `Prepare Release` → `Run workflow` を押すだけで、CI が develop 上で
+バージョン更新（`scripts/compute_release_version.py` の最新タグ相対計算、`cargo set-version`、
+`cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミット・develop→main の
+Release PR 作成までを実行する。`bump` 入力は `auto`（既定。breaking 検出時は失敗するので
+major は明示）/ `patch` / `minor` / `major`。
+
+承認は **生成された Release PR をレビューして merge** で行う（実 diff・CHANGELOG を確認）。
+merge 後は `release.yml` がタグ・GitHub Release・5プラットフォームビルドを自動実行する。
+
+バージョン算出ロジックの正本は `scripts/compute_release_version.py`（ユニットテスト
+`scripts/test_compute_release_version.py`）。`git-cliff --bumped-version` は使わない
+（全履歴再計算でバージョン後退するため）。
+
+ワークフローは push と PR 作成が別ステップのため、push 成功後に PR 作成が失敗すると
+develop に bump コミットだけが残ることがある（GitHub Actions が失敗を可視化する）。その場合は
+**同じワークフローを再実行**すればよい（`git pull --rebase` は no-op、既存 PR は更新される）。
+
+以下の手動手順は、develop 上で対話的に実行したい場合の **fallback** として残す。
+
 ## フロー概要
 
 ```

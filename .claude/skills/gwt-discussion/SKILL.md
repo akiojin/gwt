@@ -117,8 +117,9 @@ reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
   question line. It does not bypass incomplete evidence.
 
 When the `Action Bundle` is produced, call the matching exit command for each
-proposal before stopping. Claude Code's built-in `stop_hook_active` flag keeps
-the handler fail-safe: at most one forced continuation per Stop cycle.
+proposal before stopping. The runtime's `stop_hook_active` flag (built into
+Claude Code; shared with Codex via `codex_hooks`) keeps the handler fail-safe:
+at most one forced continuation per Stop cycle.
 
 ## Resume hooks
 
@@ -164,11 +165,29 @@ exception path. Keep the same one-question-at-a-time discipline.
 ### Phase 1: Theme + search
 
 1. Understand the user's concern, idea, or implementation gap.
-2. Run `gwt-search` with 2-3 semantic queries in Japanese and English.
+2. Use the `gwt-search` skill (a skill, not a PATH command) with 2-3
+   semantic queries in Japanese and English.
 3. Check open SPEC Issues: `gwtd issue spec list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
+6. If the clear owner is an existing SPEC, run the Board active-claim preflight
+   before changing `.gwt/discussion.md` or any SPEC/plan artifacts:
+   - Read the current Board with `gwtd board show --json` when available, or
+     `gwtd board show` as the fallback.
+   - Look for active `claim` entries from another session that mention the same
+     owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
+   - If a matching claim exists, pause the discussion flow and present the
+     conflict: join that session with a Board handoff request, redesign a
+     disjoint work split, or continue only after the user explicitly accepts
+     duplicate risk.
+   - Intentional parallel discussion/planning is allowed only when ownership is
+     disjoint. Post a fresh Board `claim` with a `Boundary:` line naming the
+     topic, artifacts, or files owned by this session before continuing.
+   - Acceptance scenario: Given another session has an active Board claim for
+     `SPEC-2008 Phase 24`, when `gwt-discussion --deepen SPEC-2008` starts,
+     then the preflight reports the claim and requires user confirmation before
+     producing an Action Delta or changing SPEC artifacts.
 
 ### Phase 2: Investigation
 
@@ -397,6 +416,34 @@ This final result is the handoff point where the workflow may leave Plan Mode.
 - `Update Spec` + `Update Plan` + `Resume Build`
 - `Update Issue` + `No Action`
 - `Write Memory` only
+
+### Goal Start (after Action Bundle approval)
+
+Once the user approves the Action Bundle and the follow-up work should
+continue autonomously, start a runtime goal from the approved bundle
+(SPEC-3050):
+
+1. Build a goal condition from the Action Bundle: one verifiable end state
+   (tests green, lint clean, evidence bundle emitted), the check that proves
+   it, and a turn or time cap (for example "or stop after 20 turns"). The
+   condition must respect gwt's PR gate: stop at "verification handoff ready
+   with a recorded User Verification Result" — never "PR created" or "PR
+   merged".
+2. Start the goal per runtime:
+   - **Codex** (goals enabled; gwt launches Codex with `--enable goals`):
+     start the Goal directly with the condition as its objective — the goals
+     tool contract allows the model to start a Goal itself.
+   - **Claude Code** (v2.1.139 or later): the built-in `/goal` command cannot
+     be self-invoked by the agent. Queue it into your own pane instead:
+     `gwtd pane send --text '/goal <condition>'` (resolve `GWT_BIN` first per
+     the gwtd resolution section). The injected line is submitted
+     automatically when the current turn ends. `pane send` is self-only: it
+     targets the pane bound to `GWT_SESSION_ID` and rejects other panes.
+3. If the goal cannot be started (older Claude Code, trust dialog not
+   accepted, goals feature disabled, `pane send` failure), do not skip
+   silently: report the failure reason explicitly, print the assembled
+   `/goal <condition>` line so the user can run it manually, and continue
+   the exit. Goal start failures never block the discussion exit.
 
 ## Routing notes
 

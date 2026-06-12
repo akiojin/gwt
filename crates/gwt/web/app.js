@@ -42,6 +42,8 @@
       } from "/project-tabs-renderer.js";
       import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
+      // SPEC-3038 US-3: Close Guard confirm modal renderer.
+      import { renderWindowCloseConfirmModal } from "/window-close-confirm-modal.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -189,8 +191,6 @@
       const migrationDialog = migrationModal
         ? migrationModal.querySelector(".modal-shell")
         : null;
-      const connectionDot = document.getElementById("connection-dot");
-      const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
@@ -1664,11 +1664,10 @@
 
       function setConnectionState(connected) {
         connectionOverlay.setConnected(connected);
-        connectionDot.classList.toggle("connected", connected);
-        connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
-        // SPEC-2356 — propagate connection state to the Operator Status Strip
-        // so the bottom strip clearly reflects whether the WebSocket bridge is
-        // online. The class is set on the strip element and consumed via CSS.
+        // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
+        // screen overlay above) is the home for connection state — the
+        // permanent canvas hint bar is retired. The class is set on the strip
+        // element and consumed via CSS.
         const strip = document.getElementById("op-status-strip");
         const connectionStatusLabel = strip?.querySelector(
           "[data-role='connection-label']",
@@ -2955,12 +2954,26 @@
         };
       }
 
-      function openWorkspaceCleanup() {
-        const candidate = activeWorkProjection?.cleanup_candidate;
-        if (!candidate?.branch) return;
-        const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
-        state.entries = [workspaceCleanupEntry(candidate)];
-        state.cleanupSelected = new Set([candidate.branch]);
+      function openWorkspaceCleanup(candidateOverride, sourceWindowId) {
+        // The Workspace detail passes the selected row, the list header
+        // passes ALL merged rows (user verification 2026-06-12: completed
+        // local branches need a bulk cleanup path); without an override the
+        // projection-level cleanup candidate is used. When the caller knows
+        // its real window id the run rides the multi-branch
+        // `run_branch_cleanup` machinery (per-branch progress + failure
+        // reasons); the synthetic id keeps the legacy single-candidate wire.
+        const overrides = Array.isArray(candidateOverride)
+          ? candidateOverride
+          : [candidateOverride];
+        const candidates = (candidateOverride
+          ? overrides
+          : [activeWorkProjection?.cleanup_candidate]
+        ).filter((candidate) => candidate?.branch);
+        if (candidates.length === 0) return;
+        const cleanupWindowId = sourceWindowId || WORKSPACE_CLEANUP_WINDOW_ID;
+        const state = ensureBranchListState(cleanupWindowId);
+        state.entries = candidates.map((candidate) => workspaceCleanupEntry(candidate));
+        state.cleanupSelected = new Set(candidates.map((candidate) => candidate.branch));
         state.notice = "";
         state.cleanupModal = {
           open: true,
@@ -2972,7 +2985,7 @@
           progress: null,
           results: [],
         };
-        branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
+        branchCleanupWindowId = cleanupWindowId;
         renderBranchCleanupModal();
       }
 
@@ -3778,9 +3791,27 @@
         }
       }
 
+      // SPEC-3038 AS-4.5: the empty-canvas call to action follows the live
+      // window count, even when the operator shell is degraded.
+      function updateCanvasEmptyState() {
+        const emptyState = document.getElementById("canvas-empty-state");
+        if (emptyState) {
+          emptyState.hidden = windowMap.size > 0;
+        }
+      }
+
       function recomputeOperatorTelemetry() {
+        updateCanvasEmptyState();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
+        // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+        const counts = {
+          active: 0,
+          idle: 0,
+          blocked: 0,
+          done: 0,
+          agents: 0,
+          windows: windowMap.size,
+        };
         for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
           if (!state) continue;
@@ -4438,6 +4469,7 @@
             // `data-agent-state` attribute the components.css layer animates.
             element.dataset.agentState = mapAgentTelemetryState(runtimeState);
             recomputeOperatorTelemetry();
+            refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
             const statusTitle = effectiveDetail
               ? `${windowRuntimeLabel(runtimeState)}: ${effectiveDetail}`
@@ -4559,15 +4591,94 @@
         });
       }
 
+      // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
+      // tab x) confirms through one modal regardless of agent state
+      // (user-confirmed decision, 2026-06-10).
+      let windowCloseConfirmState = { open: false, windowId: null };
+
+      function renderWindowCloseConfirm() {
+        const modalEl = document.getElementById("window-close-confirm-modal");
+        const dialogEl = modalEl?.querySelector(".window-close-confirm-shell");
+        if (!modalEl || !dialogEl) return;
+        renderWindowCloseConfirmModal({
+          modalEl,
+          dialogEl,
+          state: windowCloseConfirmState,
+          createNode,
+          onCancel: () => closeWindowCloseConfirm(),
+          onConfirm: () => {
+            const id = windowCloseConfirmState.windowId;
+            closeWindowCloseConfirm();
+            if (id) send({ kind: "close_window", id });
+          },
+        });
+      }
+
+      function closeWindowCloseConfirm() {
+        windowCloseConfirmState = { open: false, windowId: null };
+        renderWindowCloseConfirm();
+      }
+
+      function requestCloseWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          // The window already left the workspace state; closing is pure
+          // housekeeping and needs no confirmation.
+          send({ kind: "close_window", id: windowId });
+          return;
+        }
+        const isAgentWindow = shouldShowRuntimeStatus(windowData);
+        const runtimeState =
+          windowRuntimeStateMap.get(windowId) ||
+          normalizeWindowRuntimeState(windowData.status, windowData.preset);
+        windowCloseConfirmState = {
+          open: true,
+          windowId,
+          windowTitle: windowDisplayTitle(windowData),
+          agentLabel: isAgentWindow
+            ? agentRoleLabel(windowData)
+            : presetRoleLabel(windowData.preset),
+          runtimeLabel: isAgentWindow ? windowRuntimeLabel(runtimeState) : "",
+          running: isAgentWindow && runtimeState === "running",
+        };
+        renderWindowCloseConfirm();
+      }
+
+      // SPEC-3038 US-2: tabs carry the same Living Telemetry the window chrome
+      // shows. Only agent panes (terminal surface) report a state; other
+      // surfaces render plain tabs.
+      function windowTabTelemetryState(tab) {
+        if (!shouldShowRuntimeStatus(tab)) return "";
+        const runtimeState =
+          windowRuntimeStateMap.get(tab.id) ||
+          normalizeWindowRuntimeState(tab.status, tab.preset);
+        return mapAgentTelemetryState(runtimeState);
+      }
+
+      // AS-2.2: a runtime state change must repaint the tab strip of every
+      // window in the group (the visible strip belongs to the active window's
+      // element, not necessarily the one whose status changed).
+      function refreshWindowTabTelemetry(windowData) {
+        if (!windowData?.tab_group_id) return;
+        for (const tab of windowTabsFor(windowData)) {
+          const tabElement = windowMap.get(tab.id);
+          if (tabElement) renderWindowTabs(tab, tabElement);
+        }
+      }
+
       function renderWindowTabs(windowData, element) {
         const strip = element.querySelector(".window-tab-strip");
         if (!strip) return;
         renderWindowTabsView({
           strip,
-          tabs: windowTabsFor(windowData),
+          tabs: windowTabsFor(windowData).map((tab) => ({
+            ...tab,
+            agent_state: windowTabTelemetryState(tab),
+          })),
           activeWindowId: windowData.id,
           tooltipForWindow: windowTitleTooltip,
           send,
+          requestClose: requestCloseWindow,
           onTabDragStart: (event, tabId) => {
             windowTabDragState = {
               id: tabId,
@@ -13386,7 +13497,7 @@
 
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            send({ kind: "close_window", id: windowData.id });
+            requestCloseWindow(windowData.id);
           });
 
           titlebar.addEventListener("pointerdown", (event) => {
@@ -13693,6 +13804,11 @@
             }
 
             scheduleMaximizedWindowsToViewportSync();
+
+            // SPEC-3038: keep the rail window-count badge and the empty-canvas
+            // state in sync with window mounts/unmounts, not only with agent
+            // status events.
+            recomputeOperatorTelemetry();
 
             const topmostId = topmostWindowId(workspace);
             if (topmostId && activeWindowIdSet.has(topmostId)) {
@@ -15553,6 +15669,23 @@
         }
         openModal();
       });
+
+      // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
+      document
+        .getElementById("canvas-empty-start-work")
+        ?.addEventListener("click", () => {
+          document.dispatchEvent(
+            new CustomEvent("op:command", { detail: { id: "start-work" } }),
+          );
+        });
+      document
+        .getElementById("canvas-empty-add-window")
+        ?.addEventListener("click", () => {
+          if (addButton.disabled) {
+            return;
+          }
+          openModal();
+        });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
       alignButton.addEventListener("click", () => arrangeWindows("align"));

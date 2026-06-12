@@ -183,6 +183,29 @@ fn label_for(info: &WorktreeInfo, kind: WorktreeEntryKind) -> String {
         .unwrap_or_else(|| info.path.display().to_string())
 }
 
+/// SPEC-2359 Phase W-15 (FR-379): map inventory entries to worktree reconcile
+/// sources for the Workspace list. Only Workspace-kind worktrees participate —
+/// the BareMain checkout is excluded (SC-254 note: the main checkout is not a
+/// backfill target). Prunable worktrees never reach here because
+/// `enumerate_worktrees` already skips them. Branchless (detached) entries are
+/// passed through; the FR-381 guard in
+/// `gwt_core::workspace_projection::worktree_sources_needing_backfill` skips
+/// them so the policy lives in one place.
+pub fn worktree_reconcile_sources(
+    entries: &[WorktreeEntry],
+) -> Vec<gwt_core::workspace_projection::WorktreeReconcileSource> {
+    entries
+        .iter()
+        .filter(|entry| entry.kind == WorktreeEntryKind::Workspace)
+        .map(
+            |entry| gwt_core::workspace_projection::WorktreeReconcileSource {
+                branch: entry.branch.clone(),
+                worktree_path: entry.path.clone(),
+            },
+        )
+        .collect()
+}
+
 fn entry_ordering(left: &WorktreeEntry, right: &WorktreeEntry) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (left.kind, right.kind) {
@@ -193,5 +216,50 @@ fn entry_ordering(left: &WorktreeEntry, right: &WorktreeEntry) -> std::cmp::Orde
             .to_ascii_lowercase()
             .cmp(&right.label.to_ascii_lowercase())
             .then_with(|| left.label.cmp(&right.label)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(kind: WorktreeEntryKind, path: &str, branch: Option<&str>) -> WorktreeEntry {
+        WorktreeEntry {
+            id: path.to_string(),
+            kind,
+            path: PathBuf::from(path),
+            label: branch.unwrap_or(path).to_string(),
+            branch: branch.map(str::to_string),
+            session_ids: Vec::new(),
+            is_active: false,
+        }
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-379 / SC-254 note): only Workspace-kind
+    /// worktrees feed reconciliation. The BareMain checkout is excluded;
+    /// branchless (detached) entries pass through and are skipped later by
+    /// the FR-381 guard in gwt-core.
+    #[test]
+    fn worktree_reconcile_sources_filters_bare_main_and_maps_branch() {
+        let entries = vec![
+            entry(WorktreeEntryKind::BareMain, "/repo", Some("develop")),
+            entry(
+                WorktreeEntryKind::Workspace,
+                "/repo/work/foo",
+                Some("work/foo"),
+            ),
+            entry(WorktreeEntryKind::Workspace, "/repo/work/detached", None),
+        ];
+
+        let sources = worktree_reconcile_sources(&entries);
+
+        assert_eq!(sources.len(), 2, "BareMain must be excluded");
+        assert_eq!(sources[0].branch.as_deref(), Some("work/foo"));
+        assert_eq!(sources[0].worktree_path, PathBuf::from("/repo/work/foo"));
+        assert_eq!(sources[1].branch, None);
+        assert_eq!(
+            sources[1].worktree_path,
+            PathBuf::from("/repo/work/detached")
+        );
     }
 }
