@@ -24,6 +24,12 @@ fn window_runtime_state_js() -> &'static str {
     root_js_module_source("/window-runtime-state.js")
 }
 
+/// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
+/// app.js.
+fn project_index_search_surface_js() -> &'static str {
+    root_js_module_source("/project-index-search-surface.js")
+}
+
 /// SPEC-3015 — generated protocol enum contract (see web_protocol_enums.rs).
 fn protocol_enums_js() -> &'static str {
     root_js_module_source("/protocol-enums.js")
@@ -61,7 +67,16 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/update-cta.js"),
         "\n",
-        include_str!("../web/terminal-context-menu.js")
+        include_str!("../web/terminal-context-menu.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E2) — terminal attachment/clipboard handlers
+        // moved out of app.js; bundle-level content contracts keep matching
+        // against the shipped module set.
+        include_str!("../web/terminal-attachments.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E3) — Project Index window surface moved out
+        // of app.js.
+        include_str!("../web/project-index-search-surface.js")
     )
 }
 
@@ -1184,7 +1199,9 @@ fn embedded_web_project_bar_omits_index_status_badge() {
         "SPEC-1939 Phase 13: badge formatter / toast helpers must be removed from app.js",
     );
     assert!(
-        js.contains("function setIndexStatus(projectRoot, status)")
+        // SPEC-3064 Phase 3 (E3): setIndexStatus moved to the extracted
+        // Project Index surface module; app.js keeps the receive() case.
+        project_index_search_surface_js().contains("function setIndexStatus(projectRoot, status)")
             && js.contains("case \"project_index_status\""),
         "frontend must still consume project_index_status events for the Index Health tab",
     );

@@ -50,3 +50,6 @@ node_check crates/gwt/web/ui-trace-wiring.js
 node_check crates/gwt/web/close-project-tab-confirm-modal.js
 node_check crates/gwt/web/release-notes-window.js
 node_check crates/gwt/web/console-window.js
+node_check crates/gwt/web/provider-usage-surface.js
+node_check crates/gwt/web/terminal-attachments.js
+node_check crates/gwt/web/project-index-search-surface.js

@@ -42,7 +42,11 @@ const ROOT_MODULES = new Set([
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",
+  // SPEC-3064 Phase 3 (E3) — Project Index window surface.
+  "project-index-search-surface.js",
   "project-tabs-renderer.js",
+  // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
+  "provider-usage-surface.js",
   "window-tabs-renderer.js",
   // SPEC-3015 — generated protocol enum contract + extracted window runtime
   // state helpers.
@@ -53,6 +57,8 @@ const ROOT_MODULES = new Set([
   // SPEC-2809 — Console window per-kind tab live tail.
   "console-window.js",
   "socket-receive-dispatcher.js",
+  // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
+  "terminal-attachments.js",
   "terminal-copy-shortcut.js",
   "terminal-context-menu.js",
   "terminal-output-buffer.js",

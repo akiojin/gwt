@@ -147,6 +147,15 @@ root_js_modules! {
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
     // SPEC-3015 — window runtime state normalization extracted from app.js.
     "window-runtime-state.js" => "normalizeWindowRuntimeState",
+    // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface
+    // (SPEC-2970) extracted from app.js.
+    "provider-usage-surface.js" => "createProviderUsageSurface",
+    // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface
+    // (image paste / file drop / upload progress) extracted from app.js.
+    "terminal-attachments.js" => "createTerminalAttachments",
+    // SPEC-3064 Phase 3 (E3) — Project Index window surface (index status
+    // map + search state/render + Index window mount) extracted from app.js.
+    "project-index-search-surface.js" => "createProjectIndexSearchSurface",
 }
 
 /// Embedded payload of a [`StaticAsset`].
