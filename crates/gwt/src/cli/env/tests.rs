@@ -521,3 +521,31 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         );
     }
 }
+
+/// SPEC-2359 US-66 (T-527): `work` is the canonical CLI verb and routes to
+/// the same command family as the legacy `workspace` alias.
+#[test]
+fn work_verb_routes_like_workspace_alias() {
+    let mut env_work = TestEnv::new(std::path::PathBuf::from("cache-root"));
+    let work_code = super::dispatch(
+        &mut env_work,
+        &[
+            "gwtd".to_string(),
+            "work".to_string(),
+            "bogus-subcommand".to_string(),
+        ],
+    );
+    let mut env_workspace = TestEnv::new(std::path::PathBuf::from("cache-root"));
+    let workspace_code = super::dispatch(
+        &mut env_workspace,
+        &[
+            "gwtd".to_string(),
+            "workspace".to_string(),
+            "bogus-subcommand".to_string(),
+        ],
+    );
+    assert_eq!(
+        work_code, workspace_code,
+        "work and workspace verbs share one parser"
+    );
+}

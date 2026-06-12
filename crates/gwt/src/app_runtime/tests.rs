@@ -2150,7 +2150,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_
         events.first(),
         Some(event)
             if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                && matches!(event.event, BackendEvent::WorkspaceState { .. })
+                && matches!(event.event, BackendEvent::WorkState { .. })
     ));
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -2781,7 +2781,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 
     assert!(matches!(
         events.first().map(|event| &event.event),
-        Some(BackendEvent::WorkspaceState { .. })
+        Some(BackendEvent::WorkState { .. })
     ));
     let projection = events.iter().find_map(|event| match &event.event {
         BackendEvent::ActiveWorkProjection { projection } => Some(projection),
@@ -2838,10 +2838,7 @@ fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() 
 
     assert_eq!(events.len(), 3);
     assert!(matches!(events[0].target, DispatchTarget::Broadcast));
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(events[1].target, DispatchTarget::Broadcast));
     assert!(matches!(
         events[1].event,
@@ -2967,7 +2964,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "non-structural runtime status changes must not force a full workspace_state"
     );
     assert!(matches!(events[0].target, DispatchTarget::Broadcast));
@@ -4316,7 +4313,7 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            BackendEvent::WorkState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("workspace state after wizard submit");
@@ -5642,7 +5639,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
         }
     )));
 }
@@ -5781,10 +5778,7 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
     // the surface must update without a saved current.json or live agents —
     // so the projection broadcast accompanies the WorkspaceState event.
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8326,10 +8320,7 @@ fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
     // the surface must update without a saved current.json or live agents —
     // so the projection broadcast accompanies the WorkspaceState event.
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8359,10 +8350,7 @@ fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_
     runtime.push_workspace_and_active_work_projection_broadcasts(&mut events);
 
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WorkspaceState { .. }
-    ));
+    assert!(matches!(events[0].event, BackendEvent::WorkState { .. }));
     assert!(matches!(
         events[1].event,
         BackendEvent::ActiveWorkProjection { .. }
@@ -8574,7 +8562,7 @@ fn app_runtime_stopped_runtime_state_after_prior_state_still_auto_closes() {
 
     assert!(matches!(
         events.first().map(|event| &event.event),
-        Some(BackendEvent::WorkspaceState { .. })
+        Some(BackendEvent::WorkState { .. })
     ));
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
@@ -9174,7 +9162,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
             ..
         }
     )));
@@ -11006,7 +10994,7 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            BackendEvent::WorkState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("initial WorkspaceState broadcast");
@@ -11363,7 +11351,7 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
     assert!(
             events
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+                .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
             "expected WorkspaceState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
         );
     assert!(
@@ -11418,10 +11406,10 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 
     let workspace_event = events
         .iter()
-        .find(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
+        .find(|event| matches!(event.event, BackendEvent::WorkState { .. }))
         .expect("WorkspaceState reply for FrontendReady");
     let workspace = match &workspace_event.event {
-        BackendEvent::WorkspaceState { workspace } => workspace,
+        BackendEvent::WorkState { workspace } => workspace,
         _ => unreachable!(),
     };
     let projected_window = workspace
@@ -11520,7 +11508,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "first Board post should broadcast WorkspaceState: {first:?}"
     );
 
@@ -11528,7 +11516,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     assert!(
             !second
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+                .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
             "second Board post with identical title_summary must not duplicate WorkspaceState: {second:?}"
         );
     assert!(
@@ -12000,7 +11988,7 @@ fn apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_titl
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "expected WorkspaceState broadcast when dynamic_title changed: {events:?}"
     );
 }
@@ -12033,7 +12021,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_nothing_chan
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "WorkspaceState must be skipped when in-memory dynamic_title did not change: {events:?}"
     );
 }
@@ -12064,7 +12052,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "first sync should broadcast WorkspaceState: {first:?}"
     );
 
@@ -12075,7 +12063,7 @@ fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_r
     assert!(
         !second
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "second sync with identical title must not broadcast WorkspaceState: {second:?}"
     );
     // ActiveWorkProjection still fires (it's idempotent on the
@@ -12118,7 +12106,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "handle_workspace_projection_changed_events must broadcast WorkspaceState: {events:?}"
     );
     assert!(
@@ -12162,7 +12150,7 @@ fn handle_workspace_projection_changed_events_syncs_title_from_canonical_project
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "canonical Project State root updates must broadcast WorkspaceState: {events:?}"
     );
     let tab = runtime.tab("tab-1").expect("tab");
@@ -12501,7 +12489,7 @@ fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkState { .. })),
         "non-structural runtime hook state changes must not force a full workspace_state"
     );
     assert!(events
@@ -13007,7 +12995,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
         event,
         OutboundEvent {
             target: DispatchTarget::Broadcast,
-            event: BackendEvent::WorkspaceState { .. },
+            event: BackendEvent::WorkState { .. },
         }
     )));
 }

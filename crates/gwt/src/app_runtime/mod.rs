@@ -1920,7 +1920,7 @@ pub fn build_frontend_sync_events(
 ) -> Vec<OutboundEvent> {
     let mut events = vec![OutboundEvent::reply(
         client_id,
-        BackendEvent::WorkspaceState { workspace },
+        BackendEvent::WorkState { workspace },
     )];
 
     for (id, status, detail) in terminal_statuses {
@@ -10227,7 +10227,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+        OutboundEvent::broadcast(BackendEvent::WorkState {
             workspace: self.app_state_view(),
         })
     }
