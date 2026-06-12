@@ -487,7 +487,7 @@ body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
 counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
-labels. Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
 Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
 single token system that ships in two flagship themes:
 
@@ -520,8 +520,14 @@ falls back to system colors so accessibility is preserved.
 | `⌘G` | Focus the Git (Branches) surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
-| `⌘\` | Collapse / expand the Sidebar Layers |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
+
+The Command Rail on the left edge is always visible: Start Work / Work /
+Board / Logs at the top, window operations (Tile / Stack / Align / window
+list / Add) in the middle, and the Command Palette + update marker at the
+bottom. Hovering a rail item reveals its label and real shortcut. Closing a
+window (titlebar × or tab ×) always asks for confirmation so a stray click
+can never kill a running agent.
 
 ### Accessibility
 
